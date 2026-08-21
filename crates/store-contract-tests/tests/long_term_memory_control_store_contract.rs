@@ -7,14 +7,15 @@ use bm_core::memory::{
 };
 use bm_sdk::nonproduction_replay_harness::{StoreBackendConfig, StoreEventScope};
 use bm_sdk::{
-    LongTermMemoryDraft, LongTermMemoryKind, LongTermMemoryQuery, LongTermMemorySourceScope,
-    LongTermMemorySourceType, MemoryCapabilityPolicy, MemoryClock, MemoryGovernancePolicyMutation,
-    MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration, MemoryIdentity,
-    MemoryLongTermControlView, MemoryLongTermGovernancePolicy, MemoryLongTermListRequest,
-    MemoryLongTermMutation, MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest,
-    MemoryLongTermTarget, MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryRuntime, MemoryScope,
-    MemoryStoreHandle, MemoryWriteRequest, NoopMemoryAuditSink, ParsedLongTermMemoryExtraction,
-    RuntimeLifecycleModeInput,
+    LongTermMemoryDraft, LongTermMemoryKind, LongTermMemoryProvenance, LongTermMemoryQuery,
+    LongTermMemorySourceScope, LongTermMemorySourceType, MemoryCapabilityPolicy, MemoryClock,
+    MemoryEvidenceAuthority, MemoryGovernancePolicyMutation, MemoryGovernanceSelector,
+    MemoryGovernanceSuppressionDuration, MemoryIdentity, MemoryLongTermControlView,
+    MemoryLongTermGovernancePolicy, MemoryLongTermListRequest, MemoryLongTermMutation,
+    MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryLongTermTarget,
+    MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryRuntime, MemoryScope, MemoryStoreHandle,
+    MemorySubjectVisibilityPolicy, MemoryWriteRequest, NoopMemoryAuditSink,
+    ParsedLongTermMemoryExtraction, RuntimeLifecycleModeInput,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -61,6 +62,8 @@ fn preferred_editor_draft(content: &str, source_revision: u64) -> LongTermMemory
         source_chat_id: Some("chat-a".to_string()),
         source_type: Some(LongTermMemorySourceType::Conversation),
         source_scope: Some(LongTermMemorySourceScope::User),
+        subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+        provenance: LongTermMemoryProvenance::new(MemoryEvidenceAuthority::UserAsserted),
         confidence: Some(LongTermMemoryConfidence::High),
         freshness: Some(LongTermMemoryFreshness::Dynamic),
         stale_hint: Some(LongTermMemoryStaleHint::ReviewBeforeUse),
@@ -68,7 +71,6 @@ fn preferred_editor_draft(content: &str, source_revision: u64) -> LongTermMemory
         canonical_entities: Vec::new(),
         evidence_count: Some(1),
         observed_at: Some(NOW_SECS - 60),
-        last_confirmed_at: Some(NOW_SECS - 60),
         source_revision: Some(source_revision),
     }
 }

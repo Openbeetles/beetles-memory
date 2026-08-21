@@ -67,7 +67,7 @@ impl MemoryClock for FixedMemoryClock {
     }
 }
 
-fn runtime_for_scope(
+pub fn runtime_for_scope(
     platform: &StorePlatform,
     memory_space_id: &str,
     now_secs: u64,

@@ -9,7 +9,12 @@ cargo() {
 }
 export -f cargo
 
-gate_tmp="$(mktemp -d "${TMPDIR:-/tmp}/bm-release-surface.XXXXXX")"
+release_surface_work_root="${BM_RELEASE_SURFACE_WORK_ROOT:-${TMPDIR:-/tmp}}"
+if [[ "$release_surface_work_root" != /* || ! -d "$release_surface_work_root" ]]; then
+  echo "release surface work root must be an existing absolute directory" >&2
+  exit 1
+fi
+gate_tmp="$(mktemp -d "$release_surface_work_root/bm-release-surface.XXXXXX")"
 cleanup() {
   rm -rf "$gate_tmp"
 }
@@ -47,6 +52,7 @@ required_docs=(
   "docs/en/adapters.md"
   "docs/en/operator-guide.md"
   "docs/en/release-checklist.md"
+  "docs/en/release-notes-0.3.0.md"
   "docs/zh-CN/api.md"
   "docs/zh-CN/cli-usage.md"
   "docs/zh-CN/deployment.md"
@@ -58,11 +64,14 @@ required_docs=(
   "docs/zh-CN/adapters.md"
   "docs/zh-CN/operator-guide.md"
   "docs/zh-CN/release-checklist.md"
+  "docs/zh-CN/release-notes-0.3.0.md"
   "dev-docs/deployment-runtime-plan.md"
   "dev-docs/entry-runtime-plan.md"
   "dev-docs/archive/production-hardening-audit-plan.md"
   "dev-docs/release-surface-plan.md"
   "dev-docs/agent-tool-experience-registry-plan.md"
+  "dev-docs/long-term-memory-control-surface-plan.md"
+  "dev-docs/mutation-operation-receipt-plan.md"
 )
 
 for doc in "${required_docs[@]}"; do
@@ -70,6 +79,102 @@ for doc in "${required_docs[@]}"; do
     echo "missing release surface document: $doc" >&2
     exit 1
   fi
+done
+
+release_version="0.3.0"
+version_manifests=(
+  "crates/core/Cargo.toml"
+  "crates/store-contract-tests/Cargo.toml"
+  "crates/sdk/Cargo.toml"
+  "crates/replay/Cargo.toml"
+  "crates/evolve/Cargo.toml"
+  "crates/adapter/Cargo.toml"
+  "crates/entry/Cargo.toml"
+  "crates/cli/Cargo.toml"
+  "crates/http/Cargo.toml"
+  "crates/wss/Cargo.toml"
+  "crates/mcp/Cargo.toml"
+  "crates/a2a/Cargo.toml"
+  "crates/llm-gateway/Cargo.toml"
+  "crates/ollama-transparent/Cargo.toml"
+  "apps/desktop/src-tauri/Cargo.toml"
+)
+
+for manifest in "${version_manifests[@]}"; do
+  rg -F -q "version = \"$release_version\"" "$manifest" || {
+    echo "workspace package is not on the release version: $manifest" >&2
+    exit 1
+  }
+done
+
+for crate in bm-core bm-sdk bm-replay bm-adapter bm-entry bm-http bm-llm-gateway bm-ollama-transparent; do
+  rg -F -q "$crate = { version = \"$release_version\"" Cargo.toml || {
+    echo "workspace dependency is not on the release version: $crate" >&2
+    exit 1
+  }
+done
+
+rg -F -q 'repository = "https://github.com/Openbeetles/beetles-memory"' Cargo.toml || {
+  echo "workspace package repository metadata is missing or incorrect" >&2
+  exit 1
+}
+rg -F -q 'readme = "README.md"' Cargo.toml || {
+  echo "workspace package readme metadata is missing or incorrect" >&2
+  exit 1
+}
+
+publishable_manifests=(
+  "crates/core/Cargo.toml"
+  "crates/sdk/Cargo.toml"
+  "crates/replay/Cargo.toml"
+  "crates/evolve/Cargo.toml"
+  "crates/adapter/Cargo.toml"
+  "crates/entry/Cargo.toml"
+  "crates/ollama-transparent/Cargo.toml"
+  "crates/cli/Cargo.toml"
+  "crates/llm-gateway/Cargo.toml"
+  "crates/http/Cargo.toml"
+  "crates/wss/Cargo.toml"
+  "crates/mcp/Cargo.toml"
+  "crates/a2a/Cargo.toml"
+)
+for manifest in "${publishable_manifests[@]}"; do
+  rg -F -q 'repository.workspace = true' "$manifest" || {
+    echo "publishable crate does not inherit repository metadata: $manifest" >&2
+    exit 1
+  }
+  rg -F -q 'readme.workspace = true' "$manifest" || {
+    echo "publishable crate does not inherit readme metadata: $manifest" >&2
+    exit 1
+  }
+done
+
+for manifest in crates/a2a/Cargo.toml crates/cli/Cargo.toml crates/http/Cargo.toml crates/mcp/Cargo.toml crates/wss/Cargo.toml; do
+  rg -F -q "bm-entry = { version = \"$release_version\"" "$manifest" || {
+    echo "explicit bm-entry dependency is not on the release version: $manifest" >&2
+    exit 1
+  }
+done
+
+rg -F -q 'publish = false' apps/desktop/src-tauri/Cargo.toml || {
+  echo "bm-desktop must remain outside the crates.io publish set" >&2
+  exit 1
+}
+
+for desktop_identity in apps/desktop/package.json apps/desktop/package-lock.json apps/desktop/src-tauri/tauri.conf.json; do
+  rg -F -q "\"version\": \"$release_version\"" "$desktop_identity" || {
+    echo "desktop identity is not on the release version: $desktop_identity" >&2
+    exit 1
+  }
+done
+
+for doc in docs/en/release-notes-0.3.0.md docs/zh-CN/release-notes-0.3.0.md; do
+  for marker in 'Store v9' 'material v5' 'Adapter V2' 'automatic migration' 'operation key'; do
+    rg -F -q "$marker" "$doc" || {
+      echo "0.3.0 release notes omit required compatibility marker: doc=$doc marker=$marker" >&2
+      exit 1
+    }
+  done
 done
 
 current_persistence_truth_docs=(
@@ -337,9 +442,9 @@ publishable=(
   "bm-evolve"
   "bm-adapter"
   "bm-entry"
+  "bm-ollama-transparent"
   "bm-cli"
   "bm-llm-gateway"
-  "bm-ollama-transparent"
   "bm-http"
   "bm-wss"
   "bm-mcp"

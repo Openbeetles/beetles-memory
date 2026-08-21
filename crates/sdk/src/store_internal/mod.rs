@@ -57,6 +57,7 @@ pub(crate) use platform::{
     snapshot_key_requires_private_export, snapshot_namespace_requires_private_export,
     transcript_derived_ref_storage_key, transcript_turn_storage_key,
     validate_scoped_projection_governed_closure, RuntimeLifecycleStoreBinding,
+    StoreMutationOperationOutcome, StoreMutationOperationPlan, StoreMutationOperationPreflight,
     GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE, GOVERNED_EVIDENCE_SOURCE_REF_NAMESPACE,
 };
 pub(crate) use schema::{

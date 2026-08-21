@@ -124,7 +124,7 @@ fn http_local_profile_requires_explicit_owner_scope_and_may_fill_local_source_ch
         "topic": "scope",
         "title": "Local write",
         "summary": "Local write",
-        "content": "local policy may fill source chat only",
+        "content": "- validate the explicit owner scope before dispatch\n- fill only the local source chat after scope validation",
         "source": "manual",
         "citations": ["http-auth-contract"],
         "owning_scope": {
@@ -140,7 +140,8 @@ fn http_local_profile_requires_explicit_owner_scope_and_may_fill_local_source_ch
         "privacy_class": "shared_with_subject",
     })
     .to_string();
-    let request = HttpRuntimeRequest::post_json("/memory/write", &body);
+    let mut request = HttpRuntimeRequest::post_json("/memory/write", &body);
+    request.idempotency_key = "http-auth-contract-local-write".to_string();
     let response = handle_http_in_process_request(&runtime, request).expect("http response");
 
     assert_eq!(response.status_code, 200);

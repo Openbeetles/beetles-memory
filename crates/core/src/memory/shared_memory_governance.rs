@@ -51,6 +51,7 @@ pub enum SharedMemoryWriteReason {
     StructuredMaterial,
     WeakCanonicalStatement,
     PrivacyClassTransitionRequiresExplicitGovernance,
+    SubjectVisibilityTransitionRequiresControl,
     OlderThanExisting,
     SourceRevisionConflict,
     LowerConfidenceThanExisting,
@@ -67,6 +68,9 @@ impl SharedMemoryWriteReason {
             Self::WeakCanonicalStatement => "weak_canonical_statement",
             Self::PrivacyClassTransitionRequiresExplicitGovernance => {
                 "privacy_class_transition_requires_explicit_governance"
+            }
+            Self::SubjectVisibilityTransitionRequiresControl => {
+                "subject_visibility_transition_requires_control"
             }
             Self::OlderThanExisting => "older_than_existing",
             Self::SourceRevisionConflict => "source_revision_conflict",
@@ -296,6 +300,9 @@ where
                     LongTermMemoryEntryRejection::PrivacyTransitionRequiresControl => {
                         SharedMemoryWriteReason::PrivacyClassTransitionRequiresExplicitGovernance
                     }
+                    LongTermMemoryEntryRejection::SubjectVisibilityTransitionRequiresControl => {
+                        SharedMemoryWriteReason::SubjectVisibilityTransitionRequiresControl
+                    }
                     LongTermMemoryEntryRejection::OlderSourceRevision
                     | LongTermMemoryEntryRejection::OlderObservation => {
                         SharedMemoryWriteReason::OlderThanExisting
@@ -504,6 +511,10 @@ mod tests {
             source_chat_id: Some("chat-1".to_string()),
             source_type: Some(LongTermMemorySourceType::ManualTool),
             source_scope: Some(LongTermMemorySourceScope::User),
+            subject_visibility: crate::memory::MemorySubjectVisibilityPolicy::AllSubjects,
+            provenance: crate::memory::LongTermMemoryProvenance::new(
+                crate::memory::MemoryEvidenceAuthority::UserAsserted,
+            ),
             confidence: Some(LongTermMemoryConfidence::High),
             freshness: Some(LongTermMemoryFreshness::Stable),
             stale_hint: Some(LongTermMemoryStaleHint::None),
@@ -511,7 +522,6 @@ mod tests {
             canonical_entities: Vec::new(),
             evidence_count: None,
             observed_at: Some(20),
-            last_confirmed_at: Some(20),
             source_revision: Some(2),
         }
     }
@@ -550,6 +560,9 @@ mod tests {
                 source_type: LongTermMemorySourceType::Conversation,
                 source_scope: LongTermMemorySourceScope::User,
                 subject_visibility: crate::memory::MemorySubjectVisibilityPolicy::AllSubjects,
+                provenance: crate::memory::LongTermMemoryProvenance::new(
+                    crate::memory::MemoryEvidenceAuthority::UserAsserted,
+                ),
                 confidence: LongTermMemoryConfidence::High,
                 freshness: LongTermMemoryFreshness::Stable,
                 stale_hint: LongTermMemoryStaleHint::None,
@@ -559,7 +572,7 @@ mod tests {
                 created_at: 10,
                 updated_at: 20,
                 observed_at: 20,
-                last_confirmed_at: 20,
+                last_confirmed_at: None,
                 source_revision: Some(5),
                 owner_revision: 1,
                 last_used_at: 0,
@@ -569,7 +582,6 @@ mod tests {
         let mut incoming = draft("Owner timezone is UTC+8.");
         incoming.confidence = Some(LongTermMemoryConfidence::Medium);
         incoming.observed_at = Some(30);
-        incoming.last_confirmed_at = Some(30);
         incoming.source_revision = Some(6);
         let outcome = write_governed_shared_memory(
             &store,
@@ -640,6 +652,9 @@ mod tests {
                 source_type: LongTermMemorySourceType::Conversation,
                 source_scope: LongTermMemorySourceScope::User,
                 subject_visibility: crate::memory::MemorySubjectVisibilityPolicy::AllSubjects,
+                provenance: crate::memory::LongTermMemoryProvenance::new(
+                    crate::memory::MemoryEvidenceAuthority::UserAsserted,
+                ),
                 confidence: LongTermMemoryConfidence::High,
                 freshness: LongTermMemoryFreshness::Stable,
                 stale_hint: LongTermMemoryStaleHint::None,
@@ -649,7 +664,7 @@ mod tests {
                 created_at: 10,
                 updated_at: 20,
                 observed_at: 20,
-                last_confirmed_at: 20,
+                last_confirmed_at: None,
                 source_revision: Some(5),
                 owner_revision: 1,
                 last_used_at: 0,
@@ -659,7 +674,6 @@ mod tests {
         let mut incoming = draft("Owner timezone is public now.");
         incoming.privacy = MemoryPrivacyClass::SharedWithSubject;
         incoming.observed_at = Some(30);
-        incoming.last_confirmed_at = Some(30);
         incoming.source_revision = Some(6);
 
         let outcome = write_governed_shared_memory(
@@ -676,6 +690,45 @@ mod tests {
             outcome.reports[0].reason,
             SharedMemoryWriteReason::PrivacyClassTransitionRequiresExplicitGovernance
         );
+        assert!(store.upserts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reports_typed_subject_visibility_transition_from_core_planner() {
+        let mut initial = draft("Owner timezone is Asia/Shanghai.");
+        initial.subject_visibility =
+            crate::memory::MemorySubjectVisibilityPolicy::OnlySubjects(vec!["agent:a".to_string()]);
+        let existing = match plan_long_term_memory_upsert(None, &initial, 10) {
+            LongTermMemoryEntryPlan::Created(entry) => entry,
+            plan => panic!("unexpected initial plan: {plan:?}"),
+        };
+        let store = MemoryStoreStub {
+            entries: Mutex::new(vec![existing]),
+            upserts: Mutex::new(Vec::new()),
+        };
+        let mut incoming = initial;
+        incoming.subject_visibility =
+            crate::memory::MemorySubjectVisibilityPolicy::HiddenFromSubjects(vec![
+                "agent:b".to_string()
+            ]);
+        incoming.source_revision = Some(2);
+        incoming.observed_at = Some(30);
+
+        let plan = plan_governed_shared_memory(
+            &store,
+            &[incoming],
+            30,
+            SharedMemoryWriteSource::ManualTool,
+        )
+        .expect("governance plan");
+
+        assert_eq!(plan.outcome.accepted, 0);
+        assert_eq!(plan.outcome.rejected, 1);
+        assert_eq!(
+            plan.outcome.reports[0].reason,
+            SharedMemoryWriteReason::SubjectVisibilityTransitionRequiresControl
+        );
+        assert!(plan.accepted_entries.is_empty());
         assert!(store.upserts.lock().unwrap().is_empty());
     }
 
@@ -759,6 +812,9 @@ mod tests {
                 source_type: LongTermMemorySourceType::Conversation,
                 source_scope: LongTermMemorySourceScope::User,
                 subject_visibility: crate::memory::MemorySubjectVisibilityPolicy::AllSubjects,
+                provenance: crate::memory::LongTermMemoryProvenance::new(
+                    crate::memory::MemoryEvidenceAuthority::UserAsserted,
+                ),
                 confidence: LongTermMemoryConfidence::High,
                 freshness: LongTermMemoryFreshness::Stable,
                 stale_hint: LongTermMemoryStaleHint::None,
@@ -768,7 +824,7 @@ mod tests {
                 created_at: 10,
                 updated_at: 20,
                 observed_at: 20,
-                last_confirmed_at: 20,
+                last_confirmed_at: None,
                 source_revision: Some(5),
                 owner_revision: 1,
                 last_used_at: 0,
@@ -778,7 +834,6 @@ mod tests {
         let mut incoming = draft("Owner timezone is UTC+8.");
         incoming.confidence = Some(LongTermMemoryConfidence::Medium);
         incoming.observed_at = Some(30);
-        incoming.last_confirmed_at = Some(30);
         incoming.source_revision = Some(6);
         let lower_confidence = write_governed_shared_memory(
             &existing_store,

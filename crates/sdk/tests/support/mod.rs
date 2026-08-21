@@ -12,11 +12,13 @@ use bm_core::platform::ResponseBody;
 use bm_sdk::NonproductionRuntimeBudgetLimits;
 use bm_sdk::{
     default_agent_subject_id, default_memory_space_id, GovernedRuntimeSkillWriteInput,
-    LongTermMemoryDraft, MemoryCapabilityPolicy, MemoryClock, MemoryIdentity, MemoryPrivacyClass,
-    MemoryPrivacyPolicy, MemoryRuntime, MemoryScope, MemoryStoreHandle, MemoryWriteRequest,
-    NoopMemoryAuditSink, ParsedLongTermMemoryExtraction, ProfileId, Result,
-    RuntimeSkillCreationRef, RuntimeSkillOwningScope, RuntimeSkillWrite, StoreBackendConfig,
-    SubjectDescriptor, SubjectRegistry, SubjectScopedRuntime,
+    LongTermMemoryDraft, LongTermMemoryProvenance, MemoryCapabilityPolicy, MemoryClock,
+    MemoryEvidenceAuthority, MemoryIdentity, MemoryPrivacyClass, MemoryPrivacyPolicy,
+    MemoryRuntime, MemoryScope, MemorySemanticJudgmentSource, MemoryStoreHandle,
+    MemorySubjectVisibilityPolicy, MemoryWriteRequest, NoopMemoryAuditSink,
+    ParsedLongTermMemoryExtraction, ProfileId, Result, RuntimeSkillCreationRef,
+    RuntimeSkillOwningScope, RuntimeSkillWrite, StoreBackendConfig, SubjectDescriptor,
+    SubjectRegistry, SubjectScopedRuntime,
 };
 
 struct FixedMemoryClock {
@@ -118,6 +120,11 @@ pub fn seeded_store_platform(profile: ProfileId) -> MemoryStoreHandle {
                     source_chat_id: Some("chat-1".to_string()),
                     source_type: None,
                     source_scope: None,
+                    subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                    provenance: LongTermMemoryProvenance {
+                        source_authority: MemoryEvidenceAuthority::ProgramMemoryCanonical,
+                        semantic_judgment_source: Some(MemorySemanticJudgmentSource::RuntimeGate),
+                    },
                     confidence: None,
                     freshness: None,
                     stale_hint: None,
@@ -125,7 +132,6 @@ pub fn seeded_store_platform(profile: ProfileId) -> MemoryStoreHandle {
                     canonical_entities: Vec::new(),
                     evidence_count: Some(1),
                     observed_at: Some(1_800_000_000),
-                    last_confirmed_at: Some(1_800_000_000),
                     source_revision: Some(1),
                 }],
                 deletes: Vec::new(),

@@ -1,12 +1,12 @@
 use bm_sdk::{
-    AgentToolHint, GovernedRecallPublicReportV1, MemoryCapabilityCatalog, MemoryCloseReport,
-    MemoryCloseRequest, MemoryGovernancePolicyMutationReport, MemoryInspectionReport,
-    MemoryInspectionRequest, MemoryLongTermDetailReport, MemoryLongTermDetailRequest,
-    MemoryLongTermListReport, MemoryLongTermListRequest, MemoryLongTermMutationReport,
-    MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryMaintenanceReport,
-    MemoryMaintenanceRequest, MemoryProjectionReport, MemoryProjectionRequest, MemoryRecallReport,
-    MemoryRecallRequest, MemoryRecallTemporalOperation, MemoryRecoverReport, MemoryRecoverRequest,
-    MemoryReplayReport, MemoryReplayRequest, MemoryRuntime, MemoryTranscriptAttrWriteReport,
+    AgentToolHint, GovernedRecallPublicReportV1, MemoryCloseReport, MemoryCloseRequest,
+    MemoryGovernancePolicyMutationReport, MemoryInspectionReport, MemoryInspectionRequest,
+    MemoryLongTermDetailReport, MemoryLongTermDetailRequest, MemoryLongTermListReport,
+    MemoryLongTermListRequest, MemoryLongTermMutationReport, MemoryLongTermMutationRequest,
+    MemoryLongTermPolicyRequest, MemoryMaintenanceReport, MemoryMaintenanceRequest,
+    MemoryProjectionReport, MemoryProjectionRequest, MemoryRecallReport, MemoryRecallRequest,
+    MemoryRecallTemporalOperation, MemoryRecoverReport, MemoryRecoverRequest, MemoryReplayReport,
+    MemoryReplayRequest, MemoryRuntime, MemoryTranscriptAttrWriteReport,
     MemoryTranscriptAttrWriteRequest, MemoryTurnFinalizeReport, MemoryTurnFinalizeRequest,
     MemoryWriteReport, MemoryWriteRequest, ProfileId, RuntimeBudgetLease,
 };
@@ -42,7 +42,7 @@ static NEXT_REQUEST_IDENTITY_OWNER: AtomicUsize = AtomicUsize::new(1);
 pub struct AdapterRequestIdentity {
     pub request_id: String,
     pub audit_id: String,
-    pub idempotency_key: String,
+    pub mutation_operation_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -119,38 +119,28 @@ impl AdapterRequestIdentityOwner {
             "{transport}-request-{}-{request_sequence}",
             self.owner_sequence
         );
-        let idempotency_key = match explicit_idempotency_key {
+        let mutation_operation_id = match explicit_idempotency_key {
             Some(key) => {
                 let key = key.trim();
                 if key.is_empty() {
                     return Err(AdapterRequestIdentityError::EmptyExplicitIdempotencyKey);
                 }
-                derived_idempotency_key("explicit", transport, &[principal, key])
+                Some(derived_idempotency_key("explicit", &[principal, key]))
             }
-            None => derived_idempotency_key(
-                "automatic",
-                transport,
-                &[
-                    principal,
-                    source_id,
-                    &self.owner_sequence.to_string(),
-                    &request_sequence.to_string(),
-                ],
-            ),
+            None => None,
         };
         Ok(AdapterRequestIdentity {
             audit_id: format!("audit-{request_id}"),
             request_id,
-            idempotency_key,
+            mutation_operation_id,
         })
     }
 }
 
-fn derived_idempotency_key(mode: &str, transport: &str, fields: &[&str]) -> String {
+fn derived_idempotency_key(mode: &str, fields: &[&str]) -> String {
     let mut hasher = Sha256::new();
     for field in std::iter::once("bm_adapter_request_identity_v1")
         .chain(std::iter::once(mode))
-        .chain(std::iter::once(transport))
         .chain(fields.iter().copied())
     {
         hasher.update((field.len() as u64).to_be_bytes());
@@ -200,6 +190,25 @@ pub enum AdapterOperation {
 }
 
 impl AdapterOperation {
+    pub const ALL: [Self; 16] = [
+        Self::Write,
+        Self::FinalizeTurn,
+        Self::Recall,
+        Self::Project,
+        Self::Maintain,
+        Self::Inspect,
+        Self::Recover,
+        Self::Replay,
+        Self::LongTermList,
+        Self::LongTermDetail,
+        Self::LongTermMutate,
+        Self::LongTermPolicy,
+        Self::TranscriptAttrWrite,
+        Self::Capabilities,
+        Self::Subscribe,
+        Self::Close,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Write => "write",
@@ -221,7 +230,7 @@ impl AdapterOperation {
         }
     }
 
-    pub const fn requires_idempotency(self) -> bool {
+    pub const fn requires_in_flight_reservation(self) -> bool {
         match self {
             Self::Write
             | Self::FinalizeTurn
@@ -241,6 +250,41 @@ impl AdapterOperation {
             | Self::Subscribe => false,
         }
     }
+
+    pub const fn mutation_reliability(self) -> AdapterMutationReliability {
+        match self {
+            Self::Write | Self::LongTermMutate => AdapterMutationReliability::DurableStoreReceipt,
+            Self::FinalizeTurn
+            | Self::Maintain
+            | Self::Recover
+            | Self::LongTermPolicy
+            | Self::TranscriptAttrWrite
+            | Self::Close => AdapterMutationReliability::ExplicitlyNonDurable,
+            Self::Recall
+            | Self::Project
+            | Self::Inspect
+            | Self::Replay
+            | Self::LongTermList
+            | Self::LongTermDetail
+            | Self::Capabilities
+            | Self::Subscribe => AdapterMutationReliability::NotMutation,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdapterMutationReliability {
+    NotMutation,
+    DurableStoreReceipt,
+    ExplicitlyNonDurable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdapterMutationOperationCapability {
+    pub operation: AdapterOperation,
+    pub reliability: AdapterMutationReliability,
 }
 
 impl std::fmt::Display for AdapterOperation {
@@ -270,6 +314,8 @@ pub struct AdapterAuthContext {
 pub enum ExternalAiMemoryProtocolVersion {
     #[serde(rename = "beetle-memory.external-ai.v1")]
     V1,
+    #[serde(rename = "beetle-memory.external-ai.v2")]
+    V2,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -301,11 +347,14 @@ pub struct AdapterProtocolCapabilityBinding {
     pub wss_visible: bool,
     pub mcp_visible: bool,
     pub a2a_visible: bool,
+    pub mutation_operation_inventory: Vec<AdapterMutationOperationCapability>,
+    pub mutation_receipt_policy: bm_sdk::MutationOperationReceiptQuota,
 }
 
 impl AdapterProtocolCapabilityBinding {
-    fn from_runtime(runtime: &MemoryRuntime) -> Self {
+    pub fn from_runtime(runtime: &MemoryRuntime) -> Self {
         let catalog = runtime.capabilities();
+        let retention_quota = runtime.retention_quota_report();
         Self {
             write_visible: catalog.write.visible,
             recall_visible: catalog.recall.visible,
@@ -323,6 +372,32 @@ impl AdapterProtocolCapabilityBinding {
             wss_visible: catalog.adapter.wss.visible,
             mcp_visible: catalog.adapter.mcp.visible,
             a2a_visible: catalog.adapter.a2a.visible,
+            mutation_operation_inventory: AdapterOperation::ALL
+                .into_iter()
+                .map(|operation| AdapterMutationOperationCapability {
+                    operation,
+                    reliability: operation.mutation_reliability(),
+                })
+                .collect(),
+            mutation_receipt_policy: retention_quota.mutation_operation_receipts,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdapterCapabilityReportV2 {
+    pub profile: ProfileId,
+    pub capabilities: AdapterProtocolCapabilityBinding,
+    pub sdk_mutation_inventory: bm_sdk::MemoryMutationCapabilityCatalog,
+}
+
+impl AdapterCapabilityReportV2 {
+    pub fn for_runtime(runtime: &MemoryRuntime) -> Self {
+        Self {
+            profile: runtime.config().profile,
+            capabilities: AdapterProtocolCapabilityBinding::from_runtime(runtime),
+            sdk_mutation_inventory: runtime.mutation_capabilities(),
         }
     }
 }
@@ -443,7 +518,7 @@ pub struct AdapterEnvelope<T> {
     pub operation: AdapterOperation,
     pub source: AdapterSource,
     pub auth: AdapterAuthContext,
-    pub idempotency_key: String,
+    pub mutation_operation_id: Option<String>,
     pub audit_id: String,
     pub payload: T,
 }
@@ -465,6 +540,8 @@ pub enum AdapterResponse<T> {
         request_id: String,
         audit_id: String,
         report: T,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt: Option<AdapterMutationReceiptV1>,
     },
     Rejected {
         request_id: String,
@@ -477,11 +554,43 @@ pub enum AdapterResponse<T> {
         audit_id: String,
         queue: String,
     },
-    Duplicated {
+    Replayed {
         request_id: String,
         audit_id: String,
-        idempotency_key: String,
+        mutation_operation_id: String,
+        receipt: AdapterMutationReceiptV1,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdapterMutationReceiptV1 {
+    pub schema_version: u32,
+    pub mutation_operation_id: String,
+    pub operation_kind: bm_sdk::MemoryMutationOperationKind,
+    pub transaction_id: String,
+    pub effect: bm_sdk::MemoryMutationEffect,
+    pub changed_count: u64,
+    pub audit_record_id: String,
+    pub committed_at_unix_secs: u64,
+}
+
+impl AdapterMutationReceiptV1 {
+    pub fn from_operation_id(
+        mutation_operation_id: impl Into<String>,
+        receipt: &bm_sdk::MemoryMutationReceipt,
+    ) -> Self {
+        Self {
+            schema_version: receipt.schema_version,
+            mutation_operation_id: mutation_operation_id.into(),
+            operation_kind: receipt.identity.operation_kind(),
+            transaction_id: receipt.transaction_id.clone(),
+            effect: receipt.effect,
+            changed_count: receipt.changed_count,
+            audit_record_id: receipt.audit_record_id.clone(),
+            committed_at_unix_secs: receipt.committed_at_unix_secs,
+        }
+    }
 }
 
 pub enum AdapterCommand {
@@ -751,7 +860,7 @@ pub enum AdapterSdkReport {
     LongTermMutate(Box<MemoryLongTermMutationReport>),
     LongTermPolicy(Box<MemoryGovernancePolicyMutationReport>),
     TranscriptAttrWrite(Box<MemoryTranscriptAttrWriteReport>),
-    Capabilities(Box<MemoryCapabilityCatalog>),
+    Capabilities(Box<AdapterCapabilityReportV2>),
     Close(Box<MemoryCloseReport>),
 }
 

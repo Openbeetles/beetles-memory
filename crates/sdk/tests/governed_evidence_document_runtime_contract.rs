@@ -13,10 +13,11 @@ use bm_sdk::{
     default_memory_space_id, governed_evidence_document_content_digest,
     GovernedEvidenceDocumentChunk, GovernedEvidenceDocumentDraft,
     GovernedEvidenceDocumentSourceKind, GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef,
-    LongTermMemoryDraft, LongTermMemoryKind, MemoryEvidenceAuthority,
+    LongTermMemoryDraft, LongTermMemoryKind, LongTermMemoryProvenance, MemoryEvidenceAuthority,
     MemoryEvidenceDocumentMutation, MemoryEvidenceDocumentReadRequest, MemoryEvidenceRefVisibility,
-    MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallRequest, MemoryWriteRequest,
-    ParsedLongTermMemoryExtraction, PressureLevel, RuntimeLifecycleModeInput,
+    MemoryMutationExecution, MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallRequest,
+    MemorySubjectVisibilityPolicy, MemoryWriteRequest, ParsedLongTermMemoryExtraction,
+    PressureLevel, RuntimeLifecycleModeInput,
 };
 use serde_json::Value;
 
@@ -234,6 +235,77 @@ fn evidence_document_batch_atomically_commits_owner_facet_graph_and_lifecycle() 
         ));
         assert!(graph_has_owner_ref(&platform, &expected));
     }
+}
+
+#[test]
+fn operation_aware_evidence_write_commits_noop_replays_and_rejects_collision() {
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime = test_runtime_with_scope(
+        platform.clone(),
+        support::host_test_profile(),
+        "llm.gateway",
+        "evidence-operation",
+    );
+    let request = |body: &str| MemoryWriteRequest::GovernedEvidenceDocuments {
+        mutations: vec![MemoryEvidenceDocumentMutation::Upsert {
+            draft: evidence_draft("evidence:operation", 1, body),
+        }],
+    };
+
+    let first = runtime
+        .write_operation(
+            "sdk-write-evidence-changed",
+            request("Operation-aware evidence writes require durable receipts."),
+        )
+        .expect("operation-aware evidence write");
+    let MemoryMutationExecution::Committed { report, receipt } = first else {
+        panic!("evidence write must commit")
+    };
+    assert_eq!(report.changed, 1);
+    assert_eq!(receipt.changed_count, 1);
+
+    let before_replay = state_and_event_fingerprints(&platform);
+    assert!(matches!(
+        runtime
+            .write_operation(
+                "sdk-write-evidence-changed",
+                request("Operation-aware evidence writes require durable receipts.")
+            )
+            .expect("evidence replay"),
+        MemoryMutationExecution::Replayed { .. }
+    ));
+    assert_eq!(state_and_event_fingerprints(&platform), before_replay);
+
+    let collision = runtime
+        .write_operation(
+            "sdk-write-evidence-changed",
+            request("A different body is a different operation intent."),
+        )
+        .expect_err("evidence intent collision");
+    assert_eq!(collision.class(), Some(bm_sdk::ErrorClass::Conflict));
+
+    let noop = runtime
+        .write_operation(
+            "sdk-write-evidence-noop",
+            request("Operation-aware evidence writes require durable receipts."),
+        )
+        .expect("operation-aware evidence noop");
+    let MemoryMutationExecution::Committed { report, receipt } = noop else {
+        panic!("evidence noop must commit its receipt")
+    };
+    assert_eq!(report.changed, 0);
+    assert_eq!(receipt.changed_count, 0);
+    let before_noop_replay = state_and_event_fingerprints(&platform);
+    assert!(matches!(
+        runtime
+            .write_operation(
+                "sdk-write-evidence-noop",
+                request("Operation-aware evidence writes require durable receipts.")
+            )
+            .expect("evidence noop replay"),
+        MemoryMutationExecution::Replayed { .. }
+    ));
+    assert_eq!(state_and_event_fingerprints(&platform), before_noop_replay);
 }
 
 #[test]
@@ -1132,6 +1204,10 @@ fn same_owner_id_does_not_collide_across_long_term_and_evidence_document_planes(
                     source_chat_id: Some("evidence-owner-plane".to_string()),
                     source_type: None,
                     source_scope: None,
+                    subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                    provenance: LongTermMemoryProvenance::new(
+                        MemoryEvidenceAuthority::ProgramMemoryCanonical,
+                    ),
                     confidence: None,
                     freshness: None,
                     stale_hint: None,
@@ -1139,7 +1215,6 @@ fn same_owner_id_does_not_collide_across_long_term_and_evidence_document_planes(
                     canonical_entities: Vec::new(),
                     evidence_count: Some(1),
                     observed_at: Some(1_799_999_900),
-                    last_confirmed_at: Some(1_799_999_900),
                     source_revision: Some(1),
                 }],
                 deletes: Vec::new(),
@@ -1270,6 +1345,10 @@ fn recall_snapshot_keeps_long_term_and_evidence_typed_owner_bindings_consistent(
                     source_chat_id: Some("mixed-owner-recall".to_string()),
                     source_type: None,
                     source_scope: None,
+                    subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                    provenance: LongTermMemoryProvenance::new(
+                        MemoryEvidenceAuthority::ProgramMemoryCanonical,
+                    ),
                     confidence: None,
                     freshness: None,
                     stale_hint: None,
@@ -1277,7 +1356,6 @@ fn recall_snapshot_keeps_long_term_and_evidence_typed_owner_bindings_consistent(
                     canonical_entities: Vec::new(),
                     evidence_count: Some(1),
                     observed_at: Some(1_799_999_900),
-                    last_confirmed_at: Some(1_799_999_900),
                     source_revision: Some(1),
                 }],
                 deletes: Vec::new(),
@@ -1381,6 +1459,10 @@ fn concurrent_mixed_owner_updates_never_produce_a_torn_recall_snapshot() {
                     source_chat_id: Some("mixed-owner-snapshot-writer".to_string()),
                     source_type: None,
                     source_scope: None,
+                    subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                    provenance: LongTermMemoryProvenance::new(
+                        MemoryEvidenceAuthority::ProgramMemoryCanonical,
+                    ),
                     confidence: None,
                     freshness: None,
                     stale_hint: None,
@@ -1388,7 +1470,6 @@ fn concurrent_mixed_owner_updates_never_produce_a_torn_recall_snapshot() {
                     canonical_entities: Vec::new(),
                     evidence_count: Some(1),
                     observed_at: Some(1_799_999_800),
-                    last_confirmed_at: Some(1_799_999_800),
                     source_revision: Some(1),
                 }],
                 deletes: Vec::new(),
@@ -1425,6 +1506,10 @@ fn concurrent_mixed_owner_updates_never_produce_a_torn_recall_snapshot() {
                             source_chat_id: Some("mixed-owner-snapshot-writer".to_string()),
                             source_type: None,
                             source_scope: None,
+                            subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                            provenance: LongTermMemoryProvenance::new(
+                                MemoryEvidenceAuthority::ProgramMemoryCanonical,
+                            ),
                             confidence: None,
                             freshness: None,
                             stale_hint: None,
@@ -1432,7 +1517,6 @@ fn concurrent_mixed_owner_updates_never_produce_a_torn_recall_snapshot() {
                             canonical_entities: Vec::new(),
                             evidence_count: Some(1),
                             observed_at: Some(1_799_999_810 + index),
-                            last_confirmed_at: Some(1_799_999_810 + index),
                             source_revision: Some(index + 2),
                         }],
                         deletes: Vec::new(),

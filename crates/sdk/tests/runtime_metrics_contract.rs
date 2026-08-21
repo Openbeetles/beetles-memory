@@ -4,10 +4,10 @@ use bm_sdk::{
     default_agent_subject_id, CanonicalTurnDelta, ConversationScope, LongTermMemoryKind,
     MemoryCandidateContent, MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment,
     MemoryCandidateTarget, MemoryEvidenceAuthority, MemoryPrivacyClass, MemoryProjectionRequest,
-    MemoryRecallRequest, MemorySemanticJudgmentSource, MemoryTurnDeliveryStatus,
-    MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteCandidate,
-    MemoryWriteRequest, PressureLevel, RuntimeLifecycleModeInput, RuntimeMetricsSource,
-    TranscriptInputMessage,
+    MemoryRecallRequest, MemorySemanticJudgmentSource, MemorySubjectVisibilityPolicy,
+    MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource,
+    MemoryWriteCandidate, MemoryWriteRequest, PressureLevel, RuntimeLifecycleModeInput,
+    RuntimeMetricsSource, TranscriptInputMessage,
 };
 
 use support::{empty_store_platform, test_runtime_with_scope};
@@ -72,6 +72,7 @@ fn runtime_metrics_report_counts_write_recall_project_finalize_and_deferred_from
                     kind: LongTermMemoryKind::Fact,
                     topic: "runtime metrics".to_string(),
                 },
+                long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
                 privacy: MemoryPrivacyClass::PublicRuntime,
                 content: MemoryCandidateContent::Text {
                     topic: "runtime metrics".to_string(),

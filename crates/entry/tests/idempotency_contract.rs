@@ -4,11 +4,42 @@ use bm_entry::{
     EntryScope, EntryTransportConfig, EntryTransportContext,
 };
 use bm_sdk::{
-    MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryWriteRequest, RuntimeSkillWrite,
-    RuntimeSkillWriteSource, StoreBackendConfig,
+    LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateSemanticDecision,
+    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryCapabilityPolicy,
+    MemoryEvidenceAuthority, MemoryPrivacyClass, MemoryPrivacyPolicy, MemorySemanticJudgmentSource,
+    MemorySubjectVisibilityPolicy, MemoryWriteCandidate, MemoryWriteRequest, StoreBackendConfig,
 };
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 mod support;
+
+struct SyntheticStoreDir(PathBuf);
+
+impl SyntheticStoreDir {
+    fn create(test_name: &str) -> Self {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "bm-entry-{test_name}-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).expect("create synthetic store dir");
+        Self(path)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for SyntheticStoreDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 fn config() -> EntryRuntimeConfig {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
@@ -77,12 +108,16 @@ fn explicit_idempotency_replays_and_conflicts_across_transport_boundaries() {
         )
         .expect("cross transport conflict");
 
-    assert!(matches!(first.adapter, AdapterResponse::Accepted { .. }));
-    assert!(matches!(replay.adapter, AdapterResponse::Duplicated { .. }));
+    assert!(
+        matches!(first.adapter, AdapterResponse::Accepted { .. }),
+        "first durable mutation must be accepted, got {:?}",
+        first.adapter
+    );
+    assert!(matches!(replay.adapter, AdapterResponse::Replayed { .. }));
     assert!(matches!(
         conflict.adapter,
         AdapterResponse::Rejected {
-            error_key: bm_adapter::AdapterErrorKey::Duplicated,
+            error_key: bm_adapter::AdapterErrorKey::MutationOperationConflict,
             ..
         }
     ));
@@ -93,20 +128,32 @@ fn write_command() -> AdapterCommand {
 }
 
 fn write_command_with_summary(summary: &str) -> AdapterCommand {
-    AdapterCommand::Write(MemoryWriteRequest::Procedural {
-        writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
-            name: "runtime_skill__entry_runtime".to_string(),
-            topic: "entry-runtime".to_string(),
-            title: "Entry runtime writes".to_string(),
-            summary: summary.to_string(),
-            content: "Use EntryRuntime to normalize source/auth/idempotency before SDK dispatch."
-                .to_string(),
-            citations: vec![],
-            source_chat_id: Some("chat-1".to_string()),
-            observed_at: 1_800_000_000,
-        })],
-        owning_scope: support::runtime_skill_subject_scope("agent-main"),
-        source: RuntimeSkillWriteSource::Manual,
+    let target = MemoryCandidateTarget::LongTermMemory {
+        kind: LongTermMemoryKind::Project,
+        topic: "entry-idempotency".to_string(),
+    };
+    AdapterCommand::Write(MemoryWriteRequest::Candidates {
+        candidates: vec![MemoryWriteCandidate {
+            candidate_id: "entry-idempotency-candidate".to_string(),
+            authority: MemoryEvidenceAuthority::ProgramMemoryCanonical,
+            target: target.clone(),
+            long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
+            privacy: MemoryPrivacyClass::SharedWithSubject,
+            content: MemoryCandidateContent::Text {
+                topic: "entry-idempotency".to_string(),
+                body: summary.to_string(),
+                keywords: vec!["entry".to_string(), "idempotency".to_string()],
+            },
+            evidence_refs: vec!["chat-1:entry-idempotency-contract".to_string()],
+            canonical_entities: Vec::new(),
+            semantic_judgment: Some(MemoryCandidateSemanticJudgment {
+                source: MemorySemanticJudgmentSource::RuntimeGate,
+                decision: MemoryCandidateSemanticDecision::Accept,
+                governed_target: Some(target),
+                reason: "entry durable mutation receipt fixture".to_string(),
+            }),
+        }],
+        runtime_skill_owning_scope: None,
     })
 }
 
@@ -123,13 +170,20 @@ fn idempotency_key_reuse_with_a_different_mutation_payload_is_rejected() {
         )
         .expect("conflicting write response");
 
-    assert!(matches!(first.adapter, AdapterResponse::Accepted { .. }));
+    assert!(
+        matches!(first.adapter, AdapterResponse::Accepted { .. }),
+        "first durable mutation must be accepted, got {:?}",
+        first.adapter
+    );
     match conflicting.adapter {
         AdapterResponse::Rejected {
             error_key, reason, ..
         } => {
-            assert_eq!(error_key, bm_adapter::AdapterErrorKey::Duplicated);
-            assert!(reason.contains("different payload"));
+            assert_eq!(
+                error_key,
+                bm_adapter::AdapterErrorKey::MutationOperationConflict
+            );
+            assert!(reason.contains("different intent"));
         }
         other => panic!("unexpected conflict response: {other:?}"),
     }
@@ -145,16 +199,63 @@ fn mutation_command_with_same_idempotency_key_is_not_dispatched_twice() {
         .handle(context("idem-write-1"), write_command())
         .expect("second write");
 
-    assert!(matches!(first.adapter, AdapterResponse::Accepted { .. }));
+    assert!(matches!(
+        first.adapter,
+        AdapterResponse::Accepted {
+            receipt: Some(_),
+            ..
+        }
+    ));
     match second.adapter {
-        AdapterResponse::Duplicated {
-            idempotency_key, ..
+        AdapterResponse::Replayed {
+            mutation_operation_id,
+            receipt,
+            ..
         } => {
-            assert_eq!(idempotency_key, "idem-write-1");
-            assert_eq!(second.status.as_str(), "duplicated");
+            assert_eq!(mutation_operation_id, "idem-write-1");
+            assert_eq!(receipt.mutation_operation_id, "idem-write-1");
+            assert_eq!(second.status.as_str(), "replayed");
         }
         other => panic!("unexpected response: {other:?}"),
     }
+}
+
+#[test]
+fn durable_mutation_idempotency_survives_entry_runtime_reopen() {
+    let store_dir = SyntheticStoreDir::create("durable-idempotency-reopen");
+    let mut first_config = config();
+    first_config.store =
+        StoreBackendConfig::file(store_dir.path(), support::host_production_profile())
+            .expect("file store config")
+            .with_fsync(false);
+
+    let first = {
+        let runtime = EntryRuntime::open(first_config).expect("first entry runtime");
+        runtime
+            .handle(context("durable-idem-write-1"), write_command())
+            .expect("first durable write")
+    };
+    assert!(
+        matches!(first.adapter, AdapterResponse::Accepted { .. }),
+        "first durable mutation must be accepted, got {:?}",
+        first.adapter
+    );
+
+    let mut reopened_config = config();
+    reopened_config.store =
+        StoreBackendConfig::file(store_dir.path(), support::host_production_profile())
+            .expect("reopened file store config")
+            .with_fsync(false);
+    let reopened = EntryRuntime::open(reopened_config).expect("reopened entry runtime");
+    let replay = reopened
+        .handle(context("durable-idem-write-1"), write_command())
+        .expect("durable replay");
+
+    assert!(
+        matches!(replay.adapter, AdapterResponse::Replayed { .. }),
+        "reopened runtime must replay the committed operation, got {:?}",
+        replay.adapter
+    );
 }
 
 #[test]

@@ -7,16 +7,16 @@ use bm_core::platform::Platform as _;
 use bm_sdk::{
     ActorAttribution, CanonicalTurnDelta, ConversationKey, ConversationScope, DerivedMemoryPlane,
     DerivedMemoryRef, HostOpaqueRef, HostRefRelation, HostRefVisibility, LongTermMemoryDraft,
-    LongTermMemoryKind, MemoryArchiveScope, MemoryCandidateContent,
+    LongTermMemoryKind, LongTermMemoryProvenance, MemoryArchiveScope, MemoryCandidateContent,
     MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
     MemoryEvidenceAuthority, MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryPrivacyClass,
     MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest, MemoryReplayRequest,
     MemorySemanticJudgmentSource, MemorySpaceExportRequest, MemorySpacePrivateMaterialPolicy,
-    MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitRequest, MemoryTranscriptExportRequest,
-    MemoryTranscriptLifecycleRequest, MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus,
-    MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteCandidate,
-    MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel, ProfileId,
-    RuntimeLifecycleModeInput, RuntimeSkillOwningScope, RuntimeSkillReuseOutcome,
+    MemorySubjectVisibilityPolicy, MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitRequest,
+    MemoryTranscriptExportRequest, MemoryTranscriptLifecycleRequest, MemoryTranscriptReplayRequest,
+    MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource,
+    MemoryWriteCandidate, MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel,
+    ProfileId, RuntimeLifecycleModeInput, RuntimeSkillOwningScope, RuntimeSkillReuseOutcome,
     TranscriptAttrEnvelope, TranscriptAttrGovernance, TranscriptAttrLink,
     TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
     TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind, TranscriptEvidenceRef,
@@ -1061,6 +1061,7 @@ fn candidate_write_records_transcript_derived_ref_for_lifecycle_impact() {
                     kind: LongTermMemoryKind::Preference,
                     topic: "response_style".to_string(),
                 },
+                long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
                 privacy: MemoryPrivacyClass::SharedWithSubject,
                 content: MemoryCandidateContent::Text {
                     topic: "response_style".to_string(),
@@ -1151,6 +1152,7 @@ fn candidate_write_records_only_second_stage_accepted_derived_refs() {
                         kind: LongTermMemoryKind::Fact,
                         topic: "release_notes_blob".to_string(),
                     },
+                    long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
                     privacy: MemoryPrivacyClass::SharedWithSubject,
                     content: MemoryCandidateContent::Text {
                         topic: "release_notes_blob".to_string(),
@@ -1177,6 +1179,7 @@ fn candidate_write_records_only_second_stage_accepted_derived_refs() {
                         name: "runtime_skill__weak_summary".to_string(),
                         topic: "summary_style".to_string(),
                     },
+                    long_term_subject_visibility: None,
                     privacy: MemoryPrivacyClass::SharedWithSubject,
                     content: MemoryCandidateContent::Text {
                         topic: "summary_style".to_string(),
@@ -1272,6 +1275,10 @@ fn long_term_extraction_records_transcript_derived_ref_for_lifecycle_impact() {
                     source_chat_id: Some("chat-a".to_string()),
                     source_type: None,
                     source_scope: None,
+                    subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                    provenance: LongTermMemoryProvenance::new(
+                        MemoryEvidenceAuthority::UserAsserted,
+                    ),
                     confidence: None,
                     freshness: None,
                     stale_hint: None,
@@ -1279,7 +1286,6 @@ fn long_term_extraction_records_transcript_derived_ref_for_lifecycle_impact() {
                     canonical_entities: Vec::new(),
                     evidence_count: None,
                     observed_at: Some(10),
-                    last_confirmed_at: None,
                     source_revision: None,
                 }],
                 deletes: Vec::new(),
@@ -1434,6 +1440,7 @@ fn soul_candidate_handoff_records_transcript_derived_ref_for_lifecycle_impact() 
                 target: MemoryCandidateTarget::Soul {
                     surface: "self_understanding".to_string(),
                 },
+                long_term_subject_visibility: None,
                 privacy: MemoryPrivacyClass::SoulPrivate,
                 content: MemoryCandidateContent::Text {
                     topic: "self_understanding".to_string(),

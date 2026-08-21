@@ -1,5 +1,8 @@
 use bm_core::feature_gate::ProfileId;
-use bm_core::memory::{LongTermMemoryDraft, LongTermMemoryKind, MemoryPrivacyClass};
+use bm_core::memory::{
+    LongTermMemoryDraft, LongTermMemoryKind, LongTermMemoryProvenance, MemoryEvidenceAuthority,
+    MemoryPrivacyClass, MemorySubjectVisibilityPolicy,
+};
 use bm_core::platform::Platform;
 use bm_sdk::nonproduction_replay_harness::{
     StoreBackendConfig, StorePlatform, LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
@@ -29,6 +32,8 @@ fn seed(platform: &StorePlatform) {
             source_chat_id: Some("chat-a".to_string()),
             source_type: None,
             source_scope: None,
+            subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+            provenance: LongTermMemoryProvenance::new(MemoryEvidenceAuthority::RuntimeObservation),
             confidence: None,
             freshness: None,
             stale_hint: None,
@@ -36,7 +41,6 @@ fn seed(platform: &StorePlatform) {
             canonical_entities: Vec::new(),
             evidence_count: None,
             observed_at: None,
-            last_confirmed_at: None,
             source_revision: None,
         },
         100,
@@ -187,6 +191,47 @@ fn snapshot_import_rejects_pre_p741_store_schema_before_touching_target_state() 
     let after = target.export_store_snapshot().unwrap();
     assert_eq!(after.state_fingerprint(), before.state_fingerprint());
     assert_eq!(after.event_fingerprint(), before.event_fingerprint());
+}
+
+#[test]
+fn snapshot_import_rejects_v7_store_schema_before_touching_target_state() {
+    let source = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    seed(&source);
+    let mut snapshot = source.export_store_snapshot().unwrap();
+    snapshot.schema_id = "beetle_memory_store_schema_v7".to_string();
+    snapshot.schema_manifest.schema_id = "beetle_memory_store_schema_v7".to_string();
+    snapshot.schema_manifest.schema_version = 7;
+
+    let target = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    target
+        .state_fs()
+        .write("runtime/state.json", b"keep")
+        .unwrap();
+    let before = target.export_store_snapshot().unwrap();
+
+    let err = target
+        .import_store_snapshot(&snapshot)
+        .expect_err("v7 snapshot must be rejected before target mutation");
+
+    assert_eq!(err.stage(), "store_snapshot_import");
+    assert!(err.to_string().contains("schema"));
+    let after = target.export_store_snapshot().unwrap();
+    assert_eq!(after.state_fingerprint(), before.state_fingerprint());
+    assert_eq!(after.event_fingerprint(), before.event_fingerprint());
+    assert_eq!(after.json_docs, before.json_docs);
+    assert_eq!(after.events, before.events);
 }
 
 #[test]

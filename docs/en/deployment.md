@@ -78,7 +78,7 @@ Headers consumed by the standard-library HTTP helper:
 
 | Header | Purpose |
 | --- | --- |
-| `x-idempotency-key` | Optional caller idempotency material. The transport derives its internal key and never echoes the raw value. |
+| `x-idempotency-key` | Required stable, non-sensitive caller material for Adapter V2 durable `Write` and `LongTermMutate`; the transport derives its internal key and never echoes the raw value. |
 | `authorization: Bearer ...` | Verified against the configured typed principal, owner, tenant, and operation capabilities. |
 
 Loopback trust comes only from the accepted socket peer address. Forwarded identity, subject, and `x-loopback` headers are untrusted and cannot grant authentication or capabilities. A non-loopback listener requires `BM_HTTP_BEARER_TOKEN`, `BM_HTTP_BEARER_PRINCIPAL_ID`, a globally unique `BM_HTTP_BEARER_OWNER_ID`, and `BM_HTTP_BEARER_CAPABILITIES`; `owner_id` is the tenancy namespace. Startup fails closed when the verifier or nonzero read/write timeouts are missing.
@@ -313,7 +313,7 @@ Example message:
 3. Set a stable `agent_id`, `owner_id`, `channel`, and `chat_id` policy.
 4. Configure transport visibility through `EntryTransportConfig`.
 5. Derive `EntryAuthDecision` from the real transport boundary before constructing `EntryTransportContext`; never accept caller-controlled booleans or loopback headers as trust evidence.
-6. Use idempotency keys for mutation operations.
+6. Supply stable, non-sensitive idempotency keys for every Adapter V2 durable `Write` and `LongTermMutate`; inspect capabilities for explicitly non-durable or domain-owned mutations.
 7. Persist file/sqlite stores under a path owned by the runtime process.
 8. Run `memory capabilities` or the platform capability snapshot before exposing a protocol.
 9. Add a deployment smoke test that writes, recalls, and checks capabilities through the selected entry surface.

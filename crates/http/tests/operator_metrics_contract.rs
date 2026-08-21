@@ -89,7 +89,7 @@ fn operator_overview_exposes_stable_runtime_metrics_fields() {
         "topic": "operator metrics",
         "title": "Operator metrics contract",
         "summary": "Operator API displays metrics from runtime reports.",
-        "content": "Write count and hit count are runtime metrics fields.",
+        "content": "- record the accepted write from the runtime event stream\n- render write and recall counters from the validated metrics report",
         "source": "manual",
         "citations": ["operator-metrics-contract"],
         "owning_scope": {
@@ -107,7 +107,8 @@ fn operator_overview_exposes_stable_runtime_metrics_fields() {
     .to_string();
     let write = handle_http_in_process_request(
         &runtime,
-        HttpRuntimeRequest::post_json("/memory/write", &write_body),
+        HttpRuntimeRequest::post_json("/memory/write", &write_body)
+            .with_idempotency_key("operator-metrics-contract-write"),
     )
     .expect("write");
     assert_eq!(write.status_code, 200, "{}", write.body);

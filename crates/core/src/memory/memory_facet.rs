@@ -1355,9 +1355,12 @@ pub fn build_long_term_memory_facet_index_doc(
     );
 
     for (anchor_kind, epoch_secs) in [
-        (TemporalAnchorKind::ObservedAt, entry.observed_at),
+        (TemporalAnchorKind::ObservedAt, Some(entry.observed_at)),
         (TemporalAnchorKind::LastConfirmedAt, entry.last_confirmed_at),
     ] {
+        let Some(epoch_secs) = epoch_secs else {
+            continue;
+        };
         if epoch_secs == 0 {
             continue;
         }

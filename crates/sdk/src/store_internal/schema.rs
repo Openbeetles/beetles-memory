@@ -13,18 +13,20 @@ use bm_core::memory::{
     MemoryFacetIndexDoc, MemoryFacetIndexManifest, MemoryFacetPostingDoc,
     MemoryGraphBacklinkMembership, MemoryGraphEdge, MemoryGraphEdgeMembership, MemoryGraphNode,
     MemoryGraphNodeMembership, MemoryGraphRecallIndexDoc, MemoryGraphRevisionDoc,
-    MemoryGraphScopeManifest, MemoryLongTermGovernancePolicy, PostTurnGovernanceJobV2,
-    PostTurnGovernanceScopeIndexV2, GOVERNED_EVIDENCE_DOCUMENT_SCHEMA_VERSION,
-    GOVERNED_EVIDENCE_SOURCE_REF_SCHEMA_VERSION, LONG_TERM_CONTROL_AUDIT_NAMESPACE,
-    LONG_TERM_CONTROL_REVISION_NAMESPACE, LONG_TERM_CONTROL_SCHEMA_VERSION,
-    LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE, LONG_TERM_GOVERNANCE_POLICY_NAMESPACE,
-    LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION, MEMORY_FACET_INDEX_NAMESPACE,
-    MEMORY_FACET_POSTING_NAMESPACE, MEMORY_GRAPH_BACKLINK_MEMBERSHIP_NAMESPACE,
-    MEMORY_GRAPH_BACKLINK_NAMESPACE, MEMORY_GRAPH_EDGE_MEMBERSHIP_NAMESPACE,
-    MEMORY_GRAPH_EDGE_NAMESPACE, MEMORY_GRAPH_INDEX_NAMESPACE, MEMORY_GRAPH_MANIFEST_NAMESPACE,
+    MemoryGraphScopeManifest, MemoryLongTermGovernancePolicy, MemoryMutationAuditRecord,
+    MemoryMutationReceipt, PostTurnGovernanceJobV2, PostTurnGovernanceScopeIndexV2,
+    GOVERNED_EVIDENCE_DOCUMENT_SCHEMA_VERSION, GOVERNED_EVIDENCE_SOURCE_REF_SCHEMA_VERSION,
+    LONG_TERM_CONTROL_AUDIT_NAMESPACE, LONG_TERM_CONTROL_REVISION_NAMESPACE,
+    LONG_TERM_CONTROL_SCHEMA_VERSION, LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+    LONG_TERM_GOVERNANCE_POLICY_NAMESPACE, LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
+    MEMORY_FACET_INDEX_NAMESPACE, MEMORY_FACET_POSTING_NAMESPACE,
+    MEMORY_GRAPH_BACKLINK_MEMBERSHIP_NAMESPACE, MEMORY_GRAPH_BACKLINK_NAMESPACE,
+    MEMORY_GRAPH_EDGE_MEMBERSHIP_NAMESPACE, MEMORY_GRAPH_EDGE_NAMESPACE,
+    MEMORY_GRAPH_INDEX_NAMESPACE, MEMORY_GRAPH_MANIFEST_NAMESPACE,
     MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE, MEMORY_GRAPH_NODE_NAMESPACE,
-    MEMORY_GRAPH_REVISION_NAMESPACE, MEMORY_GRAPH_SCHEMA_VERSION,
-    POST_TURN_GOVERNANCE_JOB_NAMESPACE, POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
+    MEMORY_GRAPH_REVISION_NAMESPACE, MEMORY_GRAPH_SCHEMA_VERSION, MEMORY_MUTATION_AUDIT_NAMESPACE,
+    MEMORY_MUTATION_RECEIPT_NAMESPACE, POST_TURN_GOVERNANCE_JOB_NAMESPACE,
+    POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
 };
 use bm_core::platform::MemorySystemKind;
 use bm_core::skills::{
@@ -49,8 +51,8 @@ use crate::store_internal::recall_index::{
     TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE,
 };
 
-pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema_v7";
-pub const STORE_SCHEMA_VERSION: u32 = 7;
+pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema_v9";
+pub const STORE_SCHEMA_VERSION: u32 = 9;
 pub(crate) const LONG_TERM_VERSION_MATERIAL_NAMESPACE: &str = "long_term_version_materials";
 pub(crate) const LONG_TERM_HEAD_MANIFEST_NAMESPACE: &str = "long_term_head_manifests";
 pub(crate) const LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE: &str =
@@ -103,6 +105,8 @@ pub(crate) enum StoreJsonDecoderKind {
     RecallOwnerScopeBinding,
     PostTurnGovernanceJob,
     PostTurnGovernanceScopeIndex,
+    MemoryMutationReceipt,
+    MemoryMutationAudit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,7 +142,7 @@ pub(crate) struct StoreBlobNamespaceContract {
     pub decoder_kind: StoreBlobDecoderKind,
 }
 
-pub(crate) const STORE_V6_JSON_NAMESPACE_REGISTRY: &[StoreJsonNamespaceContract] = &[
+pub(crate) const STORE_JSON_NAMESPACE_REGISTRY: &[StoreJsonNamespaceContract] = &[
     StoreJsonNamespaceContract {
         namespace: "skill_meta",
         decoder_kind: StoreJsonDecoderKind::GenericSkillMeta,
@@ -313,9 +317,17 @@ pub(crate) const STORE_V6_JSON_NAMESPACE_REGISTRY: &[StoreJsonNamespaceContract]
         POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
         StoreJsonDecoderKind::PostTurnGovernanceScopeIndex,
     ),
+    typed_json_namespace(
+        MEMORY_MUTATION_RECEIPT_NAMESPACE,
+        StoreJsonDecoderKind::MemoryMutationReceipt,
+    ),
+    typed_json_namespace(
+        MEMORY_MUTATION_AUDIT_NAMESPACE,
+        StoreJsonDecoderKind::MemoryMutationAudit,
+    ),
 ];
 
-pub(crate) const STORE_V6_BLOB_NAMESPACE_REGISTRY: &[StoreBlobNamespaceContract] = &[
+pub(crate) const STORE_BLOB_NAMESPACE_REGISTRY: &[StoreBlobNamespaceContract] = &[
     opaque_blob_namespace("state_fs"),
     StoreBlobNamespaceContract {
         namespace: GENERIC_SKILL_BLOB_NAMESPACE,
@@ -349,8 +361,8 @@ const fn opaque_blob_namespace(namespace: &'static str) -> StoreBlobNamespaceCon
     }
 }
 
-pub(crate) fn store_v6_json_namespaces() -> impl ExactSizeIterator<Item = &'static str> {
-    STORE_V6_JSON_NAMESPACE_REGISTRY
+pub(crate) fn store_json_namespaces() -> impl ExactSizeIterator<Item = &'static str> {
+    STORE_JSON_NAMESPACE_REGISTRY
         .iter()
         .map(|contract| contract.namespace)
 }
@@ -375,12 +387,12 @@ pub(crate) fn is_subject_global_soul_json_namespace(namespace: &str) -> bool {
 }
 
 pub(crate) fn store_memory_space_archive_json_namespaces() -> impl Iterator<Item = &'static str> {
-    store_v6_json_namespaces().filter(|namespace| !is_subject_global_soul_json_namespace(namespace))
+    store_json_namespaces().filter(|namespace| !is_subject_global_soul_json_namespace(namespace))
 }
 
 #[cfg(any(test, feature = "nonproduction-replay-harness"))]
-pub(crate) fn store_v6_blob_namespaces() -> impl ExactSizeIterator<Item = &'static str> {
-    STORE_V6_BLOB_NAMESPACE_REGISTRY
+pub(crate) fn store_blob_namespaces() -> impl ExactSizeIterator<Item = &'static str> {
+    STORE_BLOB_NAMESPACE_REGISTRY
         .iter()
         .map(|contract| contract.namespace)
 }
@@ -399,7 +411,7 @@ pub(crate) fn classify_store_json_address(
                 StoreLegacyAddressKind::RuntimeSkillRecallManifest,
             ))
         }
-        _ => Ok(STORE_V6_JSON_NAMESPACE_REGISTRY
+        _ => Ok(STORE_JSON_NAMESPACE_REGISTRY
             .iter()
             .find(|contract| contract.namespace == namespace)
             .map_or(StoreAddressAdmission::Unknown, |contract| {
@@ -1038,6 +1050,30 @@ fn validate_store_json_value(
             }
             Ok(())
         }
+        StoreJsonDecoderKind::MemoryMutationReceipt => {
+            let receipt = decode_json::<MemoryMutationReceipt>(value, invalid)?;
+            receipt
+                .validate_contract()
+                .map_err(|error| invalid(error.to_string()))?;
+            if receipt.identity.storage_key() != key {
+                return Err(invalid(
+                    "mutation receipt identity does not match its physical key".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::MemoryMutationAudit => {
+            let audit = decode_json::<MemoryMutationAuditRecord>(value, invalid)?;
+            audit
+                .validate_contract()
+                .map_err(|error| invalid(error.to_string()))?;
+            if audit.audit_record_id != key {
+                return Err(invalid(
+                    "mutation audit identity does not match its physical key".to_string(),
+                ));
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1422,7 +1458,7 @@ pub(crate) fn classify_store_blob_address(
     value: Option<&[u8]>,
 ) -> Result<StoreAddressAdmission<StoreBlobDecoderKind>> {
     require_store_address(namespace, key)?;
-    let Some(contract) = STORE_V6_BLOB_NAMESPACE_REGISTRY
+    let Some(contract) = STORE_BLOB_NAMESPACE_REGISTRY
         .iter()
         .find(|contract| contract.namespace == namespace)
     else {
@@ -2343,14 +2379,14 @@ mod tests {
     }
 
     #[test]
-    fn p8_store_schema_identity_is_exactly_v6() {
-        assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v7");
-        assert_eq!(STORE_SCHEMA_VERSION, 7);
+    fn store_schema_identity_is_exactly_v9_and_rejects_v8() {
+        assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v9");
+        assert_eq!(STORE_SCHEMA_VERSION, 9);
         assert!(
             validate_store_schema_identity(STORE_SCHEMA_ID, STORE_SCHEMA_VERSION, "test").is_ok()
         );
         assert!(
-            validate_store_schema_identity("beetle_memory_store_schema_v5", 5, "test").is_err()
+            validate_store_schema_identity("beetle_memory_store_schema_v8", 8, "test").is_err()
         );
         assert!(
             validate_store_schema_identity("unknown_memory_store_schema_v999", 999, "test")
@@ -2359,12 +2395,81 @@ mod tests {
     }
 
     #[test]
-    fn p8_typed_namespaces_have_one_canonical_registry() {
-        let active = store_v6_json_namespaces().collect::<BTreeSet<_>>();
-        assert_eq!(active.len(), STORE_V6_JSON_NAMESPACE_REGISTRY.len());
+    fn mutation_receipt_and_audit_are_typed_v9_namespaces() {
+        use bm_core::memory::{
+            MemoryMutationAuditRecord, MemoryMutationEffect, MemoryMutationOperationIdentity,
+            MemoryMutationOperationKind, MemoryMutationReceipt, MEMORY_MUTATION_AUDIT_NAMESPACE,
+            MEMORY_MUTATION_RECEIPT_NAMESPACE,
+        };
+
+        let identity = MemoryMutationOperationIdentity::new(
+            "operation-store-contract",
+            "memory-space-main",
+            "subject-main",
+            "actor-main",
+            MemoryMutationOperationKind::Write,
+        )
+        .unwrap();
+        let key = identity.storage_key();
+        let transaction_id =
+            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let intent_digest =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let effect_plan_digest =
+            "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        let audit = MemoryMutationAuditRecord::new(
+            identity.clone(),
+            intent_digest,
+            effect_plan_digest,
+            transaction_id,
+            MemoryMutationEffect::Changed,
+            1,
+            "actor-main",
+            1_800_000_000,
+        )
+        .unwrap();
+        let receipt = MemoryMutationReceipt::new(
+            identity,
+            intent_digest,
+            effect_plan_digest,
+            transaction_id,
+            MemoryMutationEffect::Changed,
+            1,
+            1_800_000_000,
+        )
+        .unwrap();
+
         assert_eq!(
-            store_v6_blob_namespaces().collect::<BTreeSet<_>>().len(),
-            STORE_V6_BLOB_NAMESPACE_REGISTRY.len()
+            classify_store_json_address(MEMORY_MUTATION_RECEIPT_NAMESPACE, &key).unwrap(),
+            StoreAddressAdmission::Active(StoreJsonDecoderKind::MemoryMutationReceipt)
+        );
+        assert_eq!(
+            classify_store_json_address(MEMORY_MUTATION_AUDIT_NAMESPACE, &key).unwrap(),
+            StoreAddressAdmission::Active(StoreJsonDecoderKind::MemoryMutationAudit)
+        );
+        admit_store_json_document(
+            MEMORY_MUTATION_RECEIPT_NAMESPACE,
+            &key,
+            &serde_json::to_value(receipt).unwrap(),
+            "test",
+        )
+        .unwrap();
+        admit_store_json_document(
+            MEMORY_MUTATION_AUDIT_NAMESPACE,
+            &key,
+            &serde_json::to_value(audit).unwrap(),
+            "test",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn p8_typed_namespaces_have_one_canonical_registry() {
+        let active = store_json_namespaces().collect::<BTreeSet<_>>();
+        assert_eq!(active.len(), STORE_JSON_NAMESPACE_REGISTRY.len());
+        assert_eq!(
+            store_blob_namespaces().collect::<BTreeSet<_>>().len(),
+            STORE_BLOB_NAMESPACE_REGISTRY.len()
         );
         for namespace in [
             LONG_TERM_VERSION_MATERIAL_NAMESPACE,

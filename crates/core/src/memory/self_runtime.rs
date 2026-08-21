@@ -500,6 +500,7 @@ fn run_self_runtime_method_distillation(
     skill_storage: &dyn SkillStorage,
     memory_store: &dyn MemoryStore,
     authority_plan: SelfRuntimeAuthorityPlan,
+    mounted_subject_id: &str,
     channel: &str,
     chat_id: &str,
     now_secs: u64,
@@ -519,6 +520,10 @@ fn run_self_runtime_method_distillation(
         crate::task_execution::TaskLearningMaintenanceInput {
             channel,
             chat_id,
+            long_term_subject_visibility:
+                crate::memory::MemorySubjectVisibilityPolicy::OnlySubjects(vec![
+                    mounted_subject_id.to_string()
+                ]),
             now_secs,
         },
     )
@@ -732,6 +737,7 @@ fn execute_self_runtime_actions(
         ctx.skill_storage,
         ctx.memory_store,
         authority_plan,
+        ctx.mounted_subject_id,
         state.active_relationship_channel.as_str(),
         chat_id,
         payload.now_secs,
@@ -3253,6 +3259,7 @@ mod tests {
             &skill_storage,
             &memory_store,
             authority,
+            "agent:test",
             "chat_channel",
             "chat-1",
             now_secs,

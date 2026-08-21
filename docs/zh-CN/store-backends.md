@@ -38,6 +38,12 @@ let config = StoreBackendConfig::file("/var/lib/beetle-memory", profile)?
     .with_fsync(true);
 ```
 
+## 0.3.0 Schema Admission
+
+Beetle Memory 0.3.0 只接受 Store v9 与 immutable long-term material v5。Store v7/v8 和 material v4 不会被自动迁移、打开或重写；schema 不匹配会在正常读写前 fail closed，并返回 typed migration/repair requirement。
+
+任何 0.3.0 二进制打开 Store 前，都要在数据路径之外备份该 exact Store。回滚需要旧二进制及其匹配的 Store 备份；archive export/import 不是 schema migration。完整兼容和验证边界见 [0.3.0 发布说明](release-notes-0.3.0.md)。
+
 ## File Path Budget
 
 logical store key 不是 filesystem path。file backend 会按 profile 的 `StorePathBudget` 把 logical key 映射到受限 physical address：短 digest 文件名加 sidecar key index。`list_*_keys`、snapshot export/import、replay 和 delete 仍然只暴露 logical key。

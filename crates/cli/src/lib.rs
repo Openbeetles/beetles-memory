@@ -6,8 +6,9 @@ pub mod agent_rules;
 
 use agent_rules::{render_agent_rules_export, AgentRulesExportRequest, AgentRulesTarget};
 use bm_adapter::{
-    decode_json_adapter_command, AdapterCommand, AdapterJsonCommandOptions, AdapterOperation,
-    AdapterResponse, AdapterSdkReport,
+    decode_json_adapter_command, AdapterCommand, AdapterJsonCommandOptions,
+    AdapterMutationReliability, AdapterOperation, AdapterRequestIdentityOwner, AdapterResponse,
+    AdapterSdkReport,
 };
 use bm_entry::{
     EntryAuthConfig, EntryConsoleRuntimeSkillEdit, EntryConsoleSkillSetEnabled,
@@ -65,7 +66,7 @@ const COMMAND_SPECS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "write-procedural",
-        usage: "bm memory write-procedural --name <name> --content <content> --runtime-skill-subject <subject-id>|--runtime-skill-shared-program --replay-candidate-ref <safe-ref> --verification-receipt-digest <sha256> --runtime-skill-privacy <public-runtime|shared-with-subject>",
+        usage: "bm memory write-procedural --idempotency-key <stable-non-sensitive-key> --name <name> --content <content> --runtime-skill-subject <subject-id>|--runtime-skill-shared-program --replay-candidate-ref <safe-ref> --verification-receipt-digest <sha256> --runtime-skill-privacy <public-runtime|shared-with-subject>",
         operation: AdapterOperation::Write,
     },
     CommandSpec {
@@ -85,7 +86,7 @@ const COMMAND_SPECS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "long-term-delete",
-        usage: "bm memory long-term-delete --record-id <id> --reason <reason>",
+        usage: "bm memory long-term-delete --idempotency-key <stable-non-sensitive-key> --record-id <id> --reason <reason>",
         operation: AdapterOperation::LongTermMutate,
     },
     CommandSpec {
@@ -260,10 +261,18 @@ fn run_memory_cli(args: &[String]) -> Result<String, String> {
     if is_skill_command(command) {
         return run_skill_cli(&entry, command, &options);
     }
+    if operation.mutation_reliability() == AdapterMutationReliability::DurableStoreReceipt
+        && options.idempotency_key.is_none()
+    {
+        return Err(
+            "durable mutation command requires --idempotency-key <stable-non-sensitive-key>"
+                .to_string(),
+        );
+    }
     let adapter_command = options.adapter_command(command)?;
     let response = entry
         .handle(
-            options.transport_context(&entry, operation),
+            options.transport_context(&entry, operation)?,
             adapter_command,
         )
         .map_err(|err| err.to_string())?;
@@ -445,6 +454,7 @@ struct CliOptions {
     replay_candidate_ref: String,
     verification_receipt_digest: String,
     runtime_skill_privacy: Option<MemoryPrivacyClass>,
+    idempotency_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -487,6 +497,7 @@ impl CliOptions {
         let mut replay_candidate_ref = String::new();
         let mut verification_receipt_digest = String::new();
         let mut runtime_skill_privacy = None;
+        let mut idempotency_key = None;
         let mut index = 0;
         while index < args.len() {
             let key = args[index].as_str();
@@ -569,6 +580,10 @@ impl CliOptions {
                     });
                 }
                 "--record-id" => record_id = next_value(args, &mut index, key)?.to_string(),
+                "--idempotency-key" => {
+                    idempotency_key =
+                        Some(required_value(next_value(args, &mut index, key)?, key)?.to_string())
+                }
                 "--input" => input_path = Some(PathBuf::from(next_value(args, &mut index, key)?)),
                 "--reason" => {
                     reason = next_value(args, &mut index, key)?.to_string();
@@ -606,6 +621,7 @@ impl CliOptions {
             replay_candidate_ref,
             verification_receipt_digest,
             runtime_skill_privacy,
+            idempotency_key,
         })
     }
 
@@ -655,18 +671,22 @@ impl CliOptions {
         &self,
         runtime: &EntryRuntime,
         operation: AdapterOperation,
-    ) -> EntryTransportContext {
-        EntryTransportContext::new(
-            format!("cli-{operation:?}-{}", self.chat),
+    ) -> Result<EntryTransportContext, String> {
+        let identity =
+            AdapterRequestIdentityOwner::new(bm_adapter::TransportKind::Cli, "bm-cli", "operator")
+                .issue(self.idempotency_key.as_deref())
+                .map_err(|error| error.to_string())?;
+        Ok(EntryTransportContext::new(
+            identity.request_id,
             bm_adapter::TransportKind::Cli,
             bm_adapter::TransportMode::InProcess,
             operation,
             "bm-cli",
             "local_cli",
-            format!("cli-{operation:?}-{}-{}", self.chat, self.name),
-            format!("audit-cli-{operation:?}-{}", self.chat),
+            identity.mutation_operation_id.unwrap_or_default(),
+            identity.audit_id,
             runtime.authenticate_local_transport(EntryLocalTransport::InProcess, "operator"),
-        )
+        ))
     }
 
     fn adapter_command(&self, command: &str) -> Result<AdapterCommand, String> {
@@ -865,7 +885,18 @@ fn non_empty_string(value: &str) -> Option<String> {
 
 fn render_entry_response(response: AdapterResponse<AdapterSdkReport>) -> Result<String, String> {
     match response {
-        AdapterResponse::Accepted { report, .. } => render_sdk_report(report),
+        AdapterResponse::Accepted {
+            report, receipt, ..
+        } => {
+            let rendered = render_sdk_report(report)?;
+            let mut value: serde_json::Value =
+                serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+            if let Some(receipt) = receipt {
+                value["receipt"] =
+                    serde_json::to_value(receipt).map_err(|error| error.to_string())?;
+            }
+            serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
+        }
         AdapterResponse::Rejected {
             error_key, reason, ..
         } => serde_json::to_string_pretty(&json!({
@@ -879,11 +910,14 @@ fn render_entry_response(response: AdapterResponse<AdapterSdkReport>) -> Result<
             "queue": queue,
         }))
         .map_err(|err| err.to_string()),
-        AdapterResponse::Duplicated {
-            idempotency_key, ..
+        AdapterResponse::Replayed {
+            mutation_operation_id,
+            receipt,
+            ..
         } => serde_json::to_string_pretty(&json!({
-            "status": "duplicated",
-            "idempotency_key": idempotency_key,
+            "status": "replayed",
+            "mutation_operation_id": mutation_operation_id,
+            "receipt": receipt,
         }))
         .map_err(|err| err.to_string()),
     }
@@ -974,10 +1008,12 @@ fn render_sdk_report(report: AdapterSdkReport) -> Result<String, String> {
             "dry_run": report.dry_run,
             "lifecycle": report.lifecycle_report.result_summary,
         }),
-        AdapterSdkReport::Capabilities(catalog) => {
-            let rendered = render_capabilities(&catalog).map_err(|err| err.to_string())?;
-            return Ok(rendered);
-        }
+        AdapterSdkReport::Capabilities(report) => json!({
+            "status": "accepted",
+            "profile": report.profile.as_str(),
+            "capabilities": report.capabilities,
+            "sdk_mutation_inventory": report.sdk_mutation_inventory,
+        }),
         AdapterSdkReport::Close(report) => json!({
             "status": "accepted",
             "operation": "close",

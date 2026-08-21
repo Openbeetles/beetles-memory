@@ -59,7 +59,7 @@ fn write_payload(name: &str, summary: &str) -> String {
         "topic": "a2a-idempotency",
         "title": format!("A2A write {name}"),
         "summary": summary,
-        "content": "Dispatch this write through the governed EntryRuntime path.",
+        "content": "1. Decode the A2A write payload.\n2. Dispatch it through the governed EntryRuntime path and verify the receipt.",
         "source_chat_id": "chat-1",
         "owning_scope": {
             "kind": "subject",
@@ -150,7 +150,7 @@ fn assert_exact_governed_result(payload: &str) {
 }
 
 #[test]
-fn a2a_automatic_identity_accepts_two_distinct_writes_on_one_bridge() {
+fn a2a_durable_write_without_caller_operation_key_fails_closed() {
     let runtime = runtime();
     let bridge = support::bridge("bridge-auto");
 
@@ -175,8 +175,48 @@ fn a2a_automatic_identity_accepts_two_distinct_writes_on_one_bridge() {
         )
         .expect("second write");
 
-    assert_eq!(response_status(&first), "accepted");
-    assert_eq!(response_status(&second), "accepted");
+    assert_eq!(response_status(&first), "rejected");
+    assert_eq!(response_status(&second), "rejected");
+    assert!(
+        first.payload.contains("mutation_operation_id"),
+        "{}",
+        first.payload
+    );
+    assert!(
+        second.payload.contains("mutation_operation_id"),
+        "{}",
+        second.payload
+    );
+}
+
+#[test]
+fn a2a_capabilities_expose_mutation_reliability_and_receipt_policy() {
+    let runtime = runtime();
+    let bridge = support::bridge("bridge-capabilities");
+    let response = bridge
+        .handle_in_process_request(
+            &runtime,
+            "a2a-in-process-principal",
+            A2aRuntimeMessage::json("memory_capabilities_request", "{}"),
+        )
+        .expect("A2A capabilities");
+
+    assert_eq!(response_status(&response), "accepted");
+    assert!(
+        response.payload.contains("mutation_operation_inventory"),
+        "{}",
+        response.payload
+    );
+    assert!(
+        response.payload.contains("mutation_receipt_policy"),
+        "{}",
+        response.payload
+    );
+    assert!(
+        !response.payload.contains("\"receipt\""),
+        "{}",
+        response.payload
+    );
 }
 
 #[test]
@@ -215,8 +255,17 @@ fn a2a_explicit_identity_replays_same_payload_and_rejects_conflict() {
         .expect("conflicting write");
 
     assert_eq!(response_status(&first), "accepted");
-    assert_eq!(response_status(&replay), "duplicated");
+    assert_eq!(response_status(&replay), "replayed");
     assert_eq!(response_status(&conflict), "rejected");
+    let first_payload: serde_json::Value =
+        serde_json::from_str(&first.payload).expect("first A2A response JSON");
+    let replay_payload: serde_json::Value =
+        serde_json::from_str(&replay.payload).expect("replay A2A response JSON");
+    assert!(first_payload["receipt"].is_object(), "{first_payload}");
+    assert_eq!(
+        first_payload["receipt"]["transaction_id"],
+        replay_payload["receipt"]["transaction_id"]
+    );
 }
 
 #[test]

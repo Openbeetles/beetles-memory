@@ -1,7 +1,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bm_desktop::{
-    DesktopConsoleRequest, DesktopConsoleState, DesktopMemoryAuthority, DesktopRuntimeConfig,
+    DesktopConsoleInvokeRequest, DesktopConsoleRequest, DesktopConsoleState,
+    DesktopMemoryAuthority, DesktopRuntimeConfig,
 };
 use bm_entry::{
     EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
@@ -93,12 +94,14 @@ fn desktop_console_mutates_skills_through_entry_runtime() {
         "privacy_class": MemoryPrivacyClass::SharedWithSubject,
     })
     .to_string();
-    let seeded = state
-        .handle_console_request(DesktopConsoleRequest::post_json(
-            "/memory/write",
-            &seed_body,
-        ))
-        .unwrap();
+    let seed_request = DesktopConsoleRequest::try_from(DesktopConsoleInvokeRequest {
+        method: "POST".to_string(),
+        path: "/memory/write".to_string(),
+        body: seed_body,
+        idempotency_key: "desktop-console-runtime-skill-seed".to_string(),
+    })
+    .expect("desktop invoke request");
+    let seeded = state.handle_console_request(seed_request).unwrap();
     assert_eq!(seeded.status_code, 200, "{}", seeded.body);
 
     let list = state

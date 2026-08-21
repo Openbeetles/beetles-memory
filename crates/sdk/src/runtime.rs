@@ -22,13 +22,16 @@ use crate::store_internal::{
     GovernedEvidenceSourceClaimManifest, GraphRepairAuthority, MemoryStoreEvent,
     MemoryStoreEventKind, RuntimeLifecycleStoreBinding, StoreBackendKind, StoreEventScope,
     StoreGovernedEvidenceExactReadRequest, StoreJsonPrecondition, StoreMutation,
-    StoreMutationBatch, StoreMutationBatchReport, StorePlatform, StoreReadReceipt,
-    GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE, GOVERNED_EVIDENCE_SOURCE_CLAIM_MANIFEST_NAMESPACE,
-    GOVERNED_EVIDENCE_SOURCE_REF_NAMESPACE,
+    StoreMutationBatch, StoreMutationBatchReport, StoreMutationBudgetReport,
+    StoreMutationOperationOutcome, StoreMutationOperationPlan, StoreMutationOperationPreflight,
+    StorePlatform, StoreReadReceipt, GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE,
+    GOVERNED_EVIDENCE_SOURCE_CLAIM_MANIFEST_NAMESPACE, GOVERNED_EVIDENCE_SOURCE_REF_NAMESPACE,
 };
 use bm_core::budget::{RuntimeBudgetAuthority, RuntimeBudgetReport, TranscriptGovernanceBudget};
 use bm_core::feature_gate::{profile_capability_catalog, ProfileCapabilityCatalogEntry, ProfileId};
 use bm_core::llm::{LlmClient as CoreLlmClient, LlmHttpClient};
+#[cfg(test)]
+use bm_core::memory::LongTermMemoryProvenance;
 use bm_core::memory::{
     allocate_recall_delivery_candidates, build_current_dynamic_state_resolution_report,
     build_deferred_governance_queue_report, build_governed_evidence_document_facet_index_doc,
@@ -78,7 +81,7 @@ use bm_core::memory::{
     GovernedRecallEligibilityReport, GovernedRecallTemporalQuery, GovernedRequiredPremiseGate,
     GovernedWriteDecision, GraphFacetPropagationContext, GraphRecallCandidateScore,
     GraphRecallExpansionBudget, GraphRecallRerankReport, IngressKind, InhabitedSubjectProjection,
-    InhabitedSubjectProjectionInput, LongTermMemoryControlAuditEvent,
+    InhabitedSubjectProjectionInput, LongTermControlOperation, LongTermMemoryControlAuditEvent,
     LongTermMemoryControlDetailRequest as CoreLongTermMemoryControlDetailRequest,
     LongTermMemoryControlListRequest as CoreLongTermMemoryControlListRequest,
     LongTermMemoryControlMutationRequest as CoreLongTermMemoryControlMutationRequest,
@@ -97,29 +100,32 @@ use bm_core::memory::{
     MemoryGraphNodeMembership, MemoryGraphOwnerBinding, MemoryGraphPersistencePlan,
     MemoryGraphRecallIndexDoc, MemoryGraphRevisionDoc, MemoryGraphScopeManifest,
     MemoryGraphWritePlan, MemoryHygieneContext, MemoryLongTermAffectedFacetDoc,
-    MemoryLongTermGovernancePolicy, MemoryLongTermMutation, MemoryPlaneGovernanceReport,
-    MemoryPrivacyClass, MemorySubjectVisibilityDecision, MemorySubjectVisibilityPolicy,
-    MemoryUpdateLineageReport, MemoryWriteAuthority, MemoryWriteCandidate, MemoryWriteDomain,
-    ParsedLongTermMemoryExtraction, PostReplyMemoryMaintenanceContext,
-    PostReplyMemoryMaintenanceInput, PostTurnGovernanceAttemptAuthorityV2,
-    PostTurnGovernanceIdentityV2, PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV2,
-    PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport, PremiseTypedSource,
-    PrivateGardenDoc, PrivateGardenDocRecord, PrivateGardenGovernanceContext,
-    PrivateGardenGovernanceInput, PrivateGardenGovernanceManifestEntry,
-    PrivateGardenGovernanceOutcome, PrivateGardenStore, ProceduralMemoryDeliveryReport,
-    ProceduralMemoryPromotionPolicy, ProceduralMemoryPromotionReport, ProjectionBudgetDecision,
-    ProjectionFaithfulnessCheck, ProjectionPrivacyDecision, PromptMemoryContextParams,
-    PromptParticipationPlan, PromptProjectionSource, PromptProjectionSurfaceRole,
-    PromptRecallIntent, QueryFacet, QueryFacetInput, QueryFacetParser, RecallCandidate,
-    RecallDeliveryCandidate, RecallDeliveryOrderingPolicy, RecallDeliveryText,
-    RecallSelectionReport, RedactedTranscriptSlice, SessionMessage, SessionMessageRecord,
-    SessionStore, SessionSummaryStore, SharedFactWriteGovernanceContext, SharedMemoryWriteAction,
-    SharedMemoryWriteOutcome, SharedMemoryWriteSource, SkillEvolutionReport, SubjectKind,
-    SubjectProjectionBoundaryProtocolReport, SubjectProjectionMountReport, SubjectProjectionReport,
-    SubjectProjectionWorkIntegrityReport, SubjectRegistry, SubjectRelationshipGraph,
-    SubjectScopedRuntime, TemporalMemoryGraphBuildReport, TemporalMemoryGraphGateReport,
-    TranscriptAttrEnvelope, TranscriptAttrWriteRejection, TranscriptAttrWriteReport,
-    TranscriptConversationAlias, TranscriptEvidenceRef, TranscriptInputMessage,
+    MemoryLongTermGovernancePolicy, MemoryLongTermMutation, MemoryMutationEffect,
+    MemoryMutationOperationIdentity, MemoryMutationOperationKind, MemoryMutationReceipt,
+    MemoryPlaneGovernanceReport, MemoryPrivacyClass, MemorySubjectVisibilityDecision,
+    MemorySubjectVisibilityPolicy, MemoryUpdateLineageReport, MemoryWriteAuthority,
+    MemoryWriteCandidate, MemoryWriteDomain, ParsedLongTermMemoryExtraction,
+    PostReplyMemoryMaintenanceContext, PostReplyMemoryMaintenanceInput,
+    PostTurnGovernanceAttemptAuthorityV2, PostTurnGovernanceIdentityV2,
+    PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV2, PostTurnPrivateGardenReport,
+    PostTurnSemanticGovernanceReport, PremiseTypedSource, PrivateGardenDoc, PrivateGardenDocRecord,
+    PrivateGardenGovernanceContext, PrivateGardenGovernanceInput,
+    PrivateGardenGovernanceManifestEntry, PrivateGardenGovernanceOutcome, PrivateGardenStore,
+    ProceduralMemoryDeliveryReport, ProceduralMemoryPromotionPolicy,
+    ProceduralMemoryPromotionReport, ProjectionBudgetDecision, ProjectionFaithfulnessCheck,
+    ProjectionPrivacyDecision, PromptMemoryContextParams, PromptParticipationPlan,
+    PromptProjectionSource, PromptProjectionSurfaceRole, PromptRecallIntent, QueryFacet,
+    QueryFacetInput, QueryFacetParser, RecallCandidate, RecallDeliveryCandidate,
+    RecallDeliveryOrderingPolicy, RecallDeliveryText, RecallSelectionReport,
+    RedactedTranscriptSlice, SessionMessage, SessionMessageRecord, SessionStore,
+    SessionSummaryStore, SharedFactWriteGovernanceContext, SharedMemoryWriteAction,
+    SharedMemoryWriteOutcome, SharedMemoryWriteReason, SharedMemoryWriteSource,
+    SkillEvolutionReport, SubjectKind, SubjectProjectionBoundaryProtocolReport,
+    SubjectProjectionMountReport, SubjectProjectionReport, SubjectProjectionWorkIntegrityReport,
+    SubjectRegistry, SubjectRelationshipGraph, SubjectScopedRuntime,
+    TemporalMemoryGraphBuildReport, TemporalMemoryGraphGateReport, TranscriptAttrEnvelope,
+    TranscriptAttrWriteRejection, TranscriptAttrWriteReport, TranscriptConversationAlias,
+    TranscriptEvidenceRef, TranscriptInputMessage,
     TranscriptLifecycleReport as CoreTranscriptLifecycleReport,
     TranscriptLifecycleRequest as CoreTranscriptLifecycleRequest, TranscriptLifecycleState,
     TranscriptLifecycleTransition, TranscriptRedactionReason, TranscriptRedactionReportItem,
@@ -170,6 +176,7 @@ use bm_core::skills::{
     RUNTIME_SKILL_GOVERNED_CONTRACT_SCHEMA_VERSION,
 };
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::ops::{
@@ -217,14 +224,15 @@ use crate::{
     MemoryInspectionRequest, MemoryLongTermDetailReport, MemoryLongTermDetailRequest,
     MemoryLongTermListReport, MemoryLongTermListRequest, MemoryLongTermMutationReport,
     MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryMaintenanceReport,
-    MemoryMaintenanceRequest, MemoryOperationVisibility, MemoryPrivacyPolicy, MemoryProfile,
-    MemoryProjectionAuditReport, MemoryProjectionGatewayAuditView, MemoryProjectionOutput,
-    MemoryProjectionPrivateGateAudit, MemoryProjectionReport, MemoryProjectionRequest,
-    MemoryProjectionSafeAuditReport, MemoryProjectionSectionAudit, MemoryProjectionSourceAudit,
-    MemoryRecallDeliveryReport, MemoryRecallDeliverySafeView, MemoryRecallRenderDecision,
-    MemoryRecallRenderDropReason, MemoryRecallReport, MemoryRecallRequest,
-    MemoryRecallSelectionDecision, MemoryRecallSelectionDropReason, MemoryRecoverReport,
-    MemoryRecoverRequest, MemoryRenderedEvidenceCapsule, MemoryReplayReport, MemoryReplayRequest,
+    MemoryMaintenanceRequest, MemoryMutationExecution, MemoryOperationVisibility,
+    MemoryPrivacyPolicy, MemoryProfile, MemoryProjectionAuditReport,
+    MemoryProjectionGatewayAuditView, MemoryProjectionOutput, MemoryProjectionPrivateGateAudit,
+    MemoryProjectionReport, MemoryProjectionRequest, MemoryProjectionSafeAuditReport,
+    MemoryProjectionSectionAudit, MemoryProjectionSourceAudit, MemoryRecallDeliveryReport,
+    MemoryRecallDeliverySafeView, MemoryRecallRenderDecision, MemoryRecallRenderDropReason,
+    MemoryRecallReport, MemoryRecallRequest, MemoryRecallSelectionDecision,
+    MemoryRecallSelectionDropReason, MemoryRecoverReport, MemoryRecoverRequest,
+    MemoryRenderedEvidenceCapsule, MemoryReplayReport, MemoryReplayRequest,
     MemoryRetentionCompactionReport, MemoryRetentionCompactionRequest, MemoryRuntimeSystemKind,
     MemorySpaceExportReport, MemorySpaceExportRequest, MemorySpaceImportReport,
     MemorySpaceImportRequest, MemoryStoreHandle, MemoryTranscriptAttrWriteReport,
@@ -961,8 +969,26 @@ struct MemoryWriteTransactionCommit<'a> {
     changed_count: usize,
 }
 
+#[derive(Clone, Debug)]
+struct MemoryMutationExecutionContext {
+    identity: MemoryMutationOperationIdentity,
+    intent_digest: String,
+}
+
+fn canonical_memory_write_operation_request(request: &MemoryWriteRequest) -> MemoryWriteRequest {
+    let mut canonical = request.clone();
+    if let MemoryWriteRequest::Procedural { writes, .. } = &mut canonical {
+        for write in writes {
+            write.write.observed_at = 0;
+        }
+    }
+    canonical
+}
+
 struct LongTermMutationExecution {
     report: MemoryLongTermMutationReport,
+    mutation_receipt: Option<MemoryMutationReceipt>,
+    mutation_replayed: bool,
     #[cfg(feature = "nonproduction-replay-harness")]
     transaction: Option<MemoryWriteTransactionReport>,
     #[cfg(feature = "nonproduction-replay-harness")]
@@ -2944,6 +2970,10 @@ impl MemoryRuntime {
         &self.capabilities
     }
 
+    pub fn mutation_capabilities(&self) -> crate::MemoryMutationCapabilityCatalog {
+        crate::MemoryMutationCapabilityCatalog::current()
+    }
+
     pub fn acquire_runtime_budget_lease(&self) -> Result<RuntimeBudgetLease> {
         RuntimeBudgetLease::issue(Arc::clone(&self.config.runtime_budget_authority))
     }
@@ -3253,13 +3283,55 @@ impl MemoryRuntime {
                 self.mutate_long_term_memory(request)
             });
         }
-        self.mutate_long_term_memory_internal(request)
+        self.mutate_long_term_memory_internal(request, None)
             .map(|execution| execution.report)
+    }
+
+    pub fn mutate_long_term_memory_operation(
+        &self,
+        operation_id: impl Into<String>,
+        request: MemoryLongTermMutationRequest,
+    ) -> Result<MemoryMutationExecution<MemoryLongTermMutationReport>> {
+        if RuntimeBudgetLease::active_report(&self.config.runtime_budget_authority).is_none() {
+            let lease = self.acquire_runtime_budget_lease()?;
+            return self.execute_with_runtime_budget_lease(&lease, || {
+                self.mutate_long_term_memory_operation(operation_id, request)
+            });
+        }
+        let operation_kind = MemoryMutationOperationKind::LongTermControl {
+            operation: long_term_control_operation(&request.operation),
+        };
+        let context =
+            self.memory_mutation_execution_context(operation_id.into(), operation_kind, &request)?;
+        if let Some(receipt) = self.preflight_memory_mutation_operation(&context)? {
+            return Ok(MemoryMutationExecution::Replayed { receipt });
+        }
+        let execution = self.mutate_long_term_memory_internal(request, Some(context))?;
+        if !execution.report.accepted {
+            return Ok(MemoryMutationExecution::Rejected {
+                report: execution.report,
+            });
+        }
+        let receipt = execution.mutation_receipt.ok_or_else(|| {
+            Error::config(
+                "memory_mutation_operation_commit",
+                "accepted operation-aware long-term mutation is missing its receipt",
+            )
+        })?;
+        if execution.mutation_replayed {
+            Ok(MemoryMutationExecution::Replayed { receipt })
+        } else {
+            Ok(MemoryMutationExecution::Committed {
+                report: execution.report,
+                receipt,
+            })
+        }
     }
 
     fn mutate_long_term_memory_internal(
         &self,
         request: MemoryLongTermMutationRequest,
+        mutation_operation: Option<MemoryMutationExecutionContext>,
     ) -> Result<LongTermMutationExecution> {
         let visibility = self.long_term_mutation_visibility(&request.operation);
         self.ensure_visible("long_term_control.mutation", visibility)?;
@@ -3319,37 +3391,45 @@ impl MemoryRuntime {
                 core_report.affected_records.len().to_string(),
             ),
         ];
-        let (lifecycle_report, transaction) = if mutation_plan.mutations.is_empty() {
-            (
-                self.finish_lifecycle_success_with_payload(
-                    lifecycle,
-                    RuntimeLifecycleEventKind::OperatorAction,
-                    RuntimeLifecycleEffect::RecordOperatorAction,
-                    changed,
-                    lifecycle_summary,
-                    &lifecycle_payload,
-                )?,
-                None,
-            )
-        } else {
-            let (lifecycle_report, transaction) =
-                self.commit_memory_write_transaction(MemoryWriteTransactionCommit {
-                    lifecycle,
-                    operation: "long_term_control.mutation",
-                    lifecycle_kind: RuntimeLifecycleEventKind::OperatorAction,
-                    lifecycle_effect: RuntimeLifecycleEffect::RecordOperatorAction,
-                    changed,
-                    summary: lifecycle_summary,
-                    extra_payload: &lifecycle_payload,
-                    plan: mutation_plan,
-                    changed_count: core_report.affected_records.len(),
-                })?;
-            (lifecycle_report, Some(transaction))
-        };
-        #[cfg(not(feature = "nonproduction-replay-harness"))]
-        drop(transaction);
+        let (lifecycle_report, transaction) =
+            if mutation_plan.mutations.is_empty() && mutation_operation.is_none() {
+                (
+                    self.finish_lifecycle_success_with_payload(
+                        lifecycle,
+                        RuntimeLifecycleEventKind::OperatorAction,
+                        RuntimeLifecycleEffect::RecordOperatorAction,
+                        changed,
+                        lifecycle_summary,
+                        &lifecycle_payload,
+                    )?,
+                    None,
+                )
+            } else {
+                let (lifecycle_report, transaction) = self
+                    .commit_memory_write_transaction_with_operation(
+                        MemoryWriteTransactionCommit {
+                            lifecycle,
+                            operation: "long_term_control.mutation",
+                            lifecycle_kind: RuntimeLifecycleEventKind::OperatorAction,
+                            lifecycle_effect: RuntimeLifecycleEffect::RecordOperatorAction,
+                            changed,
+                            summary: lifecycle_summary,
+                            extra_payload: &lifecycle_payload,
+                            plan: mutation_plan,
+                            changed_count: core_report.affected_records.len(),
+                        },
+                        mutation_operation,
+                    )?;
+                (lifecycle_report, Some(transaction))
+            };
         Ok(LongTermMutationExecution {
             report: memory_long_term_mutation_report_from_core(core_report, lifecycle_report),
+            mutation_receipt: transaction
+                .as_ref()
+                .and_then(|transaction| transaction.mutation_receipt.clone()),
+            mutation_replayed: transaction
+                .as_ref()
+                .is_some_and(|transaction| transaction.mutation_replayed),
             #[cfg(feature = "nonproduction-replay-harness")]
             transaction,
             #[cfg(feature = "nonproduction-replay-harness")]
@@ -3389,15 +3469,18 @@ impl MemoryRuntime {
                 "P8 forgetting evidence requires the transactional StorePlatform owner",
             )
         })?;
-        let committed = self.mutate_long_term_memory_internal(MemoryLongTermMutationRequest {
-            operation: crate::MemoryLongTermMutation::ForgetByQuery {
-                selector,
-                confirmation_token: Some(confirmation_token),
+        let committed = self.mutate_long_term_memory_internal(
+            MemoryLongTermMutationRequest {
+                operation: crate::MemoryLongTermMutation::ForgetByQuery {
+                    selector,
+                    confirmation_token: Some(confirmation_token),
+                },
+                reason: "p8_semantic_forgetting_fixture".into(),
+                dry_run: false,
+                mode_input: RuntimeLifecycleModeInput::default(),
             },
-            reason: "p8_semantic_forgetting_fixture".into(),
-            dry_run: false,
-            mode_input: RuntimeLifecycleModeInput::default(),
-        })?;
+            None,
+        )?;
         let transaction = committed.transaction.as_ref().ok_or_else(|| {
             Error::config(
                 "p8_forgetting_pre_operation",
@@ -3675,11 +3758,105 @@ impl MemoryRuntime {
         }
     }
 
+    fn memory_mutation_execution_context<T: Serialize>(
+        &self,
+        operation_id: String,
+        operation_kind: MemoryMutationOperationKind,
+        request: &T,
+    ) -> Result<MemoryMutationExecutionContext> {
+        let canonical_request = serde_json::to_vec(request).map_err(|error| {
+            Error::config(
+                "memory_mutation_operation_intent",
+                format!("failed to canonicalize mutation intent: {error}"),
+            )
+        })?;
+        Ok(MemoryMutationExecutionContext {
+            identity: MemoryMutationOperationIdentity::new(
+                operation_id,
+                self.config.memory_space_id.clone(),
+                self.config.scoped_runtime.mounted_subject_id.clone(),
+                self.config.scoped_runtime.actor_subject_id.clone(),
+                operation_kind,
+            )?,
+            intent_digest: sha256_field_digest(&[
+                b"memory_mutation_operation_intent_v1",
+                &canonical_request,
+            ]),
+        })
+    }
+
+    fn preflight_memory_mutation_operation(
+        &self,
+        context: &MemoryMutationExecutionContext,
+    ) -> Result<Option<MemoryMutationReceipt>> {
+        let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "memory_mutation_operation_unavailable",
+                "operation-aware mutations require StorePlatform-backed runtime",
+            )
+        })?;
+        store_platform.preflight_memory_mutation_operation(&StoreMutationOperationPreflight::new(
+            context.identity.clone(),
+            context.intent_digest.clone(),
+        )?)
+    }
+
     pub fn write(&self, request: MemoryWriteRequest) -> Result<MemoryWriteReport> {
         if RuntimeBudgetLease::active_report(&self.config.runtime_budget_authority).is_none() {
             let lease = self.acquire_runtime_budget_lease()?;
             return self.execute_with_runtime_budget_lease(&lease, || self.write(request));
         }
+        self.write_internal(request, None)
+    }
+
+    pub fn write_operation(
+        &self,
+        operation_id: impl Into<String>,
+        request: MemoryWriteRequest,
+    ) -> Result<MemoryMutationExecution<MemoryWriteReport>> {
+        if RuntimeBudgetLease::active_report(&self.config.runtime_budget_authority).is_none() {
+            let lease = self.acquire_runtime_budget_lease()?;
+            return self.execute_with_runtime_budget_lease(&lease, || {
+                self.write_operation(operation_id, request)
+            });
+        }
+        let canonical_request = canonical_memory_write_operation_request(&request);
+        let context = self.memory_mutation_execution_context(
+            operation_id.into(),
+            MemoryMutationOperationKind::Write,
+            &canonical_request,
+        )?;
+        if let Some(receipt) = self.preflight_memory_mutation_operation(&context)? {
+            return Ok(MemoryMutationExecution::Replayed { receipt });
+        }
+        let report = self.write_internal(request, Some(context))?;
+        if !report.accepted {
+            return Ok(MemoryMutationExecution::Rejected { report });
+        }
+        let transaction = report.transaction.as_ref().ok_or_else(|| {
+            Error::config(
+                "memory_mutation_operation_commit",
+                "accepted operation-aware write did not commit a mutation receipt",
+            )
+        })?;
+        let receipt = transaction.mutation_receipt.clone().ok_or_else(|| {
+            Error::config(
+                "memory_mutation_operation_commit",
+                "operation-aware write transaction is missing its mutation receipt",
+            )
+        })?;
+        if transaction.mutation_replayed {
+            Ok(MemoryMutationExecution::Replayed { receipt })
+        } else {
+            Ok(MemoryMutationExecution::Committed { report, receipt })
+        }
+    }
+
+    fn write_internal(
+        &self,
+        request: MemoryWriteRequest,
+        mutation_operation: Option<MemoryMutationExecutionContext>,
+    ) -> Result<MemoryWriteReport> {
         self.ensure_visible("write", self.capabilities.write)?;
         let now_secs = self.config.clock.now_secs();
         let lifecycle = self.start_lifecycle(
@@ -3788,7 +3965,7 @@ impl MemoryRuntime {
                         ));
                     let changed = outcome.changed;
                     let (lifecycle_report, transaction) = self
-                        .commit_memory_write_transaction_in_runtime_skill_scope(
+                        .commit_memory_write_transaction_in_runtime_skill_scope_with_operation(
                             MemoryWriteTransactionCommit {
                                 lifecycle,
                                 operation: "write.procedural",
@@ -3801,6 +3978,7 @@ impl MemoryRuntime {
                                 changed_count: changed,
                             },
                             &owning_scope,
+                            mutation_operation.clone(),
                         )?;
                     MemoryWriteReport {
                         accepted: outcome.accepted > 0 || outcome.rejected == 0,
@@ -3926,7 +4104,7 @@ impl MemoryRuntime {
                 let (lifecycle_report, transaction) =
                     if let Some((_outcome, plan)) = transaction_plan {
                         let (lifecycle_report, transaction) = self
-                            .commit_memory_write_transaction_in_runtime_skill_scope(
+                            .commit_memory_write_transaction_in_runtime_skill_scope_with_operation(
                                 MemoryWriteTransactionCommit {
                                     lifecycle,
                                     operation: "write.procedural_promotions",
@@ -3939,6 +4117,7 @@ impl MemoryRuntime {
                                     changed_count: changed,
                                 },
                                 &owning_scope,
+                                mutation_operation.clone(),
                             )?;
                         (lifecycle_report, Some(transaction))
                     } else {
@@ -3986,6 +4165,9 @@ impl MemoryRuntime {
                 governed_skill_writes,
                 runtime_skill_owning_scope,
             } => {
+                self.validate_long_term_draft_subject_visibility_registry_membership(
+                    &extraction.upserts,
+                )?;
                 let (upserts, suppressed_long_term_policy_ids, suppressed_draft_count) =
                     self.filter_long_term_drafts_by_policy(extraction.upserts.clone(), now_secs)?;
                 let extraction = ParsedLongTermMemoryExtraction {
@@ -4018,12 +4200,16 @@ impl MemoryRuntime {
                 };
                 let (lifecycle_report, transaction) =
                     if let Some(owning_scope) = runtime_skill_owning_scope.as_ref() {
-                        self.commit_memory_write_transaction_in_runtime_skill_scope(
+                        self.commit_memory_write_transaction_in_runtime_skill_scope_with_operation(
                             commit,
                             owning_scope,
+                            mutation_operation.clone(),
                         )?
                     } else {
-                        self.commit_memory_write_transaction(commit)?
+                        self.commit_memory_write_transaction_with_operation(
+                            commit,
+                            mutation_operation.clone(),
+                        )?
                     };
                 let policy_reason = if suppressed_draft_count > 0 {
                     format!(
@@ -4057,9 +4243,15 @@ impl MemoryRuntime {
                 runtime_skill_owning_scope,
                 lifecycle,
                 now_secs,
+                mutation_operation.clone(),
             )?,
             MemoryWriteRequest::GovernedEvidenceDocuments { mutations } => self
-                .write_governed_evidence_documents_transactional(mutations, lifecycle, now_secs)?,
+                .write_governed_evidence_documents_transactional(
+                    mutations,
+                    lifecycle,
+                    now_secs,
+                    mutation_operation.clone(),
+                )?,
             MemoryWriteRequest::AgentToolUsageFeedback { feedback } => {
                 let storage = self.config.platform.skill_storage();
                 let agent_tool_registries = self.agent_tool_registries();
@@ -4076,18 +4268,38 @@ impl MemoryRuntime {
                         };
                         let changed = usize::from(!mutations.is_empty());
                         let (lifecycle_report, transaction) = self
-                            .commit_memory_write_transaction(MemoryWriteTransactionCommit {
-                                lifecycle,
-                                operation: "write.agent_tool_usage_feedback",
-                                lifecycle_kind: RuntimeLifecycleEventKind::RuntimeLifecycle,
-                                lifecycle_effect: RuntimeLifecycleEffect::RunMaintenance,
-                                changed: changed > 0,
-                                summary: "write.agent_tool_usage_feedback".to_string(),
-                                extra_payload: &[("changed_count", changed.to_string())],
-                                plan: MemoryStoreMutationPlan::from_mutations(mutations),
-                                changed_count: changed,
-                            })?;
+                            .commit_memory_write_transaction_with_operation(
+                                MemoryWriteTransactionCommit {
+                                    lifecycle,
+                                    operation: "write.agent_tool_usage_feedback",
+                                    lifecycle_kind: RuntimeLifecycleEventKind::RuntimeLifecycle,
+                                    lifecycle_effect: RuntimeLifecycleEffect::RunMaintenance,
+                                    changed: changed > 0,
+                                    summary: "write.agent_tool_usage_feedback".to_string(),
+                                    extra_payload: &[("changed_count", changed.to_string())],
+                                    plan: MemoryStoreMutationPlan::from_mutations(mutations),
+                                    changed_count: changed,
+                                },
+                                mutation_operation.clone(),
+                            )?;
                         (changed, lifecycle_report, Some(transaction))
+                    } else if governance.accepted && mutation_operation.is_some() {
+                        let (lifecycle_report, transaction) = self
+                            .commit_memory_write_transaction_with_operation(
+                                MemoryWriteTransactionCommit {
+                                    lifecycle,
+                                    operation: "write.agent_tool_usage_feedback",
+                                    lifecycle_kind: RuntimeLifecycleEventKind::RuntimeLifecycle,
+                                    lifecycle_effect: RuntimeLifecycleEffect::RunMaintenance,
+                                    changed: false,
+                                    summary: "write.agent_tool_usage_feedback".to_string(),
+                                    extra_payload: &[("changed_count", "0".to_string())],
+                                    plan: MemoryStoreMutationPlan::default(),
+                                    changed_count: 0,
+                                },
+                                mutation_operation.clone(),
+                            )?;
+                        (0, lifecycle_report, Some(transaction))
                     } else {
                         let lifecycle_report = self.finish_lifecycle_success_with_payload(
                             lifecycle,
@@ -4124,6 +4336,7 @@ impl MemoryRuntime {
         mutations: Vec<MemoryEvidenceDocumentMutation>,
         lifecycle: RuntimeLifecycleReport,
         now_secs: u64,
+        mutation_operation: Option<MemoryMutationExecutionContext>,
     ) -> Result<MemoryWriteReport> {
         let store = self.config.store_platform.as_ref().ok_or_else(|| {
             Error::config(
@@ -4668,6 +4881,37 @@ impl MemoryRuntime {
             .saturating_add(summary.updated)
             .saturating_add(summary.deleted);
         if changed == 0 {
+            if mutation_operation.is_some() {
+                let (lifecycle_report, transaction) = self
+                    .commit_memory_write_transaction_with_operation(
+                        MemoryWriteTransactionCommit {
+                            lifecycle,
+                            operation: "write.governed_evidence_documents",
+                            lifecycle_kind: RuntimeLifecycleEventKind::RuntimeLifecycle,
+                            lifecycle_effect: RuntimeLifecycleEffect::Noop,
+                            changed: false,
+                            summary: "write.governed_evidence_documents".to_string(),
+                            extra_payload: &[("changed_count", "0".to_string())],
+                            plan: MemoryStoreMutationPlan::default(),
+                            changed_count: 0,
+                        },
+                        mutation_operation,
+                    )?;
+                return Ok(MemoryWriteReport {
+                    accepted: true,
+                    changed: 0,
+                    operation: "write.governed_evidence_documents",
+                    reason: "governed_evidence_documents_unchanged".to_string(),
+                    lifecycle_report,
+                    transaction: Some(transaction),
+                    semantic_governance: None,
+                    shared_fact_governance: None,
+                    procedural_evolution: None,
+                    procedural_promotions: Vec::new(),
+                    agent_tool_experience: None,
+                    evidence_documents: Some(summary),
+                });
+            }
             let lifecycle_report = self.finish_lifecycle_success_with_payload(
                 lifecycle,
                 RuntimeLifecycleEventKind::RuntimeLifecycle,
@@ -4722,8 +4966,8 @@ impl MemoryRuntime {
         merge_json_preconditions(&mut planned.preconditions, facet_plan.preconditions)?;
         planned.mutations.extend(graph_plan.mutations);
         merge_json_preconditions(&mut planned.preconditions, graph_plan.preconditions)?;
-        let (lifecycle_report, transaction) =
-            self.commit_memory_write_transaction(MemoryWriteTransactionCommit {
+        let (lifecycle_report, transaction) = self.commit_memory_write_transaction_with_operation(
+            MemoryWriteTransactionCommit {
                 lifecycle,
                 operation: "write.governed_evidence_documents",
                 lifecycle_kind: RuntimeLifecycleEventKind::RuntimeLifecycle,
@@ -4733,7 +4977,9 @@ impl MemoryRuntime {
                 extra_payload: &[("changed_count", changed.to_string())],
                 plan: planned,
                 changed_count: changed,
-            })?;
+            },
+            mutation_operation,
+        )?;
         Ok(MemoryWriteReport {
             accepted: true,
             changed,
@@ -4763,6 +5009,7 @@ impl MemoryRuntime {
         runtime_skill_owning_scope: Option<RuntimeSkillOwningScope>,
         lifecycle: RuntimeLifecycleReport,
         now_secs: u64,
+        mutation_operation: Option<MemoryMutationExecutionContext>,
     ) -> Result<MemoryWriteReport> {
         let has_procedural_candidate = candidates.iter().any(|candidate| {
             matches!(
@@ -4782,7 +5029,6 @@ impl MemoryRuntime {
                 "transactional memory writes require StorePlatform-backed runtime",
             )
         })?;
-        let transaction_id = format!("memory_write_txn_{}", lifecycle.event_id);
         let operation = "write.candidates";
         let semantic_governance = govern_write_candidates(&candidates);
         let semantically_accepted_candidate_ids = semantic_governance
@@ -4808,6 +5054,9 @@ impl MemoryRuntime {
                     .map(|draft| (*candidate, draft))
             })
             .collect::<Vec<_>>();
+        for (_, draft) in &accepted_draft_pairs {
+            self.validate_subject_visibility_policy_registry_membership(&draft.subject_visibility)?;
+        }
         let policy_filter =
             self.filter_long_term_draft_pairs_by_policy(accepted_draft_pairs, now_secs)?;
         let accepted_draft_pairs = policy_filter.kept;
@@ -4865,6 +5114,7 @@ impl MemoryRuntime {
                 now_secs,
                 context,
             )?;
+            self.reject_reported_subject_visibility_transition(&plan.outcome)?;
             planning_store.stage_entries(&plan.accepted_entries)?;
             let owner_plan = planning_store.into_plan(
                 &self.config.memory_space_id,
@@ -4982,41 +5232,31 @@ impl MemoryRuntime {
         )?);
 
         let changed = long_term_changed + skill_changed;
-        let lifecycle_report = lifecycle.finish_success(
-            self.config.clock.now_secs(),
-            changed > 0,
-            "write.candidates",
-        );
-        bind_control_audit_transaction_id(&mut mutations, &transaction_id)?;
-        self.append_graph_owner_cascade_mutations(&mut mutations, &mut preconditions)?;
-        self.append_graph_owner_closure_preconditions(&mutations, &mut preconditions)?;
-        mutations.push(StoreMutation::AppendEvent {
-            event: Box::new(self.planned_lifecycle_store_event(
-                &transaction_id,
-                operation,
-                RuntimeLifecycleEventKind::RuntimeLifecycle,
-                RuntimeLifecycleEffect::RunMaintenance,
-                &lifecycle_report,
-                &[("changed_count", changed.to_string())],
-            )?),
-        });
-
-        let runtime_budget = self.runtime_budget();
-        let transaction_scope = match runtime_skill_owning_scope.as_ref() {
-            Some(owning_scope) => self.runtime_skill_transaction_scope(owning_scope)?,
-            None => self.memory_write_transaction_scope(),
-        };
-        let store_report = store_platform.commit_governed_memory_transaction_with_runtime_budget(
-            StoreMutationBatch {
-                transaction_id: transaction_id.clone(),
-                operation: operation.to_string(),
-                scope: transaction_scope,
+        let changed_count = changed.to_string();
+        let commit = MemoryWriteTransactionCommit {
+            lifecycle,
+            operation,
+            lifecycle_kind: RuntimeLifecycleEventKind::RuntimeLifecycle,
+            lifecycle_effect: RuntimeLifecycleEffect::RunMaintenance,
+            changed: changed > 0,
+            summary: operation.to_string(),
+            extra_payload: &[("changed_count", changed_count)],
+            plan: MemoryStoreMutationPlan {
                 mutations,
+                preconditions,
             },
-            &preconditions,
-            &runtime_budget,
-        )?;
-        let transaction = memory_write_transaction_report(operation, changed, store_report);
+            changed_count: changed,
+        };
+        let (lifecycle_report, transaction) =
+            if let Some(owning_scope) = runtime_skill_owning_scope.as_ref() {
+                self.commit_memory_write_transaction_in_runtime_skill_scope_with_operation(
+                    commit,
+                    owning_scope,
+                    mutation_operation,
+                )?
+            } else {
+                self.commit_memory_write_transaction_with_operation(commit, mutation_operation)?
+            };
         let shared_fact_accepted = shared_fact_governance
             .as_ref()
             .map(|outcome| outcome.accepted)
@@ -7596,20 +7836,35 @@ impl MemoryRuntime {
         commit: MemoryWriteTransactionCommit<'_>,
     ) -> Result<(RuntimeLifecycleReport, MemoryWriteTransactionReport)> {
         self.commit_memory_write_transaction_with_graph_repair_authority_and_scope(
-            commit, None, None,
+            commit, None, None, None,
         )
     }
 
-    fn commit_memory_write_transaction_in_runtime_skill_scope(
+    fn commit_memory_write_transaction_with_operation(
+        &self,
+        commit: MemoryWriteTransactionCommit<'_>,
+        mutation_operation: Option<MemoryMutationExecutionContext>,
+    ) -> Result<(RuntimeLifecycleReport, MemoryWriteTransactionReport)> {
+        self.commit_memory_write_transaction_with_graph_repair_authority_and_scope(
+            commit,
+            None,
+            None,
+            mutation_operation,
+        )
+    }
+
+    fn commit_memory_write_transaction_in_runtime_skill_scope_with_operation(
         &self,
         commit: MemoryWriteTransactionCommit<'_>,
         owning_scope: &RuntimeSkillOwningScope,
+        mutation_operation: Option<MemoryMutationExecutionContext>,
     ) -> Result<(RuntimeLifecycleReport, MemoryWriteTransactionReport)> {
         let scope = self.runtime_skill_transaction_scope(owning_scope)?;
         self.commit_memory_write_transaction_with_graph_repair_authority_and_scope(
             commit,
             None,
             Some(scope),
+            mutation_operation,
         )
     }
 
@@ -7621,6 +7876,7 @@ impl MemoryRuntime {
             commit,
             Some(GraphRepairAuthority::issue_for_integrity_maintenance()),
             None,
+            None,
         )
     }
 
@@ -7629,6 +7885,7 @@ impl MemoryRuntime {
         commit: MemoryWriteTransactionCommit<'_>,
         graph_repair_authority: Option<GraphRepairAuthority>,
         transaction_scope: Option<StoreEventScope>,
+        mutation_operation: Option<MemoryMutationExecutionContext>,
     ) -> Result<(RuntimeLifecycleReport, MemoryWriteTransactionReport)> {
         let MemoryWriteTransactionCommit {
             lifecycle,
@@ -7647,7 +7904,26 @@ impl MemoryRuntime {
                 "transactional memory writes require StorePlatform-backed runtime",
             )
         })?;
-        let transaction_id = format!("memory_write_txn_{}", lifecycle.event_id);
+        let mutation_operation_plan = mutation_operation
+            .map(|context| {
+                StoreMutationOperationPlan::new(
+                    context.identity,
+                    context.intent_digest,
+                    if changed_count > 0 {
+                        MemoryMutationEffect::Changed
+                    } else {
+                        MemoryMutationEffect::Noop
+                    },
+                    changed_count,
+                    self.config.scoped_runtime.actor_subject_id.clone(),
+                    self.config.clock.now_secs(),
+                )
+            })
+            .transpose()?;
+        let transaction_id = mutation_operation_plan
+            .as_ref()
+            .map(|operation| operation.transaction_id().to_string())
+            .unwrap_or_else(|| format!("memory_write_txn_{}", lifecycle.event_id));
         bind_control_audit_transaction_id(&mut plan.mutations, &transaction_id)?;
         let lifecycle_report =
             lifecycle.finish_success(self.config.clock.now_secs(), changed, summary);
@@ -7670,23 +7946,68 @@ impl MemoryRuntime {
             mutations: plan.mutations,
         };
         let runtime_budget = self.runtime_budget();
-        let store_report = match graph_repair_authority {
-            Some(authority) => store_platform
-                .commit_governed_graph_repair_transaction_with_runtime_budget(
-                    batch,
-                    &plan.preconditions,
-                    authority,
-                    &runtime_budget,
-                )?,
-            None => store_platform.commit_governed_memory_transaction_with_runtime_budget(
-                batch,
-                &plan.preconditions,
-                &runtime_budget,
-            )?,
-        };
+        let (store_report, mutation_receipt, mutation_replayed) =
+            match (graph_repair_authority, mutation_operation_plan) {
+                (Some(_), Some(_)) => {
+                    return Err(Error::config(
+                        "memory_mutation_operation_commit",
+                        "operation receipts are not valid for graph repair authority",
+                    ));
+                }
+                (Some(authority), None) => (
+                    store_platform.commit_governed_graph_repair_transaction_with_runtime_budget(
+                        batch,
+                        &plan.preconditions,
+                        authority,
+                        &runtime_budget,
+                    )?,
+                    None,
+                    false,
+                ),
+                (None, Some(operation)) => match store_platform
+                    .commit_memory_mutation_operation_with_runtime_budget(
+                        batch,
+                        &plan.preconditions,
+                        operation,
+                        &runtime_budget,
+                    )? {
+                    StoreMutationOperationOutcome::Committed { receipt, report } => {
+                        (report, Some(receipt), false)
+                    }
+                    StoreMutationOperationOutcome::Replayed { receipt } => {
+                        let report = StoreMutationBatchReport {
+                            transaction_id: receipt.transaction_id.clone(),
+                            admitted: true,
+                            committed: true,
+                            mutations: 0,
+                            events: 0,
+                            changed_json: 0,
+                            changed_blobs: 0,
+                            event_ids: Vec::new(),
+                            budget_report: StoreMutationBudgetReport::default(),
+                        };
+                        (report, Some(receipt), true)
+                    }
+                },
+                (None, None) => (
+                    store_platform.commit_governed_memory_transaction_with_runtime_budget(
+                        batch,
+                        &plan.preconditions,
+                        &runtime_budget,
+                    )?,
+                    None,
+                    false,
+                ),
+            };
         Ok((
             lifecycle_report,
-            memory_write_transaction_report(operation, changed_count, store_report),
+            memory_write_transaction_report(
+                operation,
+                changed_count,
+                store_report,
+                mutation_receipt,
+                mutation_replayed,
+            ),
         ))
     }
 
@@ -8067,6 +8388,7 @@ impl MemoryRuntime {
             turn_ledger_store: ctx.turn_ledger_store,
             skill_storage: ctx.skill_storage,
             draft_admission_policy: ctx.draft_admission_policy,
+            subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
         };
         let outcome = if ctx.strict_model_contract {
             run_long_term_memory_refresh_strict(
@@ -8130,6 +8452,9 @@ impl MemoryRuntime {
                     ));
                 }
                 planning_long_term.stage_delete_ids(&apply_report.deleted_entry_ids)?;
+                self.validate_long_term_entry_subject_visibility_registry_membership(
+                    &apply_report.accepted_entries,
+                )?;
                 planning_long_term.stage_entries(&apply_report.accepted_entries)?;
                 let long_term_plan = planning_long_term.into_plan(
                     &self.config.memory_space_id,
@@ -8180,6 +8505,7 @@ impl MemoryRuntime {
         runtime_skill_owning_scope: Option<&RuntimeSkillOwningScope>,
         now_secs: u64,
     ) -> Result<MemoryLongTermExtractionTransactionPlan> {
+        self.validate_long_term_draft_subject_visibility_registry_membership(&extraction.upserts)?;
         let store = self.config.long_term_memory_read_store.clone();
         let planning_store = PlanningLongTermMemoryStore::new(
             store.as_ref(),
@@ -8255,6 +8581,7 @@ impl MemoryRuntime {
                 now_secs,
                 context,
             )?;
+            self.reject_reported_subject_visibility_transition(&plan.outcome)?;
             planning_store.stage_entries(&plan.accepted_entries)?;
             changed = changed.saturating_add(plan.outcome.changed);
             accepted_upserts = plan.accepted_drafts;
@@ -8356,11 +8683,22 @@ impl MemoryRuntime {
         bm_core::memory::MemoryLongTermMutationReport,
         MemoryStoreMutationPlan,
     )> {
-        if let MemoryLongTermMutation::ChangeScope {
-            subject_visibility, ..
-        } = &request.operation
-        {
-            self.validate_subject_visibility_policy_against_registry(subject_visibility)?;
+        let human_confirmation_authority =
+            self.human_confirmation_actor_for_long_term_operation(&request.operation)?;
+        match &request.operation {
+            MemoryLongTermMutation::ChangeScope {
+                subject_visibility, ..
+            } => self.validate_subject_visibility_policy_against_registry(subject_visibility)?,
+            MemoryLongTermMutation::Correct { replacement, .. }
+            | MemoryLongTermMutation::Supersede { replacement, .. } => self
+                .validate_subject_visibility_policy_against_registry(
+                    &replacement.subject_visibility,
+                )?,
+            MemoryLongTermMutation::Invalidate { .. }
+            | MemoryLongTermMutation::Delete { .. }
+            | MemoryLongTermMutation::ForgetByQuery { .. }
+            | MemoryLongTermMutation::MarkStale { .. }
+            | MemoryLongTermMutation::ChangePrivacy { .. } => {}
         }
         let store = self.config.long_term_memory_read_store.clone();
         let governed_store = GovernedLongTermMemoryReadView {
@@ -8384,6 +8722,7 @@ impl MemoryRuntime {
                     memory_space_id: &self.config.memory_space_id,
                     factual_owner_id: &self.config.memory_space_id,
                     expected_actor_subject_id: &self.config.scoped_runtime.actor_subject_id,
+                    human_confirmation_authority: human_confirmation_authority.as_ref(),
                     store_platform: self.config.store_platform.as_ref().ok_or_else(|| {
                         Error::config("long_term_version_plan", "store platform is required")
                     })?,
@@ -8408,11 +8747,72 @@ impl MemoryRuntime {
         Ok((report, mutation_plan))
     }
 
+    fn human_confirmation_actor_for_long_term_operation(
+        &self,
+        operation: &MemoryLongTermMutation,
+    ) -> Result<Option<bm_core::memory::LongTermMemoryHumanConfirmationAuthority>> {
+        if !matches!(operation, MemoryLongTermMutation::Correct { .. }) {
+            return Ok(None);
+        }
+        let actor_subject_id = &self.config.scoped_runtime.actor_subject_id;
+        let Some(actor) = self.config.subject_registry.subject(actor_subject_id) else {
+            return Err(Error::config(
+                "long_term_human_confirmation_authority",
+                "scoped actor is absent from the exact SubjectRegistry",
+            ));
+        };
+        if actor.kind != bm_core::memory::SubjectKind::HumanUser
+            || actor.lifecycle_state != bm_core::memory::SubjectLifecycleState::Active
+        {
+            return Ok(None);
+        }
+        bm_core::memory::LongTermMemoryHumanConfirmationAuthority::try_from_registry(
+            &self.config.subject_registry,
+            actor_subject_id,
+        )
+        .map(Some)
+    }
+
     fn validate_subject_visibility_policy_against_registry(
         &self,
         policy: &MemorySubjectVisibilityPolicy,
     ) -> Result<()> {
         self.validate_subject_visibility_policy_registry_membership(policy)
+    }
+
+    fn validate_long_term_draft_subject_visibility_registry_membership(
+        &self,
+        drafts: &[LongTermMemoryDraft],
+    ) -> Result<()> {
+        for draft in drafts {
+            self.validate_subject_visibility_policy_registry_membership(&draft.subject_visibility)?;
+        }
+        Ok(())
+    }
+
+    fn validate_long_term_entry_subject_visibility_registry_membership(
+        &self,
+        entries: &[LongTermMemoryEntry],
+    ) -> Result<()> {
+        for entry in entries {
+            self.validate_subject_visibility_policy_registry_membership(&entry.subject_visibility)?;
+        }
+        Ok(())
+    }
+
+    fn reject_reported_subject_visibility_transition(
+        &self,
+        outcome: &SharedMemoryWriteOutcome,
+    ) -> Result<()> {
+        if outcome.reports.iter().any(|report| {
+            report.reason == SharedMemoryWriteReason::SubjectVisibilityTransitionRequiresControl
+        }) {
+            return Err(Error::config(
+                "long_term_entry_plan",
+                "draft rejected: SubjectVisibilityTransitionRequiresControl",
+            ));
+        }
+        Ok(())
     }
 
     fn validate_subject_visibility_policy_registry_membership(
@@ -12948,8 +13348,14 @@ impl MemoryRuntime {
             long_term_refresh_enqueued = true;
             true
         });
+        self.validate_long_term_entry_subject_visibility_registry_membership(
+            &report.hygiene_outcome.planned_long_term_entries,
+        )?;
         planning_long_term.stage_entries(&report.hygiene_outcome.planned_long_term_entries)?;
         if let Ok(task_learning) = &report.task_learning_outcome {
+            self.validate_long_term_entry_subject_visibility_registry_membership(
+                &task_learning.planned_long_term_entries,
+            )?;
             planning_long_term.stage_entries(&task_learning.planned_long_term_entries)?;
         }
         long_term_refresh_enqueued = long_term_refresh_enqueued
@@ -14570,6 +14976,9 @@ impl MemoryRuntime {
             self.memory_profile(),
             self.config.clock.now_secs(),
         );
+        self.validate_long_term_entry_subject_visibility_registry_membership(
+            &hygiene.planned_long_term_entries,
+        )?;
         planning_long_term.stage_entries(&hygiene.planned_long_term_entries)?;
         let planned_after_count =
             LongTermMemoryStore::count(&planning_long_term).unwrap_or(before_count);
@@ -15182,6 +15591,9 @@ impl MemoryRuntime {
         let relationship_portfolio_store = platform.relationship_portfolio_store();
         let mut snapshot_plans = Vec::with_capacity(recovery_plan.ordered_snapshots.len());
         for snapshot in &recovery_plan.ordered_snapshots {
+            self.validate_long_term_entry_subject_visibility_registry_membership(
+                &snapshot.long_term_memory,
+            )?;
             let target_chat_id = snapshot.chat_id.trim();
             if target_chat_id.is_empty() {
                 return Err(Error::config(
@@ -21760,6 +22172,21 @@ fn sha256_field_digest(fields: &[&[u8]]) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
+fn long_term_control_operation(
+    mutation: &MemoryLongTermMutation,
+) -> bm_core::memory::LongTermControlOperation {
+    match mutation {
+        MemoryLongTermMutation::Correct { .. } => LongTermControlOperation::Correct,
+        MemoryLongTermMutation::Supersede { .. } => LongTermControlOperation::Supersede,
+        MemoryLongTermMutation::Invalidate { .. } => LongTermControlOperation::Invalidate,
+        MemoryLongTermMutation::Delete { .. } => LongTermControlOperation::Delete,
+        MemoryLongTermMutation::ForgetByQuery { .. } => LongTermControlOperation::ForgetByQuery,
+        MemoryLongTermMutation::MarkStale { .. } => LongTermControlOperation::MarkStale,
+        MemoryLongTermMutation::ChangeScope { .. } => LongTermControlOperation::ChangeScope,
+        MemoryLongTermMutation::ChangePrivacy { .. } => LongTermControlOperation::ChangePrivacy,
+    }
+}
+
 fn bound_text_for_budget(value: &str, max_chars: usize, max_bytes: usize) -> String {
     let mut out = value.chars().take(max_chars).collect::<String>();
     if out.len() > max_bytes {
@@ -22577,6 +23004,8 @@ fn memory_write_transaction_report(
     operation: &str,
     changed_count: usize,
     report: StoreMutationBatchReport,
+    mutation_receipt: Option<MemoryMutationReceipt>,
+    mutation_replayed: bool,
 ) -> MemoryWriteTransactionReport {
     let committed_mutations = report.mutations;
     MemoryWriteTransactionReport {
@@ -22588,6 +23017,8 @@ fn memory_write_transaction_report(
         budget_report: report.budget_report,
         changed_count,
         partial_write: false,
+        mutation_receipt,
+        mutation_replayed,
     }
 }
 
@@ -22637,6 +23068,7 @@ struct PlanningLongTermTransitionIntent {
     invalidation_reason_code: Option<bm_core::memory::LongTermInvalidationReasonCode>,
     reason: String,
     actor_subject_id: Option<String>,
+    human_confirmation_authority: Option<bm_core::memory::LongTermMemoryHumanConfirmationAuthority>,
     created_at: u64,
     governed_evidence_refs: Vec<bm_core::memory::GovernedOwnerRevisionRef>,
 }
@@ -22693,6 +23125,7 @@ impl PlanningLongTermTransitionIntent {
             invalidation_reason_code: None,
             reason: reason.to_string(),
             actor_subject_id: Some(actor_subject_id.to_string()),
+            human_confirmation_authority: None,
             created_at: after.updated_at.max(after.observed_at).max(1),
             governed_evidence_refs: Vec::new(),
         }
@@ -22705,6 +23138,7 @@ impl PlanningLongTermTransitionIntent {
             invalidation_reason_code: None,
             reason: reason.to_string(),
             actor_subject_id: Some(actor_subject_id.to_string()),
+            human_confirmation_authority: None,
             created_at: before.updated_at.max(before.observed_at).saturating_add(1),
             governed_evidence_refs: Vec::new(),
         }
@@ -22782,6 +23216,7 @@ impl PlanningLongTermTransitionIntent {
             bm_core::memory::LongTermMemoryVersionMutationIntent {
                 control_revision_intent,
                 successor_projection: after.cloned(),
+                human_confirmation_authority: self.human_confirmation_authority.clone(),
                 audit_transaction_id: "pending".to_string(),
             },
             &snapshot,
@@ -22794,17 +23229,37 @@ impl PlanningLongTermTransitionIntent {
     fn from_core(
         intent: &bm_core::memory::LongTermMemoryControlRevisionIntent,
         expected_actor_subject_id: &str,
+        human_confirmation_authority: Option<
+            &bm_core::memory::LongTermMemoryHumanConfirmationAuthority,
+        >,
     ) -> Result<Self> {
         let actor_subject_id = validated_planning_transition_actor_subject_id(
             expected_actor_subject_id,
             intent.actor_subject_id.as_deref(),
         )?;
+        let human_confirmation_authority = match human_confirmation_authority {
+            Some(authority)
+                if intent.operation == bm_core::memory::LongTermControlOperation::Correct
+                    && authority.actor_subject_id() == actor_subject_id
+                    && authority.memory_space_id() == intent.memory_space_id =>
+            {
+                Some(authority.clone())
+            }
+            Some(_) => {
+                return Err(Error::config(
+                    "long_term_human_confirmation_authority",
+                    "human confirmation authority must bind the exact Correct transition actor",
+                ));
+            }
+            None => None,
+        };
         Ok(Self {
             revision_id: intent.revision_id.clone(),
             operation: intent.operation,
             invalidation_reason_code: intent.invalidation_reason_code,
             reason: intent.reason.clone(),
             actor_subject_id: Some(actor_subject_id),
+            human_confirmation_authority,
             created_at: intent.created_at,
             governed_evidence_refs: intent.governed_evidence_refs.clone(),
         })
@@ -24167,6 +24622,8 @@ struct LongTermOwnerPlanningContext<'a> {
     memory_space_id: &'a str,
     factual_owner_id: &'a str,
     expected_actor_subject_id: &'a str,
+    human_confirmation_authority:
+        Option<&'a bm_core::memory::LongTermMemoryHumanConfirmationAuthority>,
     store_platform: &'a StorePlatform,
     max_retained_revisions_per_owner: usize,
 }
@@ -24182,6 +24639,7 @@ fn plan_owner_writes(
         memory_space_id,
         factual_owner_id,
         expected_actor_subject_id,
+        human_confirmation_authority,
         store_platform,
         max_retained_revisions_per_owner,
     } = context;
@@ -24237,8 +24695,11 @@ fn plan_owner_writes(
                 "control predecessor revision differs from the exact typed read view",
             ));
         }
-        let transition =
-            PlanningLongTermTransitionIntent::from_core(&intent, &expected_actor_subject_id)?;
+        let transition = PlanningLongTermTransitionIntent::from_core(
+            &intent,
+            &expected_actor_subject_id,
+            human_confirmation_authority,
+        )?;
         let change = match &intent.transition.successor {
             Some(successor_ref) => {
                 let after = puts
@@ -26212,6 +26673,10 @@ mod recall_immutable_session_observer_tests {
                         source_chat_id: Some("chat-a".to_string()),
                         source_type: None,
                         source_scope: None,
+                        subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                        provenance: LongTermMemoryProvenance::new(
+                            MemoryEvidenceAuthority::ProgramMemoryCanonical,
+                        ),
                         confidence: None,
                         freshness: None,
                         stale_hint: None,
@@ -26219,7 +26684,6 @@ mod recall_immutable_session_observer_tests {
                         canonical_entities: Vec::new(),
                         evidence_count: Some(1),
                         observed_at: Some(1_900_000_000),
-                        last_confirmed_at: Some(1_900_000_000),
                         source_revision: Some(1),
                     }],
                     deletes: Vec::new(),
@@ -26789,6 +27253,10 @@ mod recall_immutable_session_observer_tests {
                         source_chat_id: Some("chat-a".to_string()),
                         source_type: None,
                         source_scope: None,
+                        subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                        provenance: LongTermMemoryProvenance::new(
+                            MemoryEvidenceAuthority::ProgramMemoryCanonical,
+                        ),
                         confidence: None,
                         freshness: None,
                         stale_hint: None,
@@ -26796,7 +27264,6 @@ mod recall_immutable_session_observer_tests {
                         canonical_entities: Vec::new(),
                         evidence_count: Some(1),
                         observed_at: Some(1_900_000_000),
-                        last_confirmed_at: Some(1_900_000_000),
                         source_revision: Some(1),
                     }],
                     deletes: Vec::new(),
@@ -27394,6 +27861,10 @@ mod recall_immutable_session_observer_tests {
                         source_chat_id: Some("chat-a".to_string()),
                         source_type: None,
                         source_scope: None,
+                        subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                        provenance: LongTermMemoryProvenance::new(
+                            MemoryEvidenceAuthority::ProgramMemoryCanonical,
+                        ),
                         confidence: None,
                         freshness: None,
                         stale_hint: None,
@@ -27401,7 +27872,6 @@ mod recall_immutable_session_observer_tests {
                         canonical_entities: Vec::new(),
                         evidence_count: Some(1),
                         observed_at: Some(1_900_000_000),
-                        last_confirmed_at: Some(1_900_000_000),
                         source_revision: Some(1),
                     }],
                     deletes: Vec::new(),
@@ -27430,6 +27900,8 @@ mod recall_immutable_session_observer_tests {
                         source_chat_id: predecessor.source_chat_id.clone(),
                         source_type: Some(predecessor.source_type),
                         source_scope: Some(predecessor.source_scope),
+                        subject_visibility: predecessor.subject_visibility.clone(),
+                        provenance: predecessor.provenance,
                         confidence: Some(predecessor.confidence),
                         freshness: Some(predecessor.freshness),
                         stale_hint: None,
@@ -27437,7 +27909,6 @@ mod recall_immutable_session_observer_tests {
                         canonical_entities: predecessor.canonical_entities.clone(),
                         evidence_count: Some(predecessor.evidence_count),
                         observed_at: Some(predecessor.observed_at.saturating_add(1)),
-                        last_confirmed_at: Some(predecessor.last_confirmed_at.saturating_add(1)),
                         source_revision: Some(
                             predecessor
                                 .source_revision
@@ -27599,6 +28070,10 @@ mod projection_budget_truncation_tests {
                         source_chat_id: Some("chat-a".to_string()),
                         source_type: None,
                         source_scope: None,
+                        subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                        provenance: LongTermMemoryProvenance::new(
+                            MemoryEvidenceAuthority::ProgramMemoryCanonical,
+                        ),
                         confidence: None,
                         freshness: None,
                         stale_hint: None,
@@ -27608,7 +28083,6 @@ mod projection_budget_truncation_tests {
                         canonical_entities: Vec::new(),
                         evidence_count: Some(1),
                         observed_at: Some(1_800_000_000),
-                        last_confirmed_at: Some(1_800_000_000),
                         source_revision: Some(1),
                     }],
                     deletes: Vec::new(),
@@ -27628,6 +28102,8 @@ mod projection_budget_truncation_tests {
                 source_chat_id: Some("chat-a".to_string()),
                 source_type: None,
                 source_scope: None,
+                subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                provenance: LongTermMemoryProvenance::new(MemoryEvidenceAuthority::ArchiveEvidence),
                 confidence: None,
                 freshness: None,
                 stale_hint: None,
@@ -27635,7 +28111,6 @@ mod projection_budget_truncation_tests {
                 canonical_entities: Vec::new(),
                 evidence_count: Some(1),
                 observed_at: Some(1_900_000_000 + index),
-                last_confirmed_at: Some(1_900_000_000 + index),
                 source_revision: Some(1),
             })
             .collect::<Vec<_>>();
@@ -27922,6 +28397,10 @@ mod projection_budget_truncation_tests {
                         source_chat_id: Some("chat-a".to_string()),
                         source_type: None,
                         source_scope: None,
+                        subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                        provenance: LongTermMemoryProvenance::new(
+                            MemoryEvidenceAuthority::ProgramMemoryCanonical,
+                        ),
                         confidence: None,
                         freshness: None,
                         stale_hint: None,
@@ -27929,7 +28408,6 @@ mod projection_budget_truncation_tests {
                         canonical_entities: Vec::new(),
                         evidence_count: Some(1),
                         observed_at: Some(1_800_000_000),
-                        last_confirmed_at: Some(1_800_000_000),
                         source_revision: Some(1),
                     }],
                     deletes: Vec::new(),
@@ -28027,6 +28505,10 @@ mod concurrent_memory_plan_tests {
             source_chat_id: Some("chat-a".to_string()),
             source_type: None,
             source_scope: None,
+            subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+            provenance: LongTermMemoryProvenance::new(
+                MemoryEvidenceAuthority::ProgramMemoryCanonical,
+            ),
             confidence: None,
             freshness: None,
             stale_hint: None,
@@ -28034,7 +28516,6 @@ mod concurrent_memory_plan_tests {
             canonical_entities: Vec::new(),
             evidence_count: Some(1),
             observed_at: Some(1_900_000_000),
-            last_confirmed_at: Some(1_900_000_000),
             source_revision: Some(1),
         }
     }

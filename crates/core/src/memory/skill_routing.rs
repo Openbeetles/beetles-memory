@@ -109,6 +109,8 @@ mod tests {
             source_chat_id: Some("chat-1".to_string()),
             source_type: Some(LongTermMemorySourceType::ManualTool),
             source_scope: None,
+            subject_visibility: crate::memory::MemorySubjectVisibilityPolicy::AllSubjects,
+            provenance: crate::memory::LongTermMemoryProvenance::default(),
             confidence: None,
             freshness: None,
             stale_hint: None,
@@ -116,7 +118,6 @@ mod tests {
             canonical_entities: Vec::new(),
             evidence_count: None,
             observed_at: Some(10),
-            last_confirmed_at: None,
             source_revision: None,
         }
     }
@@ -141,6 +142,8 @@ mod tests {
             source_chat_id: Some("chat-1".to_string()),
             source_type: Some(LongTermMemorySourceType::Conversation),
             source_scope: None,
+            subject_visibility: crate::memory::MemorySubjectVisibilityPolicy::AllSubjects,
+            provenance: crate::memory::LongTermMemoryProvenance::default(),
             confidence: None,
             freshness: None,
             stale_hint: None,
@@ -148,7 +151,6 @@ mod tests {
             canonical_entities: Vec::new(),
             evidence_count: None,
             observed_at: Some(10),
-            last_confirmed_at: None,
             source_revision: None,
         });
         assert_eq!(routed.plane, MemoryPlane::Factual);

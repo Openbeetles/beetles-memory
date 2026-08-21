@@ -31,9 +31,9 @@ use bm_sdk::{
     default_agent_subject_id, LongTermMemoryKind, MemoryCandidateContent,
     MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
     MemoryCapabilityPolicy, MemoryEvidenceAuthority, MemoryPrivacyClass, MemoryPrivacyPolicy,
-    MemoryProjectionRequest, MemorySemanticJudgmentSource, MemoryWriteCandidate,
-    MemoryWriteRequest, PressureLevel, RuntimeLifecycleModeInput, RuntimeSkillCreationRef,
-    StoreBackendConfig,
+    MemoryProjectionRequest, MemorySemanticJudgmentSource, MemorySubjectVisibilityPolicy,
+    MemoryWriteCandidate, MemoryWriteRequest, PressureLevel, RuntimeLifecycleModeInput,
+    RuntimeSkillCreationRef, StoreBackendConfig,
 };
 use serde_json::Value;
 
@@ -119,8 +119,9 @@ fn seed_memory_runtime_activity(runtime: &EntryRuntime) {
         .write(MemoryWriteRequest::Candidates {
             candidates: vec![MemoryWriteCandidate {
                 candidate_id: "transparent-ollama-metrics".to_string(),
-                authority: MemoryEvidenceAuthority::UserAsserted,
+                authority: MemoryEvidenceAuthority::ProgramMemoryCanonical,
                 target: target.clone(),
+                long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
                 privacy: MemoryPrivacyClass::SharedWithSubject,
                 content: MemoryCandidateContent::Text {
                     topic: "transparent ollama metrics".to_string(),
@@ -130,7 +131,7 @@ fn seed_memory_runtime_activity(runtime: &EntryRuntime) {
                 evidence_refs: vec!["http console overview contract".to_string()],
                 canonical_entities: Vec::new(),
                 semantic_judgment: Some(MemoryCandidateSemanticJudgment {
-                    source: MemorySemanticJudgmentSource::LlmGovernance,
+                    source: MemorySemanticJudgmentSource::RuntimeGate,
                     decision: MemoryCandidateSemanticDecision::Accept,
                     governed_target: Some(target),
                     reason: "http_console_metrics_fixture".to_string(),
@@ -1028,18 +1029,15 @@ fn console_overview_reflects_real_memory_operations() {
         "Patch the release and verify the result",
         "1. inspect release diff\n2. patch rollback guards\n3. verify logs",
     );
-    let write = handle_http_in_process_request(
-        &runtime,
-        HttpRuntimeRequest::post_json("/memory/write", &write_body),
-    )
-    .expect("write");
+    let mut write_request = HttpRuntimeRequest::post_json("/memory/write", &write_body);
+    write_request.idempotency_key = "console-overview-release-patch-flow".to_string();
+    let write = handle_http_in_process_request(&runtime, write_request).expect("write");
     assert_eq!(write.status_code, 200, "{}", write.body);
 
-    let duplicate_write = handle_http_in_process_request(
-        &runtime,
-        HttpRuntimeRequest::post_json("/memory/write", &write_body),
-    )
-    .expect("duplicate write");
+    let mut duplicate_request = HttpRuntimeRequest::post_json("/memory/write", &write_body);
+    duplicate_request.idempotency_key = "console-overview-release-patch-flow".to_string();
+    let duplicate_write =
+        handle_http_in_process_request(&runtime, duplicate_request).expect("duplicate write");
     assert_eq!(duplicate_write.status_code, 200, "{}", duplicate_write.body);
 
     let recall = handle_http_in_process_request(
@@ -1197,11 +1195,10 @@ fn console_http_skill_routes_edit_runtime_skills_without_store_shortcut() {
         "Check artifacts before publishing.",
         "1. run gates\n2. inspect artifacts\n3. dry run publish",
     );
-    let seeded = handle_http_in_process_request(
-        &runtime,
-        HttpRuntimeRequest::post_json("/memory/write", &seed_body),
-    )
-    .expect("seed runtime skill");
+    let mut seed_request = HttpRuntimeRequest::post_json("/memory/write", &seed_body);
+    seed_request.idempotency_key = "console-skill-release-seed".to_string();
+    let seeded =
+        handle_http_in_process_request(&runtime, seed_request).expect("seed runtime skill");
     assert_eq!(seeded.status_code, 200, "{}", seeded.body);
 
     let list = handle_http_in_process_request(&runtime, HttpRuntimeRequest::get("/console/skills"))

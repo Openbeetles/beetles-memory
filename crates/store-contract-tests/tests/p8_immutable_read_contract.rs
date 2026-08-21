@@ -5,31 +5,37 @@ use bm_sdk::nonproduction_replay_harness::{
     StoreCapacityBudget, StoreEngine, StoreEngineMutation, StoreTransactionRequest,
 };
 use serde_json::json;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const NAMESPACE: &str = "session";
 #[cfg(feature = "sqlite-store")]
 const KEY: &str = "p8-immutable-open-pin";
+static TEMP_PATH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-#[cfg(feature = "sqlite-store")]
-fn temp_sqlite_path() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "beetle-memory-p8-immutable-open-pin-{}-{}.sqlite3",
+fn unique_temp_suffix() -> String {
+    format!(
+        "{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system time")
-            .as_nanos()
+            .as_nanos(),
+        TEMP_PATH_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+#[cfg(feature = "sqlite-store")]
+fn temp_sqlite_path() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "beetle-memory-p8-immutable-open-pin-{}.sqlite3",
+        unique_temp_suffix()
     ))
 }
 
 fn temp_file_root() -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
-        "beetle-memory-p8-immutable-capacity-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system time")
-            .as_nanos()
+        "beetle-memory-p8-immutable-capacity-{}",
+        unique_temp_suffix()
     ))
 }
 

@@ -24,6 +24,7 @@
         "kind": "project",
         "topic": "sdk_host_readiness"
       },
+      "long_term_subject_visibility": "all_subjects",
       "privacy": "shared_with_subject",
       "content": {
         "kind": "text",

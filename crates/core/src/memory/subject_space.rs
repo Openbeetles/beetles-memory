@@ -241,6 +241,9 @@ impl SubjectRegistry {
         if subject.subject_id.trim().is_empty() {
             return Err("subject_id_empty".to_string());
         }
+        if subject.subject_id != subject.subject_id.trim() {
+            return Err("subject_id_non_canonical".to_string());
+        }
         if let Some(existing) = self
             .subjects
             .iter_mut()
@@ -306,6 +309,9 @@ impl SubjectRegistry {
         if self.memory_space_id.trim().is_empty() {
             return SubjectContractValidation::rejected("memory_space_id_empty");
         }
+        if self.memory_space_id != self.memory_space_id.trim() {
+            return SubjectContractValidation::rejected("memory_space_id_non_canonical");
+        }
         if self.subjects.is_empty() {
             return SubjectContractValidation::rejected("subject_registry_empty");
         }
@@ -315,6 +321,9 @@ impl SubjectRegistry {
         for subject in &self.subjects {
             if subject.subject_id.trim().is_empty() {
                 return SubjectContractValidation::rejected("subject_id_empty");
+            }
+            if subject.subject_id != subject.subject_id.trim() {
+                return SubjectContractValidation::rejected("subject_id_non_canonical");
             }
             if !seen.insert(subject.subject_id.clone()) {
                 return SubjectContractValidation::rejected("subject_id_duplicate");

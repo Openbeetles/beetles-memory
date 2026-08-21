@@ -1090,7 +1090,7 @@ impl SqliteStoreEngine {
             validate_existing_sqlite_schema_read_only(&path, config)?.ok_or_else(|| {
                 Error::config(
                     "sqlite_store_open_preflight",
-                    "an existing SQLite file is not a complete v6 store",
+                    "an existing SQLite file is not a complete current-schema store",
                 )
             })?;
             validate_existing_sqlite_file_fence(&path, expected_identity)?;

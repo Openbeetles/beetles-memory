@@ -2,8 +2,9 @@ mod support;
 
 use bm_sdk::{
     GovernedRecallEligibility, GovernedRecallEligibilityReason, LongTermMemoryDraft,
-    LongTermMemoryKind, MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallRequest,
-    MemoryRecallTemporalOperation, MemoryWriteRequest, ParsedLongTermMemoryExtraction,
+    LongTermMemoryKind, LongTermMemoryProvenance, MemoryEvidenceAuthority, MemoryPrivacyClass,
+    MemoryProjectionRequest, MemoryRecallRequest, MemoryRecallTemporalOperation,
+    MemorySubjectVisibilityPolicy, MemoryWriteRequest, ParsedLongTermMemoryExtraction,
     PremiseEvaluationDecision, PremiseTypedSource, PressureLevel, RuntimeLifecycleModeInput,
 };
 use support::{empty_store_platform, host_test_profile, seeded_store_platform, test_runtime};
@@ -328,6 +329,10 @@ fn private_long_term_material_never_enters_the_safe_recall_closure() {
                     source_chat_id: Some("private-space-sentinel".to_string()),
                     source_type: None,
                     source_scope: None,
+                    subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                    provenance: LongTermMemoryProvenance::new(
+                        MemoryEvidenceAuthority::ArchiveEvidence,
+                    ),
                     confidence: None,
                     freshness: None,
                     stale_hint: None,
@@ -335,7 +340,6 @@ fn private_long_term_material_never_enters_the_safe_recall_closure() {
                     canonical_entities: Vec::new(),
                     evidence_count: Some(1),
                     observed_at: Some(1_800_000_000),
-                    last_confirmed_at: Some(1_800_000_000),
                     source_revision: Some(1),
                 }],
                 deletes: Vec::new(),

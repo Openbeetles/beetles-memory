@@ -434,6 +434,11 @@ fn draft(kind: LongTermMemoryKind, topic: &str, content: &str) -> LongTermMemory
         source_chat_id: Some("conversation-a".to_string()),
         source_type: None,
         source_scope: Some(LongTermMemorySourceScope::User),
+        subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+        provenance: bm_core::memory::LongTermMemoryProvenance {
+            source_authority: bm_core::memory::MemoryEvidenceAuthority::UserAsserted,
+            semantic_judgment_source: None,
+        },
         confidence: None,
         freshness: None,
         stale_hint: None,
@@ -441,7 +446,6 @@ fn draft(kind: LongTermMemoryKind, topic: &str, content: &str) -> LongTermMemory
         canonical_entities: Vec::new(),
         evidence_count: Some(1),
         observed_at: Some(NOW_SECS - 10),
-        last_confirmed_at: Some(NOW_SECS - 10),
         source_revision: Some(1),
     }
 }
@@ -698,7 +702,7 @@ fn correct_preserves_source_lineage_and_increments_owner_revision() {
 }
 
 #[test]
-fn unchanged_correct_stale_privacy_and_scope_are_noop_without_control_writes() {
+fn unchanged_explicit_correct_advances_a_correction_revision_while_other_controls_are_noop() {
     for operation_name in ["correct", "mark_stale", "change_privacy", "change_scope"] {
         let store = InMemoryLongTermStore::default();
         let control = InMemoryControlStore::default();
@@ -745,18 +749,25 @@ fn unchanged_correct_stale_privacy_and_scope_are_noop_without_control_writes() {
         .expect("noop report");
 
         assert!(report.accepted, "{operation_name}");
-        assert!(report.affected_records.is_empty(), "{operation_name}");
+        assert_eq!(
+            report.affected_records.is_empty(),
+            operation_name != "correct",
+            "{operation_name}"
+        );
         assert_eq!(
             store.get(&record_id).unwrap().unwrap().owner_revision,
-            1,
+            if operation_name == "correct" { 2 } else { 1 },
             "{operation_name}"
         );
-        assert!(
-            control.revision_intents.lock().unwrap().is_empty(),
+        let expected_control_writes = usize::from(operation_name == "correct");
+        assert_eq!(
+            control.revision_intents.lock().unwrap().len(),
+            expected_control_writes,
             "{operation_name}"
         );
-        assert!(
-            control.audits.lock().unwrap().is_empty(),
+        assert_eq!(
+            control.audits.lock().unwrap().len(),
+            expected_control_writes,
             "{operation_name}"
         );
     }
@@ -1077,11 +1088,18 @@ fn change_scope_persists_subject_visibility_and_owner_revision_without_host_role
 fn supersede_inherits_restricted_subject_visibility_without_implicit_widening() {
     let store = InMemoryLongTermStore::default();
     let control = InMemoryControlStore::default();
-    let old_id = store.seed(draft(
+    let mut predecessor_draft = draft(
         LongTermMemoryKind::Project,
         "restricted-release-gate",
         "Only agent-a may recall the restricted release gate.",
-    ));
+    );
+    predecessor_draft.provenance = bm_core::memory::LongTermMemoryProvenance {
+        source_authority: bm_core::memory::MemoryEvidenceAuthority::ModelInferred,
+        semantic_judgment_source: Some(
+            bm_core::memory::MemorySemanticJudgmentSource::LlmGovernance,
+        ),
+    };
+    let old_id = store.seed(predecessor_draft);
     let restricted = MemorySubjectVisibilityPolicy::OnlySubjects(vec!["agent-a".to_string()]);
 
     let scoped = apply_long_term_memory_control_mutation(
@@ -1103,6 +1121,11 @@ fn supersede_inherits_restricted_subject_visibility_without_implicit_widening() 
     )
     .expect("restrict predecessor");
     assert!(scoped.accepted, "{scoped:#?}");
+    let predecessor_provenance = store
+        .get(&old_id)
+        .expect("restricted predecessor read")
+        .expect("restricted predecessor")
+        .provenance;
 
     let replacement = draft(
         LongTermMemoryKind::Project,
@@ -1137,6 +1160,8 @@ fn supersede_inherits_restricted_subject_visibility_without_implicit_widening() 
         .expect("successor owner");
     assert_eq!(successor.owner_revision, 1);
     assert_eq!(successor.subject_visibility, restricted);
+    assert_eq!(successor.provenance, predecessor_provenance);
+    assert_eq!(successor.last_confirmed_at, None);
     let predecessor_tombstone = control
         .get_long_term_control_tombstone(&old_id)
         .expect("tombstone read")
@@ -1283,6 +1308,7 @@ fn non_scope_owner_mutation_reports_match_the_persisted_restricted_policy() {
 
     let mut correction = original;
     correction.content = "The restricted owner has a corrected governed value.".to_string();
+    correction.subject_visibility = restricted.clone();
     for (operation, now_secs) in [
         (
             MemoryLongTermMutation::Correct {

@@ -13,19 +13,19 @@ use bm_core::memory::{
 use bm_core::platform::Platform as _;
 use bm_sdk::{
     CanonicalTurnDelta, ConversationKey, ConversationScope, DerivedMemoryPlane, DerivedMemoryRef,
-    LongTermMemoryKind, LongTermMemoryQuery, MemoryArchiveScope, MemoryCandidateContent,
-    MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
-    MemoryEvidenceAuthority, MemoryGovernancePolicyMutation, MemoryGovernanceSelector,
-    MemoryGovernanceSuppressionDuration, MemoryLongTermControlView, MemoryLongTermDetailRequest,
-    MemoryLongTermListRequest, MemoryLongTermMutation, MemoryLongTermMutationRequest,
-    MemoryLongTermPolicyRequest, MemoryLongTermTarget, MemoryPrivacyClass, MemoryProjectionRequest,
-    MemoryRecallReport, MemoryRecallRequest, MemoryRecallTemporalOperation,
-    MemorySemanticJudgmentSource, MemorySpaceExportRequest, MemorySpacePrivateMaterialPolicy,
-    MemorySubjectVisibilityPolicy, MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus,
-    MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteCandidate,
-    MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel, ProfileId,
-    RuntimeLifecycleModeInput, RuntimeLifecycleOperation, TranscriptEvidenceRef,
-    TranscriptInputMessage, TranscriptReplayView,
+    LongTermMemoryKind, LongTermMemoryProvenance, LongTermMemoryQuery, MemoryArchiveScope,
+    MemoryCandidateContent, MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment,
+    MemoryCandidateTarget, MemoryEvidenceAuthority, MemoryGovernancePolicyMutation,
+    MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration, MemoryLongTermControlView,
+    MemoryLongTermDetailRequest, MemoryLongTermListRequest, MemoryLongTermMutation,
+    MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryLongTermTarget,
+    MemoryMutationExecution, MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallReport,
+    MemoryRecallRequest, MemoryRecallTemporalOperation, MemorySemanticJudgmentSource,
+    MemorySpaceExportRequest, MemorySpacePrivateMaterialPolicy, MemorySubjectVisibilityPolicy,
+    MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest,
+    MemoryTurnProtocol, MemoryTurnSource, MemoryWriteCandidate, MemoryWriteRequest,
+    ParsedLongTermMemoryExtraction, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
+    RuntimeLifecycleOperation, TranscriptEvidenceRef, TranscriptInputMessage, TranscriptReplayView,
 };
 
 use support::{StaticHttpClient, StaticLlmClient};
@@ -514,6 +514,8 @@ fn retained_revision_budget_rejects_owner_advance_without_any_store_change() {
         source_chat_id: Some("chat-retention".to_string()),
         source_type: None,
         source_scope: None,
+        subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+        provenance: LongTermMemoryProvenance::new(MemoryEvidenceAuthority::ProgramMemoryCanonical),
         confidence: None,
         freshness: None,
         stale_hint: None,
@@ -521,7 +523,6 @@ fn retained_revision_budget_rejects_owner_advance_without_any_store_change() {
         canonical_entities: Vec::new(),
         evidence_count: Some(1),
         observed_at: Some(1_800_000_000 + revision as u64),
-        last_confirmed_at: Some(1_800_000_000 + revision as u64),
         source_revision: Some(1),
     };
 
@@ -626,6 +627,10 @@ fn long_term_control_list_and_detail_use_the_governed_runtime_view() {
                         source_chat_id: Some("chat-a".to_string()),
                         source_type: None,
                         source_scope: None,
+                        subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                        provenance: LongTermMemoryProvenance::new(
+                            MemoryEvidenceAuthority::ProgramMemoryCanonical,
+                        ),
                         confidence: None,
                         freshness: None,
                         stale_hint: None,
@@ -633,7 +638,6 @@ fn long_term_control_list_and_detail_use_the_governed_runtime_view() {
                         canonical_entities: Vec::new(),
                         evidence_count: Some(1),
                         observed_at: Some(1_800_000_000),
-                        last_confirmed_at: Some(1_800_000_000),
                         source_revision: Some(1),
                     },
                     bm_sdk::LongTermMemoryDraft {
@@ -645,6 +649,10 @@ fn long_term_control_list_and_detail_use_the_governed_runtime_view() {
                         source_chat_id: Some("chat-a".to_string()),
                         source_type: None,
                         source_scope: None,
+                        subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                        provenance: LongTermMemoryProvenance::new(
+                            MemoryEvidenceAuthority::ArchiveEvidence,
+                        ),
                         confidence: None,
                         freshness: None,
                         stale_hint: None,
@@ -652,7 +660,6 @@ fn long_term_control_list_and_detail_use_the_governed_runtime_view() {
                         canonical_entities: Vec::new(),
                         evidence_count: Some(1),
                         observed_at: Some(1_800_000_000),
-                        last_confirmed_at: Some(1_800_000_000),
                         source_revision: Some(1),
                     },
                 ],
@@ -703,6 +710,10 @@ fn long_term_control_list_and_detail_use_the_governed_runtime_view() {
                     source_chat_id: Some("chat-a".to_string()),
                     source_type: None,
                     source_scope: None,
+                    subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                    provenance: LongTermMemoryProvenance::new(
+                        MemoryEvidenceAuthority::ProgramMemoryCanonical,
+                    ),
                     confidence: None,
                     freshness: None,
                     stale_hint: None,
@@ -710,7 +721,6 @@ fn long_term_control_list_and_detail_use_the_governed_runtime_view() {
                     canonical_entities: Vec::new(),
                     evidence_count: Some(1),
                     observed_at: Some(1_800_000_000),
-                    last_confirmed_at: Some(1_800_000_000),
                     source_revision: Some(2),
                 },
             },
@@ -800,6 +810,10 @@ fn long_term_control_mutation_reports_affected_facet_docs_for_operator_review() 
                     source_chat_id: Some("facet-control-chat".to_string()),
                     source_type: None,
                     source_scope: None,
+                    subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                    provenance: LongTermMemoryProvenance::new(
+                        MemoryEvidenceAuthority::ProgramMemoryCanonical,
+                    ),
                     confidence: None,
                     freshness: None,
                     stale_hint: None,
@@ -807,7 +821,6 @@ fn long_term_control_mutation_reports_affected_facet_docs_for_operator_review() 
                     canonical_entities: Vec::new(),
                     evidence_count: Some(1),
                     observed_at: Some(1_800_000_000),
-                    last_confirmed_at: Some(1_800_000_000),
                     source_revision: Some(1),
                 }],
                 deletes: Vec::new(),
@@ -1302,6 +1315,8 @@ fn runtime_mark_stale_excludes_owner_before_rank_selection_and_render() {
         source_chat_id: record.source_chat_id.clone(),
         source_type: Some(record.source_type),
         source_scope: Some(bm_sdk::LongTermMemorySourceScope::User),
+        subject_visibility: record.subject_visibility.clone(),
+        provenance: record.provenance,
         confidence: Some(record.confidence),
         freshness: Some(record.freshness),
         stale_hint: None,
@@ -1309,7 +1324,6 @@ fn runtime_mark_stale_excludes_owner_before_rank_selection_and_render() {
         canonical_entities: record.canonical_entities.clone(),
         evidence_count: Some(record.evidence_count),
         observed_at: Some(record.observed_at),
-        last_confirmed_at: Some(record.last_confirmed_at),
         source_revision: Some(source_revision),
     };
     runtime
@@ -1409,6 +1423,45 @@ fn runtime_supersede_excludes_predecessor_and_admits_exact_cross_owner_successor
         .next()
         .expect("seeded owner")
         .record;
+    runtime
+        .mutate_long_term_memory(MemoryLongTermMutationRequest {
+            operation: MemoryLongTermMutation::Correct {
+                target: MemoryLongTermTarget::RecordId(predecessor.id.clone()),
+                replacement: bm_sdk::LongTermMemoryDraft {
+                    kind: predecessor.kind.clone(),
+                    topic: predecessor.topic.clone(),
+                    content: predecessor.content.clone(),
+                    keywords: predecessor.keywords.clone(),
+                    privacy: predecessor.privacy,
+                    source_chat_id: predecessor.source_chat_id.clone(),
+                    source_type: Some(predecessor.source_type),
+                    source_scope: Some(predecessor.source_scope),
+                    subject_visibility: predecessor.subject_visibility.clone(),
+                    provenance: predecessor.provenance,
+                    confidence: Some(predecessor.confidence),
+                    freshness: Some(predecessor.freshness),
+                    stale_hint: Some(predecessor.stale_hint),
+                    supporting_citations: predecessor.supporting_citations.clone(),
+                    canonical_entities: predecessor.canonical_entities.clone(),
+                    evidence_count: Some(predecessor.evidence_count),
+                    observed_at: Some(predecessor.observed_at),
+                    source_revision: predecessor.source_revision,
+                },
+            },
+            reason: "agent-authored correction before supersede".to_string(),
+            dry_run: false,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })
+        .expect("correct predecessor");
+    let predecessor = runtime
+        .get_long_term_memory(MemoryLongTermDetailRequest {
+            target: MemoryLongTermTarget::RecordId(predecessor.id),
+            view: MemoryLongTermControlView::HostUi,
+        })
+        .expect("read corrected predecessor")
+        .record
+        .expect("corrected predecessor");
+    assert_eq!(predecessor.last_confirmed_at, None);
     let successor_content = "Use the signed release manifest as the replacement safety authority.";
     runtime
         .mutate_long_term_memory(MemoryLongTermMutationRequest {
@@ -1423,6 +1476,8 @@ fn runtime_supersede_excludes_predecessor_and_admits_exact_cross_owner_successor
                     source_chat_id: predecessor.source_chat_id.clone(),
                     source_type: Some(predecessor.source_type),
                     source_scope: Some(predecessor.source_scope),
+                    subject_visibility: predecessor.subject_visibility.clone(),
+                    provenance: predecessor.provenance,
                     confidence: Some(predecessor.confidence),
                     freshness: Some(predecessor.freshness),
                     stale_hint: None,
@@ -1430,7 +1485,6 @@ fn runtime_supersede_excludes_predecessor_and_admits_exact_cross_owner_successor
                     canonical_entities: predecessor.canonical_entities.clone(),
                     evidence_count: Some(predecessor.evidence_count),
                     observed_at: Some(predecessor.observed_at.saturating_add(1)),
-                    last_confirmed_at: Some(predecessor.last_confirmed_at.saturating_add(1)),
                     source_revision: Some(
                         predecessor
                             .source_revision
@@ -1463,6 +1517,7 @@ fn runtime_supersede_excludes_predecessor_and_admits_exact_cross_owner_successor
         .record;
     assert_ne!(successor.id, predecessor.id);
     assert_eq!(successor.owner_revision, 1);
+    assert_eq!(successor.last_confirmed_at, None);
 
     let recall = runtime
         .recall(MemoryRecallRequest {
@@ -1700,6 +1755,8 @@ fn runtime_correct_recall_uses_only_the_exact_current_revision_and_validity() {
                     source_chat_id: previous.source_chat_id.clone(),
                     source_type: Some(previous.source_type),
                     source_scope: Some(previous.source_scope),
+                    subject_visibility: previous.subject_visibility.clone(),
+                    provenance: previous.provenance,
                     confidence: Some(previous.confidence),
                     freshness: Some(previous.freshness),
                     stale_hint: Some(LongTermMemoryStaleHint::None),
@@ -1709,7 +1766,6 @@ fn runtime_correct_recall_uses_only_the_exact_current_revision_and_validity() {
                     canonical_entities: previous.canonical_entities.clone(),
                     evidence_count: Some(previous.evidence_count),
                     observed_at: Some(previous.observed_at),
-                    last_confirmed_at: Some(previous.last_confirmed_at),
                     source_revision: previous.source_revision.map(|revision| revision + 1),
                 },
             },
@@ -1764,6 +1820,219 @@ fn runtime_correct_recall_uses_only_the_exact_current_revision_and_validity() {
 }
 
 #[test]
+fn operation_aware_long_term_correct_delete_and_noop_are_terminal_and_replay_safe() {
+    let platform = support::seeded_store_platform(ProfileId::DesktopMacosStandaloneMemory);
+    let runtime = support::test_runtime_with_scope(
+        platform.clone(),
+        ProfileId::DesktopMacosStandaloneMemory,
+        "local",
+        "chat-1",
+    );
+    let previous = runtime
+        .list_long_term_memory(MemoryLongTermListRequest {
+            query: LongTermMemoryQuery::default(),
+            cursor: None,
+            limit: 10,
+            view: MemoryLongTermControlView::RawOwner,
+        })
+        .expect("list seeded owner")
+        .records
+        .into_iter()
+        .next()
+        .expect("seeded owner")
+        .record;
+    let draft = |content: String, source_revision: Option<u64>| bm_sdk::LongTermMemoryDraft {
+        kind: previous.kind.clone(),
+        topic: previous.topic.clone(),
+        content,
+        keywords: previous.keywords.clone(),
+        privacy: previous.privacy,
+        source_chat_id: previous.source_chat_id.clone(),
+        source_type: Some(previous.source_type),
+        source_scope: Some(previous.source_scope),
+        subject_visibility: previous.subject_visibility.clone(),
+        provenance: previous.provenance,
+        confidence: Some(previous.confidence),
+        freshness: Some(previous.freshness),
+        stale_hint: Some(previous.stale_hint),
+        supporting_citations: previous.supporting_citations.clone(),
+        canonical_entities: previous.canonical_entities.clone(),
+        evidence_count: Some(previous.evidence_count),
+        observed_at: Some(previous.observed_at),
+        source_revision,
+    };
+    let namespace_count = |namespace: &str| {
+        platform
+            .replay_harness()
+            .read_json_namespace(namespace)
+            .expect("read namespace")
+            .len()
+    };
+
+    let noop_request = MemoryLongTermMutationRequest {
+        operation: MemoryLongTermMutation::MarkStale {
+            target: MemoryLongTermTarget::RecordId(previous.id.clone()),
+            stale_hint: previous.stale_hint,
+        },
+        reason: "same value is a terminal accepted noop".to_string(),
+        dry_run: false,
+        mode_input: RuntimeLifecycleModeInput::default(),
+    };
+    let before_noop_control_audits = namespace_count(LONG_TERM_CONTROL_AUDIT_NAMESPACE);
+    let noop = runtime
+        .mutate_long_term_memory_operation("lt-control-noop", noop_request.clone())
+        .expect("commit accepted noop receipt");
+    let MemoryMutationExecution::Committed { report, receipt } = noop else {
+        panic!("accepted noop must commit")
+    };
+    assert!(report.accepted);
+    assert!(report.affected_records.is_empty());
+    assert_eq!(receipt.changed_count, 0);
+    assert_eq!(
+        namespace_count(LONG_TERM_CONTROL_AUDIT_NAMESPACE),
+        before_noop_control_audits
+    );
+    assert!(matches!(
+        runtime
+            .mutate_long_term_memory_operation("lt-control-noop", noop_request)
+            .expect("replay accepted noop"),
+        MemoryMutationExecution::Replayed { .. }
+    ));
+
+    let correct_request = MemoryLongTermMutationRequest {
+        operation: MemoryLongTermMutation::Correct {
+            target: MemoryLongTermTarget::RecordId(previous.id.clone()),
+            replacement: draft(
+                "Corrected durable operation receipt contract.".to_string(),
+                previous.source_revision.map(|revision| revision + 1),
+            ),
+        },
+        reason: "correct through operation receipt".to_string(),
+        dry_run: false,
+        mode_input: RuntimeLifecycleModeInput::default(),
+    };
+    let correct = runtime
+        .mutate_long_term_memory_operation("lt-control-correct", correct_request.clone())
+        .expect("correct once");
+    let MemoryMutationExecution::Committed {
+        receipt: correct_receipt,
+        ..
+    } = correct
+    else {
+        panic!("correct must commit")
+    };
+    assert_eq!(
+        correct_receipt.identity.operation_kind(),
+        bm_sdk::MemoryMutationOperationKind::LongTermControl {
+            operation: LongTermControlOperation::Correct,
+        }
+    );
+    let after_correct = (
+        namespace_count(LONG_TERM_CONTROL_REVISION_NAMESPACE),
+        namespace_count(LONG_TERM_CONTROL_AUDIT_NAMESPACE),
+        namespace_count("memory_mutation_audits"),
+    );
+    assert!(matches!(
+        runtime
+            .mutate_long_term_memory_operation("lt-control-correct", correct_request.clone())
+            .expect("replay correct"),
+        MemoryMutationExecution::Replayed { .. }
+    ));
+    assert_eq!(
+        (
+            namespace_count(LONG_TERM_CONTROL_REVISION_NAMESPACE),
+            namespace_count(LONG_TERM_CONTROL_AUDIT_NAMESPACE),
+            namespace_count("memory_mutation_audits"),
+        ),
+        after_correct,
+        "correct replay must not append revision or either audit"
+    );
+    let collision = runtime
+        .mutate_long_term_memory_operation(
+            "lt-control-correct",
+            MemoryLongTermMutationRequest {
+                reason: "different intent must conflict".to_string(),
+                ..correct_request
+            },
+        )
+        .expect_err("same operation id with another intent must conflict");
+    assert_eq!(collision.class(), Some(bm_sdk::ErrorClass::Conflict));
+
+    let mut different_kind_draft = draft(
+        "A Write operation with the same caller id remains a distinct durable identity."
+            .to_string(),
+        Some(1),
+    );
+    different_kind_draft.topic = "operation-kind-isolation".to_string();
+    let different_kind = runtime
+        .write_operation(
+            "lt-control-correct",
+            MemoryWriteRequest::LongTermExtraction {
+                extraction: ParsedLongTermMemoryExtraction {
+                    upserts: vec![different_kind_draft],
+                    deletes: Vec::new(),
+                    skill_writes: Vec::new(),
+                },
+                governed_skill_writes: Vec::new(),
+                runtime_skill_owning_scope: None,
+            },
+        )
+        .expect("same caller id under the Write kind must not collide");
+    let MemoryMutationExecution::Committed {
+        receipt: write_receipt,
+        ..
+    } = different_kind
+    else {
+        panic!("different operation kind must commit independently")
+    };
+    assert_eq!(
+        write_receipt.identity.operation_kind(),
+        bm_sdk::MemoryMutationOperationKind::Write
+    );
+    assert_ne!(
+        write_receipt.identity.storage_key(),
+        correct_receipt.identity.storage_key()
+    );
+
+    let delete_request = MemoryLongTermMutationRequest {
+        operation: MemoryLongTermMutation::Delete {
+            target: MemoryLongTermTarget::RecordId(previous.id.clone()),
+        },
+        reason: "delete through operation receipt".to_string(),
+        dry_run: false,
+        mode_input: RuntimeLifecycleModeInput::default(),
+    };
+    assert!(matches!(
+        runtime
+            .mutate_long_term_memory_operation("lt-control-delete", delete_request.clone())
+            .expect("delete once"),
+        MemoryMutationExecution::Committed { .. }
+    ));
+    let after_delete = (
+        namespace_count(LONG_TERM_CONTROL_REVISION_NAMESPACE),
+        namespace_count(LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE),
+        namespace_count(LONG_TERM_CONTROL_AUDIT_NAMESPACE),
+        namespace_count("memory_mutation_audits"),
+    );
+    assert!(matches!(
+        runtime
+            .mutate_long_term_memory_operation("lt-control-delete", delete_request)
+            .expect("replay delete"),
+        MemoryMutationExecution::Replayed { .. }
+    ));
+    assert_eq!(
+        (
+            namespace_count(LONG_TERM_CONTROL_REVISION_NAMESPACE),
+            namespace_count(LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE),
+            namespace_count(LONG_TERM_CONTROL_AUDIT_NAMESPACE),
+            namespace_count("memory_mutation_audits"),
+        ),
+        after_delete,
+        "delete replay must not append revision, tombstone, or either audit"
+    );
+}
+
+#[test]
 fn runtime_suppression_policy_blocks_future_candidate_long_term_writes() {
     let platform = support::empty_store_platform(support::host_test_profile());
     let runtime = support::test_runtime_with_scope(
@@ -1801,6 +2070,7 @@ fn runtime_suppression_policy_blocks_future_candidate_long_term_writes() {
                     kind: LongTermMemoryKind::Preference,
                     topic: "temporary-tone".to_string(),
                 },
+                long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
                 privacy: bm_core::memory::MemoryPrivacyClass::SharedWithSubject,
                 content: bm_core::memory::MemoryCandidateContent::Text {
                     topic: "temporary-tone".to_string(),
@@ -1880,6 +2150,10 @@ fn runtime_suppression_policy_blocks_long_term_extraction_writes() {
                     source_chat_id: Some("chat-1".to_string()),
                     source_type: None,
                     source_scope: None,
+                    subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                    provenance: LongTermMemoryProvenance::new(
+                        MemoryEvidenceAuthority::UserAsserted,
+                    ),
                     confidence: None,
                     freshness: None,
                     stale_hint: None,
@@ -1887,7 +2161,6 @@ fn runtime_suppression_policy_blocks_long_term_extraction_writes() {
                     canonical_entities: Vec::new(),
                     evidence_count: Some(1),
                     observed_at: Some(1_800_000_000),
-                    last_confirmed_at: Some(1_800_000_000),
                     source_revision: Some(1),
                 }],
                 deletes: Vec::new(),
@@ -2030,6 +2303,7 @@ fn runtime_mutates_long_term_memory_from_transcript_derived_ref_target() {
                     kind: LongTermMemoryKind::Preference,
                     topic: "response_style".to_string(),
                 },
+                long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
                 privacy: MemoryPrivacyClass::SharedWithSubject,
                 content: MemoryCandidateContent::Text {
                     topic: "response_style".to_string(),

@@ -26,19 +26,19 @@ use super::{
     memory_policy, plan_governed_shared_memory, render_long_term_memory_block,
     run_memory_governance_kernel, search_archive_records, ArchiveRecordSource, ArchiveSearchHit,
     ArchiveSearchQuery, LongTermExtractionPolicy, LongTermMemoryConfidence, LongTermMemoryDraft,
-    LongTermMemoryEntry, LongTermMemoryFreshness, LongTermMemoryKind, LongTermMemoryReadStore,
-    LongTermMemorySlot, LongTermMemorySourceScope, LongTermMemorySourceType,
-    LongTermMemoryStaleHint, MemoryEvidenceAuthority, MemoryGovernanceContext,
-    MemoryGovernanceInput, MemoryProfile, MemoryStore, SessionMessage, SessionStore,
-    SessionSummaryStore, SharedMemoryWriteAction, SharedMemoryWriteSource, TurnLedgerStore,
-    MAX_LONG_TERM_MEMORY_ITEMS,
+    LongTermMemoryEntry, LongTermMemoryFreshness, LongTermMemoryKind, LongTermMemoryProvenance,
+    LongTermMemoryReadStore, LongTermMemorySlot, LongTermMemorySourceScope,
+    LongTermMemorySourceType, LongTermMemoryStaleHint, MemoryEvidenceAuthority,
+    MemoryGovernanceContext, MemoryGovernanceInput, MemoryProfile, MemorySemanticJudgmentSource,
+    MemoryStore, MemorySubjectVisibilityPolicy, SessionMessage, SessionStore, SessionSummaryStore,
+    SharedMemoryWriteAction, SharedMemoryWriteSource, TurnLedgerStore, MAX_LONG_TERM_MEMORY_ITEMS,
 };
 #[cfg(any(test, feature = "nonproduction-replay-harness"))]
 use super::{write_governed_shared_memory, LongTermMemoryStore};
 
 /// 长期记忆提取状态存储路径（相对状态根）。
 pub const REL_PATH_LONG_TERM_EXTRACTION_STATES: &str = "memory/long_term_extraction_states.json";
-pub const LONG_TERM_MEMORY_EXTRACTION_SYSTEM_PROMPT: &str = "You extract durable memory updates for a personal AI assistant. Return JSON only: an array of objects. Each object must contain plane plus topic. plane must be factual, skill, or ignore. Use factual for canonical shared facts: durable user profile facts, stable preferences, durable constraints, ongoing project/task state, and durable external facts. Use skill for procedural experience, operating routines, tool-use know-how, setup playbooks, or reusable workflows that should not pollute canonical factual memory. Use ignore when nothing durable should be written. For plane=factual, also provide op, kind, source_authority, and optionally content and keywords. source_authority must be one of user_asserted, runtime_observation, world_observation, program_memory_canonical, archive_evidence, assistant_utterance, assistant_self_claim, external_content, private_garden_internal, or legacy_transcript. op must be upsert or delete. kind must be one of preference, profile, relationship, project, task, constraint, fact. Reuse an existing factual topic whenever the same durable slot is being updated or corrected. For plane=skill, provide content and optional skill_summary; content should be a compact reusable procedure, not a transcript. For plane=ignore, no extra fields are needed. Do not store greetings, one-off troubleshooting steps as factual memory, short acknowledgements, temporary moods, assistant-only claims, secrets, credentials, raw tool payloads, copied log fragments, or long external document excerpts. Factual upserts from assistant_utterance, assistant_self_claim, private_garden_internal, external_content, or legacy_transcript will be rejected by policy; route user-granted relationship or naming preferences as user_asserted. Treat archive evidence sources as supporting records rather than canonical memory: they may justify a durable conclusion, but they are not themselves a fact slot. Prefer newer transcript evidence over older archive fragments when they disagree. When project/task context shifts, update the existing active factual slot instead of creating a parallel near-duplicate slot. Use the provided session summary, existing long-term memory, and archive evidence as grounding when deciding whether to upsert, delete, reroute to skill, or ignore. Keep only the highest-value durable changes, at most 4 items. If there is nothing durable to add, update, or delete, return [].";
+pub const LONG_TERM_MEMORY_EXTRACTION_SYSTEM_PROMPT: &str = "You extract durable memory updates for a personal AI assistant. Return JSON only: an array of objects. Each object must contain plane plus topic. plane must be factual, skill, or ignore. Use factual for canonical shared facts: durable user profile facts, stable preferences, durable constraints, ongoing project/task state, and durable external facts. Use skill for procedural experience, operating routines, tool-use know-how, setup playbooks, or reusable workflows that should not pollute canonical factual memory. Use ignore when nothing durable should be written. For plane=factual, also provide op, kind, source_authority, and optionally content and keywords. source_authority must be one of user_asserted, model_inferred, runtime_observation, world_observation, program_memory_canonical, archive_evidence, assistant_utterance, assistant_self_claim, external_content, private_garden_internal, or legacy_transcript. op must be upsert or delete. kind must be one of preference, profile, relationship, project, task, constraint, fact. Reuse an existing factual topic whenever the same durable slot is being updated or corrected. For plane=skill, provide content and optional skill_summary; content should be a compact reusable procedure, not a transcript. For plane=ignore, no extra fields are needed. Do not store greetings, one-off troubleshooting steps as factual memory, short acknowledgements, temporary moods, assistant-only claims, secrets, credentials, raw tool payloads, copied log fragments, or long external document excerpts. Factual upserts from assistant_utterance, assistant_self_claim, private_garden_internal, external_content, or legacy_transcript will be rejected by policy; route user-granted relationship or naming preferences as user_asserted, and label derived conclusions as model_inferred. Treat archive evidence sources as supporting records rather than canonical memory: they may justify a durable conclusion, but they are not themselves a fact slot. Prefer newer transcript evidence over older archive fragments when they disagree. When project/task context shifts, update the existing active factual slot instead of creating a parallel near-duplicate slot. Use the provided session summary, existing long-term memory, and archive evidence as grounding when deciding whether to upsert, delete, reroute to skill, or ignore. Keep only the highest-value durable changes, at most 4 items. If there is nothing durable to add, update, or delete, return [].";
 /// 共享策略允许的 recent 消息窗口上限；实际运行值由 MemoryProfile 决定。
 pub const LONG_TERM_MEMORY_EXTRACTION_RECENT_N: usize = 10;
 /// 单次提取允许的动作数上限；实际运行值由 MemoryProfile 决定。
@@ -350,7 +350,11 @@ fn build_extraction_existing_memory_grounding(
 pub fn parse_long_term_memory_extraction_response(
     raw: &str,
     chat_id: &str,
+    subject_visibility: &MemorySubjectVisibilityPolicy,
 ) -> ParsedLongTermMemoryExtraction {
+    if subject_visibility.validate_canonical().is_err() {
+        return ParsedLongTermMemoryExtraction::default();
+    }
     let trimmed = raw.trim();
     let json_slice = if trimmed.starts_with('[') {
         trimmed
@@ -416,6 +420,9 @@ pub fn parse_long_term_memory_extraction_response(
                 if !factual_source_authority_allows_upsert(parsed_item.source_authority) {
                     continue;
                 }
+                let source_authority = parsed_item
+                    .source_authority
+                    .expect("validated factual source authority");
                 if parsed_item.source_chat_id.is_none() {
                     parsed_item.source_chat_id = Some(chat_id.to_string());
                 }
@@ -430,6 +437,11 @@ pub fn parse_long_term_memory_extraction_response(
                         .source_type
                         .or(Some(LongTermMemorySourceType::Conversation)),
                     source_scope: parsed_item.source_scope,
+                    subject_visibility: subject_visibility.clone(),
+                    provenance: LongTermMemoryProvenance {
+                        source_authority,
+                        semantic_judgment_source: Some(MemorySemanticJudgmentSource::LlmGovernance),
+                    },
                     confidence: parsed_item.confidence,
                     freshness: parsed_item.freshness,
                     stale_hint: parsed_item.stale_hint,
@@ -437,7 +449,6 @@ pub fn parse_long_term_memory_extraction_response(
                     canonical_entities: Vec::new(),
                     evidence_count: None,
                     observed_at: None,
-                    last_confirmed_at: None,
                     source_revision: None,
                 })
             }
@@ -481,7 +492,9 @@ pub fn parse_long_term_memory_extraction_response(
 pub fn parse_long_term_memory_extraction_response_strict(
     raw: &str,
     chat_id: &str,
+    subject_visibility: &MemorySubjectVisibilityPolicy,
 ) -> Result<ParsedLongTermMemoryExtraction> {
+    subject_visibility.validate_canonical()?;
     let values = match parse_strict_llm_json_payload(raw) {
         LlmJsonPayload::Value(serde_json::Value::Array(values)) => values,
         LlmJsonPayload::Absent | LlmJsonPayload::Null | LlmJsonPayload::Value(_) => {
@@ -578,6 +591,7 @@ pub fn parse_long_term_memory_extraction_response_strict(
     Ok(parse_long_term_memory_extraction_response(
         &normalized,
         chat_id,
+        subject_visibility,
     ))
 }
 
@@ -586,6 +600,7 @@ fn factual_source_authority_allows_upsert(authority: Option<MemoryEvidenceAuthor
         authority,
         Some(
             MemoryEvidenceAuthority::UserAsserted
+                | MemoryEvidenceAuthority::ModelInferred
                 | MemoryEvidenceAuthority::RuntimeObservation
                 | MemoryEvidenceAuthority::WorldObservation
                 | MemoryEvidenceAuthority::ProgramMemoryCanonical
@@ -709,7 +724,7 @@ fn enrich_drafts_with_archive_evidence(
     chat_id: &str,
     recent: &[SessionMessage],
     session_summary: Option<&str>,
-    now_secs: u64,
+    _now_secs: u64,
 ) {
     for draft in drafts {
         let hits = select_archive_reconcile_hits(
@@ -733,31 +748,17 @@ fn enrich_drafts_with_archive_evidence(
             .filter(|hit| archive_hit_conflicts_draft(draft, hit))
             .count();
         let mut citations = Vec::with_capacity(hits.len());
-        let mut last_confirmed_at = 0u64;
-        let mut used_now_confirmation = false;
         for hit in hits {
             if citations.iter().any(|existing| existing == &hit.citation) {
                 continue;
             }
             citations.push(hit.citation);
-            match hit.observed_at {
-                Some(observed_at) if observed_at > 0 => {
-                    last_confirmed_at = last_confirmed_at.max(observed_at);
-                }
-                _ => used_now_confirmation = true,
-            }
         }
         if citations.is_empty() {
             continue;
         }
         draft.supporting_citations = citations;
         draft.evidence_count = Some(draft.supporting_citations.len() as u32);
-        if used_now_confirmation {
-            last_confirmed_at = last_confirmed_at.max(now_secs);
-        }
-        if last_confirmed_at > 0 {
-            draft.last_confirmed_at = Some(last_confirmed_at);
-        }
         if support_count >= 3 {
             elevate_draft_confidence(draft, LongTermMemoryConfidence::High);
         } else if support_count >= 1 {
@@ -1294,10 +1295,7 @@ fn should_skip_redundant_upsert(
     draft: &LongTermMemoryDraft,
     existing_entries: &[LongTermMemoryEntry],
 ) -> bool {
-    if !draft.supporting_citations.is_empty()
-        || draft.evidence_count.unwrap_or(0) > 0
-        || draft.last_confirmed_at.unwrap_or(0) > 0
-    {
+    if !draft.supporting_citations.is_empty() || draft.evidence_count.unwrap_or(0) > 0 {
         return false;
     }
     let Some(slot_id) = draft.stable_id() else {
@@ -1463,6 +1461,7 @@ pub struct LongTermMemoryRefreshContext<'a> {
     pub extraction_state_store: &'a dyn LongTermMemoryExtractionStateStore,
     pub turn_ledger_store: &'a dyn TurnLedgerStore,
     pub skill_storage: &'a dyn SkillStorage,
+    pub subject_visibility: MemorySubjectVisibilityPolicy,
     pub draft_admission_policy: Option<&'a dyn LongTermMemoryDraftAdmissionPolicy>,
 }
 
@@ -1672,9 +1671,17 @@ fn extract_long_term_memory(
     )?;
     let now_secs = crate::util::current_unix_secs();
     let mut parsed = if strict_model_contract {
-        parse_long_term_memory_extraction_response_strict(response.content.trim(), chat_id)?
+        parse_long_term_memory_extraction_response_strict(
+            response.content.trim(),
+            chat_id,
+            &ctx.subject_visibility,
+        )?
     } else {
-        parse_long_term_memory_extraction_response(response.content.trim(), chat_id)
+        parse_long_term_memory_extraction_response(
+            response.content.trim(),
+            chat_id,
+            &ctx.subject_visibility,
+        )
     };
     let source_revision = ctx.session_store.message_count(chat_id).unwrap_or(0) as u64;
     for draft in &mut parsed.upserts {
@@ -2035,6 +2042,8 @@ mod tests {
             source_chat_id: source_chat_id.map(str::to_string),
             source_type: None,
             source_scope: None,
+            subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+            provenance: LongTermMemoryProvenance::default(),
             confidence: None,
             freshness: None,
             stale_hint: None,
@@ -2042,7 +2051,6 @@ mod tests {
             canonical_entities: Vec::new(),
             evidence_count: None,
             observed_at: None,
-            last_confirmed_at: None,
             source_revision: None,
         }
     }
@@ -2068,6 +2076,7 @@ mod tests {
             source_type: LongTermMemorySourceType::Conversation,
             source_scope: LongTermMemorySourceScope::User,
             subject_visibility: crate::memory::MemorySubjectVisibilityPolicy::AllSubjects,
+            provenance: LongTermMemoryProvenance::default(),
             confidence: crate::memory::LongTermMemoryConfidence::Medium,
             freshness: LongTermMemoryFreshness::Stable,
             stale_hint: LongTermMemoryStaleHint::None,
@@ -2077,7 +2086,7 @@ mod tests {
             created_at,
             updated_at,
             observed_at: updated_at.max(created_at),
-            last_confirmed_at: updated_at.max(created_at),
+            last_confirmed_at: None,
             source_revision: None,
             owner_revision: 1,
             last_used_at: 0,
@@ -2414,7 +2423,6 @@ mod tests {
             drafts[0].evidence_count,
             Some(drafts[0].supporting_citations.len() as u32)
         );
-        assert_eq!(drafts[0].last_confirmed_at, Some(200));
         assert!(drafts[0].supporting_citations[0].starts_with("transcript:chat-1"));
     }
 
@@ -2428,7 +2436,11 @@ mod tests {
           {"op":"upsert","kind":"task","topic":"current_focus","content":"Continue memory redesign","keywords":["memory"],"source_authority":"user_asserted"}
         ]
         "#;
-        let parsed = parse_long_term_memory_extraction_response(raw, "chat-1");
+        let parsed = parse_long_term_memory_extraction_response(
+            raw,
+            "chat-1",
+            &MemorySubjectVisibilityPolicy::AllSubjects,
+        );
         assert_eq!(parsed.upserts.len(), 2);
         assert_eq!(parsed.deletes.len(), 0);
         assert_eq!(parsed.upserts[0].topic, "response_style");
@@ -2440,12 +2452,22 @@ mod tests {
         let fenced = r#"```json
 [{"plane":"factual","op":"upsert","kind":"preference","topic":"drink","content":"User prefers cold brew.","source_authority":"user_asserted"}]
 ```"#;
-        let parsed = parse_long_term_memory_extraction_response_strict(fenced, "chat-1").unwrap();
+        let parsed = parse_long_term_memory_extraction_response_strict(
+            fenced,
+            "chat-1",
+            &MemorySubjectVisibilityPolicy::AllSubjects,
+        )
+        .unwrap();
         assert_eq!(parsed.upserts.len(), 1);
         assert_eq!(parsed.upserts[0].topic, "drink");
 
         let wrapped = format!("Here is the result:\n{fenced}");
-        assert!(parse_long_term_memory_extraction_response_strict(&wrapped, "chat-1").is_err());
+        assert!(parse_long_term_memory_extraction_response_strict(
+            &wrapped,
+            "chat-1",
+            &MemorySubjectVisibilityPolicy::AllSubjects,
+        )
+        .is_err());
     }
 
     #[test]
@@ -2464,7 +2486,11 @@ mod tests {
         ]
         "#;
 
-        let parsed = parse_long_term_memory_extraction_response(raw, "chat-1");
+        let parsed = parse_long_term_memory_extraction_response(
+            raw,
+            "chat-1",
+            &MemorySubjectVisibilityPolicy::AllSubjects,
+        );
 
         assert_eq!(parsed.upserts.len(), 1);
         assert!(parsed.upserts[0].canonical_entities.is_empty());
@@ -2480,7 +2506,11 @@ mod tests {
           {"op":"delete","kind":"profile","topic":"user_name"}
         ]
         "#;
-        let parsed = parse_long_term_memory_extraction_response(raw, "chat-1");
+        let parsed = parse_long_term_memory_extraction_response(
+            raw,
+            "chat-1",
+            &MemorySubjectVisibilityPolicy::AllSubjects,
+        );
         assert_eq!(parsed.upserts.len(), 1);
         assert_eq!(parsed.deletes.len(), 1);
         assert_eq!(parsed.upserts[0].topic, "current_focus");
@@ -2797,8 +2827,8 @@ mod tests {
             Some("chat-1"),
         );
         draft.supporting_citations = vec!["transcript:chat-1#message=0".to_string()];
+        draft.provenance.source_authority = MemoryEvidenceAuthority::UserAsserted;
         draft.evidence_count = Some(1);
-        draft.last_confirmed_at = Some(20);
         let extraction = ParsedLongTermMemoryExtraction {
             upserts: vec![draft],
             deletes: vec![],
@@ -3056,6 +3086,7 @@ mod tests {
             extraction_state_store: &extraction_state_store,
             turn_ledger_store: &turn_ledger_store,
             skill_storage: &skill_storage,
+            subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
             draft_admission_policy: None,
         };
         let mut http = DummyHttpClient;

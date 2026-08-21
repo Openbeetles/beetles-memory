@@ -9,7 +9,8 @@ use bm_core::memory::{
     LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateSemanticDecision,
     MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryEvidenceAuthority,
     MemoryGovernancePolicyMutation, MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration,
-    MemoryPrivacyClass, MemorySemanticJudgmentSource, MemoryWriteCandidate,
+    MemoryPrivacyClass, MemorySemanticJudgmentSource, MemorySubjectVisibilityPolicy,
+    MemoryWriteCandidate,
 };
 use bm_core::platform::Platform as _;
 use bm_sdk::nonproduction_replay_harness::{
@@ -85,6 +86,7 @@ fn write_project_candidate_with_privacy(
                     kind: LongTermMemoryKind::Project,
                     topic: topic.to_string(),
                 },
+                long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
                 privacy,
                 content: MemoryCandidateContent::Text {
                     topic: topic.to_string(),

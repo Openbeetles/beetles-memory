@@ -6,6 +6,29 @@ use bm_core::memory::{
 };
 
 #[test]
+fn registry_rejects_noncanonical_subject_ids_at_mutation_and_validation_boundaries() {
+    let mut registry = SubjectRegistry::empty("space:canonical");
+    let mut subject = SubjectDescriptor::new(
+        "human:user",
+        SubjectKind::HumanUser,
+        "Human",
+        bm_core::memory::SubjectVisibility::Visible,
+    );
+    subject.subject_id = " human:user ".to_string();
+    assert_eq!(
+        registry.upsert_subject(subject),
+        Err("subject_id_non_canonical".to_string())
+    );
+
+    let mut valid =
+        SubjectRegistry::single_agent_default("owner-a", "agent-a").expect("canonical registry");
+    valid.subjects[0].subject_id = " system:owner-a ".to_string();
+    let validation = valid.validate_contract();
+    assert!(!validation.accepted);
+    assert_eq!(validation.reason, "subject_id_non_canonical");
+}
+
+#[test]
 fn single_agent_default_registry_hides_multi_subject_internals() {
     let registry =
         SubjectRegistry::single_agent_default("owner default", "agent-main").expect("registry");

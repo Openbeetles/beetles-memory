@@ -4,10 +4,12 @@ use crate::skills::{runtime_skill_name_for_topic, RuntimeSkillWrite};
 
 use super::{
     CanonicalEntityRef, GovernedWriteDecision, LongTermMemoryConfidence, LongTermMemoryDraft,
-    LongTermMemoryFreshness, LongTermMemoryKind, LongTermMemorySourceScope,
-    LongTermMemorySourceType, LongTermMemoryStaleHint, MemoryEvidenceAuthority,
-    MemoryPlaneGovernanceReport, MemoryPrivacyClass, MemoryWriteAuthority, MemoryWriteDomain,
-    PostTurnSemanticGovernanceReport, SoulCandidateDisposition, SoulCandidateHandoffReport,
+    LongTermMemoryFreshness, LongTermMemoryKind, LongTermMemoryProvenance,
+    LongTermMemorySourceScope, LongTermMemorySourceType, LongTermMemoryStaleHint,
+    MemoryEvidenceAuthority, MemoryPlaneGovernanceReport, MemoryPrivacyClass,
+    MemorySemanticJudgmentSource, MemorySubjectVisibilityPolicy, MemoryWriteAuthority,
+    MemoryWriteDomain, PostTurnSemanticGovernanceReport, SoulCandidateDisposition,
+    SoulCandidateHandoffReport,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,13 +118,6 @@ impl MemoryCandidateContent {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum MemorySemanticJudgmentSource {
-    LlmGovernance,
-    RuntimeGate,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum MemoryCandidateSemanticDecision {
     Accept,
     Reject,
@@ -144,6 +139,8 @@ pub struct MemoryWriteCandidate {
     pub candidate_id: String,
     pub authority: MemoryEvidenceAuthority,
     pub target: MemoryCandidateTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub long_term_subject_visibility: Option<MemorySubjectVisibilityPolicy>,
     pub privacy: MemoryPrivacyClass,
     pub content: MemoryCandidateContent,
     #[serde(default)]
@@ -171,6 +168,7 @@ impl MemoryWriteCandidate {
         let MemoryCandidateTarget::LongTermMemory { kind, topic } = target else {
             return None;
         };
+        let subject_visibility = self.long_term_subject_visibility.clone()?;
         if self.content.is_empty() {
             return None;
         }
@@ -201,6 +199,14 @@ impl MemoryWriteCandidate {
                 }
                 MemoryWriteDomain::Procedural => LongTermMemorySourceScope::Chat,
             }),
+            subject_visibility,
+            provenance: LongTermMemoryProvenance {
+                source_authority: self.authority,
+                semantic_judgment_source: self
+                    .semantic_judgment
+                    .as_ref()
+                    .map(|judgment| judgment.source),
+            },
             confidence: Some(match self.authority {
                 MemoryEvidenceAuthority::UserAsserted
                 | MemoryEvidenceAuthority::RuntimeObservation
@@ -211,9 +217,9 @@ impl MemoryWriteCandidate {
             stale_hint: Some(LongTermMemoryStaleHint::None),
             supporting_citations: self.evidence_refs.clone(),
             canonical_entities: self.canonical_entities.clone(),
-            evidence_count: Some(self.evidence_refs.len().max(1) as u32),
+            evidence_count: (!self.evidence_refs.is_empty())
+                .then_some(self.evidence_refs.len() as u32),
             observed_at: Some(now_secs),
-            last_confirmed_at: Some(now_secs),
             source_revision: None,
         })
     }
@@ -358,6 +364,28 @@ pub fn govern_write_candidates(
                 existing_gate: "soul_governance".to_string(),
                 reason: judgment_reason,
                 evidence_refs,
+            });
+            continue;
+        }
+
+        let visibility_intent_valid = match governed_target {
+            MemoryCandidateTarget::LongTermMemory { .. } => candidate
+                .long_term_subject_visibility
+                .as_ref()
+                .is_some_and(|policy| policy.validate_canonical().is_ok()),
+            _ => candidate.long_term_subject_visibility.is_none(),
+        };
+        if !visibility_intent_valid {
+            rejected_count += 1;
+            plane_reports.push(MemoryPlaneGovernanceReport {
+                domain: governed_target.domain(),
+                plane: governed_target.plane().to_string(),
+                authority: MemoryWriteAuthority::RuntimeDeterministic,
+                decision: GovernedWriteDecision::Rejected,
+                reason: "long_term_subject_visibility_intent_invalid".to_string(),
+                evidence_refs,
+                privacy_decision: candidate.privacy.label().to_string(),
+                profile_decision: "candidate_visibility_owner".to_string(),
             });
             continue;
         }

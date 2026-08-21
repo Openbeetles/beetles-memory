@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bm_core::budget::StoreRuntimeBudget;
-use bm_core::memory::{LongTermMemoryDraft, LongTermMemoryKind, MEMORY_FACET_INDEX_NAMESPACE};
+use bm_core::memory::{
+    LongTermMemoryDraft, LongTermMemoryKind, LongTermMemoryProvenance, MemoryEvidenceAuthority,
+    MemorySubjectVisibilityPolicy, MEMORY_FACET_INDEX_NAMESPACE,
+};
 use bm_core::platform::Platform;
 use bm_sdk::nonproduction_replay_harness::{
     StoreBackendConfig, StorePlatform, StoreRepairPolicy, RUNTIME_SKILL_RECORD_NAMESPACE,
@@ -253,6 +256,10 @@ fn seed_and_tamper_facet(platform: &StorePlatform) {
             source_chat_id: Some("chat-a".to_string()),
             source_type: None,
             source_scope: None,
+            subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+            provenance: LongTermMemoryProvenance::new(
+                MemoryEvidenceAuthority::ProgramMemoryCanonical,
+            ),
             confidence: None,
             freshness: None,
             stale_hint: None,
@@ -260,7 +267,6 @@ fn seed_and_tamper_facet(platform: &StorePlatform) {
             canonical_entities: Vec::new(),
             evidence_count: None,
             observed_at: None,
-            last_confirmed_at: None,
             source_revision: None,
         },
         100,
@@ -406,6 +412,38 @@ fn file_store_rejects_unknown_manifest_fields_without_rewriting_bytes() {
         std::fs::read(&manifest_path).expect("read rejected manifest"),
         tampered,
         "admission failure must not normalize or rewrite unknown schema"
+    );
+    std::fs::remove_dir_all(root).expect("remove file test root");
+}
+
+#[test]
+fn file_store_rejects_v8_manifest_without_rewriting_bytes() {
+    let root = temp_root("file", "v8-fail-closed", PersistentStateKind::Kv);
+    support::open_store(
+        StoreBackendConfig::file(&root, support::native_persistent_profile()).expect("file config"),
+    )
+    .expect("initialize v9 file store");
+    let manifest_path = root.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).expect("read v9 manifest"))
+            .expect("decode v9 manifest");
+    manifest["schema_id"] = serde_json::json!("beetle_memory_store_schema_v8");
+    manifest["schema_version"] = serde_json::json!(8);
+    let v8_bytes = serde_json::to_vec_pretty(&manifest).expect("encode v8 manifest fixture");
+    std::fs::write(&manifest_path, &v8_bytes).expect("write synthetic v8 manifest");
+
+    let error = match support::open_store(
+        StoreBackendConfig::file(&root, support::native_persistent_profile()).expect("file config"),
+    ) {
+        Ok(_) => panic!("v8 file store must fail closed under v9"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.stage(), "file_store_manifest");
+    assert_eq!(
+        std::fs::read(&manifest_path).expect("read rejected v8 manifest"),
+        v8_bytes,
+        "v8 rejection must not migrate or rewrite the manifest"
     );
     std::fs::remove_dir_all(root).expect("remove file test root");
 }
@@ -899,6 +937,61 @@ fn sqlite_store_rejects_unknown_manifest_fields_without_rewriting_schema_row() {
         .query_row("SELECT manifest_json FROM bm_schema", [], |row| row.get(0))
         .expect("read rejected schema manifest");
     assert_eq!(after, tampered, "admission failure must not rewrite schema");
+    drop(connection);
+    std::fs::remove_dir_all(root).expect("remove sqlite test root");
+}
+
+#[cfg(feature = "sqlite-store")]
+#[test]
+fn sqlite_store_rejects_v8_manifest_without_rewriting_schema_row() {
+    let root = temp_root("sqlite", "v8-fail-closed", PersistentStateKind::Kv);
+    std::fs::create_dir_all(&root).expect("create sqlite test root");
+    let path = root.join("memory.sqlite3");
+    support::open_store(
+        StoreBackendConfig::sqlite(&path, support::native_persistent_profile())
+            .expect("sqlite config"),
+    )
+    .expect("initialize v9 sqlite store");
+
+    let connection = rusqlite::Connection::open(&path).expect("open sqlite fixture");
+    let initialized: String = connection
+        .query_row("SELECT manifest_json FROM bm_schema", [], |row| row.get(0))
+        .expect("read v9 sqlite manifest");
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&initialized).expect("decode v9 sqlite manifest");
+    manifest["schema_id"] = serde_json::json!("beetle_memory_store_schema_v8");
+    manifest["schema_version"] = serde_json::json!(8);
+    let v8_manifest = serde_json::to_string(&manifest).expect("encode v8 sqlite manifest");
+    connection
+        .execute(
+            "UPDATE bm_schema SET schema_id = ?1, schema_version = ?2, manifest_json = ?3",
+            rusqlite::params!["beetle_memory_store_schema_v8", 8_u32, &v8_manifest],
+        )
+        .expect("write synthetic v8 sqlite manifest");
+    drop(connection);
+
+    let error = match support::open_store(
+        StoreBackendConfig::sqlite(&path, support::native_persistent_profile())
+            .expect("sqlite config"),
+    ) {
+        Ok(_) => panic!("v8 sqlite store must fail closed under v9"),
+        Err(error) => error,
+    };
+    assert_eq!(error.stage(), "sqlite_store_schema");
+
+    let connection = rusqlite::Connection::open(&path).expect("reopen rejected sqlite fixture");
+    let persisted: (String, u32, String) = connection
+        .query_row(
+            "SELECT schema_id, schema_version, manifest_json FROM bm_schema",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read rejected v8 sqlite manifest");
+    assert_eq!(
+        persisted,
+        ("beetle_memory_store_schema_v8".to_string(), 8, v8_manifest),
+        "v8 rejection must not migrate or rewrite the schema row"
+    );
     drop(connection);
     std::fs::remove_dir_all(root).expect("remove sqlite test root");
 }

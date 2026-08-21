@@ -1,10 +1,12 @@
 use bm_sdk::{
-    LlmClient, LlmHttpClient, MemoryProjectionRequest, MemoryRuntime, Result, RuntimeBudgetLease,
+    ErrorClass, LlmClient, LlmHttpClient, MemoryMutationExecution, MemoryProjectionRequest,
+    MemoryRuntime, Result, RuntimeBudgetLease,
 };
 
 use crate::{
-    AdapterCommand, AdapterEnvelope, AdapterErrorKey, AdapterProjectionReport, AdapterResponse,
-    AdapterSdkReport, AdapterTurnFinalizeReport, ExternalAiMemoryProtocolVersion,
+    AdapterCapabilityReportV2, AdapterCommand, AdapterEnvelope, AdapterErrorKey,
+    AdapterMutationReceiptV1, AdapterProjectionReport, AdapterResponse, AdapterSdkReport,
+    AdapterTurnFinalizeReport, ExternalAiMemoryProtocolVersion,
 };
 
 pub struct AdapterRuntimeServices<'a> {
@@ -52,12 +54,31 @@ pub fn dispatch_adapter_command_with_services(
     mut envelope: AdapterEnvelope<AdapterCommand>,
     services: AdapterRuntimeServices<'_>,
 ) -> Result<AdapterResponse<AdapterSdkReport>> {
-    if envelope.protocol_version != ExternalAiMemoryProtocolVersion::V1 {
+    if envelope.protocol_version == ExternalAiMemoryProtocolVersion::V1
+        && envelope.operation.mutation_reliability()
+            != crate::AdapterMutationReliability::NotMutation
+    {
         return Ok(AdapterResponse::Rejected {
             request_id: envelope.request_id,
             audit_id: envelope.audit_id,
             error_key: AdapterErrorKey::RuntimeBindingMismatch,
-            reason: "protocol_version_mismatch".to_string(),
+            reason: "mutation operations require beetle-memory.external-ai.v2".to_string(),
+        });
+    }
+    if envelope.protocol_version == ExternalAiMemoryProtocolVersion::V2
+        && envelope.operation.mutation_reliability()
+            == crate::AdapterMutationReliability::DurableStoreReceipt
+        && envelope
+            .mutation_operation_id
+            .as_deref()
+            .is_none_or(|value| value.is_empty() || value != value.trim())
+    {
+        return Ok(AdapterResponse::Rejected {
+            request_id: envelope.request_id,
+            audit_id: envelope.audit_id,
+            error_key: AdapterErrorKey::MutationOperationIdRequired,
+            reason: "V2 durable mutation requires a non-empty canonical mutation_operation_id"
+                .to_string(),
         });
     }
     if let Some(reason) = envelope.runtime_binding.mismatch_reason(runtime, lease) {
@@ -103,10 +124,52 @@ fn dispatch_adapter_command_with_services_in_lease(
 
     let request_id = envelope.request_id;
     let audit_id = envelope.audit_id;
+    let mutation_operation_id = envelope.mutation_operation_id;
     let AdapterRuntimeServices { http, llm } = services;
+    let mut committed_receipt = None;
     let report = match envelope.payload {
         AdapterCommand::Write(request) => {
-            AdapterSdkReport::Write(Box::new(runtime.write(request)?))
+            let operation_id = mutation_operation_id
+                .as_deref()
+                .expect("V2 durable mutation identity validated before dispatch");
+            match runtime.write_operation(operation_id, request) {
+                Ok(MemoryMutationExecution::Committed { report, receipt }) => {
+                    committed_receipt = Some(AdapterMutationReceiptV1::from_operation_id(
+                        operation_id,
+                        &receipt,
+                    ));
+                    AdapterSdkReport::Write(Box::new(report))
+                }
+                Ok(MemoryMutationExecution::Replayed { receipt }) => {
+                    return Ok(AdapterResponse::Replayed {
+                        request_id,
+                        audit_id,
+                        mutation_operation_id: operation_id.to_string(),
+                        receipt: AdapterMutationReceiptV1::from_operation_id(
+                            operation_id,
+                            &receipt,
+                        ),
+                    });
+                }
+                Ok(MemoryMutationExecution::Rejected { report }) => {
+                    return Ok(AdapterResponse::Rejected {
+                        request_id,
+                        audit_id,
+                        error_key: AdapterErrorKey::RuntimeRejected,
+                        reason: report.reason,
+                    });
+                }
+                Err(error) if error.class() == Some(ErrorClass::Conflict) => {
+                    return Ok(AdapterResponse::Rejected {
+                        request_id,
+                        audit_id,
+                        error_key: AdapterErrorKey::MutationOperationConflict,
+                        reason: "mutation_operation_id is already committed for a different intent"
+                            .to_string(),
+                    });
+                }
+                Err(error) => return Err(error),
+            }
         }
         AdapterCommand::FinalizeTurn(request) => {
             let turn_id = request.turn.turn_id.clone();
@@ -156,7 +219,47 @@ fn dispatch_adapter_command_with_services_in_lease(
             AdapterSdkReport::LongTermDetail(Box::new(runtime.get_long_term_memory(request)?))
         }
         AdapterCommand::LongTermMutate(request) => {
-            AdapterSdkReport::LongTermMutate(Box::new(runtime.mutate_long_term_memory(*request)?))
+            let operation_id = mutation_operation_id
+                .as_deref()
+                .expect("V2 durable mutation identity validated before dispatch");
+            match runtime.mutate_long_term_memory_operation(operation_id, *request) {
+                Ok(MemoryMutationExecution::Committed { report, receipt }) => {
+                    committed_receipt = Some(AdapterMutationReceiptV1::from_operation_id(
+                        operation_id,
+                        &receipt,
+                    ));
+                    AdapterSdkReport::LongTermMutate(Box::new(report))
+                }
+                Ok(MemoryMutationExecution::Replayed { receipt }) => {
+                    return Ok(AdapterResponse::Replayed {
+                        request_id,
+                        audit_id,
+                        mutation_operation_id: operation_id.to_string(),
+                        receipt: AdapterMutationReceiptV1::from_operation_id(
+                            operation_id,
+                            &receipt,
+                        ),
+                    });
+                }
+                Ok(MemoryMutationExecution::Rejected { report }) => {
+                    return Ok(AdapterResponse::Rejected {
+                        request_id,
+                        audit_id,
+                        error_key: AdapterErrorKey::RuntimeRejected,
+                        reason: report.reason,
+                    });
+                }
+                Err(error) if error.class() == Some(ErrorClass::Conflict) => {
+                    return Ok(AdapterResponse::Rejected {
+                        request_id,
+                        audit_id,
+                        error_key: AdapterErrorKey::MutationOperationConflict,
+                        reason: "mutation_operation_id is already committed for a different intent"
+                            .to_string(),
+                    });
+                }
+                Err(error) => return Err(error),
+            }
         }
         AdapterCommand::LongTermPolicy(request) => AdapterSdkReport::LongTermPolicy(Box::new(
             runtime.mutate_memory_governance_policy(request)?,
@@ -164,9 +267,9 @@ fn dispatch_adapter_command_with_services_in_lease(
         AdapterCommand::TranscriptAttrWrite(request) => AdapterSdkReport::TranscriptAttrWrite(
             Box::new(runtime.record_transcript_attrs(request)?),
         ),
-        AdapterCommand::Capabilities => {
-            AdapterSdkReport::Capabilities(Box::new(runtime.capabilities().clone()))
-        }
+        AdapterCommand::Capabilities => AdapterSdkReport::Capabilities(Box::new(
+            AdapterCapabilityReportV2::for_runtime(runtime),
+        )),
         AdapterCommand::Close(request) => {
             AdapterSdkReport::Close(Box::new(runtime.close(request)?))
         }
@@ -176,5 +279,6 @@ fn dispatch_adapter_command_with_services_in_lease(
         request_id,
         audit_id,
         report,
+        receipt: committed_receipt,
     })
 }

@@ -11,7 +11,8 @@ use bm_core::memory::{
     GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef, GovernedOwnerRevisionRef,
     LongTermControlOperation, LongTermControlPostImageClosure, LongTermMemoryConfidence,
     LongTermMemoryControlAuditEvent, LongTermMemoryControlRevision,
-    LongTermMemoryControlRevisionIntent, LongTermMemoryEntry, LongTermMemoryFreshness,
+    LongTermMemoryControlRevisionIntent, LongTermMemoryCorrectionEvidence,
+    LongTermMemoryCorrectionLifecycle, LongTermMemoryEntry, LongTermMemoryFreshness,
     LongTermMemoryKind, LongTermMemorySourceScope, LongTermMemorySourceType,
     LongTermMemoryVersionMaterial, LongTermMemoryVersionMaterialImage, MemoryEvidenceAuthority,
     MemoryFacetIndexDoc, MemoryFacetIndexManifest, MemoryFacetOwnerVersion,
@@ -52,6 +53,9 @@ fn owner_entry(id: &str, owner_revision: u64) -> LongTermMemoryEntry {
         source_type: LongTermMemorySourceType::Conversation,
         source_scope: LongTermMemorySourceScope::User,
         subject_visibility: bm_core::memory::MemorySubjectVisibilityPolicy::AllSubjects,
+        provenance: bm_core::memory::LongTermMemoryProvenance::new(
+            MemoryEvidenceAuthority::UserAsserted,
+        ),
         confidence: LongTermMemoryConfidence::High,
         freshness: LongTermMemoryFreshness::Dynamic,
         stale_hint: Default::default(),
@@ -61,7 +65,7 @@ fn owner_entry(id: &str, owner_revision: u64) -> LongTermMemoryEntry {
         created_at: 10,
         updated_at: 10,
         observed_at: 10,
-        last_confirmed_at: 10,
+        last_confirmed_at: Some(10),
         source_revision: Some(owner_revision),
         owner_revision,
         last_used_at: 0,
@@ -823,12 +827,27 @@ fn control_closure() -> LongTermControlPostImageClosure {
     after_owner.updated_at = 20;
     after_owner.observed_at = 20;
     let before_material = version_material(&before_owner, SPACE, 10, None);
-    let after_material = version_material(
+    let mut after_material = version_material(
         &after_owner,
         SPACE,
         20,
         Some(before_material.owner_revision_ref()),
     );
+    after_material.governed_content.correction_evidence = Some(
+        LongTermMemoryCorrectionEvidence::try_new(
+            SPACE,
+            "governor:p7",
+            before_material.owner_revision_ref(),
+            after_material.owner_revision_ref(),
+            LongTermMemoryCorrectionLifecycle::Correct,
+            20,
+            "revision:p7",
+        )
+        .expect("canonical correction evidence"),
+    );
+    after_material.content_digest = after_material
+        .canonical_content_digest()
+        .expect("correction material digest");
     let intent = LongTermMemoryControlRevisionIntent::for_owner_change(
         "revision:p7",
         LongTermControlOperation::Correct,

@@ -7,8 +7,9 @@ use bm_sdk::{
     LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateSemanticDecision,
     MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryCapabilityPolicy,
     MemoryEvidenceAuthority, MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryProjectionRequest,
-    MemoryRecallRequest, MemorySemanticJudgmentSource, MemoryWriteCandidate, MemoryWriteRequest,
-    PressureLevel, RuntimeLifecycleModeInput, StoreBackendConfig,
+    MemoryRecallRequest, MemorySemanticJudgmentSource, MemorySubjectVisibilityPolicy,
+    MemoryWriteCandidate, MemoryWriteRequest, PressureLevel, RuntimeLifecycleModeInput,
+    StoreBackendConfig,
 };
 use std::fs;
 
@@ -74,8 +75,9 @@ fn console_overview_aggregates_memory_runtime_events_from_the_store() {
         .write(MemoryWriteRequest::Candidates {
             candidates: vec![MemoryWriteCandidate {
                 candidate_id: "console-system-metrics".to_string(),
-                authority: MemoryEvidenceAuthority::UserAsserted,
+                authority: MemoryEvidenceAuthority::ProgramMemoryCanonical,
                 target: target.clone(),
+                long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
                 privacy: MemoryPrivacyClass::SharedWithSubject,
                 content: MemoryCandidateContent::Text {
                     topic: "console metrics".to_string(),
@@ -90,7 +92,7 @@ fn console_overview_aggregates_memory_runtime_events_from_the_store() {
                 evidence_refs: vec!["console overview contract".to_string()],
                 canonical_entities: Vec::new(),
                 semantic_judgment: Some(MemoryCandidateSemanticJudgment {
-                    source: MemorySemanticJudgmentSource::LlmGovernance,
+                    source: MemorySemanticJudgmentSource::RuntimeGate,
                     decision: MemoryCandidateSemanticDecision::Accept,
                     governed_target: Some(target),
                     reason: "console telemetry fixture".to_string(),

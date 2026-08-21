@@ -33,11 +33,13 @@ async function httpJson<T>(path: string, init: RequestInit): Promise<T> {
 }
 
 async function tauriJson<T>(path: string, init: RequestInit): Promise<T> {
+  const headers = new Headers(init.headers);
   const response = await invoke<DesktopConsoleResponse>("console_request", {
     request: {
       method: (init.method ?? "GET").toUpperCase(),
       path,
       body: requestBody(init.body),
+      idempotencyKey: headers.get("x-idempotency-key") ?? "",
     },
   });
   if (response.statusCode < 200 || response.statusCode >= 300) {

@@ -8,12 +8,14 @@ Use this checklist for maintainer release candidates.
 - `docs/README.md` links to `docs/en/README.md` and `docs/zh-CN/README.md`.
 - English and Chinese docs cover the same developer topics.
 - Architecture, integration, deployment, CLI, API, profile, store, adapter, replay, operator, and release guides are all present in both languages.
+- Version-specific release notes disclose breaking API/schema changes, migration availability, rollback, publish scope, and unverified evidence planes.
 
 ## Metadata
 
 - Workspace license is `Apache-2.0`.
 - Root `LICENSE` exists.
 - Publishable crates have package descriptions.
+- Publishable crates inherit the canonical repository URL and root README.
 - Workspace crate dependencies include both `version` and `path`.
 
 ## Verification
@@ -49,6 +51,8 @@ bash scripts/check_production_hardening_contract.sh
 bash scripts/check_release_surface.sh
 ```
 
+When build cache space must live on another volume, set `BM_RELEASE_SURFACE_WORK_ROOT` to an existing absolute directory while keeping `TMPDIR` on the host filesystem for macOS launchd fixtures.
+
 An engineering handoff from a host that lacks a required target toolchain may record that row as
 `deferred_not_passed`. Every release candidate must provision all required target toolchains and
 obtain strict GREEN; a missing toolchain blocks release and is not a pass:
@@ -64,10 +68,17 @@ bash scripts/check_cross_target_compile_gates.sh --strict
 ```text
 bm-core
 bm-sdk
-bm-replay / bm-evolve / bm-adapter
+bm-replay
+bm-evolve
+bm-adapter
 bm-entry
 bm-ollama-transparent
-bm-cli / bm-llm-gateway / bm-http / bm-wss / bm-mcp / bm-a2a
+bm-cli
+bm-llm-gateway
+bm-http
+bm-wss
+bm-mcp
+bm-a2a
 ```
 
 Run staged `cargo publish --dry-run -p <crate>` through `scripts/check_release_surface.sh`. The release gate runs production hardening checks, uses temporary Cargo target directories, and fails if repository ignored artifacts change.

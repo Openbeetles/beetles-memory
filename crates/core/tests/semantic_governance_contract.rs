@@ -2,7 +2,8 @@ use bm_core::memory::{
     govern_write_candidates, GovernedWriteDecision, LongTermMemoryKind, MemoryCandidateContent,
     MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
     MemoryEvidenceAuthority, MemoryPrivacyClass, MemorySemanticJudgmentSource,
-    MemoryWriteAuthority, MemoryWriteCandidate, MemoryWriteDomain, SoulCandidateDisposition,
+    MemorySubjectVisibilityPolicy, MemoryWriteAuthority, MemoryWriteCandidate, MemoryWriteDomain,
+    SoulCandidateDisposition,
 };
 
 fn text_candidate(
@@ -13,9 +14,18 @@ fn text_candidate(
     body: &str,
     semantic_judgment: Option<MemoryCandidateSemanticJudgment>,
 ) -> MemoryWriteCandidate {
+    let governed_target = semantic_judgment
+        .as_ref()
+        .and_then(|judgment| judgment.governed_target.as_ref())
+        .unwrap_or(&target);
     MemoryWriteCandidate {
         candidate_id: id.to_string(),
         authority,
+        long_term_subject_visibility: matches!(
+            governed_target,
+            MemoryCandidateTarget::LongTermMemory { .. }
+        )
+        .then_some(MemorySubjectVisibilityPolicy::AllSubjects),
         target,
         privacy,
         content: MemoryCandidateContent::Text {

@@ -24,6 +24,7 @@
         "kind": "preference",
         "topic": "preferred_name"
       },
+      "long_term_subject_visibility": "all_subjects",
       "privacy": "shared_with_subject",
       "content": {
         "kind": "text",
@@ -83,6 +84,7 @@
         "kind": "task",
         "topic": "operator_inspect_parity"
       },
+      "long_term_subject_visibility": "all_subjects",
       "privacy": "operator_diagnostic",
       "content": {
         "kind": "text",

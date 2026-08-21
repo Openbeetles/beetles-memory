@@ -315,6 +315,10 @@ fn run_post_reply_followup_passes(
         TaskLearningMaintenanceInput {
             channel: input.channel,
             chat_id: input.chat_id,
+            long_term_subject_visibility:
+                crate::memory::MemorySubjectVisibilityPolicy::OnlySubjects(vec![input
+                    .mounted_subject_id
+                    .to_string()]),
             now_secs: input.now_secs,
         },
     );

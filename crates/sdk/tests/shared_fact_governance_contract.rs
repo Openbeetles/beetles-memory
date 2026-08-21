@@ -6,10 +6,11 @@ use bm_core::memory::{
 };
 use bm_sdk::{
     default_agent_subject_id, default_memory_space_id, LongTermMemoryDraft, LongTermMemoryKind,
-    MemoryCandidateContent, MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment,
-    MemoryCandidateTarget, MemoryEvidenceAuthority, MemoryIdentity, MemoryPrivacyClass,
-    MemoryRuntime, MemoryScope, MemorySemanticJudgmentSource, MemoryWriteCandidate,
-    MemoryWriteRequest, ParsedLongTermMemoryExtraction, SubjectDescriptor, SubjectRegistry,
+    LongTermMemoryProvenance, MemoryCandidateContent, MemoryCandidateSemanticDecision,
+    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryEvidenceAuthority,
+    MemoryIdentity, MemoryPrivacyClass, MemoryRuntime, MemoryScope, MemorySemanticJudgmentSource,
+    MemorySubjectVisibilityPolicy, MemoryWriteCandidate, MemoryWriteRequest,
+    ParsedLongTermMemoryExtraction, SubjectDescriptor, SubjectRegistry,
 };
 
 use support::empty_store_platform;
@@ -22,6 +23,7 @@ fn accepted_fact_candidate(id: &str, body: &str) -> MemoryWriteCandidate {
             kind: LongTermMemoryKind::Fact,
             topic: "multi_subject_owner".to_string(),
         },
+        long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
         privacy: MemoryPrivacyClass::PublicRuntime,
         content: MemoryCandidateContent::Text {
             topic: "multi_subject_owner".to_string(),
@@ -51,6 +53,7 @@ fn accepted_procedural_candidate(id: &str, body: &str) -> MemoryWriteCandidate {
         candidate_id: id.to_string(),
         authority: MemoryEvidenceAuthority::UserAsserted,
         target: target.clone(),
+        long_term_subject_visibility: None,
         privacy: MemoryPrivacyClass::PublicRuntime,
         content: MemoryCandidateContent::Text {
             topic: "release_procedure".to_string(),
@@ -78,6 +81,8 @@ fn conflicting_shared_fact(content: &str) -> LongTermMemoryDraft {
         source_chat_id: Some("shared-fact-source".to_string()),
         source_type: Some(LongTermMemorySourceType::Conversation),
         source_scope: Some(LongTermMemorySourceScope::User),
+        subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+        provenance: LongTermMemoryProvenance::new(MemoryEvidenceAuthority::UserAsserted),
         confidence: Some(LongTermMemoryConfidence::High),
         freshness: Some(LongTermMemoryFreshness::Stable),
         stale_hint: Some(LongTermMemoryStaleHint::None),
@@ -85,7 +90,6 @@ fn conflicting_shared_fact(content: &str) -> LongTermMemoryDraft {
         canonical_entities: Vec::new(),
         evidence_count: Some(1),
         observed_at: Some(1_800_000_000),
-        last_confirmed_at: Some(1_800_000_000),
         source_revision: Some(7),
     }
 }

@@ -190,6 +190,8 @@ fn observation_to_metadata_draft(
         source_chat_id: entry.source_chat_id.clone(),
         source_type: Some(entry.source_type),
         source_scope: Some(entry.source_scope),
+        subject_visibility: entry.subject_visibility.clone(),
+        provenance: entry.provenance,
         confidence: Some(confidence),
         freshness: Some(entry.freshness),
         stale_hint: Some(stale_hint),
@@ -201,7 +203,6 @@ fn observation_to_metadata_draft(
                 .max(observation.top_citations.len()) as u32,
         ),
         observed_at: (last_confirmed_at > 0).then_some(last_confirmed_at),
-        last_confirmed_at: (last_confirmed_at > 0).then_some(last_confirmed_at),
         source_revision: None,
     })
 }
@@ -471,6 +472,7 @@ fn reconcile_entry_observation(
     let evidence_state = long_term_memory_evidence_state(entry, now_secs);
     let latest_confirmation = entry
         .last_confirmed_at
+        .unwrap_or(0)
         .max(entry.observed_at)
         .max(entry.updated_at)
         .max(entry.created_at);
@@ -873,6 +875,7 @@ mod tests {
                 source_type: crate::memory::LongTermMemorySourceType::Conversation,
                 source_scope: crate::memory::LongTermMemorySourceScope::World,
                 subject_visibility: crate::memory::MemorySubjectVisibilityPolicy::AllSubjects,
+                provenance: crate::memory::LongTermMemoryProvenance::default(),
                 confidence: crate::memory::LongTermMemoryConfidence::Medium,
                 freshness: crate::memory::LongTermMemoryFreshness::Dynamic,
                 stale_hint: crate::memory::LongTermMemoryStaleHint::ReviewBeforeUse,
@@ -882,7 +885,7 @@ mod tests {
                 created_at: 1,
                 updated_at: 1,
                 observed_at: 1,
-                last_confirmed_at: 1,
+                last_confirmed_at: Some(1),
                 source_revision: None,
                 owner_revision: 1,
                 last_used_at: 0,
@@ -952,6 +955,7 @@ mod tests {
             source_type: crate::memory::LongTermMemorySourceType::Conversation,
             source_scope: crate::memory::LongTermMemorySourceScope::World,
             subject_visibility: crate::memory::MemorySubjectVisibilityPolicy::AllSubjects,
+            provenance: crate::memory::LongTermMemoryProvenance::default(),
             confidence: crate::memory::LongTermMemoryConfidence::High,
             freshness: crate::memory::LongTermMemoryFreshness::Dynamic,
             stale_hint: crate::memory::LongTermMemoryStaleHint::ReviewBeforeUse,
@@ -961,7 +965,7 @@ mod tests {
             created_at: 1,
             updated_at: 1,
             observed_at: 1,
-            last_confirmed_at: 1,
+            last_confirmed_at: Some(1),
             source_revision: None,
             owner_revision: 1,
             last_used_at: 0,

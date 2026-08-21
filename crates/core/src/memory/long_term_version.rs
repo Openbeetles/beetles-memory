@@ -14,20 +14,122 @@ use super::{
     GovernedOwnerRevisionRef, GovernedOwnerTermination, GovernedOwnerValidity,
     GovernedUpdateLineageItem, LongTermControlOperation, LongTermMemoryConfidence,
     LongTermMemoryControlRevision, LongTermMemoryEntry, LongTermMemoryFreshness,
-    LongTermMemoryKind, LongTermMemorySourceScope, LongTermMemorySourceType,
-    LongTermMemoryStaleHint, MemoryPrivacyClass, MemorySpaceId, MemorySubjectVisibilityPolicy,
-    MemoryUpdateLineageReport, LONG_TERM_CONTROL_REVISION_NAMESPACE,
+    LongTermMemoryKind, LongTermMemoryProvenance, LongTermMemorySourceScope,
+    LongTermMemorySourceType, LongTermMemoryStaleHint, MemoryPrivacyClass, MemorySpaceId,
+    MemorySubjectVisibilityPolicy, MemoryUpdateLineageReport, LONG_TERM_CONTROL_REVISION_NAMESPACE,
 };
 
-pub const LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION: u32 = 3;
-const LONG_TERM_VERSION_MATERIAL_KEY_DOMAIN: &str = "long_term_version_material_key_v3";
-const LONG_TERM_VERSION_HEAD_KEY_DOMAIN: &str = "long_term_version_head_key_v3";
-const LONG_TERM_VERSION_SCOPE_MANIFEST_KEY_DOMAIN: &str = "long_term_version_scope_manifest_key_v3";
-const LONG_TERM_VERSION_CONTENT_DIGEST_DOMAIN: &str = "long_term_version_content_digest_v3";
+pub const LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION: u32 = 5;
+const LONG_TERM_VERSION_MATERIAL_KEY_DOMAIN: &str = "long_term_version_material_key_v5";
+const LONG_TERM_VERSION_HEAD_KEY_DOMAIN: &str = "long_term_version_head_key_v5";
+const LONG_TERM_VERSION_SCOPE_MANIFEST_KEY_DOMAIN: &str = "long_term_version_scope_manifest_key_v5";
+const LONG_TERM_VERSION_CONTENT_DIGEST_DOMAIN: &str = "long_term_version_content_digest_v5";
 const LONG_TERM_VERSION_HEAD_CONTENT_DIGEST_DOMAIN: &str =
-    "long_term_version_head_content_digest_v3";
+    "long_term_version_head_content_digest_v5";
 const LONG_TERM_VERSION_SCOPE_CLOSURE_DIGEST_DOMAIN: &str =
-    "long_term_version_scope_closure_digest_v3";
+    "long_term_version_scope_closure_digest_v5";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LongTermMemoryCorrectionLifecycle {
+    Correct,
+}
+
+/// Immutable metadata evidence for an explicit, actor-scoped correction transition.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LongTermMemoryCorrectionEvidence {
+    pub memory_space_id: String,
+    pub actor_subject_id: String,
+    pub predecessor: GovernedOwnerRevisionRef,
+    pub successor: GovernedOwnerRevisionRef,
+    pub lifecycle: LongTermMemoryCorrectionLifecycle,
+    pub corrected_at: u64,
+    pub control_revision_id: String,
+}
+
+impl LongTermMemoryCorrectionEvidence {
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        memory_space_id: impl Into<String>,
+        actor_subject_id: impl Into<String>,
+        predecessor: GovernedOwnerRevisionRef,
+        successor: GovernedOwnerRevisionRef,
+        lifecycle: LongTermMemoryCorrectionLifecycle,
+        corrected_at: u64,
+        control_revision_id: impl Into<String>,
+    ) -> Result<Self> {
+        let evidence = Self {
+            memory_space_id: memory_space_id.into(),
+            actor_subject_id: actor_subject_id.into(),
+            predecessor,
+            successor,
+            lifecycle,
+            corrected_at,
+            control_revision_id: control_revision_id.into(),
+        };
+        evidence.validate_contract()?;
+        Ok(evidence)
+    }
+
+    pub fn validate_contract(&self) -> Result<()> {
+        if self.memory_space_id.trim().is_empty()
+            || self.memory_space_id != self.memory_space_id.trim()
+            || self.actor_subject_id.trim().is_empty()
+            || self.actor_subject_id != self.actor_subject_id.trim()
+            || self.corrected_at == 0
+            || self.control_revision_id.trim().is_empty()
+            || self.control_revision_id != self.control_revision_id.trim()
+            || !self.predecessor.is_valid()
+            || !self.successor.is_valid()
+            || self.predecessor.owner_ref.owner_plane != GovernedMemoryOwnerPlane::LongTerm
+            || self.successor.owner_ref.owner_plane != GovernedMemoryOwnerPlane::LongTerm
+            || self.predecessor.owner_ref != self.successor.owner_ref
+            || self
+                .predecessor
+                .owner_revision
+                .checked_add(1)
+                .is_none_or(|revision| revision != self.successor.owner_revision)
+        {
+            return Err(Error::config(
+                "long_term_correction_evidence",
+                "correction evidence scope, actor, lifecycle, revision, time, or control identity is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Additional evidence minted only after the SDK verifies the exact actor as an active
+/// `HumanUser` in the current `SubjectRegistry`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LongTermMemoryHumanConfirmationEvidence {
+    pub correction: LongTermMemoryCorrectionEvidence,
+    pub confirmed_at: u64,
+}
+
+impl LongTermMemoryHumanConfirmationEvidence {
+    pub fn try_new(correction: LongTermMemoryCorrectionEvidence) -> Result<Self> {
+        let evidence = Self {
+            confirmed_at: correction.corrected_at,
+            correction,
+        };
+        evidence.validate_contract()?;
+        Ok(evidence)
+    }
+
+    pub fn validate_contract(&self) -> Result<()> {
+        self.correction.validate_contract()?;
+        if self.confirmed_at == 0 || self.confirmed_at != self.correction.corrected_at {
+            return Err(Error::config(
+                "long_term_human_confirmation_evidence",
+                "human confirmation time must equal its exact correction transition time",
+            ));
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LongTermVersionRetentionLease {
@@ -62,6 +164,7 @@ pub struct LongTermMemoryGovernedContent {
     pub source_chat_id: Option<String>,
     pub source_type: LongTermMemorySourceType,
     pub source_scope: LongTermMemorySourceScope,
+    pub provenance: LongTermMemoryProvenance,
     pub confidence: LongTermMemoryConfidence,
     pub freshness: LongTermMemoryFreshness,
     pub stale_hint: LongTermMemoryStaleHint,
@@ -71,7 +174,8 @@ pub struct LongTermMemoryGovernedContent {
     pub created_at: u64,
     pub updated_at: u64,
     pub observed_at: u64,
-    pub last_confirmed_at: u64,
+    pub correction_evidence: Option<LongTermMemoryCorrectionEvidence>,
+    pub confirmation_evidence: Option<LongTermMemoryHumanConfirmationEvidence>,
     pub source_revision: Option<u64>,
     pub last_used_at: u64,
 }
@@ -165,6 +269,7 @@ impl LongTermMemoryVersionMaterial {
                 source_chat_id: entry.source_chat_id.clone(),
                 source_type: entry.source_type,
                 source_scope: entry.source_scope,
+                provenance: entry.provenance,
                 confidence: entry.confidence,
                 freshness: entry.freshness,
                 stale_hint: entry.stale_hint,
@@ -174,7 +279,8 @@ impl LongTermMemoryVersionMaterial {
                 created_at: entry.created_at,
                 updated_at: entry.updated_at,
                 observed_at: entry.observed_at,
-                last_confirmed_at: entry.last_confirmed_at,
+                correction_evidence: None,
+                confirmation_evidence: None,
                 source_revision: entry.source_revision,
                 last_used_at: entry.last_used_at,
             },
@@ -217,6 +323,7 @@ impl LongTermMemoryVersionMaterial {
             source_type: self.governed_content.source_type,
             source_scope: self.governed_content.source_scope,
             subject_visibility: self.subject_visibility.clone(),
+            provenance: self.governed_content.provenance,
             confidence: self.governed_content.confidence,
             freshness: self.governed_content.freshness,
             stale_hint: self.governed_content.stale_hint,
@@ -226,7 +333,11 @@ impl LongTermMemoryVersionMaterial {
             created_at: self.governed_content.created_at,
             updated_at: self.governed_content.updated_at,
             observed_at: self.governed_content.observed_at,
-            last_confirmed_at: self.governed_content.last_confirmed_at,
+            last_confirmed_at: self
+                .governed_content
+                .confirmation_evidence
+                .as_ref()
+                .map(|evidence| evidence.confirmed_at),
             source_revision: self.governed_content.source_revision,
             owner_revision: self.owner_revision,
             last_used_at: self.governed_content.last_used_at,
@@ -312,6 +423,25 @@ impl LongTermMemoryVersionMaterial {
         }
         if self.governed_content.content.trim().is_empty()
             || self.governed_content.observed_at != self.origin.observed_at
+            || self
+                .governed_content
+                .correction_evidence
+                .as_ref()
+                .is_some_and(|evidence| {
+                    evidence.validate_contract().is_err()
+                        || evidence.memory_space_id != self.memory_space_id
+                        || evidence.successor.owner_ref != self.owner_ref
+                        || evidence.successor.owner_revision > self.owner_revision
+                })
+            || self
+                .governed_content
+                .confirmation_evidence
+                .as_ref()
+                .is_some_and(|evidence| {
+                    evidence.validate_contract().is_err()
+                        || Some(&evidence.correction)
+                            != self.governed_content.correction_evidence.as_ref()
+                })
             || self.canonical_content_digest().ok().as_deref() != Some(self.content_digest.as_str())
         {
             failures.push(GovernedContractFailure::ContentDigestMismatch);
@@ -351,6 +481,7 @@ pub fn bind_long_term_version_creation(
         || intent.factual_owner_id != intent.factual_owner_id.trim()
         || intent.factual_owner_id != intent.memory_space_id
         || intent.projection.owner_revision != 1
+        || intent.projection.last_confirmed_at.is_some()
         || lease.max_retained_revisions_per_owner() < 1
     {
         return Err(Error::config(

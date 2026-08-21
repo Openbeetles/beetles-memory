@@ -28,6 +28,7 @@ use bm_core::task_execution::{
 use bm_core::{Error, Result};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::store_internal::config::{open_runtime_budget_authority, resolve_store_capacity};
 use crate::store_internal::recall_index::{
@@ -54,7 +55,7 @@ use crate::store_internal::schema::{
     RECALL_OWNER_SCOPE_BINDING_NAMESPACE,
 };
 #[cfg(feature = "nonproduction-replay-harness")]
-use crate::store_internal::schema::{store_v6_blob_namespaces, store_v6_json_namespaces};
+use crate::store_internal::schema::{store_blob_namespaces, store_json_namespaces};
 #[cfg(feature = "sqlite-store")]
 use crate::store_internal::sqlite::SqliteStoreEngine;
 use crate::store_internal::transaction::{
@@ -96,6 +97,104 @@ type RecallIndexMutationPlan = (
 
 pub(crate) const GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE: &str = "governed_evidence_documents";
 pub(crate) const GOVERNED_EVIDENCE_SOURCE_REF_NAMESPACE: &str = "governed_evidence_source_refs";
+
+#[derive(Clone, Debug)]
+pub(crate) struct StoreMutationOperationPlan {
+    identity: MemoryMutationOperationIdentity,
+    intent_digest: String,
+    effect: MemoryMutationEffect,
+    changed_count: u64,
+    actor_subject_id: String,
+    committed_at_unix_secs: u64,
+    transaction_id: String,
+}
+
+impl StoreMutationOperationPlan {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        identity: MemoryMutationOperationIdentity,
+        intent_digest: impl Into<String>,
+        effect: MemoryMutationEffect,
+        changed_count: usize,
+        actor_subject_id: impl Into<String>,
+        committed_at_unix_secs: u64,
+    ) -> Result<Self> {
+        let intent_digest = intent_digest.into();
+        let actor_subject_id = actor_subject_id.into();
+        let changed_count = u64::try_from(changed_count).map_err(|_| {
+            Error::invalid_input(
+                "memory_mutation_operation_plan",
+                "changed_count exceeds the durable receipt width",
+            )
+        })?;
+        let transaction_id = mutation_operation_transaction_id(&identity, &intent_digest);
+        MemoryMutationAuditRecord::new(
+            identity.clone(),
+            &intent_digest,
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            &transaction_id,
+            effect,
+            usize::try_from(changed_count).map_err(|_| {
+                Error::invalid_input(
+                    "memory_mutation_operation_plan",
+                    "changed_count cannot be represented by this process",
+                )
+            })?,
+            &actor_subject_id,
+            committed_at_unix_secs,
+        )?;
+        Ok(Self {
+            identity,
+            intent_digest,
+            effect,
+            changed_count,
+            actor_subject_id,
+            committed_at_unix_secs,
+            transaction_id,
+        })
+    }
+
+    pub(crate) fn transaction_id(&self) -> &str {
+        &self.transaction_id
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct StoreMutationOperationPreflight {
+    pub(crate) identity: MemoryMutationOperationIdentity,
+    pub(crate) intent_digest: String,
+}
+
+impl StoreMutationOperationPreflight {
+    pub(crate) fn new(
+        identity: MemoryMutationOperationIdentity,
+        intent_digest: impl Into<String>,
+    ) -> Result<Self> {
+        let intent_digest = intent_digest.into();
+        identity.validate_contract()?;
+        if intent_digest.trim().is_empty() {
+            return Err(Error::invalid_input(
+                "memory_mutation_operation_intent",
+                "intent_digest must not be empty",
+            ));
+        }
+        Ok(Self {
+            identity,
+            intent_digest,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum StoreMutationOperationOutcome {
+    Committed {
+        receipt: MemoryMutationReceipt,
+        report: StoreMutationBatchReport,
+    },
+    Replayed {
+        receipt: MemoryMutationReceipt,
+    },
+}
 
 pub(crate) struct StoreOpenPreflight {
     capacity: StoreCapacityBudget,
@@ -741,7 +840,14 @@ impl StorePlatform {
         batch: StoreMutationBatch,
         preconditions: &[StoreJsonPrecondition],
     ) -> Result<StoreMutationBatchReport> {
-        self.commit_governed_memory_transaction_authorized(batch, preconditions, None, None, None)
+        self.commit_governed_memory_transaction_authorized(
+            batch,
+            preconditions,
+            None,
+            None,
+            None,
+            None,
+        )
     }
 
     pub(crate) fn commit_governed_memory_transaction_with_runtime_budget(
@@ -755,6 +861,7 @@ impl StorePlatform {
             preconditions,
             None,
             Some(runtime_budget),
+            None,
             None,
         )
     }
@@ -772,6 +879,7 @@ impl StorePlatform {
             None,
             Some(runtime_budget),
             Some(runtime_timestamp_unix_secs),
+            None,
         )
     }
 
@@ -788,7 +896,149 @@ impl StorePlatform {
             Some(authority),
             Some(runtime_budget),
             None,
+            None,
         )
+    }
+
+    pub(crate) fn commit_memory_mutation_operation_with_runtime_budget(
+        &self,
+        batch: StoreMutationBatch,
+        preconditions: &[StoreJsonPrecondition],
+        operation: StoreMutationOperationPlan,
+        runtime_budget: &RuntimeBudgetReport,
+    ) -> Result<StoreMutationOperationOutcome> {
+        operation.identity.validate_contract()?;
+        if batch.scope.memory_space_id != operation.identity.memory_space_id()
+            || batch.scope.subject_id != operation.identity.mounted_subject_id()
+            || batch.transaction_id != operation.transaction_id
+        {
+            return Err(Error::invalid_input(
+                "memory_mutation_operation_scope",
+                "operation identity or transaction id differs from the governed batch scope",
+            ));
+        }
+        if let Some(receipt) = self.load_committed_mutation_operation(&operation)? {
+            return Ok(StoreMutationOperationOutcome::Replayed { receipt });
+        }
+        let commit = self.commit_governed_memory_transaction_authorized(
+            batch,
+            preconditions,
+            None,
+            Some(runtime_budget),
+            Some(operation.committed_at_unix_secs),
+            Some(&operation),
+        );
+        match commit {
+            Ok(report) => {
+                let receipt = self
+                    .load_committed_mutation_operation(&operation)?
+                    .ok_or_else(|| {
+                        Error::config(
+                            "memory_mutation_operation_commit",
+                            "committed operation receipt is missing after store commit",
+                        )
+                    })?;
+                Ok(StoreMutationOperationOutcome::Committed { receipt, report })
+            }
+            Err(error) if error.stage() == "memory_write_transaction_precondition_failed" => {
+                match self.load_committed_mutation_operation(&operation)? {
+                    Some(receipt) => Ok(StoreMutationOperationOutcome::Replayed { receipt }),
+                    None => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn preflight_memory_mutation_operation(
+        &self,
+        operation: &StoreMutationOperationPreflight,
+    ) -> Result<Option<MemoryMutationReceipt>> {
+        operation.identity.validate_contract()?;
+        self.load_committed_mutation_operation_parts(&operation.identity, &operation.intent_digest)
+    }
+
+    fn load_committed_mutation_operation(
+        &self,
+        operation: &StoreMutationOperationPlan,
+    ) -> Result<Option<MemoryMutationReceipt>> {
+        self.load_committed_mutation_operation_parts(&operation.identity, &operation.intent_digest)
+    }
+
+    fn load_committed_mutation_operation_parts(
+        &self,
+        identity: &MemoryMutationOperationIdentity,
+        intent_digest: &str,
+    ) -> Result<Option<MemoryMutationReceipt>> {
+        let key = identity.storage_key();
+        let addresses = [
+            (MEMORY_MUTATION_RECEIPT_NAMESPACE.to_string(), key.clone()),
+            (MEMORY_MUTATION_AUDIT_NAMESPACE.to_string(), key.clone()),
+        ];
+        for (namespace, key) in &addresses {
+            admit_store_json_address(namespace, key, "memory_mutation_operation_pair_read")?;
+        }
+        let pair = self
+            .engine
+            .read_consistent_known_keys(&addresses, &[], false, self.capacity)?;
+        let receipt = pair
+            .json
+            .iter()
+            .find(|document| document.namespace == MEMORY_MUTATION_RECEIPT_NAMESPACE)
+            .and_then(|document| document.value.clone())
+            .map(serde_json::from_value::<MemoryMutationReceipt>)
+            .transpose()
+            .map_err(|error| Error::config("memory_mutation_receipt_read", error.to_string()))?;
+        let audit = pair
+            .json
+            .iter()
+            .find(|document| document.namespace == MEMORY_MUTATION_AUDIT_NAMESPACE)
+            .and_then(|document| document.value.clone())
+            .map(serde_json::from_value::<MemoryMutationAuditRecord>)
+            .transpose()
+            .map_err(|error| Error::config("memory_mutation_audit_read", error.to_string()))?;
+        match (receipt, audit) {
+            (None, None) => Ok(None),
+            (Some(receipt), Some(audit)) => {
+                receipt
+                    .classify_replay(identity, intent_digest)
+                    .map_err(|error| {
+                        if error.class() == Some(bm_core::ErrorClass::Conflict) {
+                            error
+                        } else {
+                            Error::config(
+                                "memory_write_transaction_repair_required",
+                                format!("invalid durable mutation receipt: {error}"),
+                            )
+                        }
+                    })?;
+                audit.validate_contract().map_err(|error| {
+                    Error::config(
+                        "memory_write_transaction_repair_required",
+                        format!("invalid authoritative mutation audit: {error}"),
+                    )
+                })?;
+                if audit.audit_record_id != receipt.audit_record_id
+                    || audit.identity != receipt.identity
+                    || audit.intent_digest != receipt.intent_digest
+                    || audit.effect_plan_digest != receipt.effect_plan_digest
+                    || audit.transaction_id != receipt.transaction_id
+                    || audit.effect != receipt.effect
+                    || audit.changed_count != receipt.changed_count
+                    || audit.committed_at_unix_secs != receipt.committed_at_unix_secs
+                {
+                    return Err(Error::config(
+                        "memory_write_transaction_repair_required",
+                        "mutation receipt and authoritative audit binding differ",
+                    ));
+                }
+                Ok(Some(receipt))
+            }
+            _ => Err(Error::config(
+                "memory_write_transaction_repair_required",
+                "mutation receipt and authoritative audit must exist together",
+            )),
+        }
     }
 
     fn commit_governed_memory_transaction_authorized(
@@ -798,6 +1048,7 @@ impl StorePlatform {
         graph_repair_authority: Option<GraphRepairAuthority>,
         pinned_runtime_budget: Option<&RuntimeBudgetReport>,
         runtime_timestamp_unix_secs: Option<u64>,
+        mutation_operation: Option<&StoreMutationOperationPlan>,
     ) -> Result<StoreMutationBatchReport> {
         let mut preconditions = preconditions.to_vec();
         let transaction_timestamp =
@@ -821,6 +1072,12 @@ impl StorePlatform {
                 "operation is required",
             ));
         }
+        append_mutation_operation_records(
+            &mut batch,
+            &mut preconditions,
+            mutation_operation,
+            transaction_timestamp,
+        )?;
 
         let owned_runtime_budget;
         let runtime_budget = if let Some(runtime_budget) = pinned_runtime_budget {
@@ -842,6 +1099,7 @@ impl StorePlatform {
             self.engine.get_blob(namespace, key)
         })?;
         validate_protected_json_mutation_preconditions(&batch, &preconditions)?;
+        validate_mutation_operation_closure(&batch, &preconditions, mutation_operation)?;
         validate_recall_index_mutation_closure(
             &batch,
             |namespace, key| self.engine.get_json_value(namespace, key),
@@ -1556,7 +1814,7 @@ impl StorePlatform {
     ) -> Result<(StoreSnapshot, StoreSnapshotExportReport)> {
         let runtime_budget = self.current_runtime_budget(current_unix_secs());
         let mut json_docs = Vec::new();
-        for namespace in store_v6_json_namespaces() {
+        for namespace in store_json_namespaces() {
             for key in self.engine.list_json_keys(namespace)? {
                 if let Some(value) = self.engine.get_json_value(namespace, &key)? {
                     admit_store_json_document(namespace, &key, &value, "store_snapshot_export")?;
@@ -1569,7 +1827,7 @@ impl StorePlatform {
             }
         }
         let mut blobs = Vec::new();
-        for namespace in store_v6_blob_namespaces() {
+        for namespace in store_blob_namespaces() {
             for key in self.engine.list_blob_keys(namespace)? {
                 if let Some(value) = self.engine.get_blob(namespace, &key)? {
                     blobs.push(StoreSnapshotBlob {
@@ -1708,8 +1966,8 @@ impl StorePlatform {
         enforce_snapshot_logical_budget(self.capacity, snapshot)?;
         self.enforce_snapshot_budget(snapshot, self.capacity.import_max_bytes, "import")?;
         let _transaction_guard = self.lock_transaction("store_snapshot_import")?;
-        let json_namespaces = store_v6_json_namespaces().collect::<Vec<_>>();
-        let blob_namespaces = store_v6_blob_namespaces().collect::<Vec<_>>();
+        let json_namespaces = store_json_namespaces().collect::<Vec<_>>();
+        let blob_namespaces = store_blob_namespaces().collect::<Vec<_>>();
         let replace_report = self.engine.replace_snapshot(
             &json_namespaces,
             &blob_namespaces,
@@ -1812,6 +2070,7 @@ impl StorePlatform {
             None,
             None,
             runtime_timestamp_unix_secs,
+            None,
         )
     }
 
@@ -2798,6 +3057,212 @@ impl StorePlatform {
     }
 }
 
+fn mutation_operation_transaction_id(
+    identity: &MemoryMutationOperationIdentity,
+    intent_digest: &str,
+) -> String {
+    canonical_mutation_operation_digest(
+        b"memory_mutation_transaction_id_v1",
+        &[identity.storage_key().as_bytes(), intent_digest.as_bytes()],
+    )
+}
+
+fn canonical_mutation_operation_digest(domain: &[u8], fields: &[&[u8]]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(domain.len().to_be_bytes());
+    hasher.update(domain);
+    for field in fields {
+        hasher.update(field.len().to_be_bytes());
+        hasher.update(field);
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn append_mutation_operation_records(
+    batch: &mut StoreMutationBatch,
+    preconditions: &mut Vec<StoreJsonPrecondition>,
+    operation: Option<&StoreMutationOperationPlan>,
+    transaction_timestamp: u64,
+) -> Result<()> {
+    let protected_mutation_present = batch.mutations.iter().any(|mutation| {
+        matches!(mutation,
+            StoreMutation::PutJson { namespace, .. }
+                | StoreMutation::DeleteJson { namespace, .. }
+                if matches!(namespace.as_str(), MEMORY_MUTATION_RECEIPT_NAMESPACE | MEMORY_MUTATION_AUDIT_NAMESPACE))
+    });
+    let Some(operation) = operation else {
+        if protected_mutation_present {
+            return Err(Error::config(
+                "memory_mutation_operation_authority",
+                "only the Store operation-aware commit may create mutation receipt records",
+            ));
+        }
+        return Ok(());
+    };
+    if protected_mutation_present {
+        return Err(Error::config(
+            "memory_mutation_operation_authority",
+            "callers must not provide mutation receipt or audit records",
+        ));
+    }
+    if operation.committed_at_unix_secs != transaction_timestamp
+        || batch.transaction_id != operation.transaction_id
+        || batch.scope.memory_space_id != operation.identity.memory_space_id()
+        || batch.scope.subject_id != operation.identity.mounted_subject_id()
+    {
+        return Err(Error::invalid_input(
+            "memory_mutation_operation_scope",
+            "operation plan does not match the final governed batch authority",
+        ));
+    }
+    let encoded_effect_plan = serde_json::to_vec(&(
+        &batch.transaction_id,
+        &batch.operation,
+        &batch.scope,
+        &batch.mutations,
+    ))
+    .map_err(|error| Error::config("memory_mutation_effect_plan_digest", error.to_string()))?;
+    let effect_plan_digest = canonical_mutation_operation_digest(
+        b"memory_mutation_effect_plan_v1",
+        &[&encoded_effect_plan],
+    );
+    let key = operation.identity.storage_key();
+    let audit = MemoryMutationAuditRecord::new(
+        operation.identity.clone(),
+        &operation.intent_digest,
+        &effect_plan_digest,
+        &operation.transaction_id,
+        operation.effect,
+        usize::try_from(operation.changed_count).map_err(|_| {
+            Error::invalid_input(
+                "memory_mutation_operation_plan",
+                "changed_count cannot be represented by this process",
+            )
+        })?,
+        &operation.actor_subject_id,
+        operation.committed_at_unix_secs,
+    )?;
+    let receipt = MemoryMutationReceipt::new(
+        operation.identity.clone(),
+        &operation.intent_digest,
+        &effect_plan_digest,
+        &operation.transaction_id,
+        operation.effect,
+        usize::try_from(operation.changed_count).map_err(|_| {
+            Error::invalid_input(
+                "memory_mutation_operation_plan",
+                "changed_count cannot be represented by this process",
+            )
+        })?,
+        operation.committed_at_unix_secs,
+    )?;
+    preconditions.push(StoreJsonPrecondition::Absent {
+        namespace: MEMORY_MUTATION_AUDIT_NAMESPACE.to_string(),
+        key: key.clone(),
+    });
+    preconditions.push(StoreJsonPrecondition::Absent {
+        namespace: MEMORY_MUTATION_RECEIPT_NAMESPACE.to_string(),
+        key: key.clone(),
+    });
+    batch.mutations.push(StoreMutation::PutJson {
+        namespace: MEMORY_MUTATION_AUDIT_NAMESPACE.to_string(),
+        key: key.clone(),
+        value: serde_json::to_value(audit)
+            .map_err(|error| Error::config("memory_mutation_audit_encode", error.to_string()))?,
+        event_kind: MemoryStoreEventKind::MemoryControl,
+        plane: MEMORY_MUTATION_AUDIT_NAMESPACE.to_string(),
+        record_key: key.clone(),
+    });
+    batch.mutations.push(StoreMutation::PutJson {
+        namespace: MEMORY_MUTATION_RECEIPT_NAMESPACE.to_string(),
+        key: key.clone(),
+        value: serde_json::to_value(receipt)
+            .map_err(|error| Error::config("memory_mutation_receipt_encode", error.to_string()))?,
+        event_kind: MemoryStoreEventKind::MemoryControl,
+        plane: MEMORY_MUTATION_RECEIPT_NAMESPACE.to_string(),
+        record_key: key,
+    });
+    Ok(())
+}
+
+fn validate_mutation_operation_closure(
+    batch: &StoreMutationBatch,
+    preconditions: &[StoreJsonPrecondition],
+    operation: Option<&StoreMutationOperationPlan>,
+) -> Result<()> {
+    let receipt_values = batch
+        .mutations
+        .iter()
+        .filter_map(|mutation| match mutation {
+            StoreMutation::PutJson {
+                namespace, value, ..
+            } if namespace == MEMORY_MUTATION_RECEIPT_NAMESPACE => Some(value),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let audit_values = batch
+        .mutations
+        .iter()
+        .filter_map(|mutation| match mutation {
+            StoreMutation::PutJson {
+                namespace, value, ..
+            } if namespace == MEMORY_MUTATION_AUDIT_NAMESPACE => Some(value),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(operation) = operation else {
+        if receipt_values.is_empty() && audit_values.is_empty() {
+            return Ok(());
+        }
+        return Err(Error::config(
+            "memory_mutation_operation_authority",
+            "mutation receipt records require Store operation authority",
+        ));
+    };
+    if receipt_values.len() != 1 || audit_values.len() != 1 {
+        return Err(Error::config(
+            "memory_mutation_operation_closure",
+            "one operation transaction requires exactly one receipt and one audit",
+        ));
+    }
+    let receipt = serde_json::from_value::<MemoryMutationReceipt>((*receipt_values[0]).clone())
+        .map_err(|error| Error::config("memory_mutation_operation_closure", error.to_string()))?;
+    let audit = serde_json::from_value::<MemoryMutationAuditRecord>((*audit_values[0]).clone())
+        .map_err(|error| Error::config("memory_mutation_operation_closure", error.to_string()))?;
+    let key = operation.identity.storage_key();
+    let absent = |namespace: &str| {
+        preconditions.iter().any(|precondition| {
+            matches!(precondition,
+                StoreJsonPrecondition::Absent { namespace: actual_namespace, key: actual_key }
+                    if actual_namespace == namespace && actual_key == &key)
+        })
+    };
+    if !absent(MEMORY_MUTATION_RECEIPT_NAMESPACE)
+        || !absent(MEMORY_MUTATION_AUDIT_NAMESPACE)
+        || receipt.identity != operation.identity
+        || receipt.intent_digest != operation.intent_digest
+        || receipt.transaction_id != operation.transaction_id
+        || receipt.effect != operation.effect
+        || receipt.changed_count != operation.changed_count
+        || receipt.audit_record_id != key
+        || audit.audit_record_id != receipt.audit_record_id
+        || audit.identity != receipt.identity
+        || audit.intent_digest != receipt.intent_digest
+        || audit.effect_plan_digest != receipt.effect_plan_digest
+        || audit.transaction_id != receipt.transaction_id
+        || audit.effect != receipt.effect
+        || audit.changed_count != receipt.changed_count
+        || audit.actor_subject_id != operation.actor_subject_id
+        || audit.committed_at_unix_secs != receipt.committed_at_unix_secs
+    {
+        return Err(Error::config(
+            "memory_mutation_operation_closure",
+            "mutation receipt and authoritative audit are not an exact operation binding",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_protected_json_mutation_preconditions(
     batch: &StoreMutationBatch,
     preconditions: &[StoreJsonPrecondition],
@@ -2827,6 +3292,8 @@ fn validate_protected_json_mutation_preconditions(
         RECALL_OWNER_SCOPE_BINDING_NAMESPACE,
         POST_TURN_GOVERNANCE_JOB_NAMESPACE,
         POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
+        MEMORY_MUTATION_RECEIPT_NAMESPACE,
+        MEMORY_MUTATION_AUDIT_NAMESPACE,
     ];
     let mut by_address = BTreeMap::<(String, String), &StoreJsonPrecondition>::new();
     for precondition in preconditions {
@@ -3779,6 +4246,7 @@ pub(crate) fn validate_governed_transaction_post_image(
     governed_runtime_skill_owner_limit: Option<usize>,
     operation_capacity: StoreCapacityBudget,
 ) -> Result<()> {
+    validate_confirmation_evidence_post_image(batch, before, after)?;
     validate_evidence_source_ref_post_image(
         batch,
         before,
@@ -3795,6 +4263,78 @@ pub(crate) fn validate_governed_transaction_post_image(
     validate_facet_post_image(batch, before, after)?;
     validate_graph_post_image(batch, before, after, graph_repair_authorized)?;
     validate_control_post_image(batch, before, after)
+}
+
+fn validate_confirmation_evidence_post_image(
+    batch: &StoreMutationBatch,
+    before: &BackendTransactionState,
+    after: &BackendTransactionState,
+) -> Result<()> {
+    let material_namespace = crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE;
+    if !batch_mutates_namespace(batch, material_namespace) {
+        return Ok(());
+    }
+    let materials = batch_json_keys(batch, material_namespace)
+        .into_iter()
+        .map(|key| {
+            governed_image::<LongTermMemoryVersionMaterial>(material_namespace, &key, before, after)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let revisions = batch_json_keys(batch, LONG_TERM_CONTROL_REVISION_NAMESPACE)
+        .into_iter()
+        .map(|key| {
+            governed_image::<LongTermMemoryControlRevision>(
+                LONG_TERM_CONTROL_REVISION_NAMESPACE,
+                &key,
+                before,
+                after,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for material in materials.iter().filter_map(|image| image.after.as_ref()) {
+        let Some(evidence) = material.governed_content.confirmation_evidence.as_ref() else {
+            continue;
+        };
+        let exact_correction = revisions
+            .iter()
+            .filter_map(|image| image.after.as_ref())
+            .filter(|revision| {
+                let correction = &evidence.correction;
+                revision.operation == bm_core::memory::LongTermControlOperation::Correct
+                    && revision.memory_space_id == correction.memory_space_id
+                    && revision.actor_subject_id.as_deref()
+                        == Some(correction.actor_subject_id.as_str())
+                    && revision.transition.predecessor == correction.predecessor
+                    && revision.transition.successor.as_ref() == Some(&correction.successor)
+                    && revision.created_at == evidence.confirmed_at
+                    && revision.revision_id == correction.control_revision_id
+                    && revision.successor_material_digest.as_deref()
+                        == Some(material.content_digest.as_str())
+            })
+            .count()
+            == 1;
+        let carried_by_non_correction_control = revisions
+            .iter()
+            .filter_map(|image| image.after.as_ref())
+            .any(|revision| {
+                let correction = &evidence.correction;
+                revision.operation != bm_core::memory::LongTermControlOperation::Correct
+                    && revision.transition.successor.as_ref()
+                        == Some(&material.owner_revision_ref())
+                    && revision.successor_material_digest.as_deref()
+                        == Some(material.content_digest.as_str())
+                    && correction.successor.owner_ref == revision.transition.predecessor.owner_ref
+                    && correction.successor.owner_revision
+                        <= revision.transition.predecessor.owner_revision
+            });
+        if !exact_correction && !carried_by_non_correction_control {
+            return Err(Error::config(
+                "memory_write_transaction_confirmation_evidence_invalid",
+                "confirmation evidence must be carried unchanged or bound to one same-batch Correct revision",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_long_term_version_root_post_image(
@@ -6502,6 +7042,8 @@ fn validate_typed_json_mutation(
             | StoreJsonDecoderKind::LongTermControlTombstone
             | StoreJsonDecoderKind::RuntimeSkillOwnerRecord
             | StoreJsonDecoderKind::RuntimeSkillScopeManifest
+            | StoreJsonDecoderKind::MemoryMutationReceipt
+            | StoreJsonDecoderKind::MemoryMutationAudit
     ) {
         return Ok(());
     }
@@ -6522,6 +7064,16 @@ fn validate_typed_json_mutation(
         Some(StoreJsonPrecondition::Exact { value, .. }) => Some(value),
         _ => None,
     };
+    if matches!(
+        decoder,
+        StoreJsonDecoderKind::MemoryMutationReceipt | StoreJsonDecoderKind::MemoryMutationAudit
+    ) && (deleting || !matches!(precondition, Some(StoreJsonPrecondition::Absent { .. })))
+    {
+        return Err(Error::config(
+            "memory_write_transaction_typed_precondition_invalid",
+            "mutation receipt and audit records are append-only and require Absent preconditions",
+        ));
+    }
     if deleting && prior_value.is_none() {
         return Err(Error::config(
             "memory_write_transaction_typed_precondition_missing",
@@ -8392,6 +8944,7 @@ impl ConversationTranscriptStore for StorePlatform {
             None,
             None,
             Some(derived.created_at),
+            None,
         )?;
         Ok(())
     }
@@ -10707,6 +11260,26 @@ mod transaction_error_contract_tests {
     #[cfg(feature = "nonproduction-replay-harness")]
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    struct SyntheticStoreDir(std::path::PathBuf);
+
+    impl SyntheticStoreDir {
+        fn create(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "bm-mutation-operation-{label}-{}-{}",
+                std::process::id(),
+                current_unix_nanos()
+            ));
+            std::fs::create_dir_all(&path).expect("create synthetic store directory");
+            Self(path)
+        }
+    }
+
+    impl Drop for SyntheticStoreDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     fn native_production_profile() -> ProfileId {
         #[cfg(target_os = "macos")]
         return ProfileId::DesktopMacosEmbeddedSdk;
@@ -10718,6 +11291,7 @@ mod transaction_error_contract_tests {
         compile_error!("store preparation tests require a supported host target");
     }
 
+    #[cfg(feature = "nonproduction-replay-harness")]
     #[test]
     fn direct_and_transaction_lifecycle_materialization_share_typed_completion_fields() {
         let profile = ProfileId::native_dev_full().expect("native dev-full profile");
@@ -10812,6 +11386,585 @@ mod transaction_error_contract_tests {
             let mapped = memory_write_transaction_commit_error(Error::config(stage, "proof"));
             assert_eq!(mapped.stage(), stage);
         }
+    }
+
+    #[test]
+    fn mutation_operation_commits_effect_receipt_and_audit_in_one_store_transaction() {
+        let profile = native_production_profile();
+        let config = StoreBackendConfig::in_memory(profile)
+            .expect("in-memory config")
+            .with_fsync(false);
+        let platform = StorePlatform::open(config).expect("store platform");
+        let identity = MemoryMutationOperationIdentity::new(
+            "operation-store-atomic",
+            "memory-space-main",
+            "subject-main",
+            "actor-main",
+            MemoryMutationOperationKind::Write,
+        )
+        .unwrap();
+        let operation = StoreMutationOperationPlan::new(
+            identity.clone(),
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            MemoryMutationEffect::Changed,
+            1,
+            "actor-main",
+            1_800_000_000,
+        )
+        .unwrap();
+        let effect_key = "order";
+        let batch = StoreMutationBatch {
+            transaction_id: operation.transaction_id().to_string(),
+            operation: "write.procedural".to_string(),
+            scope: StoreEventScope::new("agent", "owner", "local", "chat")
+                .with_memory_space(identity.memory_space_id())
+                .with_subject(identity.mounted_subject_id()),
+            mutations: vec![StoreMutation::PutJson {
+                namespace: "skill_meta".to_string(),
+                key: effect_key.to_string(),
+                value: serde_json::json!(["operation-effect"]),
+                event_kind: MemoryStoreEventKind::MemoryWrite,
+                plane: "skill_meta".to_string(),
+                record_key: effect_key.to_string(),
+            }],
+        };
+        let authority = platform.runtime_budget_authority();
+        let lease = crate::RuntimeBudgetLease::issue(Arc::clone(&authority)).unwrap();
+        let replay_batch = batch.clone();
+        let replay_operation = operation.clone();
+        let first = lease
+            .execute(&authority, || {
+                platform.commit_memory_mutation_operation_with_runtime_budget(
+                    batch,
+                    &[],
+                    operation,
+                    lease.report(),
+                )
+            })
+            .expect("atomic mutation operation");
+        let StoreMutationOperationOutcome::Committed { receipt, report } = first else {
+            panic!("first operation must commit")
+        };
+
+        assert!(report.committed);
+        assert_eq!(receipt.transaction_id, report.transaction_id);
+        assert_eq!(
+            platform
+                .json_get::<serde_json::Value>("skill_meta", effect_key)
+                .unwrap(),
+            Some(serde_json::json!(["operation-effect"]))
+        );
+        assert_eq!(
+            platform
+                .json_get::<MemoryMutationReceipt>(
+                    MEMORY_MUTATION_RECEIPT_NAMESPACE,
+                    &identity.storage_key(),
+                )
+                .unwrap(),
+            Some(receipt.clone())
+        );
+        let audit = platform
+            .json_get::<MemoryMutationAuditRecord>(
+                MEMORY_MUTATION_AUDIT_NAMESPACE,
+                &receipt.audit_record_id,
+            )
+            .unwrap()
+            .expect("authoritative audit");
+        assert_eq!(audit.effect_plan_digest, receipt.effect_plan_digest);
+        assert_eq!(audit.transaction_id, receipt.transaction_id);
+        let committed_events = platform.read_events().expect("operation events");
+        assert_eq!(
+            committed_events
+                .iter()
+                .filter(|event| event.kind == MemoryStoreEventKind::MemoryWrite)
+                .count(),
+            1,
+            "only the business effect is a metric-bearing memory write"
+        );
+        assert_eq!(
+            committed_events
+                .iter()
+                .filter(|event| event.kind == MemoryStoreEventKind::MemoryControl)
+                .count(),
+            2,
+            "receipt and authoritative audit are governance closure events"
+        );
+
+        let replay_authority = platform.runtime_budget_authority();
+        let replay_lease = crate::RuntimeBudgetLease::issue(Arc::clone(&replay_authority)).unwrap();
+        let replay = replay_lease
+            .execute(&replay_authority, || {
+                platform.commit_memory_mutation_operation_with_runtime_budget(
+                    replay_batch,
+                    &[],
+                    replay_operation,
+                    replay_lease.report(),
+                )
+            })
+            .expect("same operation replay");
+        let StoreMutationOperationOutcome::Replayed {
+            receipt: replay_receipt,
+        } = replay
+        else {
+            panic!("same operation must replay")
+        };
+        assert_eq!(replay_receipt, receipt);
+
+        let conflicting_operation = StoreMutationOperationPlan::new(
+            identity.clone(),
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            MemoryMutationEffect::Changed,
+            1,
+            "actor-main",
+            1_800_000_001,
+        )
+        .unwrap();
+        let conflicting_batch = StoreMutationBatch {
+            transaction_id: conflicting_operation.transaction_id().to_string(),
+            operation: "write.procedural".to_string(),
+            scope: StoreEventScope::new("agent", "owner", "local", "chat")
+                .with_memory_space(identity.memory_space_id())
+                .with_subject(identity.mounted_subject_id()),
+            mutations: Vec::new(),
+        };
+        let conflict_authority = platform.runtime_budget_authority();
+        let conflict_lease =
+            crate::RuntimeBudgetLease::issue(Arc::clone(&conflict_authority)).unwrap();
+        let conflict = conflict_lease
+            .execute(&conflict_authority, || {
+                platform.commit_memory_mutation_operation_with_runtime_budget(
+                    conflicting_batch,
+                    &[],
+                    conflicting_operation,
+                    conflict_lease.report(),
+                )
+            })
+            .expect_err("same scoped identity with a different intent must conflict");
+        assert_eq!(conflict.class(), Some(bm_core::ErrorClass::Conflict));
+    }
+
+    #[cfg(feature = "nonproduction-replay-harness")]
+    #[test]
+    fn mutation_operation_pair_read_rejects_a_tampered_authoritative_audit() {
+        let profile = native_production_profile();
+        let platform = StorePlatform::open(
+            StoreBackendConfig::in_memory(profile)
+                .expect("in-memory config")
+                .with_fsync(false),
+        )
+        .expect("store platform");
+        let identity = MemoryMutationOperationIdentity::new(
+            "operation-tampered-audit",
+            "memory-space-main",
+            "subject-main",
+            "actor-main",
+            MemoryMutationOperationKind::Write,
+        )
+        .expect("identity");
+        let operation = StoreMutationOperationPlan::new(
+            identity.clone(),
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            MemoryMutationEffect::Changed,
+            1,
+            "actor-main",
+            1_800_000_000,
+        )
+        .expect("operation");
+        let batch = StoreMutationBatch {
+            transaction_id: operation.transaction_id().to_string(),
+            operation: "write.procedural".to_string(),
+            scope: StoreEventScope::new("agent", "owner", "local", "chat")
+                .with_memory_space(identity.memory_space_id())
+                .with_subject(identity.mounted_subject_id()),
+            mutations: vec![StoreMutation::PutJson {
+                namespace: "skill_meta".to_string(),
+                key: "tampered-audit-effect".to_string(),
+                value: serde_json::json!(["committed"]),
+                event_kind: MemoryStoreEventKind::MemoryWrite,
+                plane: "skill_meta".to_string(),
+                record_key: "tampered-audit-effect".to_string(),
+            }],
+        };
+        let authority = platform.runtime_budget_authority();
+        let lease = crate::RuntimeBudgetLease::issue(Arc::clone(&authority)).expect("lease");
+        lease
+            .execute(&authority, || {
+                platform.commit_memory_mutation_operation_with_runtime_budget(
+                    batch,
+                    &[],
+                    operation.clone(),
+                    lease.report(),
+                )
+            })
+            .expect("commit operation");
+
+        let key = identity.storage_key();
+        let mut audit = platform
+            .json_get::<serde_json::Value>(MEMORY_MUTATION_AUDIT_NAMESPACE, &key)
+            .expect("read audit")
+            .expect("audit document");
+        audit["actor_subject_id"] = serde_json::json!("actor-tampered");
+        platform
+            .tamper_json_document_for_nonproduction_harness(
+                MEMORY_MUTATION_AUDIT_NAMESPACE,
+                &key,
+                audit,
+            )
+            .expect("tamper authoritative audit");
+
+        let error = platform
+            .load_committed_mutation_operation(&operation)
+            .expect_err("tampered authoritative audit must fail closed");
+        assert_eq!(error.stage(), "memory_write_transaction_repair_required");
+        assert!(error
+            .to_string()
+            .contains("invalid authoritative mutation audit"));
+    }
+
+    #[cfg(feature = "nonproduction-replay-harness")]
+    #[test]
+    fn mutation_receipts_are_pinned_and_capacity_exhaustion_fails_closed_without_eviction() {
+        let profile = native_production_profile();
+        let mut budget = StorePlatform::open(
+            StoreBackendConfig::in_memory(profile).expect("base in-memory config"),
+        )
+        .expect("base in-memory store")
+        .capacity()
+        .into_runtime_budget();
+        budget.event_log_max_items = 4;
+        let config = StoreBackendConfig::in_memory(profile)
+            .expect("in-memory config")
+            .with_fsync(false)
+            .try_with_nonproduction_store_budget_limit(budget)
+            .expect("exact operation receipt capacity contraction");
+        let platform = StorePlatform::open(config).expect("capacity-limited store platform");
+
+        let commit = |operation_id: &str, effect_key: &str, intent_byte: char| {
+            let identity = MemoryMutationOperationIdentity::new(
+                operation_id,
+                "memory-space-main",
+                "subject-main",
+                "actor-main",
+                MemoryMutationOperationKind::Write,
+            )?;
+            let intent_digest = format!("sha256:{}", intent_byte.to_string().repeat(64));
+            let operation = StoreMutationOperationPlan::new(
+                identity,
+                intent_digest,
+                MemoryMutationEffect::Changed,
+                1,
+                "actor-main",
+                1_800_000_000,
+            )?;
+            let batch = StoreMutationBatch {
+                transaction_id: operation.transaction_id().to_string(),
+                operation: "write.procedural".to_string(),
+                scope: StoreEventScope::new("agent", "owner", "local", "chat")
+                    .with_memory_space("memory-space-main")
+                    .with_subject("subject-main"),
+                mutations: vec![StoreMutation::PutJson {
+                    namespace: "skill_meta".to_string(),
+                    key: effect_key.to_string(),
+                    value: serde_json::json!([effect_key]),
+                    event_kind: MemoryStoreEventKind::MemoryWrite,
+                    plane: "skill_meta".to_string(),
+                    record_key: effect_key.to_string(),
+                }],
+            };
+            let authority = platform.runtime_budget_authority();
+            let lease = crate::RuntimeBudgetLease::issue(Arc::clone(&authority))?;
+            lease.execute(&authority, || {
+                platform.commit_memory_mutation_operation_with_runtime_budget(
+                    batch,
+                    &[],
+                    operation,
+                    lease.report(),
+                )
+            })
+        };
+
+        let first = commit("operation-capacity-first", "order", 'a')
+            .expect("first operation exactly fills durable receipt capacity");
+        let StoreMutationOperationOutcome::Committed { receipt, .. } = first else {
+            panic!("first capacity operation must commit")
+        };
+        let before = platform
+            .export_store_snapshot()
+            .expect("snapshot before overflow");
+
+        let error = commit("operation-capacity-second", "disabled", 'b')
+            .expect_err("second operation must fail before evicting the first receipt");
+        assert_eq!(error.stage(), "memory_write_transaction_preflight_failed");
+        assert!(
+            error.to_string().contains("store_budget_exceeded"),
+            "{error}"
+        );
+        let after = platform
+            .export_store_snapshot()
+            .expect("snapshot after overflow");
+        assert_eq!(after.state_fingerprint(), before.state_fingerprint());
+        assert_eq!(after.event_fingerprint(), before.event_fingerprint());
+        assert_eq!(
+            platform
+                .json_get::<MemoryMutationReceipt>(
+                    MEMORY_MUTATION_RECEIPT_NAMESPACE,
+                    &receipt.identity.storage_key(),
+                )
+                .expect("read pinned receipt"),
+            Some(receipt)
+        );
+        assert_eq!(
+            platform
+                .json_get::<serde_json::Value>("skill_meta", "disabled")
+                .expect("read rejected effect"),
+            None
+        );
+    }
+
+    #[test]
+    fn file_store_reopen_replays_persisted_mutation_operation_receipt() {
+        let store_dir = SyntheticStoreDir::create("file-reopen");
+        let config = StoreBackendConfig::file(&store_dir.0, native_production_profile())
+            .unwrap()
+            .with_fsync(false);
+        let identity = MemoryMutationOperationIdentity::new(
+            "operation-file-reopen",
+            "memory-space-main",
+            "subject-main",
+            "actor-main",
+            MemoryMutationOperationKind::Write,
+        )
+        .unwrap();
+        let intent_digest =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let now = current_unix_secs();
+
+        let committed_receipt = {
+            let platform = StorePlatform::open(config.clone()).expect("first file store open");
+            let operation = StoreMutationOperationPlan::new(
+                identity.clone(),
+                intent_digest,
+                MemoryMutationEffect::Changed,
+                1,
+                "actor-main",
+                now,
+            )
+            .unwrap();
+            let batch = StoreMutationBatch {
+                transaction_id: operation.transaction_id().to_string(),
+                operation: "write.procedural".to_string(),
+                scope: StoreEventScope::new("agent", "owner", "local", "chat")
+                    .with_memory_space(identity.memory_space_id())
+                    .with_subject(identity.mounted_subject_id()),
+                mutations: vec![StoreMutation::PutJson {
+                    namespace: "skill_meta".to_string(),
+                    key: "order".to_string(),
+                    value: serde_json::json!(["persisted-operation-effect"]),
+                    event_kind: MemoryStoreEventKind::MemoryWrite,
+                    plane: "skill_meta".to_string(),
+                    record_key: "order".to_string(),
+                }],
+            };
+            let authority = platform.runtime_budget_authority();
+            let lease = crate::RuntimeBudgetLease::issue(Arc::clone(&authority)).unwrap();
+            let outcome = lease
+                .execute(&authority, || {
+                    platform.commit_memory_mutation_operation_with_runtime_budget(
+                        batch,
+                        &[],
+                        operation,
+                        lease.report(),
+                    )
+                })
+                .expect("commit file operation");
+            let StoreMutationOperationOutcome::Committed { receipt, .. } = outcome else {
+                panic!("first file operation must commit")
+            };
+            receipt
+        };
+
+        let reopened = StorePlatform::open(config).expect("reopen file store");
+        let replay_operation = StoreMutationOperationPlan::new(
+            identity.clone(),
+            intent_digest,
+            MemoryMutationEffect::Changed,
+            1,
+            "actor-main",
+            now.saturating_add(1),
+        )
+        .unwrap();
+        let replay_batch = StoreMutationBatch {
+            transaction_id: replay_operation.transaction_id().to_string(),
+            operation: "write.procedural".to_string(),
+            scope: StoreEventScope::new("agent", "owner", "local", "chat")
+                .with_memory_space(identity.memory_space_id())
+                .with_subject(identity.mounted_subject_id()),
+            mutations: Vec::new(),
+        };
+        let authority = reopened.runtime_budget_authority();
+        let lease = crate::RuntimeBudgetLease::issue(Arc::clone(&authority)).unwrap();
+        let replay = lease
+            .execute(&authority, || {
+                reopened.commit_memory_mutation_operation_with_runtime_budget(
+                    replay_batch,
+                    &[],
+                    replay_operation,
+                    lease.report(),
+                )
+            })
+            .expect("replay reopened file operation");
+        let StoreMutationOperationOutcome::Replayed { receipt } = replay else {
+            panic!("reopened file operation must replay")
+        };
+        assert_eq!(receipt, committed_receipt);
+        let persisted_operation_documents = [
+            MEMORY_MUTATION_RECEIPT_NAMESPACE,
+            MEMORY_MUTATION_AUDIT_NAMESPACE,
+        ]
+        .into_iter()
+        .flat_map(|namespace| {
+            reopened
+                .read_json_namespace(namespace)
+                .expect("read persisted operation namespace")
+        })
+        .collect::<Vec<_>>();
+        assert!(
+            !serde_json::to_string(&persisted_operation_documents)
+                .expect("encode persisted operation documents")
+                .contains("operation-file-reopen"),
+            "durable operation records must not persist the raw caller operation id"
+        );
+        assert_eq!(
+            reopened
+                .json_get::<serde_json::Value>("skill_meta", "order")
+                .unwrap(),
+            Some(serde_json::json!(["persisted-operation-effect"]))
+        );
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    #[test]
+    fn sqlite_store_reopen_replays_persisted_mutation_operation_receipt() {
+        let store_dir = SyntheticStoreDir::create("sqlite-reopen");
+        let config = StoreBackendConfig::sqlite(
+            store_dir.0.join("memory.sqlite"),
+            native_production_profile(),
+        )
+        .unwrap()
+        .with_fsync(false);
+        let identity = MemoryMutationOperationIdentity::new(
+            "operation-sqlite-reopen",
+            "memory-space-main",
+            "subject-main",
+            "actor-main",
+            MemoryMutationOperationKind::Write,
+        )
+        .unwrap();
+        let intent_digest =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let now = current_unix_secs();
+
+        let committed_receipt = {
+            let platform = StorePlatform::open(config.clone()).expect("first sqlite store open");
+            let operation = StoreMutationOperationPlan::new(
+                identity.clone(),
+                intent_digest,
+                MemoryMutationEffect::Changed,
+                1,
+                "actor-main",
+                now,
+            )
+            .unwrap();
+            let batch = StoreMutationBatch {
+                transaction_id: operation.transaction_id().to_string(),
+                operation: "write.procedural".to_string(),
+                scope: StoreEventScope::new("agent", "owner", "local", "chat")
+                    .with_memory_space(identity.memory_space_id())
+                    .with_subject(identity.mounted_subject_id()),
+                mutations: vec![StoreMutation::PutJson {
+                    namespace: "skill_meta".to_string(),
+                    key: "disabled".to_string(),
+                    value: serde_json::json!(["persisted-sqlite-operation-effect"]),
+                    event_kind: MemoryStoreEventKind::MemoryWrite,
+                    plane: "skill_meta".to_string(),
+                    record_key: "disabled".to_string(),
+                }],
+            };
+            let authority = platform.runtime_budget_authority();
+            let lease = crate::RuntimeBudgetLease::issue(Arc::clone(&authority)).unwrap();
+            let outcome = lease
+                .execute(&authority, || {
+                    platform.commit_memory_mutation_operation_with_runtime_budget(
+                        batch,
+                        &[],
+                        operation,
+                        lease.report(),
+                    )
+                })
+                .expect("commit sqlite operation");
+            let StoreMutationOperationOutcome::Committed { receipt, .. } = outcome else {
+                panic!("first sqlite operation must commit")
+            };
+            receipt
+        };
+
+        let reopened = StorePlatform::open(config).expect("reopen sqlite store");
+        let replay_operation = StoreMutationOperationPlan::new(
+            identity.clone(),
+            intent_digest,
+            MemoryMutationEffect::Changed,
+            1,
+            "actor-main",
+            now.saturating_add(1),
+        )
+        .unwrap();
+        let replay_batch = StoreMutationBatch {
+            transaction_id: replay_operation.transaction_id().to_string(),
+            operation: "write.procedural".to_string(),
+            scope: StoreEventScope::new("agent", "owner", "local", "chat")
+                .with_memory_space(identity.memory_space_id())
+                .with_subject(identity.mounted_subject_id()),
+            mutations: Vec::new(),
+        };
+        let authority = reopened.runtime_budget_authority();
+        let lease = crate::RuntimeBudgetLease::issue(Arc::clone(&authority)).unwrap();
+        let replay = lease
+            .execute(&authority, || {
+                reopened.commit_memory_mutation_operation_with_runtime_budget(
+                    replay_batch,
+                    &[],
+                    replay_operation,
+                    lease.report(),
+                )
+            })
+            .expect("replay reopened sqlite operation");
+        let StoreMutationOperationOutcome::Replayed { receipt } = replay else {
+            panic!("reopened sqlite operation must replay")
+        };
+        assert_eq!(receipt, committed_receipt);
+        let persisted_operation_documents = [
+            MEMORY_MUTATION_RECEIPT_NAMESPACE,
+            MEMORY_MUTATION_AUDIT_NAMESPACE,
+        ]
+        .into_iter()
+        .flat_map(|namespace| {
+            reopened
+                .read_json_namespace(namespace)
+                .expect("read persisted operation namespace")
+        })
+        .collect::<Vec<_>>();
+        assert!(
+            !serde_json::to_string(&persisted_operation_documents)
+                .expect("encode persisted operation documents")
+                .contains("operation-sqlite-reopen"),
+            "durable operation records must not persist the raw caller operation id"
+        );
+        assert_eq!(
+            reopened
+                .json_get::<serde_json::Value>("skill_meta", "disabled")
+                .unwrap(),
+            Some(serde_json::json!(["persisted-sqlite-operation-effect"]))
+        );
     }
 
     #[test]

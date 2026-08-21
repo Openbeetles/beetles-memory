@@ -1012,6 +1012,7 @@ fn run_memory_harness_l2_production_replay() -> MemoryHarnessL2ReplayResult {
             extraction_state_store: &stores.extraction_state,
             turn_ledger_store: &stores.turn_ledger,
             skill_storage: stores.skills.as_ref(),
+            subject_visibility: crate::memory::MemorySubjectVisibilityPolicy::AllSubjects,
             draft_admission_policy: None,
         },
         CHAT_ID,
@@ -1139,6 +1140,8 @@ fn factual_draft(
         source_chat_id: Some(CHAT_ID.to_string()),
         source_type: Some(LongTermMemorySourceType::Conversation),
         source_scope: Some(LongTermMemorySourceScope::User),
+        subject_visibility: crate::memory::MemorySubjectVisibilityPolicy::AllSubjects,
+        provenance: crate::memory::LongTermMemoryProvenance::default(),
         confidence: Some(confidence),
         freshness: Some(LongTermMemoryFreshness::Stable),
         stale_hint: Some(LongTermMemoryStaleHint::None),
@@ -1146,7 +1149,6 @@ fn factual_draft(
         canonical_entities: Vec::new(),
         evidence_count: None,
         observed_at: Some(observed_at),
-        last_confirmed_at: Some(observed_at),
         source_revision: None,
     }
 }

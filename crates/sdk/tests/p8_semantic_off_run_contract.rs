@@ -17,14 +17,15 @@ use bm_sdk::nonproduction_replay_harness::{
 };
 use bm_sdk::{
     GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef, LongTermInvalidationContract,
-    LongTermInvalidationReasonCode, LongTermMemoryDraft, LongTermMemoryKind, LongTermMemoryQuery,
+    LongTermInvalidationReasonCode, LongTermMemoryDraft, LongTermMemoryKind,
+    LongTermMemoryProvenance, LongTermMemoryQuery, MemoryEvidenceAuthority,
     MemoryLongTermControlView, MemoryLongTermListRequest, MemoryLongTermMutation,
     MemoryLongTermMutationRequest, MemoryLongTermSelector, MemoryLongTermTarget,
     MemoryPrivacyClass, MemoryRecallRequest, MemoryRecallTemporalOperation, MemoryStoreHandle,
-    MemoryWriteRequest, P8SameClosureSafeCounterfactualV1, P8SemanticNegativeOnlyProofKindV2,
-    P8SemanticOffRunExecutionMode, P8SemanticOffRunFeatureState, P8SemanticOffRunKey,
-    P8SemanticOffRunRequest, P8SemanticSafeCandidateKind, ParsedLongTermMemoryExtraction,
-    RuntimeLifecycleModeInput, StoreBackendConfig,
+    MemorySubjectVisibilityPolicy, MemoryWriteRequest, P8SameClosureSafeCounterfactualV1,
+    P8SemanticNegativeOnlyProofKindV2, P8SemanticOffRunExecutionMode, P8SemanticOffRunFeatureState,
+    P8SemanticOffRunKey, P8SemanticOffRunRequest, P8SemanticSafeCandidateKind,
+    ParsedLongTermMemoryExtraction, RuntimeLifecycleModeInput, StoreBackendConfig,
 };
 #[cfg(feature = "sqlite-store")]
 use bm_sdk::{
@@ -70,6 +71,10 @@ fn seed_record(
                     source_chat_id: Some("chat-1".into()),
                     source_type: None,
                     source_scope: None,
+                    subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                    provenance: LongTermMemoryProvenance::new(
+                        MemoryEvidenceAuthority::ArchiveEvidence,
+                    ),
                     confidence: None,
                     freshness: None,
                     stale_hint: None,
@@ -77,7 +82,6 @@ fn seed_record(
                     canonical_entities: Vec::new(),
                     evidence_count: Some(1),
                     observed_at: Some(1_800_000_000),
-                    last_confirmed_at: Some(1_800_000_000),
                     source_revision: Some(1),
                 }],
                 deletes: Vec::new(),
@@ -223,6 +227,8 @@ fn supersede_seeded_record(runtime: &bm_sdk::MemoryRuntime) -> bm_sdk::LongTermM
                     source_chat_id: predecessor.source_chat_id,
                     source_type: Some(predecessor.source_type),
                     source_scope: Some(predecessor.source_scope),
+                    subject_visibility: predecessor.subject_visibility,
+                    provenance: predecessor.provenance,
                     confidence: Some(predecessor.confidence),
                     freshness: Some(predecessor.freshness),
                     stale_hint: None,
@@ -230,7 +236,6 @@ fn supersede_seeded_record(runtime: &bm_sdk::MemoryRuntime) -> bm_sdk::LongTermM
                     canonical_entities: predecessor.canonical_entities,
                     evidence_count: Some(predecessor.evidence_count),
                     observed_at: Some(predecessor.observed_at.saturating_add(1)),
-                    last_confirmed_at: Some(predecessor.last_confirmed_at.saturating_add(1)),
                     source_revision: Some(
                         predecessor
                             .source_revision

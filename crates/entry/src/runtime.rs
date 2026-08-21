@@ -1178,24 +1178,19 @@ impl EntryRuntime {
                 lease.report().clone(),
             ));
         }
-        let idempotency_reservation = if command.operation().requires_idempotency() {
+        let _idempotency_reservation = if command.operation().requires_in_flight_reservation() {
             let fingerprint_material = command
                 .idempotency_fingerprint_material()
                 .map_err(|error| bm_sdk::Error::config("entry_idempotency", error.to_string()))?;
             let digest = format!("{:x}", Sha256::digest(&fingerprint_material));
-            match self.idempotency.reserve(context.idempotency_key(), &digest) {
+            let reservation_key = if context.idempotency_key().trim().is_empty() {
+                context.request_id().to_string()
+            } else {
+                context.idempotency_key().to_string()
+            };
+            match self.idempotency.reserve(&reservation_key, &digest) {
                 crate::idempotency::EntryIdempotencyReservationOutcome::Reserved(reservation) => {
                     Some(reservation)
-                }
-                crate::idempotency::EntryIdempotencyReservationOutcome::DuplicateCommitted => {
-                    return Ok(EntryResponse::from_adapter(
-                        AdapterResponse::Duplicated {
-                            request_id: context.request_id().to_string(),
-                            audit_id: context.audit_id().to_string(),
-                            idempotency_key: context.idempotency_key().to_string(),
-                        },
-                        lease.report().clone(),
-                    ));
                 }
                 crate::idempotency::EntryIdempotencyReservationOutcome::InFlight => {
                     return Ok(EntryResponse::from_adapter(
@@ -1215,9 +1210,8 @@ impl EntryRuntime {
                             request_id: context.request_id().to_string(),
                             audit_id: context.audit_id().to_string(),
                             error_key: AdapterErrorKey::Duplicated,
-                            reason:
-                                "idempotency key is reserved or committed for a different payload"
-                                    .to_string(),
+                            reason: "mutation operation id is reserved for a different in-flight payload"
+                                .to_string(),
                         },
                         lease.report().clone(),
                     ));
@@ -1244,7 +1238,7 @@ impl EntryRuntime {
         let context = context.into_parts();
         let auth = context.auth.into_adapter();
         let envelope = AdapterEnvelope {
-            protocol_version: bm_adapter::ExternalAiMemoryProtocolVersion::V1,
+            protocol_version: bm_adapter::ExternalAiMemoryProtocolVersion::V2,
             runtime_binding: bm_adapter::AdapterProtocolBinding::for_runtime(
                 &self.runtime,
                 &lease.inner,
@@ -1255,21 +1249,14 @@ impl EntryRuntime {
             operation: context.operation,
             source,
             auth,
-            idempotency_key: context.idempotency_key,
+            mutation_operation_id: (!context.idempotency_key.trim().is_empty())
+                .then_some(context.idempotency_key),
             audit_id: context.audit_id,
             payload: command,
         };
         let response =
             dispatch_adapter_command_with_services(&self.runtime, &lease.inner, envelope, services)
                 .map(|adapter| EntryResponse::from_adapter(adapter, lease.report().clone()))?;
-        if matches!(
-            &response.adapter,
-            AdapterResponse::Accepted { .. } | AdapterResponse::Queued { .. }
-        ) {
-            if let Some(reservation) = idempotency_reservation {
-                reservation.commit();
-            }
-        }
         self.console
             .record_adapter_response(operation, &response.adapter);
         self.governance_coordinator.wake();

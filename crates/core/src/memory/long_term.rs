@@ -18,8 +18,8 @@ use super::recall_anchor::{
     CanonicalRecallEvidenceFamilyGroup,
 };
 use super::{
-    memory_policy, shared_long_term_governance_policy, LongTermRecallPolicy, MemoryPrivacyClass,
-    MemoryProfile, SessionMessage, SubjectId,
+    memory_policy, shared_long_term_governance_policy, LongTermRecallPolicy,
+    MemoryEvidenceAuthority, MemoryPrivacyClass, MemoryProfile, SessionMessage, SubjectId,
 };
 
 /// 结构化长期记忆存储路径（相对状态根）。
@@ -634,6 +634,36 @@ impl LongTermMemoryEvidenceState {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemorySemanticJudgmentSource {
+    LlmGovernance,
+    RuntimeGate,
+}
+
+/// 当前 long-term owner revision 的来源分类。精确证据仍由 transcript/evidence owner 持有。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LongTermMemoryProvenance {
+    pub source_authority: MemoryEvidenceAuthority,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_judgment_source: Option<MemorySemanticJudgmentSource>,
+}
+
+impl LongTermMemoryProvenance {
+    pub const fn new(source_authority: MemoryEvidenceAuthority) -> Self {
+        Self {
+            source_authority,
+            semantic_judgment_source: None,
+        }
+    }
+}
+
+impl Default for LongTermMemoryProvenance {
+    fn default() -> Self {
+        Self::new(MemoryEvidenceAuthority::ModelInferred)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LongTermMemoryEvidenceSummary {
     pub state: LongTermMemoryEvidenceState,
@@ -644,7 +674,7 @@ pub struct LongTermMemoryEvidenceSummary {
     pub source_scope: LongTermMemorySourceScope,
     pub evidence_count: u32,
     pub supporting_citations: Vec<String>,
-    pub last_confirmed_at: u64,
+    pub last_confirmed_at: Option<u64>,
     pub last_used_at: u64,
     pub age_summary: Option<String>,
     pub summary: String,
@@ -673,6 +703,7 @@ pub struct LongTermMemoryEntry {
     #[serde(default)]
     pub source_scope: LongTermMemorySourceScope,
     pub subject_visibility: MemorySubjectVisibilityPolicy,
+    pub provenance: LongTermMemoryProvenance,
     #[serde(default)]
     pub confidence: LongTermMemoryConfidence,
     #[serde(default)]
@@ -689,8 +720,8 @@ pub struct LongTermMemoryEntry {
     pub updated_at: u64,
     #[serde(default)]
     pub observed_at: u64,
-    #[serde(default)]
-    pub last_confirmed_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_confirmed_at: Option<u64>,
     pub source_revision: Option<u64>,
     pub owner_revision: u64,
     #[serde(default)]
@@ -699,6 +730,7 @@ pub struct LongTermMemoryEntry {
 
 /// 待写入的长期记忆草稿。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct LongTermMemoryDraft {
     pub kind: LongTermMemoryKind,
     pub topic: String,
@@ -712,6 +744,8 @@ pub struct LongTermMemoryDraft {
     pub source_type: Option<LongTermMemorySourceType>,
     #[serde(default)]
     pub source_scope: Option<LongTermMemorySourceScope>,
+    pub subject_visibility: MemorySubjectVisibilityPolicy,
+    pub provenance: LongTermMemoryProvenance,
     #[serde(default)]
     pub confidence: Option<LongTermMemoryConfidence>,
     #[serde(default)]
@@ -725,8 +759,6 @@ pub struct LongTermMemoryDraft {
     pub evidence_count: Option<u32>,
     #[serde(default)]
     pub observed_at: Option<u64>,
-    #[serde(default)]
-    pub last_confirmed_at: Option<u64>,
     #[serde(default)]
     pub source_revision: Option<u64>,
 }
@@ -798,6 +830,9 @@ impl LongTermMemoryDraft {
         let supporting_citations = normalize_supporting_citations(&self.supporting_citations);
         let canonical_entities =
             normalize_canonical_entities(&self.canonical_entities, &supporting_citations)?;
+        if self.subject_visibility.validate_canonical().is_err() {
+            return Err(LongTermMemoryEntryRejection::InvalidDraft);
+        }
         Ok(Self {
             kind: self.kind.clone(),
             topic,
@@ -812,6 +847,8 @@ impl LongTermMemoryDraft {
                 .map(str::to_string),
             source_type: self.source_type,
             source_scope: self.source_scope,
+            subject_visibility: self.subject_visibility.clone(),
+            provenance: self.provenance,
             confidence: self.confidence,
             freshness: self.freshness,
             stale_hint: self.stale_hint,
@@ -819,7 +856,6 @@ impl LongTermMemoryDraft {
             canonical_entities,
             evidence_count: self.evidence_count.filter(|value| *value > 0),
             observed_at: self.observed_at.filter(|value| *value > 0),
-            last_confirmed_at: self.last_confirmed_at.filter(|value| *value > 0),
             source_revision: self.source_revision.filter(|value| *value > 0),
         })
     }
@@ -1200,6 +1236,7 @@ pub enum LongTermMemoryEntryRejection {
     EntityLabelConflict,
     SlotMismatch,
     PrivacyTransitionRequiresControl,
+    SubjectVisibilityTransitionRequiresControl,
     OlderSourceRevision,
     SourceRevisionConflict,
     OlderObservation,
@@ -1225,7 +1262,7 @@ impl LongTermMemoryEntryPlan {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LongTermMemoryOwnerMutation {
-    Correct(LongTermMemoryDraft),
+    Correct(Box<LongTermMemoryDraft>),
     MarkStale(LongTermMemoryStaleHint),
     ChangeScope {
         source_scope: LongTermMemorySourceScope,
@@ -1235,7 +1272,6 @@ pub enum LongTermMemoryOwnerMutation {
     CompactEvidenceMetadata {
         supporting_citations: Vec<String>,
         evidence_count: u32,
-        last_confirmed_at: u64,
     },
 }
 
@@ -1251,10 +1287,6 @@ fn long_term_memory_entry_from_normalized_draft(
         supporting_citations.len(),
         normalized.evidence_count.unwrap_or(0),
     );
-    let last_confirmed_at = normalized
-        .last_confirmed_at
-        .unwrap_or(observed_at)
-        .max(observed_at);
     LongTermMemoryEntry {
         id,
         kind: normalized.kind,
@@ -1265,7 +1297,8 @@ fn long_term_memory_entry_from_normalized_draft(
         source_chat_id: normalized.source_chat_id,
         source_type: meta.source_type,
         source_scope: meta.source_scope,
-        subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+        subject_visibility: normalized.subject_visibility,
+        provenance: normalized.provenance,
         confidence: meta.confidence,
         freshness: meta.freshness,
         stale_hint: meta.stale_hint,
@@ -1275,7 +1308,7 @@ fn long_term_memory_entry_from_normalized_draft(
         created_at: now_secs,
         updated_at: now_secs,
         observed_at,
-        last_confirmed_at,
+        last_confirmed_at: None,
         source_revision: normalized.source_revision,
         owner_revision: 1,
         last_used_at: 0,
@@ -1300,10 +1333,6 @@ fn source_payload_matches(
     now_secs: u64,
 ) -> bool {
     let observed_at = normalized.observed_at.unwrap_or(now_secs);
-    let last_confirmed_at = normalized
-        .last_confirmed_at
-        .unwrap_or(observed_at)
-        .max(observed_at);
     let evidence_count = effective_evidence_count(
         normalized.supporting_citations.len(),
         normalized.evidence_count.unwrap_or(0),
@@ -1316,6 +1345,8 @@ fn source_payload_matches(
         && existing.source_chat_id == *effective_source_chat_id
         && existing.source_type == meta.source_type
         && existing.source_scope == meta.source_scope
+        && existing.subject_visibility == normalized.subject_visibility
+        && existing.provenance == normalized.provenance
         && existing.confidence == meta.confidence
         && existing.freshness == meta.freshness
         && existing.stale_hint == meta.stale_hint
@@ -1323,7 +1354,6 @@ fn source_payload_matches(
         && existing.canonical_entities == normalized.canonical_entities
         && existing.evidence_count == evidence_count
         && existing.observed_at == observed_at
-        && existing.last_confirmed_at == last_confirmed_at
         && existing.source_revision == normalized.source_revision
 }
 
@@ -1374,6 +1404,11 @@ pub fn plan_long_term_memory_upsert(
             LongTermMemoryEntryRejection::PrivacyTransitionRequiresControl,
         );
     }
+    if existing.subject_visibility != normalized.subject_visibility {
+        return LongTermMemoryEntryPlan::Rejected(
+            LongTermMemoryEntryRejection::SubjectVisibilityTransitionRequiresControl,
+        );
+    }
     let meta = resolve_long_term_memory_meta_for_existing(&normalized, existing);
     let effective_source_chat_id = normalized
         .source_chat_id
@@ -1408,10 +1443,6 @@ pub fn plan_long_term_memory_upsert(
     }
 
     let incoming_observed_at = normalized.observed_at.unwrap_or(now_secs);
-    let incoming_last_confirmed_at = normalized
-        .last_confirmed_at
-        .unwrap_or(incoming_observed_at)
-        .max(incoming_observed_at);
     let incoming_is_older = same_lineage
         && normalized.source_revision.is_none()
         && incoming_observed_at > 0
@@ -1437,7 +1468,8 @@ pub fn plan_long_term_memory_upsert(
         next.supporting_citations = normalized.supporting_citations.clone();
         next.canonical_entities = normalized.canonical_entities.clone();
         next.evidence_count = incoming_evidence_count;
-        next.last_confirmed_at = incoming_last_confirmed_at;
+        next.last_confirmed_at = None;
+        next.provenance = normalized.provenance;
     } else {
         for keyword in &normalized.keywords {
             if !next.keywords.iter().any(|value| value == keyword) {
@@ -1465,7 +1497,17 @@ pub fn plan_long_term_memory_upsert(
             .evidence_count
             .saturating_add(added_citations)
             .max(incoming_evidence_count);
-        next.last_confirmed_at = next.last_confirmed_at.max(incoming_last_confirmed_at);
+        if incoming_is_older {
+            next.provenance = existing.provenance;
+            next.last_confirmed_at = existing.last_confirmed_at;
+        } else {
+            next.provenance = normalized.provenance;
+            next.last_confirmed_at = if normalized.provenance == existing.provenance {
+                existing.last_confirmed_at
+            } else {
+                None
+            };
+        }
         if let Err(reason) = merge_same_content_entities(
             &mut next.canonical_entities,
             &normalized.canonical_entities,
@@ -1500,6 +1542,7 @@ pub fn plan_long_term_memory_owner_mutation(
     mutation: &LongTermMemoryOwnerMutation,
     now_secs: u64,
 ) -> LongTermMemoryEntryPlan {
+    let force_revision = matches!(mutation, LongTermMemoryOwnerMutation::Correct(_));
     let mut next = existing.clone();
     match mutation {
         LongTermMemoryOwnerMutation::Correct(replacement) => {
@@ -1517,6 +1560,11 @@ pub fn plan_long_term_memory_owner_mutation(
                     LongTermMemoryEntryRejection::PrivacyTransitionRequiresControl,
                 );
             }
+            if normalized.subject_visibility != existing.subject_visibility {
+                return LongTermMemoryEntryPlan::Rejected(
+                    LongTermMemoryEntryRejection::SubjectVisibilityTransitionRequiresControl,
+                );
+            }
             let meta = resolve_long_term_memory_meta_for_existing(&normalized, existing);
             let content_changed = next.content != normalized.content;
             next.content = normalized.content;
@@ -1525,10 +1573,8 @@ pub fn plan_long_term_memory_owner_mutation(
             next.freshness = meta.freshness;
             next.stale_hint = meta.stale_hint;
             next.observed_at = normalized.observed_at.unwrap_or(next.observed_at);
-            next.last_confirmed_at = normalized
-                .last_confirmed_at
-                .unwrap_or(next.last_confirmed_at)
-                .max(next.observed_at);
+            next.provenance = normalized.provenance;
+            next.last_confirmed_at = None;
             if content_changed {
                 next.supporting_citations = normalized.supporting_citations;
                 next.canonical_entities = normalized.canonical_entities;
@@ -1578,18 +1624,14 @@ pub fn plan_long_term_memory_owner_mutation(
         LongTermMemoryOwnerMutation::CompactEvidenceMetadata {
             supporting_citations,
             evidence_count,
-            last_confirmed_at,
         } => {
             next.supporting_citations = normalize_supporting_citations(supporting_citations);
             next.evidence_count =
                 effective_evidence_count(next.supporting_citations.len(), *evidence_count);
-            next.last_confirmed_at = (*last_confirmed_at)
-                .max(next.observed_at)
-                .max(existing.last_confirmed_at);
         }
     }
     next.source_revision = existing.source_revision;
-    if next == *existing {
+    if next == *existing && !force_revision {
         return LongTermMemoryEntryPlan::Noop;
     }
     next.updated_at = now_secs;
@@ -1737,6 +1779,7 @@ pub fn canonicalize_long_term_memory_entry(
     entry.canonical_entities =
         normalize_canonical_entities(&entry.canonical_entities, &entry.supporting_citations)
             .ok()?;
+    entry.last_confirmed_at = entry.last_confirmed_at.filter(|value| *value > 0);
     if entry.owner_revision == 0 || entry.source_revision == Some(0) {
         return None;
     }
@@ -1747,9 +1790,6 @@ pub fn canonicalize_long_term_memory_entry(
     }
     if entry.observed_at == 0 {
         entry.observed_at = entry.updated_at.max(entry.created_at);
-    }
-    if entry.last_confirmed_at == 0 {
-        entry.last_confirmed_at = entry.observed_at;
     }
     let source_scope = infer_long_term_memory_source_scope(
         &entry.kind,
@@ -1817,6 +1857,7 @@ fn render_age_hint(entry: &LongTermMemoryEntry, now_secs: u64) -> Option<String>
 fn entry_observed_at(entry: &LongTermMemoryEntry) -> u64 {
     entry
         .last_confirmed_at
+        .unwrap_or(0)
         .max(entry.observed_at)
         .max(entry.updated_at)
         .max(entry.created_at)
@@ -3085,6 +3126,8 @@ mod tests {
             source_chat_id: source_chat_id.map(str::to_string),
             source_type: None,
             source_scope: None,
+            subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+            provenance: LongTermMemoryProvenance::default(),
             confidence: None,
             freshness: None,
             stale_hint: None,
@@ -3092,7 +3135,6 @@ mod tests {
             canonical_entities: Vec::new(),
             evidence_count: None,
             observed_at: None,
-            last_confirmed_at: None,
             source_revision: None,
         }
     }
@@ -3119,6 +3161,7 @@ mod tests {
             source_type: LongTermMemorySourceType::Conversation,
             source_scope: LongTermMemorySourceScope::User,
             subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+            provenance: LongTermMemoryProvenance::default(),
             confidence: LongTermMemoryConfidence::Medium,
             freshness: LongTermMemoryFreshness::Stable,
             stale_hint: LongTermMemoryStaleHint::None,
@@ -3128,7 +3171,7 @@ mod tests {
             created_at,
             updated_at,
             observed_at: updated_at.max(created_at),
-            last_confirmed_at: updated_at.max(created_at),
+            last_confirmed_at: None,
             source_revision: None,
             owner_revision: 1,
             last_used_at: 0,
@@ -3339,6 +3382,7 @@ mod tests {
             source_type: LongTermMemorySourceType::Conversation,
             source_scope: LongTermMemorySourceScope::User,
             subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+            provenance: LongTermMemoryProvenance::default(),
             confidence: LongTermMemoryConfidence::Medium,
             freshness: LongTermMemoryFreshness::Stable,
             stale_hint: LongTermMemoryStaleHint::None,
@@ -3348,7 +3392,7 @@ mod tests {
             created_at: 42,
             updated_at: 0,
             observed_at: 0,
-            last_confirmed_at: 0,
+            last_confirmed_at: Some(0),
             source_revision: None,
             owner_revision: 1,
             last_used_at: 0,
@@ -3372,6 +3416,7 @@ mod tests {
             source_type: LongTermMemorySourceType::Conversation,
             source_scope: LongTermMemorySourceScope::User,
             subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+            provenance: LongTermMemoryProvenance::default(),
             confidence: LongTermMemoryConfidence::Medium,
             freshness: LongTermMemoryFreshness::Stable,
             stale_hint: LongTermMemoryStaleHint::None,
@@ -3381,7 +3426,7 @@ mod tests {
             created_at: 1,
             updated_at: 0,
             observed_at: 0,
-            last_confirmed_at: 0,
+            last_confirmed_at: Some(0),
             source_revision: None,
             owner_revision: 1,
             last_used_at: 0,
@@ -3501,7 +3546,8 @@ mod tests {
         );
         entry.supporting_citations = vec!["transcript:chat-a#message=1".to_string()];
         entry.evidence_count = 1;
-        entry.last_confirmed_at = 10;
+        entry.last_confirmed_at = Some(10);
+        entry.provenance = LongTermMemoryProvenance::new(MemoryEvidenceAuthority::UserAsserted);
         let mut draft = test_draft(
             LongTermMemoryKind::Fact,
             "primary_llm",
@@ -3514,12 +3560,12 @@ mod tests {
             "transcript:chat-a#message=1".to_string(),
         ];
         draft.evidence_count = Some(2);
-        draft.last_confirmed_at = Some(30);
+        draft.provenance = LongTermMemoryProvenance::new(MemoryEvidenceAuthority::UserAsserted);
 
         assert!(merge_long_term_memory_entry(&mut entry, &draft, 30));
         assert_eq!(entry.supporting_citations.len(), 2);
         assert_eq!(entry.evidence_count, 2);
-        assert_eq!(entry.last_confirmed_at, 30);
+        assert_eq!(entry.last_confirmed_at, Some(10));
     }
 
     #[test]
@@ -3603,7 +3649,7 @@ mod tests {
             "daily_note:2026-04-02.md".to_string(),
         ];
         entry.evidence_count = 2;
-        entry.last_confirmed_at = 2;
+        entry.last_confirmed_at = Some(2);
 
         let block = render_long_term_memory_block_with_now(&[entry], 512, 2).unwrap();
 
@@ -3701,6 +3747,10 @@ mod tests {
             source_type: LongTermMemorySourceType::Conversation,
             source_scope: LongTermMemorySourceScope::World,
             subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+            provenance: LongTermMemoryProvenance {
+                source_authority: MemoryEvidenceAuthority::UserAsserted,
+                semantic_judgment_source: None,
+            },
             confidence: LongTermMemoryConfidence::Medium,
             freshness: LongTermMemoryFreshness::Dynamic,
             stale_hint: LongTermMemoryStaleHint::ReviewBeforeUse,
@@ -3713,7 +3763,7 @@ mod tests {
             created_at: 10,
             updated_at: 10,
             observed_at: 12,
-            last_confirmed_at: 0,
+            last_confirmed_at: Some(0),
             source_revision: None,
             owner_revision: 1,
             last_used_at: 0,
@@ -3725,7 +3775,45 @@ mod tests {
             vec!["transcript:chat-a#message=3"]
         );
         assert_eq!(entry.evidence_count, 1);
-        assert_eq!(entry.last_confirmed_at, 12);
+        assert_eq!(entry.last_confirmed_at, None);
+    }
+
+    #[test]
+    fn canonicalize_allows_human_confirmation_of_model_inferred_provenance() {
+        let mut entry = long_term_memory_entry_from_draft(
+            &LongTermMemoryDraft {
+                kind: LongTermMemoryKind::Fact,
+                topic: "confirmed_inference".to_string(),
+                content: "A human later confirmed this model-inferred fact.".to_string(),
+                keywords: vec!["confirmed".to_string()],
+                privacy: MemoryPrivacyClass::SharedWithSubject,
+                source_chat_id: Some("chat-1".to_string()),
+                source_type: Some(LongTermMemorySourceType::Conversation),
+                source_scope: Some(LongTermMemorySourceScope::User),
+                subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                provenance: LongTermMemoryProvenance::new(MemoryEvidenceAuthority::ModelInferred),
+                confidence: Some(LongTermMemoryConfidence::High),
+                freshness: Some(LongTermMemoryFreshness::Stable),
+                stale_hint: Some(LongTermMemoryStaleHint::None),
+                supporting_citations: Vec::new(),
+                canonical_entities: Vec::new(),
+                evidence_count: Some(1),
+                observed_at: Some(20),
+                source_revision: Some(1),
+            },
+            "entry-confirmed-inference".to_string(),
+            20,
+        )
+        .expect("model-inferred entry");
+        entry.last_confirmed_at = Some(21);
+
+        let canonical = canonicalize_long_term_memory_entry(entry)
+            .expect("confirmation authority must not be inferred from provenance");
+        assert_eq!(canonical.last_confirmed_at, Some(21));
+        assert_eq!(
+            canonical.provenance.source_authority,
+            MemoryEvidenceAuthority::ModelInferred
+        );
     }
 
     #[test]

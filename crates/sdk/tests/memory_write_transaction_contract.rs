@@ -19,21 +19,21 @@ use bm_core::task_execution::{
 use bm_sdk::{
     default_agent_subject_id, AgentToolDescriptor, AgentToolObservationDigest, AgentToolOutcome,
     AgentToolRegistrySnapshot, AgentToolUsageFeedback, EvidenceBacklink, IngressKind,
-    LongTermMemoryDraft, LongTermMemoryKind, LongTermMemoryQuery, LongTermMemorySourceScope,
-    MemoryCandidateContent, MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment,
-    MemoryCandidateTarget, MemoryEvidenceAuthority, MemoryGovernancePolicyMutation,
-    MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration, MemoryGraphEdge,
-    MemoryGraphEdgeKind, MemoryGraphNode, MemoryGraphNodeKind, MemoryIdentity,
+    LongTermMemoryDraft, LongTermMemoryKind, LongTermMemoryProvenance, LongTermMemoryQuery,
+    LongTermMemorySourceScope, MemoryCandidateContent, MemoryCandidateSemanticDecision,
+    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryEvidenceAuthority,
+    MemoryGovernancePolicyMutation, MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration,
+    MemoryGraphEdge, MemoryGraphEdgeKind, MemoryGraphNode, MemoryGraphNodeKind, MemoryIdentity,
     MemoryLongTermControlView, MemoryLongTermListRequest, MemoryLongTermMutation,
     MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryLongTermTarget,
-    MemoryMaintenanceRequest, MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallRequest,
-    MemoryScope, MemorySemanticJudgmentSource, MemoryStoreHandle, MemorySubjectVisibilityPolicy,
-    MemoryTranscriptLifecycleRequest, MemoryWriteCandidate, MemoryWriteRequest,
-    ParsedLongTermMemoryExtraction, PressureLevel, ProceduralMemoryPromotionInput,
-    RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome, RuntimeSkillWrite,
-    RuntimeSkillWriteSource, StoreBackendConfig, StoreRuntimeBudget, SubjectDescriptor,
-    SubjectRegistry, TemporalMemoryGraphNodeOwnerRef, TemporalMemoryGraphWriteRequest,
-    TemporalValidity, TranscriptLifecycleTransition,
+    MemoryMaintenanceRequest, MemoryMutationExecution, MemoryPrivacyClass, MemoryProjectionRequest,
+    MemoryRecallRequest, MemoryScope, MemorySemanticJudgmentSource, MemoryStoreHandle,
+    MemorySubjectVisibilityPolicy, MemoryTranscriptLifecycleRequest, MemoryWriteCandidate,
+    MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel,
+    ProceduralMemoryPromotionInput, RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome,
+    RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig, StoreRuntimeBudget,
+    SubjectDescriptor, SubjectRegistry, TemporalMemoryGraphNodeOwnerRef,
+    TemporalMemoryGraphWriteRequest, TemporalValidity, TranscriptLifecycleTransition,
 };
 
 use support::{empty_store_platform, test_runtime_with_scope, StaticHttpClient, StaticLlmClient};
@@ -263,6 +263,7 @@ fn long_term_candidate() -> MemoryWriteCandidate {
             kind: LongTermMemoryKind::Profile,
             topic: "transaction_profile".to_string(),
         },
+        long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
         privacy: MemoryPrivacyClass::SharedWithSubject,
         content: MemoryCandidateContent::Text {
             topic: "transaction_profile".to_string(),
@@ -286,6 +287,7 @@ fn runtime_skill_candidate() -> MemoryWriteCandidate {
             name: String::new(),
             topic: "transaction_skill".to_string(),
         },
+        long_term_subject_visibility: None,
         privacy: MemoryPrivacyClass::SharedWithSubject,
         content: MemoryCandidateContent::RuntimeSkill {
             name: "runtime_skill__transaction_contract".to_string(),
@@ -320,6 +322,7 @@ fn typed_entity_candidate(
         candidate_id: format!("candidate-{source_ref}"),
         authority: MemoryEvidenceAuthority::UserAsserted,
         target: target.clone(),
+        long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
         privacy: MemoryPrivacyClass::SharedWithSubject,
         content: MemoryCandidateContent::Text {
             topic: "typed_entity_merge".to_string(),
@@ -382,6 +385,8 @@ fn extraction_draft() -> LongTermMemoryDraft {
         source_chat_id: Some("chat-a".to_string()),
         source_type: None,
         source_scope: None,
+        subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+        provenance: LongTermMemoryProvenance::new(MemoryEvidenceAuthority::UserAsserted),
         confidence: None,
         freshness: None,
         stale_hint: None,
@@ -389,7 +394,6 @@ fn extraction_draft() -> LongTermMemoryDraft {
         canonical_entities: Vec::new(),
         evidence_count: Some(1),
         observed_at: Some(1_800_000_000),
-        last_confirmed_at: Some(1_800_000_000),
         source_revision: Some(1),
     }
 }
@@ -485,6 +489,14 @@ fn assert_transaction_events(
     assert!(transaction_events
         .iter()
         .all(|event| { event.payload.get("operation").map(String::as_str) == Some(operation) }));
+}
+
+fn store_fingerprints(platform: &MemoryStoreHandle) -> (String, String) {
+    let snapshot = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("export store snapshot");
+    (snapshot.state_fingerprint(), snapshot.event_fingerprint())
 }
 
 fn facet_index_docs(
@@ -751,6 +763,7 @@ fn candidate_to_draft_to_entry_to_exact_entity_posting_to_typed_query_is_reachab
         candidate_id: "candidate-typed-entity".to_string(),
         authority: MemoryEvidenceAuthority::UserAsserted,
         target: target.clone(),
+        long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
         privacy: MemoryPrivacyClass::SharedWithSubject,
         content: MemoryCandidateContent::Text {
             topic: "typed_entity_candidate".to_string(),
@@ -1048,6 +1061,378 @@ fn procedural_write_success_reports_transaction_lineage() {
         "write.procedural",
         transaction.event_ids.len(),
     );
+}
+
+#[test]
+fn durable_write_identity_binds_the_exact_scoped_actor_on_one_shared_store() {
+    let platform = empty_store_platform(support::host_test_profile());
+    let runtime_a = support::test_runtime_with_delegated_actor(
+        platform.clone(),
+        support::host_test_profile(),
+        "agent-main",
+        "agent:delegated-a",
+        "chat-a",
+    );
+    let runtime_b = support::test_runtime_with_delegated_actor(
+        platform,
+        support::host_test_profile(),
+        "agent-main",
+        "agent:delegated-b",
+        "chat-a",
+    );
+    let request = |name: &str| MemoryWriteRequest::Procedural {
+        writes: vec![support::governed_runtime_skill_write(
+            manual_runtime_skill_write(name),
+        )],
+        owning_scope: support::runtime_skill_subject_scope(),
+        source: RuntimeSkillWriteSource::Manual,
+    };
+
+    let first = runtime_a
+        .write_operation(
+            "same-caller-operation-id",
+            request("runtime_skill__actor_bound_a"),
+        )
+        .expect("actor A commit");
+    let second = runtime_b
+        .write_operation(
+            "same-caller-operation-id",
+            request("runtime_skill__actor_bound_b"),
+        )
+        .expect("actor B commit must not collide with actor A");
+    let (
+        MemoryMutationExecution::Committed {
+            receipt: first_receipt,
+            ..
+        },
+        MemoryMutationExecution::Committed {
+            receipt: second_receipt,
+            ..
+        },
+    ) = (first, second)
+    else {
+        panic!("both actor-scoped operations must commit")
+    };
+    assert_ne!(
+        first_receipt.identity.storage_key(),
+        second_receipt.identity.storage_key()
+    );
+    assert_eq!(
+        first_receipt.identity.actor_subject_id(),
+        "agent:delegated-a"
+    );
+    assert_eq!(
+        second_receipt.identity.actor_subject_id(),
+        "agent:delegated-b"
+    );
+    assert!(matches!(
+        runtime_a
+            .write_operation(
+                "same-caller-operation-id",
+                request("runtime_skill__actor_bound_a"),
+            )
+            .expect("actor A replay"),
+        MemoryMutationExecution::Replayed { .. }
+    ));
+    assert!(matches!(
+        runtime_b
+            .write_operation(
+                "same-caller-operation-id",
+                request("runtime_skill__actor_bound_b"),
+            )
+            .expect("actor B replay"),
+        MemoryMutationExecution::Replayed { .. }
+    ));
+}
+
+#[test]
+fn operation_aware_procedural_write_replays_and_rejects_intent_collision() {
+    let platform = store_with_event_budget(32);
+    let runtime = test_runtime_with_scope(
+        platform,
+        support::host_test_profile(),
+        "llm.gateway",
+        "chat-a",
+    );
+    let request = |name: &str| MemoryWriteRequest::Procedural {
+        writes: vec![support::governed_runtime_skill_write(
+            manual_runtime_skill_write(name),
+        )],
+        owning_scope: support::runtime_skill_subject_scope(),
+        source: RuntimeSkillWriteSource::Manual,
+    };
+
+    let first = runtime
+        .write_operation(
+            "sdk-write-operation-1",
+            request("runtime_skill__operation_aware"),
+        )
+        .expect("first operation write");
+    let MemoryMutationExecution::Committed { report, receipt } = first else {
+        panic!("first operation must commit")
+    };
+    assert_eq!(report.changed, 1);
+    assert_eq!(receipt.changed_count, 1);
+
+    let replay = runtime
+        .write_operation(
+            "sdk-write-operation-1",
+            request("runtime_skill__operation_aware"),
+        )
+        .expect("same operation replay");
+    assert!(matches!(replay, MemoryMutationExecution::Replayed { .. }));
+
+    let collision = runtime
+        .write_operation(
+            "sdk-write-operation-1",
+            request("runtime_skill__different_intent"),
+        )
+        .expect_err("same operation identity with another request must conflict");
+    assert_eq!(collision.class(), Some(bm_sdk::ErrorClass::Conflict));
+
+    let noop = runtime
+        .write_operation(
+            "sdk-write-operation-noop",
+            MemoryWriteRequest::Procedural {
+                writes: Vec::new(),
+                owning_scope: support::runtime_skill_subject_scope(),
+                source: RuntimeSkillWriteSource::Manual,
+            },
+        )
+        .expect("zero-effect operation write");
+    let MemoryMutationExecution::Committed { report, receipt } = noop else {
+        panic!("zero-effect operation must still commit its receipt")
+    };
+    assert_eq!(report.changed, 0);
+    assert_eq!(receipt.changed_count, 0);
+
+    let zero_effect_collision = runtime
+        .write_operation(
+            "sdk-write-operation-noop",
+            request("runtime_skill__must_not_escape_noop_collision"),
+        )
+        .expect_err("zero-effect receipt must reserve the operation identity");
+    assert_eq!(
+        zero_effect_collision.class(),
+        Some(bm_sdk::ErrorClass::Conflict)
+    );
+}
+
+#[test]
+fn operation_aware_public_write_variants_commit_noop_replay_and_reject_collisions() {
+    let registry = registry();
+    let (platform, runtime) = runtime_with_registry_and_event_budget(registry.clone(), 256);
+    let owning_scope = bm_sdk::RuntimeSkillOwningScope::Subject {
+        mounted_subject_id: default_agent_subject_id("transaction-agent"),
+    };
+
+    let promotion_request = |task_id: &str| MemoryWriteRequest::ProceduralPromotions {
+        promotions: vec![promotion_input(task_id)],
+        owning_scope: owning_scope.clone(),
+        source: RuntimeSkillWriteSource::TaskLearning,
+    };
+    let promotion = runtime
+        .write_operation(
+            "sdk-write-promotion-changed",
+            promotion_request("operation-promotion"),
+        )
+        .expect("operation-aware promotion");
+    let MemoryMutationExecution::Committed { report, receipt } = promotion else {
+        panic!("promotion must commit")
+    };
+    assert_eq!(report.changed, 1);
+    assert_eq!(receipt.changed_count, 1);
+    let before_replay = store_fingerprints(&platform);
+    assert!(matches!(
+        runtime
+            .write_operation(
+                "sdk-write-promotion-changed",
+                promotion_request("operation-promotion")
+            )
+            .expect("promotion replay"),
+        MemoryMutationExecution::Replayed { .. }
+    ));
+    assert_eq!(store_fingerprints(&platform), before_replay);
+    let collision = runtime
+        .write_operation(
+            "sdk-write-promotion-changed",
+            promotion_request("operation-promotion-collision"),
+        )
+        .expect_err("promotion intent collision");
+    assert_eq!(collision.class(), Some(bm_sdk::ErrorClass::Conflict));
+    let promotion_noop = runtime
+        .write_operation(
+            "sdk-write-promotion-noop",
+            promotion_request("operation-promotion"),
+        )
+        .expect("operation-aware promotion noop");
+    let MemoryMutationExecution::Committed { report, receipt } = promotion_noop else {
+        panic!("promotion noop must commit its receipt")
+    };
+    assert_eq!(report.changed, 0);
+    assert_eq!(receipt.changed_count, 0);
+
+    let extraction_request = |topic: &str| {
+        let mut draft = extraction_draft();
+        draft.topic = topic.to_string();
+        MemoryWriteRequest::LongTermExtraction {
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
+            extraction: ParsedLongTermMemoryExtraction {
+                upserts: vec![draft],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
+        }
+    };
+    let extraction = runtime
+        .write_operation(
+            "sdk-write-extraction-changed",
+            extraction_request("operation_extraction"),
+        )
+        .expect("operation-aware extraction");
+    let MemoryMutationExecution::Committed { report, receipt } = extraction else {
+        panic!("extraction must commit")
+    };
+    assert_eq!(report.changed, 1);
+    assert_eq!(receipt.changed_count, 1);
+    let before_replay = store_fingerprints(&platform);
+    assert!(matches!(
+        runtime
+            .write_operation(
+                "sdk-write-extraction-changed",
+                extraction_request("operation_extraction")
+            )
+            .expect("extraction replay"),
+        MemoryMutationExecution::Replayed { .. }
+    ));
+    assert_eq!(store_fingerprints(&platform), before_replay);
+    let collision = runtime
+        .write_operation(
+            "sdk-write-extraction-changed",
+            extraction_request("operation_extraction_collision"),
+        )
+        .expect_err("extraction intent collision");
+    assert_eq!(collision.class(), Some(bm_sdk::ErrorClass::Conflict));
+    let extraction_noop = runtime
+        .write_operation(
+            "sdk-write-extraction-noop",
+            MemoryWriteRequest::LongTermExtraction {
+                governed_skill_writes: Vec::new(),
+                runtime_skill_owning_scope: None,
+                extraction: ParsedLongTermMemoryExtraction {
+                    upserts: Vec::new(),
+                    deletes: Vec::new(),
+                    skill_writes: Vec::new(),
+                },
+            },
+        )
+        .expect("operation-aware extraction noop");
+    let MemoryMutationExecution::Committed { report, receipt } = extraction_noop else {
+        panic!("extraction noop must commit its receipt")
+    };
+    assert_eq!(report.changed, 0);
+    assert_eq!(receipt.changed_count, 0);
+
+    let feedback_request = || MemoryWriteRequest::AgentToolUsageFeedback {
+        feedback: feedback(&registry),
+    };
+    let feedback_write = runtime
+        .write_operation("sdk-write-feedback-changed", feedback_request())
+        .expect("operation-aware feedback");
+    let MemoryMutationExecution::Committed { report, receipt } = feedback_write else {
+        panic!("feedback must commit")
+    };
+    assert_eq!(report.changed, 1);
+    assert_eq!(receipt.changed_count, 1);
+    let before_replay = store_fingerprints(&platform);
+    assert!(matches!(
+        runtime
+            .write_operation("sdk-write-feedback-changed", feedback_request())
+            .expect("feedback replay"),
+        MemoryMutationExecution::Replayed { .. }
+    ));
+    assert_eq!(store_fingerprints(&platform), before_replay);
+    let mut colliding_feedback = feedback(&registry);
+    colliding_feedback.operator_note = Some("different intent".to_string());
+    let collision = runtime
+        .write_operation(
+            "sdk-write-feedback-changed",
+            MemoryWriteRequest::AgentToolUsageFeedback {
+                feedback: colliding_feedback,
+            },
+        )
+        .expect_err("feedback intent collision");
+    assert_eq!(collision.class(), Some(bm_sdk::ErrorClass::Conflict));
+    let feedback_noop = runtime
+        .write_operation("sdk-write-feedback-noop", feedback_request())
+        .expect("operation-aware feedback noop");
+    let MemoryMutationExecution::Committed { report, receipt } = feedback_noop else {
+        panic!("feedback noop must commit its receipt")
+    };
+    assert_eq!(report.changed, 0);
+    assert_eq!(receipt.changed_count, 0);
+}
+
+#[test]
+fn operation_aware_procedural_write_replays_after_file_store_reopen() {
+    let root = std::env::temp_dir().join(format!(
+        "bm-sdk-write-operation-reopen-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let request = || MemoryWriteRequest::Procedural {
+        writes: vec![support::governed_runtime_skill_write(
+            manual_runtime_skill_write("runtime_skill__operation_file_reopen"),
+        )],
+        owning_scope: support::runtime_skill_subject_scope(),
+        source: RuntimeSkillWriteSource::Manual,
+    };
+
+    {
+        let platform = support::open_memory_store(
+            StoreBackendConfig::file(&root, support::host_test_profile())
+                .expect("file store config"),
+        )
+        .expect("open first file store");
+        let runtime = test_runtime_with_scope(
+            platform,
+            support::host_test_profile(),
+            "llm.gateway",
+            "chat-a",
+        );
+        assert!(matches!(
+            runtime
+                .write_operation("sdk-write-operation-file", request())
+                .expect("first durable operation"),
+            MemoryMutationExecution::Committed { .. }
+        ));
+    }
+
+    {
+        let platform = support::open_memory_store(
+            StoreBackendConfig::file(&root, support::host_test_profile())
+                .expect("reopen file store config"),
+        )
+        .expect("reopen file store");
+        let runtime = test_runtime_with_scope(
+            platform,
+            support::host_test_profile(),
+            "llm.gateway",
+            "chat-a",
+        );
+        assert!(matches!(
+            runtime
+                .write_operation("sdk-write-operation-file", request())
+                .expect("durable replay"),
+            MemoryMutationExecution::Replayed { .. }
+        ));
+    }
+
+    std::fs::remove_dir_all(&root).expect("remove synthetic file store");
 }
 
 #[test]

@@ -722,6 +722,28 @@ pub struct StoreCompactionPolicy {
     pub compact_when_pressure: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationOperationReceiptRetentionPolicy {
+    PinnedUntilCapacity,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationOperationReceiptCapacityExhaustion {
+    FailClosed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MutationOperationReceiptQuota {
+    pub retention: MutationOperationReceiptRetentionPolicy,
+    pub automatic_eviction: bool,
+    pub capacity_exhaustion: MutationOperationReceiptCapacityExhaustion,
+    pub durable_json_entries_per_operation: usize,
+    pub durable_events_per_operation: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeRetentionQuotaReport {
@@ -733,6 +755,7 @@ pub struct RuntimeRetentionQuotaReport {
     pub procedural_quota: PlaneQuotaPolicy,
     pub private_garden_quota: PlaneQuotaPolicy,
     pub compaction: StoreCompactionPolicy,
+    pub mutation_operation_receipts: MutationOperationReceiptQuota,
     pub migration_import_pressure_report: bool,
     pub host_direct_deletion_allowed: Option<bool>,
     pub fail_closed_repair: bool,
@@ -790,6 +813,13 @@ impl RuntimeBudgetReport {
             compaction: StoreCompactionPolicy {
                 store_snapshot_max_bytes: self.store_budget.snapshot_max_bytes,
                 compact_when_pressure: !self.limited_by.is_empty(),
+            },
+            mutation_operation_receipts: MutationOperationReceiptQuota {
+                retention: MutationOperationReceiptRetentionPolicy::PinnedUntilCapacity,
+                automatic_eviction: false,
+                capacity_exhaustion: MutationOperationReceiptCapacityExhaustion::FailClosed,
+                durable_json_entries_per_operation: 2,
+                durable_events_per_operation: 2,
             },
             migration_import_pressure_report: true,
             host_direct_deletion_allowed: None,

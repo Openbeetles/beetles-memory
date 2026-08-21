@@ -60,10 +60,14 @@ candidate_body="$(
 
 runtime_source="$(cat crates/sdk/src/runtime.rs)"
 
-if ! grep -q "commit_governed_memory_transaction_with_runtime_budget" <<<"${candidate_body}"; then
-  echo "check_memory_write_transaction_contract: Candidates path must commit through the governed Store transaction boundary" >&2
-  exit 1
-fi
+for required in \
+  "commit_memory_write_transaction_with_operation" \
+  "commit_memory_write_transaction_in_runtime_skill_scope_with_operation"; do
+  if ! grep -q "${required}" <<<"${candidate_body}"; then
+    echo "check_memory_write_transaction_contract: Candidates path must commit through the operation-aware governed Store transaction boundary ${required}" >&2
+    exit 1
+  fi
+done
 
 if ! grep -q "plan_governed_shared_memory_in_space" <<<"${candidate_body}"; then
   echo "check_memory_write_transaction_contract: Candidates path must use shared-memory plan builder" >&2

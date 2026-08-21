@@ -49,7 +49,7 @@ fn write_payload(name: &str, summary: &str) -> String {
         "topic": "wss-idempotency",
         "title": format!("WSS write {name}"),
         "summary": summary,
-        "content": "Dispatch this write through the governed EntryRuntime path.",
+        "content": "1. Decode the WSS write payload.\n2. Dispatch it through the governed EntryRuntime path and verify the receipt.",
         "owning_scope": {
             "kind": "subject",
             "mounted_subject_id": "agent:wss-agent",
@@ -142,7 +142,7 @@ fn assert_exact_governed_result(payload: &serde_json::Value) {
 }
 
 #[test]
-fn wss_automatic_identity_accepts_two_distinct_writes_on_one_session() {
+fn wss_durable_write_without_caller_operation_key_fails_closed() {
     let runtime = runtime();
     let mut session = WssRuntimeSession::new(
         &runtime,
@@ -163,8 +163,18 @@ fn wss_automatic_identity_accepts_two_distinct_writes_on_one_session() {
         ))
         .expect("second write");
 
-    assert_eq!(response_status(&first), "accepted");
-    assert_eq!(response_status(&second), "accepted");
+    assert_eq!(response_status(&first), "rejected", "{}", first.payload);
+    assert_eq!(response_status(&second), "rejected", "{}", second.payload);
+    assert!(
+        first.payload.contains("mutation_operation_id"),
+        "{}",
+        first.payload
+    );
+    assert!(
+        second.payload.contains("mutation_operation_id"),
+        "{}",
+        second.payload
+    );
 }
 
 #[test]
@@ -204,9 +214,23 @@ fn wss_explicit_identity_replays_same_payload_and_rejects_conflict() {
         )
         .expect("conflicting write");
 
-    assert_eq!(response_status(&first), "accepted");
-    assert_eq!(response_status(&replay), "duplicated");
-    assert_eq!(response_status(&conflict), "rejected");
+    assert_eq!(response_status(&first), "accepted", "{}", first.payload);
+    assert_eq!(response_status(&replay), "replayed", "{}", replay.payload);
+    assert_eq!(
+        response_status(&conflict),
+        "rejected",
+        "{}",
+        conflict.payload
+    );
+    let first_payload: serde_json::Value =
+        serde_json::from_str(&first.payload).expect("first WSS response JSON");
+    let replay_payload: serde_json::Value =
+        serde_json::from_str(&replay.payload).expect("replay WSS response JSON");
+    assert!(first_payload["receipt"].is_object(), "{first_payload}");
+    assert_eq!(
+        first_payload["receipt"]["transaction_id"],
+        replay_payload["receipt"]["transaction_id"]
+    );
 }
 
 #[test]
@@ -353,6 +377,17 @@ fn wss_network_session_processes_multiple_frames_ping_and_close_under_one_lease(
     result.expect("bounded persistent WSS session");
     assert_eq!(responses.len(), 2);
     assert!(responses[0].contains("event.report"), "{}", responses[0]);
+    assert!(
+        responses[0].contains("mutation_operation_inventory"),
+        "{}",
+        responses[0]
+    );
+    assert!(
+        responses[0].contains("mutation_receipt_policy"),
+        "{}",
+        responses[0]
+    );
+    assert!(!responses[0].contains("\"receipt\""), "{}", responses[0]);
     assert!(responses[1].contains("event.report"), "{}", responses[1]);
 }
 

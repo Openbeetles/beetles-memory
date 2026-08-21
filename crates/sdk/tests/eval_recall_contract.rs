@@ -13,11 +13,12 @@ use bm_core::memory::{
 };
 use bm_sdk::{
     default_agent_subject_id, EvidenceBacklink, GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef,
-    LongTermMemoryDraft, LongTermMemoryKind, MemoryEvalRecallBenchmarkContext,
-    MemoryEvalRecallRequest, MemoryEvidenceRefVisibility, MemoryGraphEdge, MemoryGraphEdgeKind,
-    MemoryGraphNode, MemoryGraphNodeKind, MemoryPrivacyClass, MemoryProjectionRequest,
-    MemoryRecallRequest, MemoryWriteRequest, NonproductionRuntimeBudgetLimits, PressureLevel,
-    RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    LongTermMemoryDraft, LongTermMemoryKind, LongTermMemoryProvenance,
+    MemoryEvalRecallBenchmarkContext, MemoryEvalRecallRequest, MemoryEvidenceAuthority,
+    MemoryEvidenceRefVisibility, MemoryGraphEdge, MemoryGraphEdgeKind, MemoryGraphNode,
+    MemoryGraphNodeKind, MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallRequest,
+    MemorySubjectVisibilityPolicy, MemoryWriteRequest, NonproductionRuntimeBudgetLimits,
+    PressureLevel, RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource,
     TemporalMemoryGraphNodeOwnerRef, TemporalMemoryGraphWriteRequest, TemporalValidity,
     MEMORY_GRAPH_SCHEMA_VERSION,
 };
@@ -89,6 +90,8 @@ fn long_term_draft(topic: &str, content: &str, citation: &str) -> LongTermMemory
         source_chat_id: Some("chat-a".to_string()),
         source_type: None,
         source_scope: None,
+        subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+        provenance: LongTermMemoryProvenance::new(MemoryEvidenceAuthority::ProgramMemoryCanonical),
         confidence: None,
         freshness: None,
         stale_hint: None,
@@ -96,7 +99,6 @@ fn long_term_draft(topic: &str, content: &str, citation: &str) -> LongTermMemory
         canonical_entities: Vec::new(),
         evidence_count: Some(1),
         observed_at: None,
-        last_confirmed_at: None,
         source_revision: None,
     }
 }

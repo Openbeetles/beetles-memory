@@ -75,7 +75,10 @@ fn http_runtime_dispatches_capabilities_and_recall_through_entry_runtime() {
     .expect("capabilities");
     assert_eq!(caps.status_code, 200);
     assert!(caps.body.contains("\"profile\""));
-    assert!(caps.body.contains("\"entry\""));
+    assert!(caps.body.contains("\"mutation_operation_inventory\""));
+    assert!(caps.body.contains("\"mutation_receipt_policy\""));
+    assert!(caps.body.contains("\"durable_store_receipt\""));
+    assert!(caps.body.contains("\"explicitly_non_durable\""));
     assert!(caps.budget_report_id.starts_with("rtb-v2-"));
 
     let recall = handle_http_in_process_request(
@@ -256,7 +259,8 @@ fn http_runtime_projects_agent_tool_hints_only_after_feedback_experience() {
     });
     let write = handle_http_in_process_request(
         &runtime,
-        HttpRuntimeRequest::post_json("/memory/write", feedback.to_string()),
+        HttpRuntimeRequest::post_json("/memory/write", feedback.to_string())
+            .with_idempotency_key("http-runtime-tool-feedback"),
     )
     .expect("write feedback");
     let write_body: Value = serde_json::from_str(&write.body).expect("write json");

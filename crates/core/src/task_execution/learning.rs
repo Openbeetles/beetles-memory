@@ -8,7 +8,8 @@ use crate::memory::LongTermMemoryStore;
 use crate::memory::{
     plan_governed_shared_memory, LongTermMemoryConfidence, LongTermMemoryDraft,
     LongTermMemoryEntry, LongTermMemoryFreshness, LongTermMemoryKind, LongTermMemoryReadStore,
-    LongTermMemorySourceScope, LongTermMemorySourceType, MemoryStore, SharedMemoryWriteSource,
+    LongTermMemorySourceScope, LongTermMemorySourceType, MemoryStore,
+    MemorySubjectVisibilityPolicy, SharedMemoryWriteSource,
 };
 use crate::reasoning::{
     adjudicate_skill_crystal_candidate, promote_skill_crystal_candidates,
@@ -353,6 +354,7 @@ pub struct TaskLearningMaintenanceContext<'a> {
 pub struct TaskLearningMaintenanceInput<'a> {
     pub channel: &'a str,
     pub chat_id: &'a str,
+    pub long_term_subject_visibility: MemorySubjectVisibilityPolicy,
     pub now_secs: u64,
 }
 
@@ -565,7 +567,11 @@ pub fn run_task_learning_maintenance(
             let route_before = record.route;
             match record.kind {
                 TaskLearningKind::DurableFact => {
-                    let draft = build_task_learning_factual_draft(&record, &archive_citation);
+                    let draft = build_task_learning_factual_draft(
+                        &record,
+                        &archive_citation,
+                        &input.long_term_subject_visibility,
+                    );
                     let plan = plan_governed_shared_memory(
                         ctx.long_term_memory_store,
                         &[draft],
@@ -1698,6 +1704,7 @@ fn build_task_learning_record(
 fn build_task_learning_factual_draft(
     record: &TaskLearningRecord,
     archive_citation: &str,
+    subject_visibility: &MemorySubjectVisibilityPolicy,
 ) -> LongTermMemoryDraft {
     LongTermMemoryDraft {
         kind: record
@@ -1714,6 +1721,13 @@ fn build_task_learning_factual_draft(
         source_chat_id: Some(record.source_chat_id.clone()),
         source_type: Some(LongTermMemorySourceType::SystemRuntime),
         source_scope: Some(LongTermMemorySourceScope::User),
+        subject_visibility: subject_visibility.clone(),
+        provenance: crate::memory::LongTermMemoryProvenance {
+            source_authority: crate::memory::MemoryEvidenceAuthority::RuntimeObservation,
+            semantic_judgment_source: Some(
+                crate::memory::MemorySemanticJudgmentSource::RuntimeGate,
+            ),
+        },
         confidence: Some(LongTermMemoryConfidence::High),
         freshness: Some(LongTermMemoryFreshness::Dynamic),
         stale_hint: None,
@@ -1725,7 +1739,6 @@ fn build_task_learning_factual_draft(
         canonical_entities: Vec::new(),
         evidence_count: Some(record.source_artifact_ids.len().max(1) as u32),
         observed_at: Some(record.observed_at),
-        last_confirmed_at: Some(record.observed_at),
         source_revision: None,
     }
 }
@@ -2698,6 +2711,9 @@ mod tests {
             TaskLearningMaintenanceInput {
                 channel: "chat_channel",
                 chat_id: "chat-1",
+                long_term_subject_visibility: MemorySubjectVisibilityPolicy::OnlySubjects(vec![
+                    "agent:test".into(),
+                ]),
                 now_secs,
             },
         )
@@ -2841,6 +2857,9 @@ mod tests {
             TaskLearningMaintenanceInput {
                 channel: "chat_channel",
                 chat_id: "chat-1",
+                long_term_subject_visibility: MemorySubjectVisibilityPolicy::OnlySubjects(vec![
+                    "agent:test".into(),
+                ]),
                 now_secs,
             },
         )

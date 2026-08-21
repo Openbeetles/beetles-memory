@@ -9,8 +9,8 @@ use bm_core::memory::{
     MemoryWriteCandidate, MemoryWriteDomain, SoulCandidateDisposition,
 };
 use bm_sdk::{
-    MemoryProjectionRequest, MemoryWriteRequest, PressureLevel, RuntimeLifecycleModeInput,
-    RuntimeSkillListRequest,
+    MemoryProjectionRequest, MemorySubjectVisibilityPolicy, MemoryWriteRequest, PressureLevel,
+    RuntimeLifecycleModeInput, RuntimeSkillListRequest,
 };
 
 use support::{empty_store_platform, test_runtime_with_scope};
@@ -35,10 +35,20 @@ fn text_candidate(
     body: &str,
     semantic_judgment: Option<MemoryCandidateSemanticJudgment>,
 ) -> MemoryWriteCandidate {
+    let governed_target = semantic_judgment
+        .as_ref()
+        .and_then(|judgment| judgment.governed_target.as_ref())
+        .unwrap_or(&target);
+    let long_term_subject_visibility = matches!(
+        governed_target,
+        MemoryCandidateTarget::LongTermMemory { .. }
+    )
+    .then_some(MemorySubjectVisibilityPolicy::AllSubjects);
     MemoryWriteCandidate {
         candidate_id: id.to_string(),
         authority: MemoryEvidenceAuthority::UserAsserted,
         target,
+        long_term_subject_visibility,
         privacy,
         content: MemoryCandidateContent::Text {
             topic: "semantic_candidate".to_string(),
@@ -67,6 +77,7 @@ fn sdk_candidate_write_mutates_only_llm_governed_plane_not_host_claimed_target()
                     kind: LongTermMemoryKind::Profile,
                     topic: "host_claimed_profile".to_string(),
                 },
+                long_term_subject_visibility: None,
                 privacy: MemoryPrivacyClass::SharedWithSubject,
                 content: MemoryCandidateContent::RuntimeSkill {
                     name: "runtime_skill__sdk_host_readiness_check".to_string(),
@@ -181,6 +192,7 @@ fn sdk_candidate_write_reports_soul_handoff_without_long_term_or_procedural_muta
                 target: MemoryCandidateTarget::Soul {
                     surface: "relationship_posture".to_string(),
                 },
+                long_term_subject_visibility: None,
                 privacy: MemoryPrivacyClass::SoulPrivate,
                 content: MemoryCandidateContent::Text {
                     topic: "relationship_posture".to_string(),
@@ -228,6 +240,7 @@ fn sdk_candidate_write_keeps_private_garden_out_of_common_candidate_mutation() {
                 target: MemoryCandidateTarget::PrivateGarden {
                     path: "journal/today.md".to_string(),
                 },
+                long_term_subject_visibility: None,
                 privacy: MemoryPrivacyClass::PrivateGarden,
                 content: MemoryCandidateContent::Text {
                     topic: "private_garden".to_string(),

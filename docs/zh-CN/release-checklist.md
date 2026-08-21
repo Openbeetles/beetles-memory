@@ -7,12 +7,14 @@
 - 根 README 链接英文和中文文档。
 - `docs/README.md` 链接 `docs/en/README.md` 和 `docs/zh-CN/README.md`。
 - 英文和中文文档覆盖同一组主题：架构、集成、部署、CLI、API、Profile、存储、Adapter、回放、运维、发布。
+- 版本专属发布说明必须披露 breaking API/schema 变更、迁移可用性、回滚、发布集合和未验证证据平面。
 
 ## Metadata
 
 - Workspace license 是 `Apache-2.0`。
 - 根目录存在 `LICENSE`。
 - 可发布 crates 有 package description。
+- 可发布 crates 继承规范 repository URL 和根 README。
 - Workspace crate dependencies 同时包含 `version` 和 `path`。
 
 ## 验证
@@ -48,6 +50,8 @@ bash scripts/check_production_hardening_contract.sh
 bash scripts/check_release_surface.sh
 ```
 
+构建缓存需要放到其他卷时，将 `BM_RELEASE_SURFACE_WORK_ROOT` 指向现有绝对目录；macOS launchd fixture 的 `TMPDIR` 仍保留在宿主文件系统。
+
 缺少必要目标工具链的开发机可以在工程交接中将对应行记录为 `deferred_not_passed`。
 任何发布候选都必须配置全部目标工具链并取得 strict GREEN；工具链缺失会阻断发布，不能算通过：
 
@@ -62,10 +66,17 @@ bash scripts/check_cross_target_compile_gates.sh --strict
 ```text
 bm-core
 bm-sdk
-bm-replay / bm-evolve / bm-adapter
+bm-replay
+bm-evolve
+bm-adapter
 bm-entry
 bm-ollama-transparent
-bm-cli / bm-llm-gateway / bm-http / bm-wss / bm-mcp / bm-a2a
+bm-cli
+bm-llm-gateway
+bm-http
+bm-wss
+bm-mcp
+bm-a2a
 ```
 
 通过 `scripts/check_release_surface.sh` 运行 staged `cargo publish --dry-run -p <crate>`。release gate 会运行 production hardening 检查、使用临时 Cargo target，并在 ignored artifact baseline 发生变化时失败。

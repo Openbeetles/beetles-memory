@@ -3,8 +3,8 @@ use bm_core::memory::{
     CanonicalEntityKind, CanonicalEntityRef, GovernedWriteDecision, LongTermMemoryKind,
     MemoryCandidateContent, MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment,
     MemoryCandidateTarget, MemoryEvidenceAuthority, MemoryPrivacyClass,
-    MemorySemanticJudgmentSource, MemoryWriteCandidate, MemoryWriteDomain,
-    SoulCandidateDisposition,
+    MemorySemanticJudgmentSource, MemorySubjectVisibilityPolicy, MemoryWriteCandidate,
+    MemoryWriteDomain, SoulCandidateDisposition,
 };
 
 fn text_candidate(
@@ -26,6 +26,11 @@ fn text_candidate(
     MemoryWriteCandidate {
         candidate_id: id.to_string(),
         authority,
+        long_term_subject_visibility: matches!(
+            target,
+            MemoryCandidateTarget::LongTermMemory { .. }
+        )
+        .then_some(MemorySubjectVisibilityPolicy::AllSubjects),
         target,
         privacy: MemoryPrivacyClass::SharedWithSubject,
         content: MemoryCandidateContent::Text {

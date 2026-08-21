@@ -30,7 +30,7 @@ After the crates are published:
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.2.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.3.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 Use exactly one profile feature for a build. Linux desktop, Linux device, and Linux server are distinct deployment targets; do not substitute one for another.
@@ -160,12 +160,14 @@ on the same memory-governance contract.
 
 ```rust
 use bm_sdk::{
-    LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateTarget,
-    MemoryEvidenceAuthority, MemoryPrivacyClass, MemoryWriteCandidate,
-    MemoryWriteRequest,
+    LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateSemanticDecision,
+    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryEvidenceAuthority,
+    MemoryPrivacyClass, MemorySemanticJudgmentSource, MemorySubjectVisibilityPolicy,
+    MemoryWriteCandidate, MemoryWriteRequest,
 };
 
 runtime.write(MemoryWriteRequest::Candidates {
+    runtime_skill_owning_scope: None,
     candidates: vec![MemoryWriteCandidate {
         candidate_id: "turn-1:preferred-name".to_string(),
         authority: MemoryEvidenceAuthority::UserAsserted,
@@ -173,6 +175,7 @@ runtime.write(MemoryWriteRequest::Candidates {
             kind: LongTermMemoryKind::Profile,
             topic: "preferred_name".to_string(),
         },
+        long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
         privacy: MemoryPrivacyClass::SharedWithSubject,
         content: MemoryCandidateContent::Text {
             topic: "preferred_name".to_string(),
@@ -181,7 +184,12 @@ runtime.write(MemoryWriteRequest::Candidates {
         },
         evidence_refs: vec!["chat-1:turn-1".to_string()],
         canonical_entities: Vec::new(),
-        semantic_judgment: None,
+        semantic_judgment: Some(MemoryCandidateSemanticJudgment {
+            source: MemorySemanticJudgmentSource::RuntimeGate,
+            decision: MemoryCandidateSemanticDecision::Accept,
+            governed_target: None,
+            reason: "explicit user statement accepted by the runtime gate".to_string(),
+        }),
     }],
 })?;
 ```
@@ -252,6 +260,34 @@ if let Some(record) = page.records.first() {
     assert!(report.accepted);
 }
 ```
+
+Hosts cannot declare confirmation on `LongTermMemoryDraft`. Ordinary create, upsert,
+extraction, Adapter metadata, citations, and observer logs remain unconfirmed. Every
+explicit `MemoryLongTermMutation::Correct` creates immutable typed correction evidence,
+including when the replacement text is unchanged. Confirmation is separate: the SDK adds
+typed human-confirmation evidence only when the exact actor is an active `HumanUser` in
+the current `SubjectRegistry`. Corrections by an `AgentPersona`, `SystemGovernor`, or a
+suspended human remain unconfirmed. Both evidence records bind the exact memory space,
+actor, predecessor/successor, time, and same-transaction control revision. `Supersede`
+clears confirmation instead of transferring it to another owner.
+
+### Durable mutation results (Adapter V2)
+
+Adapter V2 gives `Write` and `LongTermMutate` a Store-owned durable operation receipt.
+The first successful execution returns `Accepted` with a receipt. Retrying the same
+operation identity with the same canonical intent returns terminal-success `Replayed`
+with that same receipt and does not add another effect, revision, audit, or event. Reusing
+the identity for a different intent is a conflict.
+
+Durable `Write` and `LongTermMutate` requests must provide a stable, non-sensitive
+idempotency key through the transport. The Adapter hashes that key before persistence and
+rejects a durable mutation when the key is absent; it never substitutes a one-shot generated
+identity that the caller could not reproduce after a lost response. Adapter V1 accepts reads
+only. Other V2 mutations are explicitly non-durable (or have a separate domain-owned
+receipt); inspect both the Adapter capability report and the SDK mutation inventory instead
+of assuming global exactly-once behavior. Receipts remain pinned until Store capacity is
+exhausted; the Store then fails the whole mutation closed and never evicts an older receipt
+silently.
 
 Bulk `forget_by_query` must run a dry-run preview before execution and then pass the confirmation token. Use `MemoryLongTermPolicyRequest` for "do not remember this kind of thing again" or pausing future long-term memory updates for a scope; policies do not retroactively delete accepted records.
 

@@ -54,6 +54,10 @@ pub fn merge_peer_visibility(local_visible: bool, peer_visible: bool) -> bool {
 pub fn bridge_message_specs() -> Vec<A2aBridgeMessageSpec> {
     vec![
         message("peer_capability", None),
+        message(
+            "memory_capabilities_request",
+            Some(AdapterOperation::Capabilities),
+        ),
         message("memory_write_candidate", Some(AdapterOperation::Write)),
         message(
             "memory_finalize_turn_request",
@@ -224,7 +228,7 @@ impl A2aBridge {
                 operation,
                 self.bridge_id.clone(),
                 source_kind,
-                request_identity.idempotency_key,
+                request_identity.mutation_operation_id.unwrap_or_default(),
                 request_identity.audit_id,
                 auth.clone(),
             ),
@@ -637,18 +641,30 @@ struct A2aHttpRequest {
 #[cfg(feature = "bridge-http")]
 fn render_response(response: AdapterResponse<AdapterSdkReport>) -> String {
     match response {
-        AdapterResponse::Accepted { report, .. } => {
+        AdapterResponse::Accepted {
+            report, receipt, ..
+        } => {
             if let Some(governed) = report.governed_safe_report() {
-                return json!({"status":"accepted","result":governed}).to_string();
+                return omit_null_receipt(
+                    json!({"status":"accepted","result":governed,"receipt":receipt}).to_string(),
+                );
             }
-            match report {
+            omit_null_receipt(match report {
                 AdapterSdkReport::Recall(_) | AdapterSdkReport::Project(_) => {
                     unreachable!("governed DTO handled above")
                 }
+                AdapterSdkReport::Capabilities(report) => json!({
+                    "status": "accepted",
+                    "profile": report.profile.as_str(),
+                    "capabilities": report.capabilities,
+                    "sdk_mutation_inventory": report.sdk_mutation_inventory,
+                })
+                .to_string(),
                 AdapterSdkReport::FinalizeTurn(report) => json!({
                     "status": "accepted",
                     "operation": "finalize_turn",
                     "result": report,
+                    "receipt": receipt,
                 })
                 .to_string(),
                 AdapterSdkReport::TranscriptAttrWrite(report) => json!({
@@ -663,14 +679,16 @@ fn render_response(response: AdapterResponse<AdapterSdkReport>) -> String {
                     "audit_event_id": report.audit_event_id,
                     "dry_run": report.dry_run,
                     "lifecycle": report.lifecycle_report.result_summary,
+                    "receipt": receipt,
                 })
                 .to_string(),
                 other => json!({
                     "status": "accepted",
                     "report_kind": other.public_kind(),
+                    "receipt": receipt,
                 })
                 .to_string(),
-            }
+            })
         }
         AdapterResponse::Rejected { reason, .. } => {
             json!({"status":"rejected","reason":reason}).to_string()
@@ -678,8 +696,23 @@ fn render_response(response: AdapterResponse<AdapterSdkReport>) -> String {
         AdapterResponse::Queued { queue, .. } => {
             json!({"status":"queued","queue":queue}).to_string()
         }
-        AdapterResponse::Duplicated {
-            idempotency_key, ..
-        } => json!({"status":"duplicated","idempotency_key":idempotency_key}).to_string(),
+        AdapterResponse::Replayed {
+            mutation_operation_id,
+            receipt,
+            ..
+        } => json!({"status":"replayed","mutation_operation_id":mutation_operation_id,"receipt":receipt}).to_string(),
     }
+}
+
+#[cfg(feature = "bridge-http")]
+fn omit_null_receipt(rendered: String) -> String {
+    let mut value: Value =
+        serde_json::from_str(&rendered).expect("adapter response renderer emits valid JSON");
+    if value.get("receipt").is_some_and(Value::is_null) {
+        value
+            .as_object_mut()
+            .expect("adapter response renderer emits an object")
+            .remove("receipt");
+    }
+    value.to_string()
 }

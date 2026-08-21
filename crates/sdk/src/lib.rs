@@ -124,6 +124,7 @@ compile_error!("nonproduction-replay-harness cannot be combined with a productio
 mod capability;
 mod capability_snapshot;
 mod governed_report;
+mod mutation_capability;
 mod ops;
 #[cfg(feature = "nonproduction-replay-harness")]
 mod p8_semantic_off_run;
@@ -134,6 +135,10 @@ mod store_internal;
 use ops::MemorySpaceScope;
 
 pub use governed_report::*;
+pub use mutation_capability::{
+    MemoryMutationCapability, MemoryMutationCapabilityCatalog, MemoryMutationReliability,
+    MemoryMutationSurface,
+};
 #[cfg(feature = "nonproduction-replay-harness")]
 pub use p8_semantic_off_run::*;
 pub(crate) use store_internal::*;
@@ -148,9 +153,10 @@ pub use bm_core::budget::NonproductionRuntimeBudgetLimits;
 pub use bm_core::budget::{
     AdapterRuntimeBudget, FacetRecallRuntimeBudget, GovernedStateRuntimeBudget,
     GraphExpansionRuntimeBudget, LlmGatewayBudget, MaintenanceBudget, MemoryCoreBudget,
-    ProjectionRenderBudget, ProjectionSourceBudget, ProviderModelContextLimit,
-    RecallDeliveryRuntimeBudget, RuntimeBudgetReport, RuntimeJobBudget, StoreRuntimeBudget,
-    TranscriptGovernanceBudget,
+    MutationOperationReceiptCapacityExhaustion, MutationOperationReceiptQuota,
+    MutationOperationReceiptRetentionPolicy, ProjectionRenderBudget, ProjectionSourceBudget,
+    ProviderModelContextLimit, RecallDeliveryRuntimeBudget, RuntimeBudgetReport, RuntimeJobBudget,
+    RuntimeRetentionQuotaReport, StoreRuntimeBudget, TranscriptGovernanceBudget,
 };
 pub use bm_core::feature_gate::{ProfileId, RoleFeature, TargetFeature};
 pub use bm_core::llm::{
@@ -192,8 +198,8 @@ pub use bm_core::memory::{
     inspect_working_recall, load_prompt_memory_context, recall_long_term_memory_block,
     run_post_reply_memory_maintenance, search_archive_records_detailed,
     ContinuityCapsuleMaintenanceOutcome, IngressKind, IntelligenceReplayInspection,
-    LongTermMemoryDraft, LongTermMemoryEntry, LongTermMemoryKind, LongTermMemoryQuery,
-    LongTermMemorySlot, LongTermMemorySourceScope, LongTermMemorySourceType,
+    LongTermMemoryDraft, LongTermMemoryEntry, LongTermMemoryKind, LongTermMemoryProvenance,
+    LongTermMemoryQuery, LongTermMemorySlot, LongTermMemorySourceScope, LongTermMemorySourceType,
     MemoryHygieneInspection, MemoryProfile, MemorySystemKind as MemoryRuntimeSystemKind,
     ParsedLongTermMemoryExtraction, PostReplyMemoryMaintenanceContext,
     PostReplyMemoryMaintenanceInput, PostReplyMemoryMaintenanceOutcome, ProjectionSourceAuthority,
@@ -211,19 +217,20 @@ pub use bm_core::memory::{
     MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryEvidenceAuthority,
     MemoryGovernancePolicyMutation, MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration,
     MemoryLongTermControlView, MemoryLongTermGovernancePolicy, MemoryLongTermMutation,
-    MemoryLongTermSelector, MemoryLongTermTarget, MemoryPlaneGovernanceReport, MemoryPrivacyClass,
-    MemorySemanticJudgmentSource, MemorySubjectVisibilityPolicy, MemoryTurnDeliveryStatus,
-    MemoryTurnProtocol, MemoryTurnSource, MemoryWriteAuthority, MemoryWriteCandidate,
-    MemoryWriteDomain, PostTurnGovernanceAttemptAuthorityV2, PostTurnGovernanceErrorClassV2,
-    PostTurnGovernanceIdentityV2, PostTurnGovernanceJobRefV1, PostTurnGovernanceJobStatusV2,
-    PostTurnGovernanceJobV2, PostTurnGovernanceReceiptV2, PostTurnGovernanceReconciliationCursorV1,
-    PostTurnGovernanceScopeIndexV2, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
-    PrivateDocEntry, PrivateDocWorkspace, PrivateGardenAdmissionDecision,
-    PrivateGardenGovernanceManifestAction, PrivateGardenGovernanceManifestEntry,
-    RedactedTranscriptSlice, SessionTurnCommitReport, SharedFactWriteGovernanceContext,
-    SharedMemoryWriteOutcome, SoulCandidateDisposition, SoulCandidateHandoffReport,
-    SubjectDescriptor, SubjectKind, SubjectLifecycleState, SubjectRegistry,
-    SubjectRelationshipEdge, SubjectRelationshipGraph, SubjectRelationshipKind,
+    MemoryLongTermSelector, MemoryLongTermTarget, MemoryMutationEffect,
+    MemoryMutationOperationKind, MemoryMutationReceipt, MemoryPlaneGovernanceReport,
+    MemoryPrivacyClass, MemorySemanticJudgmentSource, MemorySubjectVisibilityPolicy,
+    MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteAuthority,
+    MemoryWriteCandidate, MemoryWriteDomain, PostTurnGovernanceAttemptAuthorityV2,
+    PostTurnGovernanceErrorClassV2, PostTurnGovernanceIdentityV2, PostTurnGovernanceJobRefV1,
+    PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV2, PostTurnGovernanceReceiptV2,
+    PostTurnGovernanceReconciliationCursorV1, PostTurnGovernanceScopeIndexV2,
+    PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport, PrivateDocEntry,
+    PrivateDocWorkspace, PrivateGardenAdmissionDecision, PrivateGardenGovernanceManifestAction,
+    PrivateGardenGovernanceManifestEntry, RedactedTranscriptSlice, SessionTurnCommitReport,
+    SharedFactWriteGovernanceContext, SharedMemoryWriteOutcome, SoulCandidateDisposition,
+    SoulCandidateHandoffReport, SubjectDescriptor, SubjectKind, SubjectLifecycleState,
+    SubjectRegistry, SubjectRelationshipEdge, SubjectRelationshipGraph, SubjectRelationshipKind,
     SubjectScopedRuntime, SubjectSoulBinding, SubjectSoulSurface, SubjectVisibility,
     TranscriptAttrEnvelope, TranscriptAttrGovernance, TranscriptAttrLink,
     TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
@@ -341,16 +348,16 @@ pub use ops::{
     MemoryInspectionRequest, MemoryLongTermDetailReport, MemoryLongTermDetailRequest,
     MemoryLongTermListReport, MemoryLongTermListRequest, MemoryLongTermMutationReport,
     MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryMaintenanceReport,
-    MemoryMaintenanceRequest, MemoryProceduralWriteReport, MemoryProjectionAuditReport,
-    MemoryProjectionGatewayAuditView, MemoryProjectionOutput, MemoryProjectionPrivateGateAudit,
-    MemoryProjectionReport, MemoryProjectionRequest, MemoryProjectionSafeAuditReport,
-    MemoryProjectionSectionAudit, MemoryProjectionSourceAudit, MemoryRecallDeliveryReport,
-    MemoryRecallDeliverySafeView, MemoryRecallRenderDecision, MemoryRecallRenderDropReason,
-    MemoryRecallReport, MemoryRecallRequest, MemoryRecallSelectionDecision,
-    MemoryRecallSelectionDropReason, MemoryRecallTemporalOperation, MemoryRecoverReport,
-    MemoryRecoverRequest, MemoryRenderedEvidenceCapsule, MemoryReplayReport, MemoryReplayRequest,
-    MemoryRetentionCompactionReport, MemoryRetentionCompactionRequest, MemorySpaceArchive,
-    MemorySpaceExportReport, MemorySpaceExportRequest, MemorySpaceImportReport,
+    MemoryMaintenanceRequest, MemoryMutationExecution, MemoryProceduralWriteReport,
+    MemoryProjectionAuditReport, MemoryProjectionGatewayAuditView, MemoryProjectionOutput,
+    MemoryProjectionPrivateGateAudit, MemoryProjectionReport, MemoryProjectionRequest,
+    MemoryProjectionSafeAuditReport, MemoryProjectionSectionAudit, MemoryProjectionSourceAudit,
+    MemoryRecallDeliveryReport, MemoryRecallDeliverySafeView, MemoryRecallRenderDecision,
+    MemoryRecallRenderDropReason, MemoryRecallReport, MemoryRecallRequest,
+    MemoryRecallSelectionDecision, MemoryRecallSelectionDropReason, MemoryRecallTemporalOperation,
+    MemoryRecoverReport, MemoryRecoverRequest, MemoryRenderedEvidenceCapsule, MemoryReplayReport,
+    MemoryReplayRequest, MemoryRetentionCompactionReport, MemoryRetentionCompactionRequest,
+    MemorySpaceArchive, MemorySpaceExportReport, MemorySpaceExportRequest, MemorySpaceImportReport,
     MemorySpaceImportRequest, MemorySpacePrivateMaterialPolicy, MemorySpaceProjectionScope,
     MemoryTranscriptAttrWriteReport, MemoryTranscriptAttrWriteRequest,
     MemoryTranscriptCommitReport, MemoryTranscriptCommitRequest, MemoryTranscriptExportReport,

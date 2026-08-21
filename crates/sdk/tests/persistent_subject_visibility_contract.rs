@@ -6,21 +6,25 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bm_core::memory::{
     default_agent_subject_id, governed_memory_recall_candidate_id, GovernedMemoryOwnerPlane,
-    GovernedMemoryOwnerRef, LongTermMemoryQuery, SubjectDescriptor, SubjectRegistry,
-    LONG_TERM_CONTROL_TOMBSTONE_SCHEMA_VERSION,
+    GovernedMemoryOwnerRef, LongTermMemoryProvenance, MemoryCandidateContent,
+    MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
+    MemoryEvidenceAuthority, MemorySemanticJudgmentSource, MemoryWriteCandidate, SubjectDescriptor,
+    SubjectRegistry, LONG_TERM_CONTROL_TOMBSTONE_SCHEMA_VERSION,
 };
 use bm_sdk::{
-    LongTermMemoryDraft, LongTermMemoryKind, LongTermMemorySourceScope, MemoryIdentity,
-    MemoryLongTermControlView, MemoryLongTermDetailRequest, MemoryLongTermListRequest,
-    MemoryLongTermMutation, MemoryLongTermMutationRequest, MemoryLongTermTarget,
-    MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime, MemoryScope,
-    MemoryStoreHandle, MemorySubjectVisibilityPolicy, MemoryWriteRequest,
-    ParsedLongTermMemoryExtraction, PressureLevel, QueryFacetInput, RuntimeLifecycleModeInput,
-    StoreBackendConfig,
+    LongTermMemoryDraft, LongTermMemoryKind, LongTermMemorySourceScope,
+    LongTermMemoryVersionMaterial, MemoryIdentity, MemoryLongTermControlView,
+    MemoryLongTermDetailRequest, MemoryLongTermMutation, MemoryLongTermMutationRequest,
+    MemoryLongTermTarget, MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallRequest,
+    MemoryRuntime, MemoryScope, MemoryStoreHandle, MemorySubjectVisibilityPolicy,
+    MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel, QueryFacetInput,
+    RuntimeLifecycleModeInput, StoreBackendConfig,
 };
 
 const CONTENT: &str = "PSV1_REOPEN_SENTINEL belongs to one MemorySpace owner.";
 const PRIVATE_EVIDENCE: &str = "psv1:private-evidence-sentinel";
+const HIDDEN_CONTENT: &str = "PSV1_HIDDEN_REOPEN_SENTINEL is hidden from one subject at creation.";
+const HIDDEN_PRIVATE_EVIDENCE: &str = "psv2:hidden-private-evidence-sentinel";
 
 fn registry() -> SubjectRegistry {
     let mut registry =
@@ -66,7 +70,12 @@ fn current_recall(runtime: &MemoryRuntime) -> bm_sdk::MemoryRecallReport {
         .expect("current recall")
 }
 
-fn assert_owner_exact_zero(recall: &bm_sdk::MemoryRecallReport, owner_id: &str) {
+fn assert_owner_exact_zero(
+    recall: &bm_sdk::MemoryRecallReport,
+    owner_id: &str,
+    forbidden_content: &str,
+    forbidden_evidence: &str,
+) {
     let owner_ref = GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, owner_id);
     let candidate_id = governed_memory_recall_candidate_id(&owner_ref);
     for candidates in [
@@ -91,8 +100,8 @@ fn assert_owner_exact_zero(recall: &bm_sdk::MemoryRecallReport, owner_id: &str) 
         .iter()
         .any(|entry| entry.candidate_id == candidate_id));
     let safe_report = format!("{recall:#?}");
-    assert!(!safe_report.contains(CONTENT), "{safe_report}");
-    assert!(!safe_report.contains(PRIVATE_EVIDENCE), "{safe_report}");
+    assert!(!safe_report.contains(forbidden_content), "{safe_report}");
+    assert!(!safe_report.contains(forbidden_evidence), "{safe_report}");
     assert!(!safe_report.contains(owner_id), "{safe_report}");
     assert!(!safe_report.contains(&candidate_id), "{safe_report}");
 }
@@ -100,13 +109,116 @@ fn assert_owner_exact_zero(recall: &bm_sdk::MemoryRecallReport, owner_id: &str) 
 fn assert_subject_visibility(open: impl Fn() -> MemoryStoreHandle) {
     let subject_a = default_agent_subject_id("agent-a");
     let subject_b = default_agent_subject_id("agent-b");
-    let owner_id = {
+    let (owner_id, hidden_owner_id) = {
         let platform = open();
-        let runtime_a = runtime(platform, registry(), "agent-a");
+        let runtime_a = runtime(platform.clone(), registry(), "agent-a");
         runtime_a
             .write(MemoryWriteRequest::LongTermExtraction {
                 extraction: ParsedLongTermMemoryExtraction {
-                    upserts: vec![LongTermMemoryDraft {
+                    upserts: vec![
+                        LongTermMemoryDraft {
+                            kind: LongTermMemoryKind::Fact,
+                            topic: "psv1_reopen".to_string(),
+                            content: CONTENT.to_string(),
+                            keywords: vec!["psv1".to_string()],
+                            privacy: MemoryPrivacyClass::PublicRuntime,
+                            source_chat_id: Some("psv1-reopen".to_string()),
+                            source_type: None,
+                            source_scope: None,
+                            subject_visibility: MemorySubjectVisibilityPolicy::OnlySubjects(vec![
+                                subject_a.clone(),
+                            ]),
+                            provenance: LongTermMemoryProvenance {
+                                source_authority: MemoryEvidenceAuthority::UserAsserted,
+                                semantic_judgment_source: Some(
+                                    MemorySemanticJudgmentSource::RuntimeGate,
+                                ),
+                            },
+                            confidence: None,
+                            freshness: None,
+                            stale_hint: None,
+                            supporting_citations: vec![PRIVATE_EVIDENCE.to_string()],
+                            canonical_entities: Vec::new(),
+                            evidence_count: Some(1),
+                            observed_at: Some(1_800_000_000),
+                            source_revision: Some(1),
+                        },
+                        LongTermMemoryDraft {
+                            kind: LongTermMemoryKind::Fact,
+                            topic: "psv2_hidden_reopen".to_string(),
+                            content: HIDDEN_CONTENT.to_string(),
+                            keywords: vec!["psv1".to_string(), "hidden".to_string()],
+                            privacy: MemoryPrivacyClass::PublicRuntime,
+                            source_chat_id: Some("psv1-reopen".to_string()),
+                            source_type: None,
+                            source_scope: None,
+                            subject_visibility: MemorySubjectVisibilityPolicy::HiddenFromSubjects(
+                                vec![subject_b.clone()],
+                            ),
+                            provenance: LongTermMemoryProvenance {
+                                source_authority: MemoryEvidenceAuthority::UserAsserted,
+                                semantic_judgment_source: Some(
+                                    MemorySemanticJudgmentSource::RuntimeGate,
+                                ),
+                            },
+                            confidence: None,
+                            freshness: None,
+                            stale_hint: None,
+                            supporting_citations: vec![HIDDEN_PRIVATE_EVIDENCE.to_string()],
+                            canonical_entities: Vec::new(),
+                            evidence_count: Some(1),
+                            observed_at: Some(1_800_000_001),
+                            source_revision: Some(1),
+                        },
+                    ],
+                    deletes: Vec::new(),
+                    skill_writes: Vec::new(),
+                },
+                governed_skill_writes: Vec::new(),
+                runtime_skill_owning_scope: None,
+            })
+            .expect("seed owner");
+        let materials = platform
+            .replay_harness()
+            .read_json_namespace("long_term_version_materials")
+            .expect("read rev1 materials");
+        assert_eq!(
+            materials.len(),
+            2,
+            "both restricted creates must have exactly one revision"
+        );
+        let materials = materials
+            .into_iter()
+            .map(|doc| {
+                serde_json::from_value::<LongTermMemoryVersionMaterial>(doc.value)
+                    .expect("decode rev1 material")
+            })
+            .collect::<Vec<_>>();
+        let only_material = materials
+            .iter()
+            .find(|material| material.governed_content.topic == "psv1_reopen")
+            .expect("OnlySubjects rev1 material");
+        assert_eq!(only_material.owner_revision, 1);
+        assert_eq!(
+            only_material.subject_visibility,
+            MemorySubjectVisibilityPolicy::OnlySubjects(vec![subject_a.clone()])
+        );
+        let hidden_material = materials
+            .iter()
+            .find(|material| material.governed_content.topic == "psv2_hidden_reopen")
+            .expect("HiddenFromSubjects rev1 material");
+        assert_eq!(hidden_material.owner_revision, 1);
+        assert_eq!(
+            hidden_material.subject_visibility,
+            MemorySubjectVisibilityPolicy::HiddenFromSubjects(vec![subject_b.clone()])
+        );
+        let owner_id = only_material.owner_ref.owner_id.clone();
+        let hidden_owner_id = hidden_material.owner_ref.owner_id.clone();
+        runtime_a
+            .mutate_long_term_memory(MemoryLongTermMutationRequest {
+                operation: MemoryLongTermMutation::Correct {
+                    target: MemoryLongTermTarget::RecordId(owner_id.clone()),
+                    replacement: LongTermMemoryDraft {
                         kind: LongTermMemoryKind::Fact,
                         topic: "psv1_reopen".to_string(),
                         content: CONTENT.to_string(),
@@ -115,50 +227,52 @@ fn assert_subject_visibility(open: impl Fn() -> MemoryStoreHandle) {
                         source_chat_id: Some("psv1-reopen".to_string()),
                         source_type: None,
                         source_scope: None,
+                        subject_visibility: MemorySubjectVisibilityPolicy::OnlySubjects(vec![
+                            subject_a.clone(),
+                        ]),
+                        provenance: LongTermMemoryProvenance {
+                            source_authority: MemoryEvidenceAuthority::UserAsserted,
+                            semantic_judgment_source: Some(
+                                MemorySemanticJudgmentSource::RuntimeGate,
+                            ),
+                        },
                         confidence: None,
                         freshness: None,
                         stale_hint: None,
                         supporting_citations: vec![PRIVATE_EVIDENCE.to_string()],
                         canonical_entities: Vec::new(),
                         evidence_count: Some(1),
-                        observed_at: Some(1_800_000_000),
-                        last_confirmed_at: Some(1_800_000_000),
+                        observed_at: Some(1_800_000_002),
                         source_revision: Some(1),
-                    }],
-                    deletes: Vec::new(),
-                    skill_writes: Vec::new(),
+                    },
                 },
-                governed_skill_writes: Vec::new(),
-                runtime_skill_owning_scope: None,
-            })
-            .expect("seed owner");
-        let owner_id = runtime_a
-            .list_long_term_memory(MemoryLongTermListRequest {
-                query: LongTermMemoryQuery::default(),
-                cursor: None,
-                limit: 10,
-                view: MemoryLongTermControlView::HostUi,
-            })
-            .expect("list owner")
-            .records[0]
-            .record
-            .id
-            .clone();
-        runtime_a
-            .mutate_long_term_memory(MemoryLongTermMutationRequest {
-                operation: MemoryLongTermMutation::ChangeScope {
-                    target: MemoryLongTermTarget::RecordId(owner_id.clone()),
-                    source_scope: LongTermMemorySourceScope::World,
-                    subject_visibility: MemorySubjectVisibilityPolicy::OnlySubjects(vec![
-                        subject_a.clone(),
-                    ]),
-                },
-                reason: "persist OnlySubjects across reopen".to_string(),
+                reason: "persist typed Correct confirmation across reopen".to_string(),
                 dry_run: false,
                 mode_input: RuntimeLifecycleModeInput::default(),
             })
-            .expect("persist OnlySubjects");
-        owner_id
+            .expect("persist typed correction confirmation");
+        let corrected = platform
+            .replay_harness()
+            .read_json_namespace("long_term_version_materials")
+            .expect("read corrected materials")
+            .into_iter()
+            .map(|doc| {
+                serde_json::from_value::<LongTermMemoryVersionMaterial>(doc.value)
+                    .expect("decode corrected material")
+            })
+            .filter(|material| material.owner_ref.owner_id == owner_id)
+            .max_by_key(|material| material.owner_revision)
+            .expect("corrected owner material");
+        let correction = corrected
+            .governed_content
+            .correction_evidence
+            .as_ref()
+            .expect("typed neutral correction evidence");
+        assert_eq!(correction.memory_space_id, runtime_a.memory_space_id());
+        assert_eq!(correction.actor_subject_id, subject_a);
+        assert_eq!(correction.successor.owner_revision, 2);
+        assert!(corrected.governed_content.confirmation_evidence.is_none());
+        (owner_id, hidden_owner_id)
     };
 
     {
@@ -171,9 +285,26 @@ fn assert_subject_visibility(open: impl Fn() -> MemoryStoreHandle) {
             .rendered_capsules
             .iter()
             .any(|capsule| capsule.content.contains(CONTENT)));
+        assert!(current_recall(&runtime_a)
+            .delivery_report
+            .rendered_capsules
+            .iter()
+            .any(|capsule| capsule.content.contains(HIDDEN_CONTENT)));
         let denied = current_recall(&runtime_b);
-        assert_owner_exact_zero(&denied, &owner_id);
-        assert_owner_exact_zero(&current_recall(&runtime_c), &owner_id);
+        assert_owner_exact_zero(&denied, &owner_id, CONTENT, PRIVATE_EVIDENCE);
+        assert_owner_exact_zero(
+            &denied,
+            &hidden_owner_id,
+            HIDDEN_CONTENT,
+            HIDDEN_PRIVATE_EVIDENCE,
+        );
+        let subject_c_recall = current_recall(&runtime_c);
+        assert_owner_exact_zero(&subject_c_recall, &owner_id, CONTENT, PRIVATE_EVIDENCE);
+        assert!(subject_c_recall
+            .delivery_report
+            .rendered_capsules
+            .iter()
+            .any(|capsule| capsule.content.contains(HIDDEN_CONTENT)));
         runtime_a
             .mutate_long_term_memory(MemoryLongTermMutationRequest {
                 operation: MemoryLongTermMutation::ChangeScope {
@@ -193,7 +324,7 @@ fn assert_subject_visibility(open: impl Fn() -> MemoryStoreHandle) {
     let platform = open();
     let runtime_a = runtime(platform.clone(), registry(), "agent-a");
     let runtime_b = runtime(platform.clone(), registry(), "agent-b");
-    let runtime_c = runtime(platform, registry(), "agent-c");
+    let runtime_c = runtime(platform.clone(), registry(), "agent-c");
     assert!(runtime_a
         .project(MemoryProjectionRequest {
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
@@ -210,7 +341,13 @@ fn assert_subject_visibility(open: impl Fn() -> MemoryStoreHandle) {
         .system_memory_block()
         .contains(CONTENT));
     let denied = current_recall(&runtime_b);
-    assert_owner_exact_zero(&denied, &owner_id);
+    assert_owner_exact_zero(&denied, &owner_id, CONTENT, PRIVATE_EVIDENCE);
+    assert_owner_exact_zero(
+        &denied,
+        &hidden_owner_id,
+        HIDDEN_CONTENT,
+        HIDDEN_PRIVATE_EVIDENCE,
+    );
     let denied_projection = runtime_b
         .project(MemoryProjectionRequest {
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
@@ -231,23 +368,24 @@ fn assert_subject_visibility(open: impl Fn() -> MemoryStoreHandle) {
         .rendered_capsules
         .iter()
         .any(|capsule| capsule.content.contains(CONTENT)));
-    let persisted = runtime_a
-        .list_long_term_memory(MemoryLongTermListRequest {
-            query: LongTermMemoryQuery::default(),
-            cursor: None,
-            limit: 10,
-            view: MemoryLongTermControlView::HostUi,
-        })
-        .expect("list persisted hidden policy")
-        .records
+    let persisted = platform
+        .replay_harness()
+        .read_json_namespace("long_term_version_materials")
+        .expect("read persisted hidden materials")
         .into_iter()
-        .find(|record| record.record.id == owner_id)
-        .expect("persisted hidden owner")
-        .record;
+        .map(|doc| {
+            serde_json::from_value::<LongTermMemoryVersionMaterial>(doc.value)
+                .expect("decode persisted hidden material")
+        })
+        .filter(|material| material.owner_ref.owner_id == owner_id)
+        .max_by_key(|material| material.owner_revision)
+        .expect("persisted hidden owner material");
     assert_eq!(
         persisted.subject_visibility,
         MemorySubjectVisibilityPolicy::HiddenFromSubjects(vec![subject_b.clone()])
     );
+    assert!(persisted.governed_content.correction_evidence.is_some());
+    assert!(persisted.governed_content.confirmation_evidence.is_none());
     runtime_a
         .mutate_long_term_memory(MemoryLongTermMutationRequest {
             operation: MemoryLongTermMutation::Delete {
@@ -310,6 +448,249 @@ fn temp_path(label: &str) -> std::path::PathBuf {
             .expect("clock")
             .as_nanos()
     ))
+}
+
+#[test]
+fn initial_visibility_unknown_subject_rejects_before_any_write() {
+    let platform = support::open_memory_store(
+        StoreBackendConfig::in_memory(support::host_test_profile()).expect("config"),
+    )
+    .expect("in-memory store");
+    let runtime_a = runtime(platform.clone(), registry(), "agent-a");
+    let before = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("before snapshot");
+
+    let error = runtime_a
+        .write(MemoryWriteRequest::LongTermExtraction {
+            extraction: ParsedLongTermMemoryExtraction {
+                upserts: vec![LongTermMemoryDraft {
+                    kind: LongTermMemoryKind::Fact,
+                    topic: "unknown_subject_create".to_string(),
+                    content: "UNKNOWN_SUBJECT_CREATE_SENTINEL".to_string(),
+                    keywords: vec!["unknown".to_string()],
+                    privacy: MemoryPrivacyClass::PublicRuntime,
+                    source_chat_id: Some("psv1-reopen".to_string()),
+                    source_type: None,
+                    source_scope: None,
+                    subject_visibility: MemorySubjectVisibilityPolicy::OnlySubjects(vec![
+                        "agent:missing".to_string(),
+                    ]),
+                    provenance: LongTermMemoryProvenance {
+                        source_authority: MemoryEvidenceAuthority::UserAsserted,
+                        semantic_judgment_source: Some(MemorySemanticJudgmentSource::RuntimeGate),
+                    },
+                    confidence: None,
+                    freshness: None,
+                    stale_hint: None,
+                    supporting_citations: vec!["psv2:unknown-subject-membership".to_string()],
+                    canonical_entities: Vec::new(),
+                    evidence_count: Some(1),
+                    observed_at: Some(1_800_000_001),
+                    source_revision: Some(1),
+                }],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
+        })
+        .expect_err("unknown visibility subject must fail before planning or commit");
+
+    assert_eq!(error.stage(), "long_term_subject_visibility");
+    let after = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("after snapshot");
+    assert_eq!(after.json_docs, before.json_docs);
+    assert_eq!(after.events, before.events);
+}
+
+#[test]
+fn candidate_visibility_unknown_subject_rejects_before_any_write() {
+    let platform = support::open_memory_store(
+        StoreBackendConfig::in_memory(support::host_test_profile()).expect("config"),
+    )
+    .expect("in-memory store");
+    let runtime_a = runtime(platform.clone(), registry(), "agent-a");
+    let before = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("before snapshot");
+    let target = MemoryCandidateTarget::LongTermMemory {
+        kind: LongTermMemoryKind::Fact,
+        topic: "candidate_unknown_subject".to_string(),
+    };
+
+    let error = runtime_a
+        .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: None,
+            candidates: vec![MemoryWriteCandidate {
+                candidate_id: "candidate-unknown-subject".to_string(),
+                authority: MemoryEvidenceAuthority::UserAsserted,
+                target: target.clone(),
+                long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::OnlySubjects(
+                    vec!["agent:missing".to_string()],
+                )),
+                privacy: MemoryPrivacyClass::PublicRuntime,
+                content: MemoryCandidateContent::Text {
+                    topic: "candidate_unknown_subject".to_string(),
+                    body: "CANDIDATE_UNKNOWN_SUBJECT_SENTINEL".to_string(),
+                    keywords: vec!["unknown".to_string()],
+                },
+                evidence_refs: vec!["psv2:candidate-unknown-subject".to_string()],
+                canonical_entities: Vec::new(),
+                semantic_judgment: Some(MemoryCandidateSemanticJudgment {
+                    source: MemorySemanticJudgmentSource::RuntimeGate,
+                    decision: MemoryCandidateSemanticDecision::Accept,
+                    governed_target: Some(target),
+                    reason: "trusted runtime gate".to_string(),
+                }),
+            }],
+        })
+        .expect_err("unknown candidate visibility subject must fail before commit");
+
+    assert_eq!(error.stage(), "long_term_subject_visibility");
+    let after = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("after snapshot");
+    assert_eq!(after.json_docs, before.json_docs);
+    assert_eq!(after.events, before.events);
+}
+
+#[test]
+fn candidate_initial_only_subjects_is_revision_one_and_plain_update_cannot_change_policy() {
+    const CANDIDATE_CONTENT: &str =
+        "PSV1_CANDIDATE_ONLY_SENTINEL is private to agent-a at creation.";
+    const CANDIDATE_EVIDENCE: &str = "psv2:candidate-only-evidence";
+    let platform = support::open_memory_store(
+        StoreBackendConfig::in_memory(support::host_test_profile()).expect("config"),
+    )
+    .expect("in-memory store");
+    let runtime_a = runtime(platform.clone(), registry(), "agent-a");
+    let subject_a = default_agent_subject_id("agent-a");
+    let subject_b = default_agent_subject_id("agent-b");
+    let target = MemoryCandidateTarget::LongTermMemory {
+        kind: LongTermMemoryKind::Fact,
+        topic: "psv1_candidate_only".to_string(),
+    };
+
+    runtime_a
+        .write(MemoryWriteRequest::Candidates {
+            runtime_skill_owning_scope: None,
+            candidates: vec![MemoryWriteCandidate {
+                candidate_id: "candidate-initial-only-subjects".to_string(),
+                authority: MemoryEvidenceAuthority::UserAsserted,
+                target: target.clone(),
+                long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::OnlySubjects(
+                    vec![subject_a.clone()],
+                )),
+                privacy: MemoryPrivacyClass::PublicRuntime,
+                content: MemoryCandidateContent::Text {
+                    topic: "psv1_candidate_only".to_string(),
+                    body: CANDIDATE_CONTENT.to_string(),
+                    keywords: vec!["psv1".to_string(), "candidate".to_string()],
+                },
+                evidence_refs: vec![CANDIDATE_EVIDENCE.to_string()],
+                canonical_entities: Vec::new(),
+                semantic_judgment: Some(MemoryCandidateSemanticJudgment {
+                    source: MemorySemanticJudgmentSource::RuntimeGate,
+                    decision: MemoryCandidateSemanticDecision::Accept,
+                    governed_target: Some(target),
+                    reason: "trusted runtime gate".to_string(),
+                }),
+            }],
+        })
+        .expect("create candidate with initial OnlySubjects");
+
+    let material_docs = platform
+        .replay_harness()
+        .read_json_namespace("long_term_version_materials")
+        .expect("read candidate material");
+    assert_eq!(material_docs.len(), 1);
+    let material =
+        serde_json::from_value::<LongTermMemoryVersionMaterial>(material_docs[0].value.clone())
+            .expect("decode candidate material");
+    assert_eq!(material.owner_revision, 1);
+    assert_eq!(
+        material.subject_visibility,
+        MemorySubjectVisibilityPolicy::OnlySubjects(vec![subject_a.clone()])
+    );
+    assert_eq!(
+        material.governed_content.provenance,
+        LongTermMemoryProvenance {
+            source_authority: MemoryEvidenceAuthority::UserAsserted,
+            semantic_judgment_source: Some(MemorySemanticJudgmentSource::RuntimeGate),
+        }
+    );
+    let owner_id = material.owner_ref.owner_id.clone();
+    assert!(current_recall(&runtime_a)
+        .delivery_report
+        .rendered_capsules
+        .iter()
+        .any(|capsule| capsule.content.contains(CANDIDATE_CONTENT)));
+    let runtime_b = runtime(platform.clone(), registry(), "agent-b");
+    assert_owner_exact_zero(
+        &current_recall(&runtime_b),
+        &owner_id,
+        CANDIDATE_CONTENT,
+        CANDIDATE_EVIDENCE,
+    );
+
+    let before = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("snapshot before forbidden transition");
+    let error = runtime_a
+        .write(MemoryWriteRequest::LongTermExtraction {
+            extraction: ParsedLongTermMemoryExtraction {
+                upserts: vec![LongTermMemoryDraft {
+                    kind: LongTermMemoryKind::Fact,
+                    topic: "psv1_candidate_only".to_string(),
+                    content: "A plain upsert must not change initial visibility.".to_string(),
+                    keywords: vec!["psv1".to_string(), "candidate".to_string()],
+                    privacy: MemoryPrivacyClass::PublicRuntime,
+                    source_chat_id: Some("psv1-reopen".to_string()),
+                    source_type: None,
+                    source_scope: None,
+                    subject_visibility: MemorySubjectVisibilityPolicy::HiddenFromSubjects(vec![
+                        subject_b,
+                    ]),
+                    provenance: LongTermMemoryProvenance {
+                        source_authority: MemoryEvidenceAuthority::UserAsserted,
+                        semantic_judgment_source: Some(MemorySemanticJudgmentSource::RuntimeGate),
+                    },
+                    confidence: None,
+                    freshness: None,
+                    stale_hint: None,
+                    supporting_citations: vec!["psv2:forbidden-policy-transition".to_string()],
+                    canonical_entities: Vec::new(),
+                    evidence_count: Some(1),
+                    observed_at: Some(1_800_000_002),
+                    source_revision: Some(2),
+                }],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
+            governed_skill_writes: Vec::new(),
+            runtime_skill_owning_scope: None,
+        })
+        .expect_err("plain upsert visibility transition must require control mutation");
+
+    assert_eq!(error.stage(), "long_term_entry_plan");
+    assert!(
+        error
+            .to_string()
+            .contains("SubjectVisibilityTransitionRequiresControl"),
+        "{error}"
+    );
+    let after = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("snapshot after forbidden transition");
+    assert_eq!(after, before);
 }
 
 #[test]

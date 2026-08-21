@@ -54,6 +54,7 @@ pub struct DesktopConsoleRequest {
     method: HttpMethod,
     path: String,
     body: String,
+    idempotency_key: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,6 +70,8 @@ pub struct DesktopConsoleInvokeRequest {
     pub path: String,
     #[serde(default)]
     pub body: String,
+    #[serde(default)]
+    pub idempotency_key: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -167,14 +170,15 @@ impl TryFrom<DesktopConsoleInvokeRequest> for DesktopConsoleRequest {
     type Error = String;
 
     fn try_from(value: DesktopConsoleInvokeRequest) -> std::result::Result<Self, Self::Error> {
-        match value.method.as_str() {
+        let request = match value.method.as_str() {
             "GET" => Ok(Self::get(value.path)),
             "PUT" => Ok(Self::put_json(value.path, value.body)),
             "POST" => Ok(Self::post_json(value.path, value.body)),
             "PATCH" => Ok(Self::patch_json(value.path, value.body)),
             "DELETE" => Ok(Self::delete(value.path)),
             other => Err(format!("unsupported desktop console method: {other}")),
-        }
+        }?;
+        Ok(request.with_idempotency_key(value.idempotency_key))
     }
 }
 
@@ -252,6 +256,7 @@ impl DesktopConsoleRequest {
             method: HttpMethod::Get,
             path: path.into(),
             body: String::new(),
+            idempotency_key: String::new(),
         }
     }
 
@@ -260,6 +265,7 @@ impl DesktopConsoleRequest {
             method: HttpMethod::Post,
             path: path.into(),
             body: body.into(),
+            idempotency_key: String::new(),
         }
     }
 
@@ -268,6 +274,7 @@ impl DesktopConsoleRequest {
             method: HttpMethod::Put,
             path: path.into(),
             body: body.into(),
+            idempotency_key: String::new(),
         }
     }
 
@@ -276,6 +283,7 @@ impl DesktopConsoleRequest {
             method: HttpMethod::Patch,
             path: path.into(),
             body: body.into(),
+            idempotency_key: String::new(),
         }
     }
 
@@ -284,17 +292,24 @@ impl DesktopConsoleRequest {
             method: HttpMethod::Delete,
             path: path.into(),
             body: String::new(),
+            idempotency_key: String::new(),
         }
     }
 
+    pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
+        self.idempotency_key = key.into();
+        self
+    }
+
     fn into_http_runtime_request(self) -> HttpRuntimeRequest {
-        match self.method {
+        let request = match self.method {
             HttpMethod::Get => HttpRuntimeRequest::get(self.path),
             HttpMethod::Post => HttpRuntimeRequest::post_json(self.path, self.body),
             HttpMethod::Put => HttpRuntimeRequest::put_json(self.path, self.body),
             HttpMethod::Patch => HttpRuntimeRequest::patch_json(self.path, self.body),
             HttpMethod::Delete => HttpRuntimeRequest::delete(self.path),
-        }
+        };
+        request.with_idempotency_key(self.idempotency_key)
     }
 }
 

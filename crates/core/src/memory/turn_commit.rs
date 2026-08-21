@@ -36,6 +36,7 @@ pub enum MemoryTurnProtocol {
 #[serde(rename_all = "snake_case")]
 pub enum MemoryEvidenceAuthority {
     UserAsserted,
+    ModelInferred,
     AssistantUtterance,
     AssistantSelfClaim,
     RuntimeObservation,
@@ -64,6 +65,7 @@ impl MemoryEvidenceAuthority {
     pub const fn label(self) -> &'static str {
         match self {
             Self::UserAsserted => "user_asserted",
+            Self::ModelInferred => "model_inferred",
             Self::AssistantUtterance => "assistant_utterance",
             Self::AssistantSelfClaim => "assistant_self_claim",
             Self::RuntimeObservation => "runtime_observation",

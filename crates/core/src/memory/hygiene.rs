@@ -310,7 +310,6 @@ fn compact_factual_evidence_metadata(
         let mutation = LongTermMemoryOwnerMutation::CompactEvidenceMetadata {
             supporting_citations: draft.supporting_citations,
             evidence_count: draft.evidence_count.unwrap_or(0),
-            last_confirmed_at: draft.last_confirmed_at.unwrap_or(0),
         };
         let existing = reconciled_entries
             .iter()
@@ -483,6 +482,8 @@ fn collect_factual_compaction_candidates(
             source_chat_id: entry.source_chat_id.clone(),
             source_type: Some(entry.source_type),
             source_scope: Some(entry.source_scope),
+            subject_visibility: entry.subject_visibility.clone(),
+            provenance: entry.provenance,
             confidence: Some(entry.confidence),
             freshness: Some(entry.freshness),
             stale_hint: Some(entry.stale_hint),
@@ -495,27 +496,15 @@ fn collect_factual_compaction_candidates(
                     .max(entry.supporting_citations.len().min(6) as u32),
             ),
             observed_at: Some(entry.observed_at),
-            last_confirmed_at: Some(
-                entry
-                    .last_confirmed_at
-                    .max(entry.observed_at)
-                    .max(entry.updated_at),
-            ),
             source_revision: entry.source_revision,
         };
-        if draft.evidence_count != Some(entry.evidence_count)
-            || draft.last_confirmed_at != Some(entry.last_confirmed_at)
-        {
+        if draft.evidence_count != Some(entry.evidence_count) {
             should_compact = true;
         }
         if let Some(reconcile) = reconcile_drafts
             .iter()
             .find(|candidate| candidate.kind == entry.kind && candidate.topic == entry.topic)
         {
-            if reconcile.last_confirmed_at.unwrap_or(0) > draft.last_confirmed_at.unwrap_or(0) {
-                draft.last_confirmed_at = reconcile.last_confirmed_at;
-                should_compact = true;
-            }
             if reconcile.evidence_count.unwrap_or(0) > draft.evidence_count.unwrap_or(0) {
                 draft.evidence_count = reconcile.evidence_count;
                 should_compact = true;
@@ -1019,6 +1008,10 @@ mod tests {
                 source_type: LongTermMemorySourceType::Conversation,
                 source_scope: LongTermMemorySourceScope::User,
                 subject_visibility: crate::memory::MemorySubjectVisibilityPolicy::AllSubjects,
+                provenance: crate::memory::LongTermMemoryProvenance {
+                    source_authority: crate::memory::MemoryEvidenceAuthority::UserAsserted,
+                    semantic_judgment_source: None,
+                },
                 confidence: LongTermMemoryConfidence::Medium,
                 freshness: LongTermMemoryFreshness::Stable,
                 stale_hint: LongTermMemoryStaleHint::None,
@@ -1032,7 +1025,7 @@ mod tests {
                 created_at: 3,
                 updated_at: 9,
                 observed_at: 7,
-                last_confirmed_at: 5,
+                last_confirmed_at: Some(5),
                 source_revision: None,
                 owner_revision: 1,
                 last_used_at: 0,
@@ -1045,7 +1038,7 @@ mod tests {
         assert_eq!(topics, vec!["router_position".to_string()]);
         let entry = &changed[0];
         assert_eq!(entry.observed_at, 7);
-        assert_eq!(entry.last_confirmed_at, 9);
+        assert_eq!(entry.last_confirmed_at, Some(5));
         assert_eq!(entry.supporting_citations.len(), 2);
         assert_eq!(entry.evidence_count, 3);
         assert_eq!(entry.owner_revision, 2);

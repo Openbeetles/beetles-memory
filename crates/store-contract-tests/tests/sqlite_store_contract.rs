@@ -7,8 +7,10 @@ use bm_core::feature_gate::ProfileId;
 use bm_core::memory::{
     canonical_evidence_ref_from_source, CanonicalEntityKey, CanonicalEntityKind,
     CanonicalEntityRef, LongTermMemoryConfidence, LongTermMemoryDraft, LongTermMemoryEntry,
-    LongTermMemoryFreshness, LongTermMemoryKind, LongTermMemorySourceScope,
-    LongTermMemorySourceType, LongTermMemoryStaleHint, MemoryPrivacyClass,
+    LongTermMemoryFreshness, LongTermMemoryKind, LongTermMemoryProvenance,
+    LongTermMemorySourceScope, LongTermMemorySourceType, LongTermMemoryStaleHint,
+    MemoryEvidenceAuthority, MemoryPrivacyClass, MemorySemanticJudgmentSource,
+    MemorySubjectVisibilityPolicy,
 };
 use bm_core::platform::Platform;
 use bm_sdk::nonproduction_replay_harness::{StoreBackendConfig, StorePlatform};
@@ -73,6 +75,11 @@ fn sqlite_store_persists_core_runtime_paths_across_reopen() {
                 source_chat_id: Some("chat-a".to_string()),
                 source_type: Some(LongTermMemorySourceType::Conversation),
                 source_scope: Some(LongTermMemorySourceScope::User),
+                subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                provenance: LongTermMemoryProvenance {
+                    source_authority: MemoryEvidenceAuthority::UserAsserted,
+                    semantic_judgment_source: Some(MemorySemanticJudgmentSource::RuntimeGate),
+                },
                 confidence: Some(LongTermMemoryConfidence::High),
                 freshness: Some(LongTermMemoryFreshness::Stable),
                 stale_hint: Some(LongTermMemoryStaleHint::ReviewBeforeUse),
@@ -91,7 +98,6 @@ fn sqlite_store_persists_core_runtime_paths_across_reopen() {
                 }],
                 evidence_count: Some(1),
                 observed_at: Some(100),
-                last_confirmed_at: Some(100),
                 source_revision: Some(1),
             },
             100,

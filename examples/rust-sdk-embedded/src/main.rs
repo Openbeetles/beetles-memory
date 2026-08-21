@@ -3,9 +3,9 @@ use bm_sdk::{
     MemoryCandidateTarget, MemoryCapabilityPolicy, MemoryEvidenceAuthority, MemoryIdentity,
     MemoryInspectionRequest, MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryProjectionRequest,
     MemoryRecallRequest, MemoryRuntime, MemoryScope, MemorySemanticJudgmentSource,
-    MemoryStoreHandle, MemoryWriteCandidate, MemoryWriteRequest, PressureLevel, ProfileId,
-    RuntimeLifecycleModeInput, RuntimeSkillCreationRef, RuntimeSkillOwningScope, RuntimeSkillWrite,
-    RuntimeSkillWriteSource, StoreBackendConfig,
+    MemoryStoreHandle, MemorySubjectVisibilityPolicy, MemoryWriteCandidate, MemoryWriteRequest,
+    PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillCreationRef,
+    RuntimeSkillOwningScope, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
 };
 use bm_sdk::{MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment};
 
@@ -58,12 +58,12 @@ fn build_runtime(store: MemoryStoreHandle) -> bm_sdk::Result<MemoryRuntime> {
         .build()
 }
 
-fn llm_accept(target: MemoryCandidateTarget) -> MemoryCandidateSemanticJudgment {
+fn runtime_accept(target: MemoryCandidateTarget) -> MemoryCandidateSemanticJudgment {
     MemoryCandidateSemanticJudgment {
-        source: MemorySemanticJudgmentSource::LlmGovernance,
+        source: MemorySemanticJudgmentSource::RuntimeGate,
         decision: MemoryCandidateSemanticDecision::Accept,
         governed_target: Some(target),
-        reason: "sdk_embedded_example_llm_governance".to_string(),
+        reason: "sdk_embedded_example_runtime_gate".to_string(),
     }
 }
 
@@ -72,11 +72,12 @@ fn run_host_turn_lifecycle(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
         runtime_skill_owning_scope: None,
         candidates: vec![MemoryWriteCandidate {
             candidate_id: "turn-1:project-readiness".to_string(),
-            authority: MemoryEvidenceAuthority::UserAsserted,
+            authority: MemoryEvidenceAuthority::ProgramMemoryCanonical,
             target: MemoryCandidateTarget::LongTermMemory {
                 kind: LongTermMemoryKind::Project,
                 topic: "sdk_host_readiness".to_string(),
             },
+            long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
             privacy: MemoryPrivacyClass::SharedWithSubject,
             content: MemoryCandidateContent::Text {
                 topic: "sdk_host_readiness".to_string(),
@@ -85,7 +86,7 @@ fn run_host_turn_lifecycle(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
             },
             evidence_refs: vec!["rust-sdk-embedded:turn-1".to_string()],
             canonical_entities: Vec::new(),
-            semantic_judgment: Some(llm_accept(MemoryCandidateTarget::LongTermMemory {
+            semantic_judgment: Some(runtime_accept(MemoryCandidateTarget::LongTermMemory {
                 kind: LongTermMemoryKind::Project,
                 topic: "sdk_host_readiness".to_string(),
             })),
@@ -144,13 +145,7 @@ fn run_host_turn_lifecycle(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
         structured_query_facets: Vec::new(),
         tool_registry_refs: Vec::new(),
     })?;
-    assert!(
-        projection
-            .provider_payload()
-            .system_memory_block()
-            .len()
-            <= 4096
-    );
+    assert!(projection.provider_payload().system_memory_block().len() <= 4096);
 
     Ok(())
 }

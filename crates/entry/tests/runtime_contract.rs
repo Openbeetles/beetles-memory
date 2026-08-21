@@ -8,7 +8,8 @@ use bm_sdk::{
     LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateSemanticDecision,
     MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryCapabilityPolicy,
     MemoryEvidenceAuthority, MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryRecallRequest,
-    MemorySemanticJudgmentSource, MemoryWriteCandidate, MemoryWriteRequest, StoreBackendConfig,
+    MemorySemanticJudgmentSource, MemorySubjectVisibilityPolicy, MemoryWriteCandidate,
+    MemoryWriteRequest, StoreBackendConfig,
 };
 
 mod support;
@@ -59,8 +60,9 @@ fn write_command(name: &str, chat_id: &str, marker: &str) -> AdapterCommand {
     AdapterCommand::Write(MemoryWriteRequest::Candidates {
         candidates: vec![MemoryWriteCandidate {
             candidate_id: name.to_string(),
-            authority: MemoryEvidenceAuthority::UserAsserted,
+            authority: MemoryEvidenceAuthority::ProgramMemoryCanonical,
             target: target.clone(),
+            long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
             privacy: MemoryPrivacyClass::SharedWithSubject,
             content: MemoryCandidateContent::Text {
                 topic: "entry-runtime".to_string(),
@@ -76,7 +78,7 @@ fn write_command(name: &str, chat_id: &str, marker: &str) -> AdapterCommand {
             evidence_refs: vec![format!("{chat_id}:entry-runtime-factory-contract")],
             canonical_entities: Vec::new(),
             semantic_judgment: Some(MemoryCandidateSemanticJudgment {
-                source: MemorySemanticJudgmentSource::LlmGovernance,
+                source: MemorySemanticJudgmentSource::RuntimeGate,
                 decision: MemoryCandidateSemanticDecision::Accept,
                 governed_target: Some(target),
                 reason: "entry runtime shared-store fixture".to_string(),
@@ -148,6 +150,7 @@ fn entry_runtime_dispatches_adapter_command_through_sdk_runtime() {
             request_id,
             audit_id,
             report: AdapterSdkReport::Recall(report),
+            ..
         } => {
             assert_eq!(request_id, "req-1");
             assert_eq!(audit_id, "audit-1");
@@ -306,9 +309,10 @@ fn entry_runtime_manager_reuses_scoped_runtime_idempotency_cache() {
 
     assert!(matches!(first.adapter, AdapterResponse::Accepted { .. }));
     match second.adapter {
-        AdapterResponse::Duplicated {
-            idempotency_key, ..
-        } => assert_eq!(idempotency_key, "idem-manager-write"),
+        AdapterResponse::Replayed {
+            mutation_operation_id,
+            ..
+        } => assert_eq!(mutation_operation_id, "idem-manager-write"),
         other => panic!("unexpected response: {other:?}"),
     }
 }
@@ -355,9 +359,10 @@ fn entry_runtime_manager_bounds_cache_without_splitting_active_scope() {
         )
         .expect("second write");
     match second_write.adapter {
-        AdapterResponse::Duplicated {
-            idempotency_key, ..
-        } => assert_eq!(idempotency_key, "idem-manager-active-evicted"),
+        AdapterResponse::Replayed {
+            mutation_operation_id,
+            ..
+        } => assert_eq!(mutation_operation_id, "idem-manager-active-evicted"),
         other => panic!("unexpected response: {other:?}"),
     }
 }

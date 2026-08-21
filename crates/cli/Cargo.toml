@@ -1,8 +1,10 @@
 [package]
 name = "bm-cli"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
 description = "CLI adapter surface and platform capability inspection for Beetle Memory."
 documentation = "https://docs.rs/bm-cli"
 
@@ -31,7 +33,7 @@ profile-server-linux-dev-full = ["bm-entry/profile-server-linux-dev-full"]
 
 [dependencies]
 bm-adapter.workspace = true
-bm-entry = { version = "0.2.0", path = "../entry" }
+bm-entry = { version = "0.3.0", path = "../entry" }
 bm-sdk.workspace = true
 serde.workspace = true
 serde_json.workspace = true

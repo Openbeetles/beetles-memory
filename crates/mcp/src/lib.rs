@@ -406,7 +406,7 @@ impl McpToolServer {
                 spec.operation,
                 self.server_id.clone(),
                 "mcp_tool",
-                request_identity.idempotency_key,
+                request_identity.mutation_operation_id.unwrap_or_default(),
                 request_identity.audit_id,
                 auth.clone(),
             ),
@@ -530,7 +530,7 @@ impl McpToolServer {
                 AdapterOperation::Project,
                 self.server_id.clone(),
                 "mcp_resource",
-                request_identity.idempotency_key,
+                request_identity.mutation_operation_id.unwrap_or_default(),
                 request_identity.audit_id,
                 auth.clone(),
             ),
@@ -1450,23 +1450,30 @@ fn render_mcp_tool_execution_error(message: String) -> Value {
 #[cfg(feature = "server-stdio")]
 fn render_tool_result(response: AdapterResponse<AdapterSdkReport>) -> McpToolResult {
     match response {
-        AdapterResponse::Accepted { report, .. } => {
+        AdapterResponse::Accepted {
+            report, receipt, ..
+        } => {
             let content = if let Some(governed) = report.governed_safe_report() {
-                json!({"status":"accepted","result":governed}).to_string()
+                omit_null_receipt(
+                    json!({"status":"accepted","result":governed,"receipt":receipt}).to_string(),
+                )
             } else {
-                match report {
+                omit_null_receipt(match report {
                     AdapterSdkReport::Recall(_) | AdapterSdkReport::Project(_) => {
                         unreachable!("governed DTO handled above")
                     }
-                    AdapterSdkReport::Capabilities(catalog) => json!({
+                    AdapterSdkReport::Capabilities(report) => json!({
                         "status": "accepted",
-                        "profile": catalog.profile.as_str(),
+                        "profile": report.profile.as_str(),
+                        "capabilities": report.capabilities,
+                        "sdk_mutation_inventory": report.sdk_mutation_inventory,
                     })
                     .to_string(),
                     AdapterSdkReport::FinalizeTurn(report) => json!({
                         "status": "accepted",
                         "operation": "finalize_turn",
                         "result": report,
+                        "receipt": receipt,
                     })
                     .to_string(),
                     AdapterSdkReport::TranscriptAttrWrite(report) => json!({
@@ -1481,14 +1488,16 @@ fn render_tool_result(response: AdapterResponse<AdapterSdkReport>) -> McpToolRes
                         "audit_event_id": report.audit_event_id,
                         "dry_run": report.dry_run,
                         "lifecycle": report.lifecycle_report.result_summary,
+                        "receipt": receipt,
                     })
                     .to_string(),
                     other => json!({
                         "status": "accepted",
                         "report_kind": other.public_kind(),
+                        "receipt": receipt,
                     })
                     .to_string(),
-                }
+                })
             };
             McpToolResult {
                 status: "accepted".to_string(),
@@ -1509,15 +1518,30 @@ fn render_tool_result(response: AdapterResponse<AdapterSdkReport>) -> McpToolRes
             private_raw_allowed: false,
             budget_report_id: String::new(),
         },
-        AdapterResponse::Duplicated {
-            idempotency_key, ..
+        AdapterResponse::Replayed {
+            mutation_operation_id,
+            receipt,
+            ..
         } => McpToolResult {
-            status: "duplicated".to_string(),
-            content: json!({"status":"duplicated","idempotency_key":idempotency_key}).to_string(),
+            status: "replayed".to_string(),
+            content: json!({"status":"replayed","mutation_operation_id":mutation_operation_id,"receipt":receipt}).to_string(),
             private_raw_allowed: false,
             budget_report_id: String::new(),
         },
     }
+}
+
+#[cfg(feature = "server-stdio")]
+fn omit_null_receipt(rendered: String) -> String {
+    let mut value: Value =
+        serde_json::from_str(&rendered).expect("adapter response renderer emits valid JSON");
+    if value.get("receipt").is_some_and(Value::is_null) {
+        value
+            .as_object_mut()
+            .expect("adapter response renderer emits an object")
+            .remove("receipt");
+    }
+    value.to_string()
 }
 
 #[cfg(feature = "server-stdio")]
@@ -1546,11 +1570,14 @@ fn render_projection_preview_resource(
             "queue": queue,
             "private_raw_allowed": false,
         })),
-        AdapterResponse::Duplicated {
-            idempotency_key, ..
+        AdapterResponse::Replayed {
+            mutation_operation_id,
+            receipt,
+            ..
         } => Ok(json!({
-            "status": "duplicated",
-            "idempotency_key": idempotency_key,
+            "status": "replayed",
+            "mutation_operation_id": mutation_operation_id,
+            "receipt": receipt,
             "private_raw_allowed": false,
         })),
     }

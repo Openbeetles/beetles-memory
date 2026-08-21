@@ -1327,6 +1327,13 @@ pub(super) fn execute_real_fixture_receipt_set(
                                     source_chat_id: None,
                                     source_type: None,
                                     source_scope: None,
+                                    subject_visibility:
+                                        bm_sdk::MemorySubjectVisibilityPolicy::AllSubjects,
+                                    provenance: bm_sdk::LongTermMemoryProvenance {
+                                        source_authority:
+                                            bm_sdk::MemoryEvidenceAuthority::ProgramMemoryCanonical,
+                                        semantic_judgment_source: None,
+                                    },
                                     confidence: None,
                                     freshness: None,
                                     stale_hint: None,
@@ -1336,7 +1343,6 @@ pub(super) fn execute_real_fixture_receipt_set(
                                     canonical_entities: Vec::new(),
                                     evidence_count: Some(1),
                                     observed_at: Some(1_800_000_000),
-                                    last_confirmed_at: Some(1_800_000_000),
                                     source_revision: Some(1),
                                 }],
                                 deletes: Vec::new(),

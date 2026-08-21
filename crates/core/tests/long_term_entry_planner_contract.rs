@@ -59,6 +59,11 @@ fn draft(content: &str, source_revision: Option<u64>) -> LongTermMemoryDraft {
         source_chat_id: Some("chat-a".to_string()),
         source_type: Some(LongTermMemorySourceType::Conversation),
         source_scope: Some(LongTermMemorySourceScope::User),
+        subject_visibility: bm_core::memory::MemorySubjectVisibilityPolicy::AllSubjects,
+        provenance: bm_core::memory::LongTermMemoryProvenance {
+            source_authority: bm_core::memory::MemoryEvidenceAuthority::UserAsserted,
+            semantic_judgment_source: None,
+        },
         confidence: Some(LongTermMemoryConfidence::High),
         freshness: Some(LongTermMemoryFreshness::Dynamic),
         stale_hint: Some(LongTermMemoryStaleHint::ReviewBeforeUse),
@@ -72,7 +77,6 @@ fn draft(content: &str, source_revision: Option<u64>) -> LongTermMemoryDraft {
         )],
         evidence_count: Some(1),
         observed_at: Some(NOW - 10),
-        last_confirmed_at: Some(NOW - 10),
         source_revision,
     }
 }
@@ -207,7 +211,6 @@ fn absent_revision_preserves_same_lineage_but_binds_none_to_new_lineage() {
     ));
     let mut same_lineage = draft("v2", None);
     same_lineage.observed_at = Some(NOW + 1);
-    same_lineage.last_confirmed_at = Some(NOW + 1);
     let updated = expect_updated(plan_long_term_memory_upsert(
         Some(&entry),
         &same_lineage,
@@ -218,7 +221,6 @@ fn absent_revision_preserves_same_lineage_but_binds_none_to_new_lineage() {
     let mut new_lineage = draft("v3", None);
     new_lineage.source_chat_id = Some("chat-b".to_string());
     new_lineage.observed_at = Some(NOW + 2);
-    new_lineage.last_confirmed_at = Some(NOW + 2);
     let rebound = expect_updated(plan_long_term_memory_upsert(
         Some(&updated),
         &new_lineage,
@@ -240,7 +242,6 @@ fn unspecified_lineage_fields_preserve_existing_source_lineage() {
     incoming.source_type = None;
     incoming.source_scope = None;
     incoming.observed_at = Some(NOW + 1);
-    incoming.last_confirmed_at = Some(NOW + 1);
 
     let updated = expect_updated(plan_long_term_memory_upsert(
         Some(&entry),
@@ -273,7 +274,6 @@ fn same_content_reinforcement_unions_entity_aliases_and_evidence() {
     let entry = created(plan_long_term_memory_upsert(None, &initial, NOW));
     let mut reinforcement = draft("v1", None);
     reinforcement.observed_at = Some(NOW + 1);
-    reinforcement.last_confirmed_at = Some(NOW + 1);
     reinforcement
         .supporting_citations
         .push("archive:release#turn=7".to_string());
@@ -397,21 +397,20 @@ fn evidence_compaction_is_an_owner_mutation_not_a_source_replay() {
         "turn-1".to_string(),
     ];
     entry.evidence_count = 9;
-    entry.last_confirmed_at = NOW;
+    entry.last_confirmed_at = Some(NOW);
 
     let updated = expect_updated(plan_long_term_memory_owner_mutation(
         &entry,
         &LongTermMemoryOwnerMutation::CompactEvidenceMetadata {
             supporting_citations: vec!["turn-1".to_string(), "turn-2".to_string()],
             evidence_count: 2,
-            last_confirmed_at: NOW + 1,
         },
         NOW + 1,
     ));
 
     assert_eq!(updated.supporting_citations, vec!["turn-1", "turn-2"]);
     assert_eq!(updated.evidence_count, 2);
-    assert_eq!(updated.last_confirmed_at, NOW + 1);
+    assert_eq!(updated.last_confirmed_at, Some(NOW));
     assert_eq!(updated.source_revision, Some(7));
     assert_eq!(updated.owner_revision, entry.owner_revision + 1);
 }

@@ -1,8 +1,10 @@
 [package]
 name = "bm-http"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
 description = "HTTP adapter contract surface for Beetle Memory."
 documentation = "https://docs.rs/bm-http"
 
@@ -71,7 +73,7 @@ profile-server-linux-dev-full = [
 
 [dependencies]
 bm-adapter.workspace = true
-bm-entry = { version = "0.2.0", path = "../entry", optional = true }
+bm-entry = { version = "0.3.0", path = "../entry", optional = true }
 bm-ollama-transparent = { workspace = true, optional = true }
 bm-sdk.workspace = true
 serde.workspace = true

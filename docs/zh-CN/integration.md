@@ -30,7 +30,7 @@ crates 发布后：
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.2.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.3.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 每次构建只使用一个 profile feature。Linux desktop、Linux device 与 Linux server 是三个不同部署目标，禁止相互替代。
@@ -159,12 +159,14 @@ if capabilities.lifecycle.maintain_lightweight.visible {
 
 ```rust
 use bm_sdk::{
-    LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateTarget,
-    MemoryEvidenceAuthority, MemoryPrivacyClass, MemoryWriteCandidate,
-    MemoryWriteRequest,
+    LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateSemanticDecision,
+    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryEvidenceAuthority,
+    MemoryPrivacyClass, MemorySemanticJudgmentSource, MemorySubjectVisibilityPolicy,
+    MemoryWriteCandidate, MemoryWriteRequest,
 };
 
 runtime.write(MemoryWriteRequest::Candidates {
+    runtime_skill_owning_scope: None,
     candidates: vec![MemoryWriteCandidate {
         candidate_id: "turn-1:preferred-name".to_string(),
         authority: MemoryEvidenceAuthority::UserAsserted,
@@ -172,6 +174,7 @@ runtime.write(MemoryWriteRequest::Candidates {
             kind: LongTermMemoryKind::Profile,
             topic: "preferred_name".to_string(),
         },
+        long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
         privacy: MemoryPrivacyClass::SharedWithSubject,
         content: MemoryCandidateContent::Text {
             topic: "preferred_name".to_string(),
@@ -180,7 +183,12 @@ runtime.write(MemoryWriteRequest::Candidates {
         },
         evidence_refs: vec!["chat-1:turn-1".to_string()],
         canonical_entities: Vec::new(),
-        semantic_judgment: None,
+        semantic_judgment: Some(MemoryCandidateSemanticJudgment {
+            source: MemorySemanticJudgmentSource::RuntimeGate,
+            decision: MemoryCandidateSemanticDecision::Accept,
+            governed_target: None,
+            reason: "运行时门禁接受了这条显式用户陈述".to_string(),
+        }),
     }],
 })?;
 ```
@@ -242,6 +250,29 @@ if let Some(record) = page.records.first() {
     assert!(report.accepted);
 }
 ```
+
+宿主不能通过 `LongTermMemoryDraft` 声明确认。普通 create、upsert、extraction、
+Adapter metadata、citation 和 observer log 都保持未确认。每次显式
+`MemoryLongTermMutation::Correct` 都会生成不可变 typed correction evidence，即使
+replacement 正文没有变化；confirmation 是另一份证据，只有 exact actor 在当前
+`SubjectRegistry` 中是 active `HumanUser` 时，SDK 才会增加 typed human-confirmation
+evidence。`AgentPersona`、`SystemGovernor` 或 suspended human 发起的纠正仍未确认。
+两类 evidence 都精确绑定 MemorySpace、actor、predecessor/successor、时间和同事务
+control revision；`Supersede` 会清除 confirmation，不把它转移给另一个 owner。
+
+### Adapter V2 持久 mutation 结果
+
+Adapter V2 为 `Write` 与 `LongTermMutate` 提供 Store-owned durable operation receipt。
+首次成功执行返回带 receipt 的 `Accepted`；相同 operation identity 与相同 canonical
+intent 的重试返回带同一 receipt 的终态成功 `Replayed`，不会追加第二次 effect、revision、
+audit 或 event；同 identity 对应不同 intent 则 typed conflict。
+
+durable `Write` 与 `LongTermMutate` 必须由 transport 调用方提供稳定、非敏感的 idempotency
+key；Adapter 在持久化前对它做哈希，缺 key 时直接拒绝，不会代填一个响应丢失后无法复现的
+一次性 identity。Adapter V1 只接受读取。其它 V2 mutation 被明确标为 non-durable，或由独立
+domain receipt 拥有；调用方应同时读取 Adapter capability report 与 SDK mutation inventory，
+不能假设全局 exactly-once。receipt 会一直 pinned，直至 Store 容量耗尽；容量不足时整批 fail
+closed，绝不静默驱逐旧 receipt。
 
 `forget_by_query` 这类批量遗忘必须先 dry-run preview，再带 confirmation token 执行。`MemoryLongTermPolicyRequest` 用于“以后不要记这类事情”或暂停某个 scope 的未来长期记忆更新；policy 不 retroactively 删除已接受记录。
 

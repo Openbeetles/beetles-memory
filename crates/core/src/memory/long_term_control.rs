@@ -11,7 +11,9 @@ use super::governed_post_image::{
 };
 use super::long_term::scoped_long_term_control_storage_key;
 use super::long_term_version::{
-    LongTermMemoryHeadManifest, LongTermMemoryVersionMaterialImage, LongTermVersionRetentionLease,
+    LongTermMemoryCorrectionEvidence, LongTermMemoryCorrectionLifecycle,
+    LongTermMemoryHeadManifest, LongTermMemoryHumanConfirmationEvidence,
+    LongTermMemoryVersionMaterialImage, LongTermVersionRetentionLease,
 };
 use super::{
     long_term_memory_evidence_summary, plan_long_term_memory_owner_mutation,
@@ -22,7 +24,8 @@ use super::{
     LongTermMemoryKind, LongTermMemoryOwnerMutation, LongTermMemoryQuery, LongTermMemoryReadStore,
     LongTermMemorySlot, LongTermMemorySourceScope, LongTermMemoryStaleHint, LongTermMemoryStore,
     LongTermMemoryVersionMaterial, MemoryPrivacyClass, MemorySpaceId,
-    MemorySubjectVisibilityPolicy, SubjectId, TranscriptEvidenceRef,
+    MemorySubjectVisibilityPolicy, SubjectId, SubjectKind, SubjectLifecycleState, SubjectRegistry,
+    TranscriptEvidenceRef,
 };
 
 fn plan_or_apply_owner_mutation(
@@ -973,9 +976,61 @@ impl LongTermVersionOwnerSnapshot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LongTermMemoryHumanConfirmationAuthority {
+    memory_space_id: MemorySpaceId,
+    actor_subject_id: SubjectId,
+}
+
+impl LongTermMemoryHumanConfirmationAuthority {
+    pub fn try_from_registry(registry: &SubjectRegistry, actor_subject_id: &str) -> Result<Self> {
+        let validation = registry.validate_contract();
+        if !validation.accepted {
+            return Err(Error::config(
+                "long_term_human_confirmation_authority",
+                format!("SubjectRegistry contract rejected: {}", validation.reason),
+            ));
+        }
+        if actor_subject_id.trim().is_empty() || actor_subject_id != actor_subject_id.trim() {
+            return Err(Error::config(
+                "long_term_human_confirmation_authority",
+                "human confirmation actor must be an exact canonical SubjectId",
+            ));
+        }
+        let actor = registry.subject(actor_subject_id).ok_or_else(|| {
+            Error::config(
+                "long_term_human_confirmation_authority",
+                "human confirmation actor is absent from the exact SubjectRegistry",
+            )
+        })?;
+        if actor.subject_id != actor_subject_id
+            || actor.kind != SubjectKind::HumanUser
+            || actor.lifecycle_state != SubjectLifecycleState::Active
+        {
+            return Err(Error::config(
+                "long_term_human_confirmation_authority",
+                "human confirmation requires the exact active HumanUser subject",
+            ));
+        }
+        Ok(Self {
+            memory_space_id: registry.memory_space_id.clone(),
+            actor_subject_id: actor_subject_id.to_string(),
+        })
+    }
+
+    pub fn memory_space_id(&self) -> &str {
+        &self.memory_space_id
+    }
+
+    pub fn actor_subject_id(&self) -> &str {
+        &self.actor_subject_id
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LongTermMemoryVersionMutationIntent {
     pub control_revision_intent: LongTermMemoryControlRevisionIntent,
     pub successor_projection: Option<LongTermMemoryEntry>,
+    pub human_confirmation_authority: Option<LongTermMemoryHumanConfirmationAuthority>,
     pub audit_transaction_id: String,
 }
 
@@ -1027,7 +1082,21 @@ pub fn bind_long_term_version_mutation(
     }
 
     let predecessor = snapshot.current_material(lease)?.clone();
+    let human_confirmation_authority = intent.human_confirmation_authority;
     let control_intent = intent.control_revision_intent;
+    if human_confirmation_authority
+        .as_ref()
+        .is_some_and(|authority| {
+            control_intent.operation != LongTermControlOperation::Correct
+                || control_intent.actor_subject_id.as_deref() != Some(authority.actor_subject_id())
+                || control_intent.memory_space_id != authority.memory_space_id()
+        })
+    {
+        return Err(Error::config(
+            "long_term_human_confirmation_authority",
+            "human confirmation authority must bind the exact actor of a Correct transition",
+        ));
+    }
     if control_intent.memory_space_id != predecessor.memory_space_id
         || control_intent.factual_owner_id != predecessor.factual_owner_id
         || control_intent.transition.predecessor != predecessor.owner_revision_ref()
@@ -1092,7 +1161,7 @@ pub fn bind_long_term_version_mutation(
     governed_evidence_refs.extend(control_intent.governed_evidence_refs.iter().cloned());
     governed_evidence_refs.sort();
     governed_evidence_refs.dedup();
-    let successor_material = intent
+    let mut successor_material = intent
         .successor_projection
         .as_ref()
         .map(|successor| {
@@ -1106,6 +1175,63 @@ pub fn bind_long_term_version_mutation(
             )
         })
         .transpose()?;
+
+    if let Some(successor) = successor_material.as_mut() {
+        let correction_evidence = match operation {
+            LongTermControlOperation::Correct => {
+                let actor_subject_id =
+                    control_intent.actor_subject_id.clone().ok_or_else(|| {
+                        Error::config(
+                            "long_term_correction_evidence",
+                            "Correct requires an explicit scoped actor",
+                        )
+                    })?;
+                Some(LongTermMemoryCorrectionEvidence::try_new(
+                    control_intent.memory_space_id.clone(),
+                    actor_subject_id,
+                    control_intent.transition.predecessor.clone(),
+                    successor.owner_revision_ref(),
+                    LongTermMemoryCorrectionLifecycle::Correct,
+                    control_intent.created_at,
+                    control_intent.revision_id.clone(),
+                )?)
+            }
+            _ if successor.governed_content.content == predecessor.governed_content.content => {
+                predecessor.governed_content.correction_evidence.clone()
+            }
+            _ => None,
+        };
+        let confirmation_evidence = match operation {
+            LongTermControlOperation::Correct => human_confirmation_authority
+                .map(|_| {
+                    LongTermMemoryHumanConfirmationEvidence::try_new(
+                        correction_evidence
+                            .clone()
+                            .expect("Correct always creates correction evidence"),
+                    )
+                })
+                .transpose()?,
+            _ if successor.governed_content.content == predecessor.governed_content.content
+                && predecessor
+                    .governed_content
+                    .confirmation_evidence
+                    .as_ref()
+                    .is_some_and(|evidence| {
+                        intent
+                            .successor_projection
+                            .as_ref()
+                            .and_then(|projection| projection.last_confirmed_at)
+                            == Some(evidence.confirmed_at)
+                    }) =>
+            {
+                predecessor.governed_content.confirmation_evidence.clone()
+            }
+            _ => None,
+        };
+        successor.governed_content.correction_evidence = correction_evidence;
+        successor.governed_content.confirmation_evidence = confirmation_evidence;
+        successor.content_digest = successor.canonical_content_digest()?;
+    }
 
     let retention = match operation {
         LongTermControlOperation::Supersede => {
@@ -1423,6 +1549,56 @@ pub fn validate_long_term_control_post_image(
             _ => true,
         } {
             failures.push("long_term_control_revision_owner_version_or_digest_drift".to_string());
+        }
+        match revision.operation {
+            LongTermControlOperation::Correct => {
+                let expected_actor = revision.actor_subject_id.as_deref();
+                let expected_successor = revision.transition.successor.as_ref();
+                let correction = after_owner
+                    .and_then(|owner| owner.governed_content.correction_evidence.as_ref());
+                if match (correction, expected_actor, expected_successor) {
+                    (Some(evidence), Some(actor), Some(successor)) => {
+                        evidence.validate_contract().is_err()
+                            || evidence.memory_space_id != revision.memory_space_id
+                            || evidence.actor_subject_id != actor
+                            || evidence.predecessor != revision.transition.predecessor
+                            || evidence.successor != *successor
+                            || evidence.lifecycle != LongTermMemoryCorrectionLifecycle::Correct
+                            || evidence.corrected_at != revision.created_at
+                            || evidence.control_revision_id != revision.revision_id
+                    }
+                    _ => true,
+                } {
+                    failures.push("long_term_control_correction_evidence_drift".to_string());
+                }
+                if after_owner
+                    .and_then(|owner| owner.governed_content.confirmation_evidence.as_ref())
+                    .is_some_and(|confirmation| {
+                        confirmation.validate_contract().is_err()
+                            || Some(&confirmation.correction) != correction
+                    })
+                {
+                    failures
+                        .push("long_term_control_human_confirmation_evidence_drift".to_string());
+                }
+            }
+            _ => {
+                let before_correction = before_owner
+                    .and_then(|owner| owner.governed_content.correction_evidence.as_ref());
+                let after_correction = after_owner
+                    .and_then(|owner| owner.governed_content.correction_evidence.as_ref());
+                let before_confirmation = before_owner
+                    .and_then(|owner| owner.governed_content.confirmation_evidence.as_ref());
+                let after_confirmation = after_owner
+                    .and_then(|owner| owner.governed_content.confirmation_evidence.as_ref());
+                if (after_correction.is_some() && after_correction != before_correction)
+                    || (after_confirmation.is_some() && after_confirmation != before_confirmation)
+                {
+                    failures.push(
+                        "long_term_control_non_correction_evidence_forgery_forbidden".to_string(),
+                    );
+                }
+            }
         }
         expected_effects.push(ControlEffectRef::Revision {
             revision_id: revision.revision_id.clone(),
@@ -2494,6 +2670,30 @@ fn apply_correct(
     target: &MemoryLongTermTarget,
     replacement: &LongTermMemoryDraft,
 ) -> Result<MemoryLongTermMutationReport> {
+    let memory_space_id = request.memory_space_id.as_deref().ok_or_else(|| {
+        Error::config(
+            "long_term_correction_transition",
+            "Correct requires an explicit memory space",
+        )
+    })?;
+    let actor_subject_id = request.actor_subject_id.as_deref().ok_or_else(|| {
+        Error::config(
+            "long_term_correction_transition",
+            "Correct requires an explicit scoped actor",
+        )
+    })?;
+    if memory_space_id.trim().is_empty()
+        || memory_space_id != memory_space_id.trim()
+        || request.factual_owner_id != memory_space_id
+        || actor_subject_id.trim().is_empty()
+        || actor_subject_id != actor_subject_id.trim()
+        || request.now_secs == 0
+    {
+        return Err(Error::config(
+            "long_term_correction_transition",
+            "Correct scope, actor, and transition time must be canonical",
+        ));
+    }
     let resolved = resolve_target(store, control_store, target, false)?;
     let Some(previous) = resolved.records.first().cloned() else {
         return Ok(rejected_report(
@@ -2529,7 +2729,7 @@ fn apply_correct(
         ));
     }
     let previous_digest = digest_entry(&previous)?;
-    let mutation = LongTermMemoryOwnerMutation::Correct(replacement.clone());
+    let mutation = LongTermMemoryOwnerMutation::Correct(Box::new(replacement.clone()));
     let plan = plan_or_apply_owner_mutation(
         store,
         &previous,
@@ -2676,6 +2876,8 @@ fn apply_supersede(
         }
     };
     replacement_entry.subject_visibility = previous.subject_visibility.clone();
+    replacement_entry.provenance = previous.provenance;
+    replacement_entry.last_confirmed_at = None;
     let previous_digest = digest_entry(&previous)?;
     let new_digest = digest_entry(&replacement_entry)?;
     let tombstone = tombstone_for(&previous, LongTermControlOperation::Supersede, request)?;
@@ -3886,6 +4088,10 @@ mod digest_tests {
             source_type: LongTermMemorySourceType::Conversation,
             source_scope: LongTermMemorySourceScope::User,
             subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+            provenance: crate::memory::LongTermMemoryProvenance {
+                source_authority: crate::memory::MemoryEvidenceAuthority::UserAsserted,
+                semantic_judgment_source: None,
+            },
             confidence: LongTermMemoryConfidence::High,
             freshness: LongTermMemoryFreshness::Dynamic,
             stale_hint: LongTermMemoryStaleHint::ReviewBeforeUse,
@@ -3895,7 +4101,7 @@ mod digest_tests {
             created_at: 10,
             updated_at: 20,
             observed_at: 15,
-            last_confirmed_at: 20,
+            last_confirmed_at: Some(20),
             source_revision: Some(7),
             owner_revision: 1,
             last_used_at: 0,
@@ -3950,7 +4156,7 @@ mod digest_tests {
         variants.push(("observed_at", changed));
 
         let mut changed = baseline.clone();
-        changed.last_confirmed_at += 1;
+        changed.last_confirmed_at = changed.last_confirmed_at.map(|value| value + 1);
         variants.push(("last_confirmed_at", changed));
 
         for (field, changed) in variants {

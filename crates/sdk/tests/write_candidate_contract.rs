@@ -3,7 +3,8 @@ mod support;
 use bm_core::memory::{
     LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateSemanticDecision,
     MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryEvidenceAuthority,
-    MemoryPrivacyClass, MemorySemanticJudgmentSource, MemoryWriteCandidate,
+    MemoryPrivacyClass, MemorySemanticJudgmentSource, MemorySubjectVisibilityPolicy,
+    MemoryWriteCandidate,
 };
 use bm_sdk::{
     MemoryProjectionRequest, MemoryRecallRequest, MemoryWriteRequest, PressureLevel,
@@ -42,6 +43,7 @@ fn sdk_candidate_write_persists_subject_memory_for_cross_chat_projection() {
                     kind: LongTermMemoryKind::Profile,
                     topic: "preferred_name".to_string(),
                 },
+                long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
                 privacy: MemoryPrivacyClass::SharedWithSubject,
                 content: MemoryCandidateContent::Text {
                     topic: "preferred_name".to_string(),
@@ -106,6 +108,7 @@ fn sdk_candidate_write_persists_procedural_memory_through_same_governance_entry(
                     name: String::new(),
                     topic: "release_checklist".to_string(),
                 },
+                long_term_subject_visibility: None,
                 privacy: MemoryPrivacyClass::SharedWithSubject,
                 content: MemoryCandidateContent::RuntimeSkill {
                     name: "runtime_skill__release_checklist".to_string(),

@@ -3,7 +3,8 @@ mod support;
 use bm_core::feature_gate::ProfileId;
 use bm_core::memory::{
     plan_long_term_memory_upsert, LongTermMemoryDraft, LongTermMemoryEntryPlan, LongTermMemoryKind,
-    MemoryPrivacyClass,
+    LongTermMemoryProvenance, MemoryEvidenceAuthority, MemoryPrivacyClass,
+    MemorySubjectVisibilityPolicy,
 };
 use bm_core::platform::{MemorySystemKind, Platform};
 use bm_sdk::nonproduction_replay_harness::StoreBackendConfig;
@@ -33,6 +34,8 @@ fn scoped_long_term_store_isolates_identical_logical_owners_by_memory_space() {
         source_chat_id: None,
         source_type: None,
         source_scope: None,
+        subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+        provenance: LongTermMemoryProvenance::new(MemoryEvidenceAuthority::ProgramMemoryCanonical),
         confidence: None,
         freshness: None,
         stale_hint: None,
@@ -40,7 +43,6 @@ fn scoped_long_term_store_isolates_identical_logical_owners_by_memory_space() {
         canonical_entities: Vec::new(),
         evidence_count: None,
         observed_at: None,
-        last_confirmed_at: None,
         source_revision: None,
     };
 
@@ -142,6 +144,8 @@ fn in_memory_store_platform_covers_core_runtime_paths() {
         source_chat_id: Some("chat-a".to_string()),
         source_type: None,
         source_scope: None,
+        subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+        provenance: LongTermMemoryProvenance::new(MemoryEvidenceAuthority::ProgramMemoryCanonical),
         confidence: None,
         freshness: None,
         stale_hint: None,
@@ -149,7 +153,6 @@ fn in_memory_store_platform_covers_core_runtime_paths() {
         canonical_entities: Vec::new(),
         evidence_count: None,
         observed_at: None,
-        last_confirmed_at: None,
         source_revision: None,
     };
     seed_scoped_long_term(&platform, "space:test", &long_term_draft, 100);
@@ -195,6 +198,8 @@ fn core_revision_planner_rejects_stale_and_same_revision_conflicts() {
         source_chat_id: Some("chat-a".to_string()),
         source_type: None,
         source_scope: None,
+        subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+        provenance: LongTermMemoryProvenance::new(MemoryEvidenceAuthority::ProgramMemoryCanonical),
         confidence: None,
         freshness: None,
         stale_hint: None,
@@ -202,7 +207,6 @@ fn core_revision_planner_rejects_stale_and_same_revision_conflicts() {
         canonical_entities: Vec::new(),
         evidence_count: Some(1),
         observed_at: Some(100),
-        last_confirmed_at: Some(100),
         source_revision: Some(source_revision),
     };
 

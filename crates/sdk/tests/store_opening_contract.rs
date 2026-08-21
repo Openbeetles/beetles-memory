@@ -5,11 +5,12 @@ mod support;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bm_sdk::{
-    IngressKind, LongTermMemoryDraft, LongTermMemoryKind, MemoryArchiveScope,
-    MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryPrivacyClass, MemoryProjectionRequest,
-    MemoryRecallRequest, MemorySpaceExportRequest, MemorySpaceImportRequest,
-    MemorySpacePrivateMaterialPolicy, MemoryWriteRequest, ParsedLongTermMemoryExtraction,
-    PressureLevel, RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome, StoreBackendConfig,
+    IngressKind, LongTermMemoryDraft, LongTermMemoryKind, LongTermMemoryProvenance,
+    MemoryArchiveScope, MemoryEvidenceAuthority, MemoryInspectionRequest, MemoryMaintenanceRequest,
+    MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallRequest, MemorySpaceExportRequest,
+    MemorySpaceImportRequest, MemorySpacePrivateMaterialPolicy, MemorySubjectVisibilityPolicy,
+    MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel, RuntimeLifecycleModeInput,
+    RuntimeSkillReuseOutcome, StoreBackendConfig,
 };
 
 use support::{test_runtime, StaticHttpClient, StaticLlmClient};
@@ -47,6 +48,10 @@ fn sdk_runtime_accepts_store_platform_without_host_store_traits() {
                     source_chat_id: Some("chat-1".to_string()),
                     source_type: None,
                     source_scope: None,
+                    subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                    provenance: LongTermMemoryProvenance::new(
+                        MemoryEvidenceAuthority::ProgramMemoryCanonical,
+                    ),
                     confidence: None,
                     freshness: None,
                     stale_hint: None,
@@ -54,7 +59,6 @@ fn sdk_runtime_accepts_store_platform_without_host_store_traits() {
                     canonical_entities: Vec::new(),
                     evidence_count: Some(1),
                     observed_at: Some(1_800_000_000),
-                    last_confirmed_at: Some(1_800_000_000),
                     source_revision: Some(1),
                 }],
                 deletes: Vec::new(),

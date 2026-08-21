@@ -257,7 +257,7 @@ impl GatewayMaintenanceTask {
                         GatewayMaintenanceRunOutcome::Skipped
                     }
                 },
-                AdapterResponse::Duplicated { .. } => GatewayMaintenanceRunOutcome::Queued,
+                AdapterResponse::Replayed { .. } => GatewayMaintenanceRunOutcome::Queued,
                 AdapterResponse::Rejected { .. } | AdapterResponse::Queued { .. } => {
                     GatewayMaintenanceRunOutcome::Failed
                 }

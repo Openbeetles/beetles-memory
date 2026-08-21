@@ -45,6 +45,7 @@ mod memory_facet;
 mod memory_governance;
 mod memory_privacy;
 mod mental_privacy;
+mod mutation_operation;
 mod next_gen_contract;
 mod outer_voice;
 #[cfg(all(
@@ -265,10 +266,11 @@ pub use long_term::{
     CanonicalEntityRef, CanonicalEvidenceRef, LongTermMemoryConfidence, LongTermMemoryDraft,
     LongTermMemoryEntry, LongTermMemoryEntryPlan, LongTermMemoryEntryRejection,
     LongTermMemoryEvidenceState, LongTermMemoryEvidenceSummary, LongTermMemoryFreshness,
-    LongTermMemoryKind, LongTermMemoryOwnerMutation, LongTermMemoryQuery, LongTermMemoryReadStore,
-    LongTermMemorySlot, LongTermMemorySlotLookup, LongTermMemorySourceScope,
-    LongTermMemorySourceType, LongTermMemoryStaleHint, LongTermMemoryStore,
-    MemorySubjectVisibilityDecision, MemorySubjectVisibilityPolicy, MAX_LONG_TERM_MEMORY_BLOCK_LEN,
+    LongTermMemoryKind, LongTermMemoryOwnerMutation, LongTermMemoryProvenance, LongTermMemoryQuery,
+    LongTermMemoryReadStore, LongTermMemorySlot, LongTermMemorySlotLookup,
+    LongTermMemorySourceScope, LongTermMemorySourceType, LongTermMemoryStaleHint,
+    LongTermMemoryStore, MemorySemanticJudgmentSource, MemorySubjectVisibilityDecision,
+    MemorySubjectVisibilityPolicy, MAX_LONG_TERM_MEMORY_BLOCK_LEN,
     MAX_LONG_TERM_MEMORY_CONTENT_LEN, MAX_LONG_TERM_MEMORY_ITEMS, MAX_LONG_TERM_MEMORY_KEYWORDS,
     MAX_LONG_TERM_MEMORY_KEYWORD_LEN, REL_PATH_LONG_TERM_MEMORIES,
 };
@@ -292,10 +294,10 @@ pub use long_term_control::{
     LongTermMemoryControlMutationPlan, LongTermMemoryControlMutationRequest,
     LongTermMemoryControlReadStore, LongTermMemoryControlRevision,
     LongTermMemoryControlRevisionIntent, LongTermMemoryControlWrite,
-    LongTermMemoryGovernancePolicyMutationPlan, LongTermMemoryOwnerWrite, LongTermMemoryTombstone,
-    LongTermMemoryVersionMutationIntent, LongTermVersionOwnerSnapshot,
-    MemoryDeferredGovernanceImpactReport, MemoryGovernancePolicyMutation,
-    MemoryGovernancePolicyMutationReport, MemoryGovernanceSelector,
+    LongTermMemoryGovernancePolicyMutationPlan, LongTermMemoryHumanConfirmationAuthority,
+    LongTermMemoryOwnerWrite, LongTermMemoryTombstone, LongTermMemoryVersionMutationIntent,
+    LongTermVersionOwnerSnapshot, MemoryDeferredGovernanceImpactReport,
+    MemoryGovernancePolicyMutation, MemoryGovernancePolicyMutationReport, MemoryGovernanceSelector,
     MemoryGovernanceSuppressionDuration, MemoryLongTermAffectedFacetDoc,
     MemoryLongTermAffectedRecord, MemoryLongTermControlDecision, MemoryLongTermControlView,
     MemoryLongTermDetailReport, MemoryLongTermGovernancePolicy, MemoryLongTermListReport,
@@ -337,9 +339,11 @@ pub use long_term_version::{
     select_long_term_current_recall_query_time, select_long_term_historical_recall_query_time,
     select_long_term_version_as_of, select_long_term_version_current,
     validate_long_term_version_head_closure, GovernedOwnerTransition,
+    LongTermMemoryCorrectionEvidence, LongTermMemoryCorrectionLifecycle,
     LongTermMemoryGovernedContent, LongTermMemoryHeadManifest,
-    LongTermMemoryRetainedRevisionDigest, LongTermMemoryVersionHeadBinding,
-    LongTermMemoryVersionMaterial, LongTermMemoryVersionMaterialImage, LongTermMemoryVersionOrigin,
+    LongTermMemoryHumanConfirmationEvidence, LongTermMemoryRetainedRevisionDigest,
+    LongTermMemoryVersionHeadBinding, LongTermMemoryVersionMaterial,
+    LongTermMemoryVersionMaterialImage, LongTermMemoryVersionOrigin,
     LongTermMemoryVersionReadProjection, LongTermMemoryVersionScopeManifest,
     LongTermMemoryVersionTransitionBinding, LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
 };
@@ -388,6 +392,12 @@ pub use mental_privacy::{
     MENTAL_PRIVACY_SYSTEM_CONSTRAINT, MENTAL_PRIVACY_TARGET_INNER_LIFE,
     MENTAL_PRIVACY_TARGET_SELF_CONTINUITY, MENTAL_PRIVACY_TARGET_SELF_MODEL,
     REL_PATH_MENTAL_PRIVACY_STATES,
+};
+pub use mutation_operation::{
+    MemoryMutationAuditRecord, MemoryMutationEffect, MemoryMutationOperationIdentity,
+    MemoryMutationOperationKind, MemoryMutationReceipt, MemoryMutationReplayDecision,
+    MEMORY_MUTATION_AUDIT_NAMESPACE, MEMORY_MUTATION_RECEIPT_NAMESPACE,
+    MEMORY_MUTATION_RECEIPT_SCHEMA_VERSION,
 };
 pub use next_gen_contract::{
     build_core_revision_diff_from_record, build_edge_memory_appliance_gate_report,
@@ -733,8 +743,7 @@ pub(crate) use world_sense::{
 };
 pub use write_candidate::{
     govern_write_candidates, MemoryCandidateContent, MemoryCandidateSemanticDecision,
-    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemorySemanticJudgmentSource,
-    MemoryWriteCandidate,
+    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryWriteCandidate,
 };
 pub(crate) use write_coordination::whole_record_lease_advanced;
 

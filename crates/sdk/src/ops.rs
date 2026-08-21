@@ -11,8 +11,8 @@ use bm_core::memory::{
     MemoryLongTermDetailReport as CoreMemoryLongTermDetailReport,
     MemoryLongTermListReport as CoreMemoryLongTermListReport, MemoryLongTermMutation,
     MemoryLongTermMutationReport as CoreMemoryLongTermMutationReport, MemoryLongTermTarget,
-    MemoryLongTermTargetResolutionReport, MemoryLongTermTombstoneRef, MemoryPrivacyClass,
-    MemoryProjectionImpactReport, PostTurnGovernanceAttemptAuthorityV2,
+    MemoryLongTermTargetResolutionReport, MemoryLongTermTombstoneRef, MemoryMutationReceipt,
+    MemoryPrivacyClass, MemoryProjectionImpactReport, PostTurnGovernanceAttemptAuthorityV2,
     PostTurnGovernanceErrorClassV2, PostTurnGovernanceJobV2, PostTurnPrivateGardenReport,
     PostTurnSemanticGovernanceReport, ProceduralMemoryPromotionInput,
     ProceduralMemoryPromotionReport, QueryFacetInput, RedactedTranscriptSlice, SessionMessage,
@@ -196,6 +196,20 @@ pub struct MemoryLongTermMutationReport {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MemoryMutationExecution<T> {
+    Committed {
+        report: T,
+        receipt: MemoryMutationReceipt,
+    },
+    Replayed {
+        receipt: MemoryMutationReceipt,
+    },
+    Rejected {
+        report: T,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryGovernancePolicyMutationReport {
     pub accepted: bool,
     pub dry_run: bool,
@@ -294,6 +308,8 @@ pub struct MemoryWriteTransactionReport {
     pub budget_report: StoreMutationBudgetReport,
     pub changed_count: usize,
     pub partial_write: bool,
+    pub mutation_receipt: Option<MemoryMutationReceipt>,
+    pub mutation_replayed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

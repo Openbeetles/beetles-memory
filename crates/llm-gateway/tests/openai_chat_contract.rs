@@ -8,8 +8,8 @@ use bm_sdk::{
     LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateSemanticDecision,
     MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryCapabilityPolicy,
     MemoryEvidenceAuthority, MemoryPrivacyClass, MemoryRecallRequest,
-    MemoryRecallTemporalOperation, MemorySemanticJudgmentSource, MemoryWriteCandidate,
-    MemoryWriteRequest,
+    MemoryRecallTemporalOperation, MemorySemanticJudgmentSource, MemorySubjectVisibilityPolicy,
+    MemoryWriteCandidate, MemoryWriteRequest,
 };
 use serde_json::{json, Value};
 
@@ -55,8 +55,9 @@ fn seed_gateway_memory(
         .write(MemoryWriteRequest::Candidates {
             candidates: vec![MemoryWriteCandidate {
                 candidate_id: "gateway-boundary".to_string(),
-                authority: MemoryEvidenceAuthority::UserAsserted,
+                authority: MemoryEvidenceAuthority::ProgramMemoryCanonical,
                 target: target.clone(),
+                long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
                 privacy: MemoryPrivacyClass::SharedWithSubject,
                 content: MemoryCandidateContent::Text {
                     topic: "llm gateway".to_string(),
@@ -70,7 +71,7 @@ fn seed_gateway_memory(
                 evidence_refs: vec!["thread-7:gateway-boundary".to_string()],
                 canonical_entities: Vec::new(),
                 semantic_judgment: Some(MemoryCandidateSemanticJudgment {
-                    source: MemorySemanticJudgmentSource::LlmGovernance,
+                    source: MemorySemanticJudgmentSource::RuntimeGate,
                     decision: MemoryCandidateSemanticDecision::Accept,
                     governed_target: Some(target),
                     reason: "OpenAI projection fixture".to_string(),

@@ -734,14 +734,15 @@ mod tests {
         let pid = spawned.id();
         let receipt = (0..50)
             .find_map(|_| {
-                let observed =
-                    crate::port_owner::observe_process(pid, Some("authority-fixture".to_string()))?;
-                if observed.executable == published.path() {
-                    Some(observed)
-                } else {
-                    std::thread::sleep(Duration::from_millis(10));
-                    None
+                if let Some(observed) =
+                    crate::port_owner::observe_process(pid, Some("authority-fixture".to_string()))
+                {
+                    if observed.executable == published.path() {
+                        return Some(observed);
+                    }
                 }
+                std::thread::sleep(Duration::from_millis(10));
+                None
             })
             .expect("observe executed launchd fixture");
         let address = (0..100)

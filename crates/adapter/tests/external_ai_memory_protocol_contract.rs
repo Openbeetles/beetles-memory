@@ -109,7 +109,7 @@ fn envelope(runtime: &MemoryRuntime, payload: AdapterCommand) -> AdapterEnvelope
         .expect("budget lease");
     let operation = payload.operation();
     AdapterEnvelope {
-        protocol_version: ExternalAiMemoryProtocolVersion::V1,
+        protocol_version: ExternalAiMemoryProtocolVersion::V2,
         runtime_binding: AdapterProtocolBinding::for_runtime(runtime, &lease),
         request_id: "request-eap1".to_string(),
         transport: TransportKind::Http,
@@ -128,7 +128,7 @@ fn envelope(runtime: &MemoryRuntime, payload: AdapterCommand) -> AdapterEnvelope
             auth_kind: "synthetic_token".to_string(),
             principal: "synthetic-operator".to_string(),
         },
-        idempotency_key: "idempotency-eap1".to_string(),
+        mutation_operation_id: Some("idempotency-eap1".to_string()),
         audit_id: "audit-eap1".to_string(),
         payload,
     }
@@ -172,7 +172,7 @@ fn protocol_envelope_requires_version_and_runtime_binding_without_legacy_default
             "auth_kind": "synthetic_token",
             "principal": "synthetic-operator",
         },
-        "idempotency_key": "idempotency-wire-contract",
+        "mutation_operation_id": "idempotency-wire-contract",
         "audit_id": "audit-wire-contract",
         "payload": {"query": "synthetic"},
     });

@@ -47,7 +47,7 @@ fn write_arguments(name: &str, summary: &str) -> String {
         "topic": "mcp-idempotency",
         "title": format!("MCP write {name}"),
         "summary": summary,
-        "content": "Dispatch this write through the governed EntryRuntime path.",
+        "content": "1. Decode the MCP write payload.\n2. Dispatch it through the governed EntryRuntime path and verify the receipt.",
         "owning_scope": {
             "kind": "subject",
             "mounted_subject_id": "agent:mcp-agent",
@@ -126,7 +126,7 @@ fn assert_exact_governed_result(content: &str) {
 }
 
 #[test]
-fn mcp_automatic_identity_accepts_two_distinct_writes_on_one_server() {
+fn mcp_durable_write_without_caller_operation_key_fails_closed() {
     let runtime = runtime();
     let server = McpToolServer::new("mcp-auto", "principal-auto");
 
@@ -149,8 +149,18 @@ fn mcp_automatic_identity_accepts_two_distinct_writes_on_one_server() {
         )
         .expect("second write");
 
-    assert_eq!(first.status, "accepted");
-    assert_eq!(second.status, "accepted");
+    assert_eq!(first.status, "rejected");
+    assert_eq!(second.status, "rejected");
+    assert!(
+        first.content.contains("mutation_operation_id"),
+        "{}",
+        first.content
+    );
+    assert!(
+        second.content.contains("mutation_operation_id"),
+        "{}",
+        second.content
+    );
 }
 
 #[test]
@@ -186,8 +196,17 @@ fn mcp_explicit_identity_replays_same_payload_and_rejects_conflict() {
         .expect("conflicting write");
 
     assert_eq!(first.status, "accepted");
-    assert_eq!(replay.status, "duplicated");
+    assert_eq!(replay.status, "replayed");
     assert_eq!(conflict.status, "rejected");
+    let first_content: serde_json::Value =
+        serde_json::from_str(&first.content).expect("first MCP response JSON");
+    let replay_content: serde_json::Value =
+        serde_json::from_str(&replay.content).expect("replay MCP response JSON");
+    assert!(first_content["receipt"].is_object(), "{first_content}");
+    assert_eq!(
+        first_content["receipt"]["transaction_id"],
+        replay_content["receipt"]["transaction_id"]
+    );
     assert!(
         !replay.content.contains("mcp-caller-key"),
         "{}",
@@ -274,11 +293,32 @@ fn mcp_tool_server_decodes_declared_memory_tools() {
     ];
 
     for (name, args) in calls {
+        let mut call = McpToolCall::json(name, args);
+        if name == "memory_write_candidate" {
+            call = call.with_idempotency_key("mcp-declared-tools-write");
+        }
         let result = server
-            .call(&runtime, McpToolCall::json(name, args))
+            .call(&runtime, call)
             .unwrap_or_else(|err| panic!("{name} failed: {err}"));
         assert_eq!(result.status, "accepted", "{name}: {}", result.content);
         assert!(!result.private_raw_allowed);
+        if name == "memory_capabilities" {
+            assert!(
+                result.content.contains("mutation_operation_inventory"),
+                "{}",
+                result.content
+            );
+            assert!(
+                result.content.contains("mutation_receipt_policy"),
+                "{}",
+                result.content
+            );
+            assert!(
+                !result.content.contains("\"receipt\""),
+                "{}",
+                result.content
+            );
+        }
     }
 }
 
@@ -531,7 +571,7 @@ fn json_rpc_tool_call_uses_only_explicit_meta_key_for_retry_deduplication() {
         replay
             .pointer("/result/structuredContent/status")
             .and_then(Value::as_str),
-        Some("duplicated")
+        Some("replayed")
     );
 }
 

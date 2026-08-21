@@ -12,11 +12,11 @@ use bm_core::memory::{
 };
 use bm_core::platform::Platform as _;
 use bm_sdk::{
-    default_agent_subject_id, LongTermMemoryDraft, LongTermMemoryKind, LongTermMemorySourceScope,
-    MemoryAuditEvent, MemoryAuditSink, MemoryIdentity, MemoryLongTermControlView,
-    MemoryLongTermDetailRequest, MemoryLongTermMutation, MemoryLongTermMutationRequest,
-    MemoryLongTermTarget, MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryProjectionRequest,
-    MemoryRecallRequest, MemoryRuntime, MemoryScope, MemoryStoreHandle,
+    default_agent_subject_id, LongTermMemoryDraft, LongTermMemoryKind, LongTermMemoryProvenance,
+    LongTermMemorySourceScope, MemoryAuditEvent, MemoryAuditSink, MemoryEvidenceAuthority,
+    MemoryIdentity, MemoryLongTermControlView, MemoryLongTermDetailRequest, MemoryLongTermMutation,
+    MemoryLongTermMutationRequest, MemoryLongTermTarget, MemoryPrivacyClass, MemoryPrivacyPolicy,
+    MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime, MemoryScope, MemoryStoreHandle,
     MemorySubjectVisibilityPolicy, MemoryWriteRequest, ParsedLongTermMemoryExtraction,
     PressureLevel, QueryFacetInput, RuntimeLifecycleModeInput, SubjectDescriptor, SubjectRegistry,
 };
@@ -206,6 +206,10 @@ fn one_shared_fact_can_produce_distinct_subject_projections() {
                     source_chat_id: Some("shared-chat".to_string()),
                     source_type: None,
                     source_scope: None,
+                    subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                    provenance: LongTermMemoryProvenance::new(
+                        MemoryEvidenceAuthority::UserAsserted,
+                    ),
                     confidence: None,
                     freshness: None,
                     stale_hint: None,
@@ -213,7 +217,6 @@ fn one_shared_fact_can_produce_distinct_subject_projections() {
                     canonical_entities: Vec::new(),
                     evidence_count: Some(1),
                     observed_at: Some(1_800_000_000),
-                    last_confirmed_at: Some(1_800_000_000),
                     source_revision: Some(1),
                 }],
                 deletes: Vec::new(),
@@ -558,6 +561,10 @@ fn restricted_supersede_inherits_policy_and_never_opens_the_successor_to_other_s
                     source_chat_id: Some("shared-chat".to_string()),
                     source_type: None,
                     source_scope: None,
+                    subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                    provenance: LongTermMemoryProvenance::new(
+                        MemoryEvidenceAuthority::UserAsserted,
+                    ),
                     confidence: None,
                     freshness: None,
                     stale_hint: None,
@@ -565,7 +572,6 @@ fn restricted_supersede_inherits_policy_and_never_opens_the_successor_to_other_s
                     canonical_entities: Vec::new(),
                     evidence_count: Some(1),
                     observed_at: Some(1_800_000_000),
-                    last_confirmed_at: Some(1_800_000_000),
                     source_revision: Some(1),
                 }],
                 deletes: Vec::new(),
@@ -589,7 +595,9 @@ fn restricted_supersede_inherits_policy_and_never_opens_the_successor_to_other_s
             operation: MemoryLongTermMutation::ChangeScope {
                 target: MemoryLongTermTarget::RecordId(predecessor.id.clone()),
                 source_scope: predecessor.source_scope,
-                subject_visibility: MemorySubjectVisibilityPolicy::OnlySubjects(vec![subject_a]),
+                subject_visibility: MemorySubjectVisibilityPolicy::OnlySubjects(vec![
+                    subject_a.clone()
+                ]),
             },
             reason: "restrict predecessor before supersede".to_string(),
             dry_run: false,
@@ -605,6 +613,8 @@ fn restricted_supersede_inherits_policy_and_never_opens_the_successor_to_other_s
         source_chat_id: Some("shared-chat".to_string()),
         source_type: None,
         source_scope: None,
+        subject_visibility: MemorySubjectVisibilityPolicy::OnlySubjects(vec![subject_a]),
+        provenance: LongTermMemoryProvenance::new(MemoryEvidenceAuthority::UserAsserted),
         confidence: None,
         freshness: None,
         stale_hint: None,
@@ -612,7 +622,6 @@ fn restricted_supersede_inherits_policy_and_never_opens_the_successor_to_other_s
         canonical_entities: Vec::new(),
         evidence_count: Some(1),
         observed_at: Some(1_800_000_001),
-        last_confirmed_at: Some(1_800_000_001),
         source_revision: Some(2),
     };
     let successor_id = replacement.stable_id().expect("successor id");
@@ -716,6 +725,10 @@ fn restricted_subject_is_exact_zero_for_facet_only_hit_and_audit_is_safe() {
                     source_chat_id: Some("shared-chat".to_string()),
                     source_type: None,
                     source_scope: None,
+                    subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                    provenance: LongTermMemoryProvenance::new(
+                        MemoryEvidenceAuthority::UserAsserted,
+                    ),
                     confidence: None,
                     freshness: None,
                     stale_hint: None,
@@ -729,7 +742,6 @@ fn restricted_subject_is_exact_zero_for_facet_only_hit_and_audit_is_safe() {
                     }],
                     evidence_count: Some(1),
                     observed_at: Some(1_800_000_000),
-                    last_confirmed_at: Some(1_800_000_000),
                     source_revision: Some(1),
                 }],
                 deletes: Vec::new(),

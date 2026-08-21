@@ -27,6 +27,7 @@ fn bridge_messages_are_memory_report_or_request_only() {
             .collect::<Vec<_>>(),
         vec![
             "peer_capability",
+            "memory_capabilities_request",
             "memory_write_candidate",
             "memory_finalize_turn_request",
             "memory_recall_request",

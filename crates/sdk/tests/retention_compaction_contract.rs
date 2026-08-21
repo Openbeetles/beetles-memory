@@ -2,7 +2,10 @@
 
 mod support;
 
-use bm_core::memory::{LongTermMemoryDraft, LongTermMemoryKind};
+use bm_core::memory::{
+    LongTermMemoryDraft, LongTermMemoryKind, LongTermMemoryProvenance, MemoryEvidenceAuthority,
+    MemorySubjectVisibilityPolicy,
+};
 use bm_sdk::{
     MemoryRetentionCompactionRequest, MemoryWriteRequest, ParsedLongTermMemoryExtraction,
     PressureLevel, ProfileId, RuntimeLifecycleModeInput,
@@ -55,6 +58,10 @@ fn retention_compaction_executor_compacts_metadata_without_deleting_accepted_mem
                     source_chat_id: Some("chat-1".to_string()),
                     source_type: None,
                     source_scope: None,
+                    subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                    provenance: LongTermMemoryProvenance::new(
+                        MemoryEvidenceAuthority::ProgramMemoryCanonical,
+                    ),
                     confidence: None,
                     freshness: None,
                     stale_hint: None,
@@ -71,7 +78,6 @@ fn retention_compaction_executor_compacts_metadata_without_deleting_accepted_mem
                     canonical_entities: Vec::new(),
                     evidence_count: Some(9),
                     observed_at: Some(1_800_000_000),
-                    last_confirmed_at: Some(1_700_000_000),
                     source_revision: Some(1),
                 }],
                 deletes: Vec::new(),

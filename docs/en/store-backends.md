@@ -38,6 +38,12 @@ let config = StoreBackendConfig::file("/var/lib/beetle-memory", profile)?
     .with_fsync(true);
 ```
 
+## 0.3.0 Schema Admission
+
+Beetle Memory 0.3.0 accepts Store v9 and immutable long-term material v5 only. Store v7/v8 and material v4 are not automatically migrated, opened, or rewritten. A mismatch fails closed with a typed migration/repair requirement before normal reads or writes proceed.
+
+Back up the exact Store outside its data path before a 0.3.0 binary can open it. Rollback requires the previous binary and its matching Store backup; archive export/import is not a schema migration. See the [0.3.0 release notes](release-notes-0.3.0.md) for the complete compatibility and verification boundary.
+
 ## File Path Budget
 
 Logical store keys are not filesystem paths. The file backend maps each logical key to a bounded physical address using the profile's `StorePathBudget`, with short digest file names plus a sidecar key index. `list_*_keys`, snapshot export/import, replay, and delete still operate on logical keys.

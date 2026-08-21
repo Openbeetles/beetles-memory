@@ -6,7 +6,7 @@ pub enum EntryResponseStatus {
     Accepted,
     Rejected,
     Queued,
-    Duplicated,
+    Replayed,
 }
 
 impl EntryResponseStatus {
@@ -15,7 +15,7 @@ impl EntryResponseStatus {
             Self::Accepted => "accepted",
             Self::Rejected => "rejected",
             Self::Queued => "queued",
-            Self::Duplicated => "duplicated",
+            Self::Replayed => "replayed",
         }
     }
 }
@@ -35,7 +35,7 @@ impl EntryResponse {
             AdapterResponse::Accepted { .. } => EntryResponseStatus::Accepted,
             AdapterResponse::Rejected { .. } => EntryResponseStatus::Rejected,
             AdapterResponse::Queued { .. } => EntryResponseStatus::Queued,
-            AdapterResponse::Duplicated { .. } => EntryResponseStatus::Duplicated,
+            AdapterResponse::Replayed { .. } => EntryResponseStatus::Replayed,
         };
         Self {
             status,

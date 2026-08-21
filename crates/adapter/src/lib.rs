@@ -7,9 +7,10 @@ mod payload;
 mod policy;
 
 pub use contract::{
-    AdapterAuthContext, AdapterCommand, AdapterEnvelope, AdapterEvent,
+    AdapterAuthContext, AdapterCapabilityReportV2, AdapterCommand, AdapterEnvelope, AdapterEvent,
     AdapterGovernedProjectSafeReportV1, AdapterGovernedRecallSafeReportV1,
-    AdapterGovernedSafeReportV1, AdapterOperation, AdapterProjectionAuditSummary,
+    AdapterGovernedSafeReportV1, AdapterMutationOperationCapability, AdapterMutationReceiptV1,
+    AdapterMutationReliability, AdapterOperation, AdapterProjectionAuditSummary,
     AdapterProjectionReport, AdapterProtocolBinding, AdapterProtocolCapabilityBinding,
     AdapterProtocolPrivacyBinding, AdapterProtocolRenderBudgetBinding, AdapterRequestIdentity,
     AdapterRequestIdentityError, AdapterRequestIdentityOwner, AdapterResponse, AdapterSdkReport,

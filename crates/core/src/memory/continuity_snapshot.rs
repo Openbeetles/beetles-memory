@@ -1468,6 +1468,8 @@ fn long_term_entry_to_draft(entry: &LongTermMemoryEntry) -> LongTermMemoryDraft 
         source_chat_id: entry.source_chat_id.clone(),
         source_type: Some(entry.source_type),
         source_scope: Some(entry.source_scope),
+        subject_visibility: entry.subject_visibility.clone(),
+        provenance: entry.provenance,
         confidence: Some(entry.confidence),
         freshness: Some(entry.freshness),
         stale_hint: Some(entry.stale_hint),
@@ -1475,7 +1477,6 @@ fn long_term_entry_to_draft(entry: &LongTermMemoryEntry) -> LongTermMemoryDraft 
         canonical_entities: entry.canonical_entities.clone(),
         evidence_count: Some(entry.evidence_count),
         observed_at: Some(entry.observed_at),
-        last_confirmed_at: Some(entry.last_confirmed_at),
         source_revision: entry.source_revision,
     }
 }
@@ -1517,6 +1518,10 @@ mod tests {
             source_type: LongTermMemorySourceType::Conversation,
             source_scope: LongTermMemorySourceScope::Chat,
             subject_visibility: crate::memory::MemorySubjectVisibilityPolicy::AllSubjects,
+            provenance: crate::memory::LongTermMemoryProvenance {
+                source_authority: crate::memory::MemoryEvidenceAuthority::UserAsserted,
+                semantic_judgment_source: None,
+            },
             confidence: LongTermMemoryConfidence::High,
             freshness: LongTermMemoryFreshness::Stable,
             stale_hint: LongTermMemoryStaleHint::None,
@@ -1526,7 +1531,7 @@ mod tests {
             created_at: 1,
             updated_at: 2,
             observed_at: 2,
-            last_confirmed_at: 2,
+            last_confirmed_at: Some(2),
             source_revision: Some(1),
             owner_revision: 1,
             last_used_at: 0,

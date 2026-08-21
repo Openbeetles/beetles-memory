@@ -13,18 +13,21 @@ use bm_core::memory::{
     GovernedEvidenceDocumentSourceKind, GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef,
     GovernedOwnerRevisionRef, GovernedOwnerTermination, GovernedOwnerTransition,
     LongTermControlOperation, LongTermMemoryConfidence, LongTermMemoryControlAuditEvent,
-    LongTermMemoryControlRevision, LongTermMemoryEntry, LongTermMemoryFreshness,
-    LongTermMemoryKind, LongTermMemorySourceScope, LongTermMemorySourceType,
-    LongTermMemoryTombstone, LongTermMemoryVersionCreateIntent, LongTermMemoryVersionScopeManifest,
-    LongTermVersionRetentionLease, MemoryEvidenceAuthority, MemoryFacetIndexDoc,
-    MemoryFacetIndexManifest, MemoryFacetOwnerVersion, MemoryFacetPostingDoc,
-    MemoryFacetPostingRevision, MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration,
-    MemoryGraphNode, MemoryGraphNodeKind, MemoryGraphOwnerBinding, MemoryLongTermGovernancePolicy,
+    LongTermMemoryControlRevision, LongTermMemoryCorrectionEvidence,
+    LongTermMemoryCorrectionLifecycle, LongTermMemoryEntry, LongTermMemoryFreshness,
+    LongTermMemoryGovernedContent, LongTermMemoryHumanConfirmationEvidence, LongTermMemoryKind,
+    LongTermMemoryProvenance, LongTermMemorySourceScope, LongTermMemorySourceType,
+    LongTermMemoryTombstone, LongTermMemoryVersionCreateIntent, LongTermMemoryVersionMaterial,
+    LongTermMemoryVersionOrigin, LongTermMemoryVersionScopeManifest, LongTermVersionRetentionLease,
+    MemoryEvidenceAuthority, MemoryFacetIndexDoc, MemoryFacetIndexManifest,
+    MemoryFacetOwnerVersion, MemoryFacetPostingDoc, MemoryFacetPostingRevision,
+    MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration, MemoryGraphNode,
+    MemoryGraphNodeKind, MemoryGraphOwnerBinding, MemoryLongTermGovernancePolicy,
     MemoryPrivacyClass, MemorySubjectVisibilityPolicy, LONG_TERM_CONTROL_AUDIT_NAMESPACE,
     LONG_TERM_CONTROL_REVISION_NAMESPACE, LONG_TERM_CONTROL_SCHEMA_VERSION,
     LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE, LONG_TERM_CONTROL_TOMBSTONE_SCHEMA_VERSION,
-    LONG_TERM_GOVERNANCE_POLICY_NAMESPACE, MEMORY_FACET_INDEX_NAMESPACE,
-    MEMORY_FACET_POSTING_NAMESPACE, MEMORY_FACET_SCHEMA_VERSION,
+    LONG_TERM_GOVERNANCE_POLICY_NAMESPACE, LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
+    MEMORY_FACET_INDEX_NAMESPACE, MEMORY_FACET_POSTING_NAMESPACE, MEMORY_FACET_SCHEMA_VERSION,
     MEMORY_GRAPH_BACKLINK_MEMBERSHIP_NAMESPACE, MEMORY_GRAPH_BACKLINK_NAMESPACE,
     MEMORY_GRAPH_EDGE_MEMBERSHIP_NAMESPACE, MEMORY_GRAPH_INDEX_NAMESPACE,
     MEMORY_GRAPH_MANIFEST_NAMESPACE, MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE,
@@ -135,6 +138,7 @@ fn graph_owner_for(owner_id: &str) -> LongTermMemoryEntry {
         source_type: LongTermMemorySourceType::Conversation,
         source_scope: LongTermMemorySourceScope::User,
         subject_visibility: bm_core::memory::MemorySubjectVisibilityPolicy::AllSubjects,
+        provenance: LongTermMemoryProvenance::new(MemoryEvidenceAuthority::ProgramMemoryCanonical),
         confidence: LongTermMemoryConfidence::High,
         freshness: LongTermMemoryFreshness::Dynamic,
         stale_hint: Default::default(),
@@ -144,7 +148,7 @@ fn graph_owner_for(owner_id: &str) -> LongTermMemoryEntry {
         created_at: 1,
         updated_at: 1,
         observed_at: 1,
-        last_confirmed_at: 1,
+        last_confirmed_at: None,
         source_revision: Some(1),
         owner_revision: 1,
         last_used_at: 0,
@@ -320,6 +324,66 @@ fn typed_long_term_scope_docs_without_facets(
                 && doc.namespace != MEMORY_FACET_POSTING_NAMESPACE
         })
         .collect()
+}
+
+#[test]
+fn snapshot_import_rejects_pre_v5_or_missing_provenance_material_without_partial_state() {
+    for case in ["pre-v5-schema", "missing-provenance"] {
+        let source = support::open_store_in_memory(
+            StoreBackendConfig::in_memory(
+                ProfileId::native_dev_full().expect("native dev-full profile"),
+            )
+            .expect("source config"),
+        )
+        .expect("source store");
+        let mut incoming = source.export_store_snapshot().expect("source snapshot");
+        incoming.json_docs.extend(typed_long_term_scope_docs(
+            "system",
+            "system",
+            vec![graph_owner_for(&format!("owner:material-{case}"))],
+        ));
+        let material = incoming
+            .json_docs
+            .iter_mut()
+            .find(|doc| doc.namespace == LONG_TERM_VERSION_MATERIAL_NAMESPACE)
+            .expect("typed material");
+        match case {
+            "pre-v5-schema" => material.value["schema_version"] = json!(4),
+            "missing-provenance" => {
+                material.value["governed_content"]
+                    .as_object_mut()
+                    .expect("governed content")
+                    .remove("provenance");
+            }
+            _ => unreachable!(),
+        }
+
+        let target = support::open_store_in_memory(
+            StoreBackendConfig::in_memory(
+                ProfileId::native_dev_full().expect("native dev-full profile"),
+            )
+            .expect("target config"),
+        )
+        .expect("target store");
+        target
+            .state_fs()
+            .write("existing/state", case.as_bytes())
+            .expect("seed existing target bytes");
+        let before = target.export_store_snapshot().expect("target before");
+        let before_events = target.read_events().expect("target events before");
+
+        let error = target
+            .import_store_snapshot(&incoming)
+            .expect_err("invalid long-term material must fail closed");
+
+        assert_eq!(error.stage(), "store_snapshot_import", "case={case}");
+        assert_eq!(
+            target.export_store_snapshot().unwrap(),
+            before,
+            "case={case}"
+        );
+        assert_eq!(target.read_events().unwrap(), before_events, "case={case}");
+    }
 }
 
 fn raw_graph_docs(platform: &StorePlatform) -> Vec<StoreSnapshotJsonDoc> {
@@ -909,6 +973,149 @@ fn absent_json_preconditions(batch: &StoreMutationBatch) -> Vec<StoreJsonPrecond
             _ => None,
         })
         .collect()
+}
+
+fn forged_confirmation_material() -> LongTermMemoryVersionMaterial {
+    let owner_ref = GovernedMemoryOwnerRef::new(
+        GovernedMemoryOwnerPlane::LongTerm,
+        "owner:forged-confirmation",
+    );
+    let predecessor =
+        GovernedOwnerRevisionRef::try_new(owner_ref.clone(), 1).expect("forged predecessor ref");
+    let successor =
+        GovernedOwnerRevisionRef::try_new(owner_ref.clone(), 2).expect("forged successor ref");
+    let correction_evidence = LongTermMemoryCorrectionEvidence::try_new(
+        "system",
+        "subject:forger",
+        predecessor.clone(),
+        successor,
+        LongTermMemoryCorrectionLifecycle::Correct,
+        2,
+        "control:missing-from-batch",
+    )
+    .expect("structurally valid forged correction evidence");
+    let confirmation_evidence =
+        LongTermMemoryHumanConfirmationEvidence::try_new(correction_evidence.clone())
+            .expect("structurally valid forged human confirmation evidence");
+    let mut material = LongTermMemoryVersionMaterial {
+        schema_version: LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
+        memory_space_id: "system".to_string(),
+        factual_owner_id: "system".to_string(),
+        owner_ref,
+        owner_revision: 2,
+        governed_content: LongTermMemoryGovernedContent {
+            kind: LongTermMemoryKind::Fact,
+            topic: "forged confirmation".to_string(),
+            content: "An ordinary Store batch must not mint confirmation.".to_string(),
+            keywords: vec!["confirmation".to_string()],
+            source_chat_id: None,
+            source_type: LongTermMemorySourceType::SystemRuntime,
+            source_scope: LongTermMemorySourceScope::World,
+            provenance: LongTermMemoryProvenance::new(
+                MemoryEvidenceAuthority::ProgramMemoryCanonical,
+            ),
+            confidence: LongTermMemoryConfidence::High,
+            freshness: LongTermMemoryFreshness::Dynamic,
+            stale_hint: Default::default(),
+            supporting_citations: vec!["display-only:citation".to_string()],
+            canonical_entities: Vec::new(),
+            evidence_count: 1,
+            created_at: 1,
+            updated_at: 2,
+            observed_at: 2,
+            correction_evidence: Some(correction_evidence),
+            confirmation_evidence: Some(confirmation_evidence),
+            source_revision: Some(2),
+            last_used_at: 0,
+        },
+        governed_evidence_refs: Vec::new(),
+        origin: LongTermMemoryVersionOrigin {
+            valid_from: 2,
+            observed_at: 2,
+            predecessor: Some(predecessor),
+        },
+        privacy_class: MemoryPrivacyClass::PublicRuntime,
+        subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+        content_digest: String::new(),
+    };
+    material.content_digest = material
+        .canonical_content_digest()
+        .expect("forged material digest");
+    material
+}
+
+#[test]
+fn ordinary_store_batch_cannot_forge_confirmation_and_is_zero_mutation() {
+    let platform = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .expect("config"),
+    )
+    .expect("store");
+    let before = platform.export_store_snapshot().expect("snapshot before");
+    let material = forged_confirmation_material();
+    let projection = material
+        .to_current_projection()
+        .expect("forged current projection");
+    let facet = build_long_term_memory_facet_index_doc(
+        &projection,
+        &material.memory_space_id,
+        vec![material.factual_owner_id.clone()],
+        material.owner_revision,
+    )
+    .expect("forged facet closure");
+    let key = long_term_version_material_key(
+        &material.memory_space_id,
+        &material.factual_owner_id,
+        &material.owner_ref,
+        material.owner_revision,
+    )
+    .expect("forged material key");
+    let facet_key = scoped_memory_facet_owner_storage_key(
+        &material.memory_space_id,
+        &material.factual_owner_id,
+        &material.owner_ref,
+    )
+    .expect("forged facet key");
+    let batch = StoreMutationBatch {
+        transaction_id: "txn-forged-confirmation".to_string(),
+        operation: "test.forged_confirmation".to_string(),
+        scope: StoreEventScope::system("test.forged_confirmation"),
+        mutations: vec![
+            put_json(
+                LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+                &key,
+                serde_json::to_value(material).expect("forged material value"),
+            ),
+            put_json(
+                MEMORY_FACET_INDEX_NAMESPACE,
+                &facet_key,
+                serde_json::to_value(facet).expect("forged facet value"),
+            ),
+        ],
+    };
+    let preconditions = absent_json_preconditions(&batch);
+
+    let error = platform
+        .commit_governed_memory_transaction_with_preconditions(batch, &preconditions)
+        .expect_err("ordinary Store batch must not forge typed confirmation evidence");
+
+    assert_eq!(
+        error.stage(),
+        "memory_write_transaction_commit_failed",
+        "{error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("memory_write_transaction_confirmation_evidence_invalid"),
+        "{error}"
+    );
+    assert_eq!(
+        platform.export_store_snapshot().expect("snapshot after"),
+        before
+    );
 }
 
 fn exact_json_preconditions(

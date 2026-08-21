@@ -3,7 +3,10 @@ mod support;
 use std::path::{Path, PathBuf};
 
 use bm_core::feature_gate::ProfileId;
-use bm_core::memory::{LongTermMemoryDraft, LongTermMemoryKind, MemoryPrivacyClass};
+use bm_core::memory::{
+    LongTermMemoryDraft, LongTermMemoryKind, LongTermMemoryProvenance, MemoryEvidenceAuthority,
+    MemoryPrivacyClass, MemorySubjectVisibilityPolicy,
+};
 use bm_core::platform::Platform;
 use bm_sdk::nonproduction_replay_harness::{
     StoreBackendConfig, StoreEngine, StorePathBudget, StoreRepairPolicy,
@@ -116,6 +119,10 @@ fn file_store_persists_core_runtime_paths_across_reopen() {
                 source_chat_id: Some("chat-a".to_string()),
                 source_type: None,
                 source_scope: None,
+                subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                provenance: LongTermMemoryProvenance::new(
+                    MemoryEvidenceAuthority::ProgramMemoryCanonical,
+                ),
                 confidence: None,
                 freshness: None,
                 stale_hint: None,
@@ -123,7 +130,6 @@ fn file_store_persists_core_runtime_paths_across_reopen() {
                 canonical_entities: Vec::new(),
                 evidence_count: None,
                 observed_at: None,
-                last_confirmed_at: None,
                 source_revision: None,
             },
             100,

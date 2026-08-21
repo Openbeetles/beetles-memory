@@ -3,23 +3,27 @@ use std::sync::Arc;
 use bm_adapter::{
     decode_json_adapter_command, dispatch_adapter_command, dispatch_adapter_command_with_services,
     governed_adapter_json_command_schema, AdapterAuthContext, AdapterCommand, AdapterEnvelope,
-    AdapterErrorKey, AdapterJsonCommandOptions, AdapterOperation, AdapterRequestIdentityError,
-    AdapterRequestIdentityOwner, AdapterResponse, AdapterRuntimeServices, AdapterSdkReport,
-    AdapterSource, TransportKind, TransportMode,
+    AdapterErrorKey, AdapterJsonCommandOptions, AdapterMutationReliability, AdapterOperation,
+    AdapterProtocolBinding, AdapterRequestIdentityError, AdapterRequestIdentityOwner,
+    AdapterResponse, AdapterRuntimeServices, AdapterSdkReport, AdapterSource, TransportKind,
+    TransportMode,
 };
 use bm_sdk::{
     CanonicalTurnDelta, ConversationKey, ConversationScope, HostRefVisibility, LlmClient,
-    LlmHttpClient, LlmModelCompat, LlmResponse, MemoryCapabilityPolicy, MemoryClock,
-    MemoryCloseRequest, MemoryIdentity, MemoryLongTermControlView, MemoryLongTermListRequest,
+    LlmHttpClient, LlmModelCompat, LlmResponse, LongTermMemoryKind, MemoryCandidateContent,
+    MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
+    MemoryCapabilityPolicy, MemoryClock, MemoryCloseRequest, MemoryEvidenceAuthority,
+    MemoryIdentity, MemoryLongTermControlView, MemoryLongTermListRequest, MemoryPrivacyClass,
     MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime, MemoryScope,
-    MemoryStoreHandle, MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitRequest,
-    MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource,
-    MemoryWriteRequest, Message, NoopMemoryAuditSink, PressureLevel, ProfileId, QueryFacetInput,
-    ResponseBody, RuntimeLifecycleModeInput, StopReason, StoreBackendConfig, ToolChoicePolicy,
-    ToolSpec, TranscriptAttrEnvelope, TranscriptAttrGovernance, TranscriptAttrLink,
-    TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
-    TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind,
-    TranscriptInputMessage, TranscriptReplayView,
+    MemorySemanticJudgmentSource, MemoryStoreHandle, MemorySubjectVisibilityPolicy,
+    MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitRequest, MemoryTranscriptReplayRequest,
+    MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource,
+    MemoryWriteCandidate, MemoryWriteRequest, Message, NoopMemoryAuditSink, PressureLevel,
+    ProfileId, QueryFacetInput, ResponseBody, RuntimeLifecycleModeInput, StopReason,
+    StoreBackendConfig, ToolChoicePolicy, ToolSpec, TranscriptAttrEnvelope,
+    TranscriptAttrGovernance, TranscriptAttrLink, TranscriptAttrRedactionPolicy,
+    TranscriptAttrScope, TranscriptAttrSource, TranscriptAttrSourceKind, TranscriptAttrTarget,
+    TranscriptAttrValueKind, TranscriptInputMessage, TranscriptReplayView,
 };
 use serde_json::json;
 
@@ -58,6 +62,14 @@ fn public_adapter_labels_are_stable_snake_case() {
         (AdapterErrorKey::Unauthorized, "unauthorized"),
         (AdapterErrorKey::Forbidden, "forbidden"),
         (AdapterErrorKey::Duplicated, "duplicated"),
+        (
+            AdapterErrorKey::MutationOperationIdRequired,
+            "mutation_operation_id_required",
+        ),
+        (
+            AdapterErrorKey::MutationOperationConflict,
+            "mutation_operation_conflict",
+        ),
         (AdapterErrorKey::PayloadTooLarge, "payload_too_large"),
         (AdapterErrorKey::OperationMismatch, "operation_mismatch"),
         (
@@ -116,28 +128,138 @@ fn idempotency_material_is_canonical_and_payload_sensitive() {
 }
 
 #[test]
-fn idempotency_requirement_is_exhaustive_and_covers_long_term_mutations() {
+fn mutation_reliability_inventory_is_exhaustive_and_distinguishes_durable_receipts() {
     let operations = [
-        (AdapterOperation::Write, true),
-        (AdapterOperation::FinalizeTurn, true),
-        (AdapterOperation::Recall, false),
-        (AdapterOperation::Project, false),
-        (AdapterOperation::Maintain, true),
-        (AdapterOperation::Inspect, false),
-        (AdapterOperation::Recover, true),
-        (AdapterOperation::Replay, false),
-        (AdapterOperation::LongTermList, false),
-        (AdapterOperation::LongTermDetail, false),
-        (AdapterOperation::LongTermMutate, true),
-        (AdapterOperation::LongTermPolicy, true),
-        (AdapterOperation::TranscriptAttrWrite, true),
-        (AdapterOperation::Capabilities, false),
-        (AdapterOperation::Subscribe, false),
-        (AdapterOperation::Close, true),
+        (
+            AdapterOperation::Write,
+            AdapterMutationReliability::DurableStoreReceipt,
+            true,
+        ),
+        (
+            AdapterOperation::FinalizeTurn,
+            AdapterMutationReliability::ExplicitlyNonDurable,
+            true,
+        ),
+        (
+            AdapterOperation::Recall,
+            AdapterMutationReliability::NotMutation,
+            false,
+        ),
+        (
+            AdapterOperation::Project,
+            AdapterMutationReliability::NotMutation,
+            false,
+        ),
+        (
+            AdapterOperation::Maintain,
+            AdapterMutationReliability::ExplicitlyNonDurable,
+            true,
+        ),
+        (
+            AdapterOperation::Inspect,
+            AdapterMutationReliability::NotMutation,
+            false,
+        ),
+        (
+            AdapterOperation::Recover,
+            AdapterMutationReliability::ExplicitlyNonDurable,
+            true,
+        ),
+        (
+            AdapterOperation::Replay,
+            AdapterMutationReliability::NotMutation,
+            false,
+        ),
+        (
+            AdapterOperation::LongTermList,
+            AdapterMutationReliability::NotMutation,
+            false,
+        ),
+        (
+            AdapterOperation::LongTermDetail,
+            AdapterMutationReliability::NotMutation,
+            false,
+        ),
+        (
+            AdapterOperation::LongTermMutate,
+            AdapterMutationReliability::DurableStoreReceipt,
+            true,
+        ),
+        (
+            AdapterOperation::LongTermPolicy,
+            AdapterMutationReliability::ExplicitlyNonDurable,
+            true,
+        ),
+        (
+            AdapterOperation::TranscriptAttrWrite,
+            AdapterMutationReliability::ExplicitlyNonDurable,
+            true,
+        ),
+        (
+            AdapterOperation::Capabilities,
+            AdapterMutationReliability::NotMutation,
+            false,
+        ),
+        (
+            AdapterOperation::Subscribe,
+            AdapterMutationReliability::NotMutation,
+            false,
+        ),
+        (
+            AdapterOperation::Close,
+            AdapterMutationReliability::ExplicitlyNonDurable,
+            true,
+        ),
     ];
-    for (operation, required) in operations {
-        assert_eq!(operation.requires_idempotency(), required, "{operation}");
+    assert_eq!(operations.len(), AdapterOperation::ALL.len());
+    for (operation, reliability, reserved_in_flight) in operations {
+        assert_eq!(operation.mutation_reliability(), reliability, "{operation}");
+        assert_eq!(
+            operation.requires_in_flight_reservation(),
+            reserved_in_flight,
+            "{operation}"
+        );
     }
+    let runtime = runtime();
+    let lease = runtime
+        .acquire_runtime_budget_lease()
+        .expect("runtime budget lease");
+    let binding = AdapterProtocolBinding::for_runtime(&runtime, &lease);
+    assert_eq!(
+        binding.capabilities.mutation_operation_inventory.len(),
+        AdapterOperation::ALL.len()
+    );
+    assert_eq!(
+        binding.capabilities.mutation_receipt_policy.retention,
+        bm_sdk::MutationOperationReceiptRetentionPolicy::PinnedUntilCapacity
+    );
+    assert!(
+        !binding
+            .capabilities
+            .mutation_receipt_policy
+            .automatic_eviction
+    );
+    assert_eq!(
+        binding
+            .capabilities
+            .mutation_receipt_policy
+            .capacity_exhaustion,
+        bm_sdk::MutationOperationReceiptCapacityExhaustion::FailClosed
+    );
+    assert_eq!(
+        binding
+            .capabilities
+            .mutation_receipt_policy
+            .durable_json_entries_per_operation,
+        2
+    );
+    assert_eq!(
+        binding
+            .capabilities
+            .mutation_receipt_policy
+            .durable_events_per_operation,
+        2
+    );
 }
 
 #[test]
@@ -204,7 +326,7 @@ fn long_term_mutation_and_policy_fingerprints_are_stable_and_field_sensitive() {
 }
 
 #[test]
-fn automatic_transport_identity_is_unique_per_request() {
+fn transport_request_identity_is_unique_but_missing_caller_key_has_no_durable_operation_id() {
     let owner = AdapterRequestIdentityOwner::new(TransportKind::Wss, "session-1", "principal-a");
 
     let first = owner.issue(None).expect("first identity");
@@ -212,15 +334,16 @@ fn automatic_transport_identity_is_unique_per_request() {
 
     assert_ne!(first.request_id, second.request_id);
     assert_ne!(first.audit_id, second.audit_id);
-    assert_ne!(first.idempotency_key, second.idempotency_key);
+    assert_eq!(first.mutation_operation_id, None);
+    assert_eq!(second.mutation_operation_id, None);
 }
 
 #[test]
-fn explicit_transport_idempotency_is_stable_and_principal_scoped() {
+fn explicit_mutation_operation_identity_is_transport_neutral_and_principal_scoped() {
     let first_owner =
         AdapterRequestIdentityOwner::new(TransportKind::Mcp, "server-a", "principal-a");
     let retry_owner =
-        AdapterRequestIdentityOwner::new(TransportKind::Mcp, "server-b", "principal-a");
+        AdapterRequestIdentityOwner::new(TransportKind::Wss, "session-b", "principal-a");
     let other_principal =
         AdapterRequestIdentityOwner::new(TransportKind::Mcp, "server-a", "principal-b");
 
@@ -234,12 +357,16 @@ fn explicit_transport_idempotency_is_stable_and_principal_scoped() {
         .issue(Some("caller-key"))
         .expect("isolated identity");
 
-    assert_eq!(first.idempotency_key, retry.idempotency_key);
+    assert_eq!(first.mutation_operation_id, retry.mutation_operation_id);
     assert_ne!(first.request_id, retry.request_id);
-    assert_ne!(first.idempotency_key, isolated.idempotency_key);
-    assert!(!first.idempotency_key.contains("principal-a"));
-    assert!(!first.idempotency_key.contains("caller-key"));
-    assert!(first.idempotency_key.starts_with("explicit:v1:sha256:"));
+    assert_ne!(first.mutation_operation_id, isolated.mutation_operation_id);
+    let operation_id = first
+        .mutation_operation_id
+        .as_deref()
+        .expect("explicit mutation operation id");
+    assert!(!operation_id.contains("principal-a"));
+    assert!(!operation_id.contains("caller-key"));
+    assert!(operation_id.starts_with("explicit:v1:sha256:"));
 }
 
 #[test]
@@ -308,7 +435,7 @@ fn envelope<T>(
         .acquire_runtime_budget_lease()
         .expect("runtime budget lease");
     AdapterEnvelope {
-        protocol_version: bm_adapter::ExternalAiMemoryProtocolVersion::V1,
+        protocol_version: bm_adapter::ExternalAiMemoryProtocolVersion::V2,
         runtime_binding: bm_adapter::AdapterProtocolBinding::for_runtime(runtime, &lease),
         request_id: "req-1".to_string(),
         transport: TransportKind::Http,
@@ -327,10 +454,215 @@ fn envelope<T>(
             auth_kind: "token".to_string(),
             principal: "operator".to_string(),
         },
-        idempotency_key: "idem-1".to_string(),
+        mutation_operation_id: Some("idem-1".to_string()),
         audit_id: "audit-1".to_string(),
         payload,
     }
+}
+
+fn durable_write_command(summary: &str) -> AdapterCommand {
+    let target = MemoryCandidateTarget::LongTermMemory {
+        kind: LongTermMemoryKind::Project,
+        topic: "adapter-v2".to_string(),
+    };
+    AdapterCommand::Write(MemoryWriteRequest::Candidates {
+        candidates: vec![MemoryWriteCandidate {
+            candidate_id: "adapter-v2-candidate".to_string(),
+            authority: MemoryEvidenceAuthority::ProgramMemoryCanonical,
+            target: target.clone(),
+            long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
+            privacy: MemoryPrivacyClass::SharedWithSubject,
+            content: MemoryCandidateContent::Text {
+                topic: "adapter-v2".to_string(),
+                body: summary.to_string(),
+                keywords: vec!["adapter".to_string(), "receipt".to_string()],
+            },
+            evidence_refs: vec!["adapter-v2:contract".to_string()],
+            canonical_entities: Vec::new(),
+            semantic_judgment: Some(MemoryCandidateSemanticJudgment {
+                source: MemorySemanticJudgmentSource::RuntimeGate,
+                decision: MemoryCandidateSemanticDecision::Accept,
+                governed_target: Some(target),
+                reason: "adapter V2 durable receipt fixture".to_string(),
+            }),
+        }],
+        runtime_skill_owning_scope: None,
+    })
+}
+
+#[test]
+fn v1_durable_mutation_and_v2_missing_operation_identity_fail_closed() {
+    let runtime = runtime();
+    let mut legacy = envelope(
+        &runtime,
+        AdapterOperation::Write,
+        durable_write_command("legacy mutation"),
+    );
+    legacy.protocol_version = bm_adapter::ExternalAiMemoryProtocolVersion::V1;
+    let legacy_response = dispatch_adapter_command(&runtime, legacy).expect("legacy response");
+    assert!(matches!(
+        legacy_response,
+        AdapterResponse::Rejected {
+            error_key: AdapterErrorKey::RuntimeBindingMismatch,
+            ..
+        }
+    ));
+
+    for mutation_operation_id in [None, Some(String::new()), Some(" spaced ".to_string())] {
+        let mut missing = envelope(
+            &runtime,
+            AdapterOperation::Write,
+            durable_write_command("missing identity"),
+        );
+        missing.mutation_operation_id = mutation_operation_id;
+        let response = dispatch_adapter_command(&runtime, missing).expect("missing id response");
+        assert!(matches!(
+            response,
+            AdapterResponse::Rejected {
+                error_key: AdapterErrorKey::MutationOperationIdRequired,
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn v1_rejects_every_mutation_reliability_class_but_keeps_reads() {
+    let runtime = runtime();
+    let mut non_durable = envelope(
+        &runtime,
+        AdapterOperation::FinalizeTurn,
+        AdapterCommand::FinalizeTurn(Box::new(MemoryTurnFinalizeRequest {
+            turn: CanonicalTurnDelta {
+                turn_id: "turn-v1-rejected".to_string(),
+                conversation: ConversationScope {
+                    channel: "local".to_string(),
+                    chat_id: "chat-1".to_string(),
+                    conversation_id: None,
+                },
+                subject: bm_sdk::default_agent_subject_id("agent-main"),
+                delivery_status: MemoryTurnDeliveryStatus::Delivered,
+                source: MemoryTurnSource {
+                    ingress: bm_sdk::IngressKind::User,
+                    channel: "local".to_string(),
+                    provider: None,
+                    protocol: MemoryTurnProtocol::Native,
+                    endpoint: None,
+                    model_alias: None,
+                    model_resolved: None,
+                    request_id: None,
+                    client_conversation_hint: None,
+                },
+                actor: None,
+                input_messages: vec![TranscriptInputMessage::user("v1 mutation")],
+                assistant_message: Some(TranscriptInputMessage::assistant("rejected")),
+                tool_observations: Vec::new(),
+                external_content_used: false,
+                candidate_ids: Vec::new(),
+            },
+            tool_calls: 0,
+            runtime_skill_selected_ids: Vec::new(),
+            task_learning_selected_ids: Vec::new(),
+            reuse_outcome_note: String::new(),
+            tool_usage_feedback: None,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        })),
+    );
+    non_durable.protocol_version = bm_adapter::ExternalAiMemoryProtocolVersion::V1;
+    assert!(matches!(
+        dispatch_adapter_command(&runtime, non_durable).expect("V1 mutation rejection"),
+        AdapterResponse::Rejected {
+            error_key: AdapterErrorKey::RuntimeBindingMismatch,
+            ..
+        }
+    ));
+
+    let mut read = envelope(
+        &runtime,
+        AdapterOperation::Recall,
+        AdapterCommand::Recall(MemoryRecallRequest {
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
+            structured_query_facets: Vec::new(),
+            query: "v1 read".to_string(),
+            limit: 1,
+            tool_registry_refs: Vec::new(),
+        }),
+    );
+    read.protocol_version = bm_adapter::ExternalAiMemoryProtocolVersion::V1;
+    assert!(matches!(
+        dispatch_adapter_command(&runtime, read).expect("V1 read"),
+        AdapterResponse::Accepted { .. }
+    ));
+}
+
+#[test]
+fn v2_commit_and_replay_return_the_same_typed_safe_receipt_and_conflict_is_structured() {
+    let runtime = runtime();
+    let first = dispatch_adapter_command(
+        &runtime,
+        envelope(
+            &runtime,
+            AdapterOperation::Write,
+            durable_write_command("stable intent"),
+        ),
+    )
+    .expect("first mutation");
+    let AdapterResponse::Accepted {
+        receipt: Some(committed_receipt),
+        ..
+    } = first
+    else {
+        panic!("first durable mutation must return its committed receipt");
+    };
+
+    let replay = dispatch_adapter_command(
+        &runtime,
+        envelope(
+            &runtime,
+            AdapterOperation::Write,
+            durable_write_command("stable intent"),
+        ),
+    )
+    .expect("replayed mutation");
+    let AdapterResponse::Replayed {
+        mutation_operation_id,
+        receipt,
+        ..
+    } = replay
+    else {
+        panic!("expected durable replay, got {replay:?}");
+    };
+    assert_eq!(mutation_operation_id, "idem-1");
+    assert_eq!(receipt.mutation_operation_id, "idem-1");
+    assert_eq!(receipt, committed_receipt);
+    let encoded = serde_json::to_string(&receipt).expect("safe receipt JSON");
+    for forbidden in [
+        "memory_space_id",
+        "mounted_subject_id",
+        "intent_digest",
+        "effect_plan_digest",
+        "Durable operation receipt contract",
+    ] {
+        assert!(!encoded.contains(forbidden), "receipt leaked {forbidden}");
+    }
+
+    let conflict = dispatch_adapter_command(
+        &runtime,
+        envelope(
+            &runtime,
+            AdapterOperation::Write,
+            durable_write_command("different intent"),
+        ),
+    )
+    .expect("conflicting mutation response");
+    assert!(matches!(
+        conflict,
+        AdapterResponse::Rejected {
+            error_key: AdapterErrorKey::MutationOperationConflict,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -357,6 +689,7 @@ fn recall_command_dispatches_through_memory_runtime() {
             request_id,
             audit_id,
             report: AdapterSdkReport::Recall(report),
+            ..
         } => {
             assert_eq!(request_id, "req-1");
             assert_eq!(audit_id, "audit-1");
@@ -722,6 +1055,7 @@ fn long_term_list_command_dispatches_through_memory_runtime() {
             request_id,
             audit_id,
             report: AdapterSdkReport::LongTermList(report),
+            ..
         } => {
             assert_eq!(request_id, "req-1");
             assert_eq!(audit_id, "audit-1");

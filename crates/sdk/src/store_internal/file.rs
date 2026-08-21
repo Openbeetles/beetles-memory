@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "nonproduction-replay-harness")]
+use bm_core::memory::{MEMORY_MUTATION_AUDIT_NAMESPACE, MEMORY_MUTATION_RECEIPT_NAMESPACE};
 use bm_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1247,7 +1249,7 @@ impl FileStoreEngine {
                         &entry.key,
                         "file_store_transaction_recovery",
                     )?;
-                    self.maybe_crash_for_recovery_contract("after_json_index_before_data");
+                    self.maybe_crash_for_recovery_contract("after_json_index_before_data", false);
                     let bytes = serde_json::to_vec_pretty(value).map_err(|error| {
                         Error::config("file_store_transaction_recovery", error.to_string())
                     })?;
@@ -1261,7 +1263,10 @@ impl FileStoreEngine {
                 None => {
                     let paths = self.json_paths(&entry.namespace, &entry.key)?;
                     remove_file_if_exists(&paths.data_path, "file_store_transaction_recovery")?;
-                    self.maybe_crash_for_recovery_contract("after_json_data_delete_before_index");
+                    self.maybe_crash_for_recovery_contract(
+                        "after_json_data_delete_before_index",
+                        false,
+                    );
                     remove_file_if_exists(&paths.index_path, "file_store_transaction_recovery")?;
                     remove_file_if_exists(&paths.legacy_path, "file_store_transaction_recovery")?;
                 }
@@ -1346,12 +1351,14 @@ impl FileStoreEngine {
         self.sync_root(stage)
     }
 
-    fn maybe_crash_for_recovery_contract(&self, _point: &str) {
+    fn maybe_crash_for_recovery_contract(&self, _point: &str, _contains_operation_pair: bool) {
         #[cfg(feature = "nonproduction-replay-harness")]
         if std::env::var_os("BM_FILE_TRANSACTION_RECOVERY_WORKER").as_deref()
             == Some(std::ffi::OsStr::new("1"))
             && std::env::var_os("BM_FILE_TRANSACTION_CRASH_POINT").as_deref()
                 == Some(std::ffi::OsStr::new(_point))
+            && (std::env::var_os("BM_FILE_TRANSACTION_CRASH_REQUIRES_OPERATION_PAIR").is_none()
+                || _contains_operation_pair)
         {
             std::process::exit(86);
         }
@@ -2507,7 +2514,7 @@ impl FileStoreEngine {
         self.ensure_json_entry_budget(namespace, key)?;
         self.ensure_key_index_available(&paths, key, "file_store_json_write")?;
         self.write_key_index(&paths.index_path, key, "file_store_json_write")?;
-        self.maybe_crash_for_recovery_contract("after_json_index_before_data");
+        self.maybe_crash_for_recovery_contract("after_json_index_before_data", false);
         let bytes = serde_json::to_vec_pretty(value)
             .map_err(|error| Error::config("file_store_json_write", error.to_string()))?;
         atomic_write(
@@ -2524,7 +2531,7 @@ impl FileStoreEngine {
         self.validate_v2_pair_for_delete(&paths, key, "file_store_json_delete")?;
         let mut deleted = false;
         deleted |= remove_file_if_exists(&paths.data_path, "file_store_json_delete")?;
-        self.maybe_crash_for_recovery_contract("after_json_data_delete_before_index");
+        self.maybe_crash_for_recovery_contract("after_json_data_delete_before_index", false);
         deleted |= remove_file_if_exists(&paths.index_path, "file_store_json_delete")?;
         deleted |= remove_file_if_exists(&paths.legacy_path, "file_store_json_delete")?;
         Ok(deleted)
@@ -2930,6 +2937,25 @@ fn events_jsonl_bytes(events: &[MemoryStoreEvent]) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+#[cfg(feature = "nonproduction-replay-harness")]
+fn transaction_contains_operation_pair(request: &StoreTransactionRequest) -> bool {
+    let namespaces = request
+        .mutations
+        .iter()
+        .filter_map(|mutation| match mutation {
+            StoreEngineMutation::PutJson { namespace, .. } => Some(namespace.as_str()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    namespaces.contains(MEMORY_MUTATION_RECEIPT_NAMESPACE)
+        && namespaces.contains(MEMORY_MUTATION_AUDIT_NAMESPACE)
+}
+
+#[cfg(not(feature = "nonproduction-replay-harness"))]
+const fn transaction_contains_operation_pair(_request: &StoreTransactionRequest) -> bool {
+    false
+}
+
 impl StoreEngine for FileStoreEngine {
     fn admission_authority(&self) -> &StoreAdmissionAuthority {
         &self.admission_authority
@@ -2991,17 +3017,27 @@ impl StoreEngine for FileStoreEngine {
             after,
         )?;
         self.write_transaction_journal(&journal)?;
-        self.maybe_crash_for_recovery_contract("after_prepare_before_apply");
+        let contains_operation_pair = transaction_contains_operation_pair(&plan.effective_request);
+        self.maybe_crash_for_recovery_contract(
+            "after_prepare_before_apply",
+            contains_operation_pair,
+        );
         self.maybe_pause_for_recovery_contract("after_prepare_before_apply");
 
         self.restore_transaction_image(&journal.after)?;
-        self.maybe_crash_for_recovery_contract("after_apply_before_commit");
+        self.maybe_crash_for_recovery_contract(
+            "after_apply_before_commit",
+            contains_operation_pair,
+        );
         self.maybe_pause_for_recovery_contract("after_apply_before_commit");
 
         journal.state = FileTransactionJournalState::Committed;
         journal.refresh_checksum()?;
         self.write_transaction_journal(&journal)?;
-        self.maybe_crash_for_recovery_contract("after_commit_before_cleanup");
+        self.maybe_crash_for_recovery_contract(
+            "after_commit_before_cleanup",
+            contains_operation_pair,
+        );
 
         self.remove_transaction_journal("file_store_transaction")?;
         Ok(plan.report)

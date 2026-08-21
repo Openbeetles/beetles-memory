@@ -257,7 +257,12 @@ fn std_http_stream_serves_profile_capabilities_through_entry_runtime() {
 
     assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
     assert!(response.contains("\"profile\""), "{response}");
-    assert!(response.contains("\"entry\""), "{response}");
+    assert!(
+        response.contains("mutation_operation_inventory"),
+        "{response}"
+    );
+    assert!(response.contains("sdk_mutation_inventory"), "{response}");
+    assert!(response.contains("mutation_receipt_policy"), "{response}");
     assert!(
         response.contains("x-bm-runtime-budget-report-id: rtb-v2-"),
         "{response}"
@@ -341,14 +346,14 @@ fn forged_loopback_and_auth_subject_headers_cannot_authenticate_remote_http() {
 }
 
 #[test]
-fn explicit_http_idempotency_key_is_hashed_and_never_returned_verbatim() {
+fn missing_http_operation_key_fails_closed_and_explicit_key_is_safe_and_replayable() {
     let runtime = remote_runtime([EntryOperationCapability::Write]);
     let body = serde_json::json!({
         "name": "runtime_skill__http_wire_idem",
         "topic": "http",
         "title": "HTTP idempotency",
-        "summary": "Stable payload",
-        "content": "Hash the caller key before cache admission.",
+        "summary": "HTTP mutation operation receipt contract.",
+        "content": "- derive a stable caller operation id\n- commit effect and receipt once\n- replay the persisted receipt after retry",
         "source": "manual",
         "citations": ["http-backend-contract"],
         "source_chat_id": "chat-1",
@@ -373,11 +378,35 @@ fn explicit_http_idempotency_key_is_hashed_and_never_returned_verbatim() {
         )
     };
 
+    let missing_operation_key = serve_memory_request(
+        &runtime,
+        format!(
+            "POST /memory/write HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nAuthorization: Bearer secret-token\r\nx-bm-auth-subject: forged-owner\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        ),
+    );
+    assert!(
+        missing_operation_key.starts_with("HTTP/1.1 422 Unprocessable Entity"),
+        "{missing_operation_key}"
+    );
+    assert!(
+        missing_operation_key.contains("mutation_operation_id_required"),
+        "{missing_operation_key}"
+    );
+    assert!(
+        !missing_operation_key.contains("automatic:v1:sha256:"),
+        "{missing_operation_key}"
+    );
+
     let first = serve_memory_request(&runtime, request());
     let replay = serve_memory_request(&runtime, request());
 
     assert!(first.starts_with("HTTP/1.1 200 OK"), "{first}");
-    assert!(replay.starts_with("HTTP/1.1 409 Conflict"), "{replay}");
+    assert!(first.contains("\"receipt\""), "{first}");
+    assert!(first.contains("explicit:v1:sha256:"), "{first}");
+    assert!(replay.starts_with("HTTP/1.1 200 OK"), "{replay}");
+    assert!(replay.contains("\"status\":\"replayed\""), "{replay}");
     assert!(!first.contains("caller-secret-key"), "{first}");
     assert!(!replay.contains("caller-secret-key"), "{replay}");
     assert!(replay.contains("explicit:v1:sha256:"), "{replay}");

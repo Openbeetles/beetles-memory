@@ -570,7 +570,7 @@ fn handle_http_in_process_request_with_budget_lease(
             route.operation,
             "http-runtime",
             "http_client",
-            request_identity.idempotency_key,
+            request_identity.mutation_operation_id.unwrap_or_default(),
             request_identity.audit_id,
             auth,
         ),
@@ -1584,11 +1584,22 @@ fn render_http_response(
     response: AdapterResponse<AdapterSdkReport>,
 ) -> bm_sdk::Result<HttpRuntimeResponse> {
     Ok(match response {
-        AdapterResponse::Accepted { report, .. } => HttpRuntimeResponse {
-            status_code: 200,
-            body: render_report(report)?,
-            budget_report_id: String::new(),
-        },
+        AdapterResponse::Accepted {
+            report, receipt, ..
+        } => {
+            let body = render_report(report)?;
+            let mut body_value: serde_json::Value = serde_json::from_str(&body)
+                .map_err(|error| bm_sdk::Error::config("http_response", error.to_string()))?;
+            if let Some(receipt) = receipt {
+                body_value["receipt"] = serde_json::to_value(receipt)
+                    .map_err(|error| bm_sdk::Error::config("http_response", error.to_string()))?;
+            }
+            HttpRuntimeResponse {
+                status_code: 200,
+                body: body_value.to_string(),
+                budget_report_id: String::new(),
+            }
+        }
         AdapterResponse::Rejected {
             error_key, reason, ..
         } => HttpRuntimeResponse {
@@ -1597,9 +1608,10 @@ fn render_http_response(
                 AdapterErrorKey::Forbidden => 403,
                 AdapterErrorKey::PayloadTooLarge => 413,
                 AdapterErrorKey::InvalidJson => 400,
-                AdapterErrorKey::Duplicated => 409,
+                AdapterErrorKey::Duplicated | AdapterErrorKey::MutationOperationConflict => 409,
                 AdapterErrorKey::OperationMismatch
                 | AdapterErrorKey::RuntimeBindingMismatch
+                | AdapterErrorKey::MutationOperationIdRequired
                 | AdapterErrorKey::UnsupportedOperation
                 | AdapterErrorKey::RuntimeRejected => 422,
             },
@@ -1616,11 +1628,13 @@ fn render_http_response(
             body: json!({ "status": "queued", "queue": queue }).to_string(),
             budget_report_id: String::new(),
         },
-        AdapterResponse::Duplicated {
-            idempotency_key, ..
+        AdapterResponse::Replayed {
+            mutation_operation_id,
+            receipt,
+            ..
         } => HttpRuntimeResponse {
-            status_code: 409,
-            body: json!({ "status": "duplicated", "idempotency_key": idempotency_key }).to_string(),
+            status_code: 200,
+            body: json!({ "status": "replayed", "mutation_operation_id": mutation_operation_id, "receipt": receipt }).to_string(),
             budget_report_id: String::new(),
         },
     })
@@ -1636,12 +1650,11 @@ fn render_report(report: AdapterSdkReport) -> bm_sdk::Result<String> {
         .map_err(|error| bm_sdk::Error::config("http_safe_response", error.to_string()));
     }
     Ok(match report {
-        AdapterSdkReport::Capabilities(catalog) => json!({
+        AdapterSdkReport::Capabilities(report) => json!({
             "status": "accepted",
-            "profile": catalog.profile.as_str(),
-            "entry": {
-                "http_server": catalog.entry.http_server.visible,
-            }
+            "profile": report.profile.as_str(),
+            "capabilities": report.capabilities,
+            "sdk_mutation_inventory": report.sdk_mutation_inventory,
         })
         .to_string(),
         AdapterSdkReport::Recall(_) => unreachable!("governed recall DTO handled above"),

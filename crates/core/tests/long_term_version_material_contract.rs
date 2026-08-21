@@ -61,6 +61,12 @@ fn material(
             source_chat_id: None,
             source_type: LongTermMemorySourceType::SystemRuntime,
             source_scope: LongTermMemorySourceScope::World,
+            provenance: bm_core::memory::LongTermMemoryProvenance {
+                source_authority: bm_core::memory::MemoryEvidenceAuthority::RuntimeObservation,
+                semantic_judgment_source: Some(
+                    bm_core::memory::MemorySemanticJudgmentSource::RuntimeGate,
+                ),
+            },
             confidence: LongTermMemoryConfidence::High,
             freshness: LongTermMemoryFreshness::Dynamic,
             stale_hint: LongTermMemoryStaleHint::VerifyAgainstCurrentState,
@@ -70,7 +76,8 @@ fn material(
             created_at: 10,
             updated_at: valid_from,
             observed_at: valid_from.saturating_add(2),
-            last_confirmed_at: valid_from.saturating_add(2),
+            correction_evidence: None,
+            confirmation_evidence: None,
             source_revision: Some(owner_revision.saturating_add(2)),
             last_used_at: 0,
         },
@@ -132,7 +139,7 @@ fn subject_visibility_policy_is_canonical_and_exact_subject_bound() {
 }
 
 #[test]
-fn version_v3_requires_and_digests_exact_subject_visibility() {
+fn version_v5_requires_confirmation_evidence_visibility_and_provenance() {
     let all = material(1, 10, None, "visibility-bound material");
     let mut only_a = all.clone();
     only_a.subject_visibility = MemorySubjectVisibilityPolicy::OnlySubjects(vec!["agent-a".into()]);
@@ -142,6 +149,19 @@ fn version_v3_requires_and_digests_exact_subject_visibility() {
     assert!(only_a.validate_contract().accepted);
     assert_ne!(all.content_digest, only_a.content_digest);
 
+    let mut inferred = only_a.clone();
+    inferred.governed_content.provenance = bm_core::memory::LongTermMemoryProvenance {
+        source_authority: bm_core::memory::MemoryEvidenceAuthority::ModelInferred,
+        semantic_judgment_source: Some(
+            bm_core::memory::MemorySemanticJudgmentSource::LlmGovernance,
+        ),
+    };
+    inferred.content_digest = inferred
+        .canonical_content_digest()
+        .expect("provenance-bound digest");
+    assert!(inferred.validate_contract().accepted);
+    assert_ne!(only_a.content_digest, inferred.content_digest);
+
     let mut missing = serde_json::to_value(&only_a).expect("material JSON");
     missing
         .as_object_mut()
@@ -149,12 +169,69 @@ fn version_v3_requires_and_digests_exact_subject_visibility() {
         .remove("subject_visibility");
     assert!(serde_json::from_value::<LongTermMemoryVersionMaterial>(missing).is_err());
 
+    let mut old_v4 = only_a.clone();
+    old_v4.schema_version = 4;
+    old_v4.content_digest = old_v4
+        .canonical_content_digest()
+        .expect("old schema still has deterministic bytes");
+    assert!(!old_v4.validate_contract().accepted);
+
     let mut invalid = only_a;
     invalid.subject_visibility = MemorySubjectVisibilityPolicy::OnlySubjects(Vec::new());
     invalid.content_digest = invalid
         .canonical_content_digest()
         .expect("invalid payload still has bytes");
     assert!(!invalid.validate_contract().accepted);
+}
+
+#[test]
+fn current_and_as_of_select_revision_exact_provenance() {
+    let mut first = material(1, 10, None, "The user chose cn-east-2");
+    first.governed_content.provenance = bm_core::memory::LongTermMemoryProvenance {
+        source_authority: bm_core::memory::MemoryEvidenceAuthority::UserAsserted,
+        semantic_judgment_source: None,
+    };
+    first.content_digest = first.canonical_content_digest().unwrap();
+    let mut second = material(
+        2,
+        20,
+        Some(first.owner_revision_ref()),
+        "The model inferred cn-east-3",
+    );
+    second.governed_content.provenance = bm_core::memory::LongTermMemoryProvenance {
+        source_authority: bm_core::memory::MemoryEvidenceAuthority::ModelInferred,
+        semantic_judgment_source: Some(
+            bm_core::memory::MemorySemanticJudgmentSource::LlmGovernance,
+        ),
+    };
+    second.content_digest = second.canonical_content_digest().unwrap();
+    let materials = vec![first, second];
+    let transition = transition(1, 20, GovernedOwnerTermination::Revised, Some(2));
+    let head = head(&materials, 2, None);
+
+    let historical =
+        select_long_term_version_as_of(&head, &materials, std::slice::from_ref(&transition), 19, 4)
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        historical
+            .material
+            .governed_content
+            .provenance
+            .source_authority,
+        bm_core::memory::MemoryEvidenceAuthority::UserAsserted
+    );
+
+    let current = select_long_term_version_current(&head, &materials, &[transition], 4)
+        .expect("current projection");
+    assert_eq!(
+        current
+            .material
+            .governed_content
+            .provenance
+            .source_authority,
+        bm_core::memory::MemoryEvidenceAuthority::ModelInferred
+    );
 }
 
 fn transition(

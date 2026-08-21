@@ -12,9 +12,10 @@ use bm_core::runtime::continuity_flush::{
 };
 use bm_sdk::{
     default_agent_subject_id, default_memory_space_id, primary_human_subject_id,
-    system_governor_subject_id, IngressKind, MemoryCloseRequest, MemoryIdentity,
-    MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryPrivacyClass, MemoryProjectionRequest,
-    MemoryRecallRequest, MemoryRecoverRequest, MemoryRuntime, MemoryScope, MemoryStoreHandle,
+    system_governor_subject_id, IngressKind, LongTermMemoryProvenance, MemoryCloseRequest,
+    MemoryEvidenceAuthority, MemoryIdentity, MemoryInspectionRequest, MemoryMaintenanceRequest,
+    MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallRequest, MemoryRecoverRequest,
+    MemoryRuntime, MemoryScope, MemoryStoreHandle, MemorySubjectVisibilityPolicy,
     MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel, ProfileId,
     RuntimeLifecycleDisposition, RuntimeLifecycleModeInput, RuntimeLifecycleOperation,
     RuntimeLifecycleTrigger, RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource,
@@ -174,6 +175,10 @@ fn runtime_lifecycle_events_record_memory_hit_telemetry_for_recall_and_projectio
                     source_chat_id: Some("chat-1".to_string()),
                     source_type: None,
                     source_scope: None,
+                    subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                    provenance: LongTermMemoryProvenance::new(
+                        MemoryEvidenceAuthority::ProgramMemoryCanonical,
+                    ),
                     confidence: None,
                     freshness: None,
                     stale_hint: None,
@@ -181,7 +186,6 @@ fn runtime_lifecycle_events_record_memory_hit_telemetry_for_recall_and_projectio
                     canonical_entities: Vec::new(),
                     evidence_count: Some(1),
                     observed_at: Some(1_800_000_000),
-                    last_confirmed_at: Some(1_800_000_000),
                     source_revision: Some(1),
                 }],
                 deletes: Vec::new(),
