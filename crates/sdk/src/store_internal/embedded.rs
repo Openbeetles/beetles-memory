@@ -345,13 +345,31 @@ impl StoreEngine for EmbeddedStoreEngine {
             &request.scope,
             admission.operation_capacity(),
         )?;
+        let deleted_json = deleted_json
+            .into_iter()
+            .filter_map(|address| {
+                state
+                    .json
+                    .get(&address)
+                    .map(|value| {
+                        crate::store_internal::engine::json_document_is_protected_owner(
+                            &address.0, value,
+                        )
+                    })
+                    .transpose()
+                    .map(|protected| {
+                        (!(request.preserve_protected_owner_state && protected.unwrap_or(false)))
+                            .then_some(address)
+                    })
+                    .transpose()
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
         let deleted_events = state
             .events
             .iter()
             .filter(|event| {
-                crate::store_internal::transaction::event_matches_scoped_projection(
-                    event,
-                    &request.scope,
+                crate::store_internal::engine::event_is_replaced_by_scoped_projection(
+                    event, request,
                 )
             })
             .count();
@@ -382,9 +400,8 @@ impl StoreEngine for EmbeddedStoreEngine {
             .events
             .iter()
             .filter(|event| {
-                !crate::store_internal::transaction::event_matches_scoped_projection(
-                    event,
-                    &request.scope,
+                !crate::store_internal::engine::event_is_replaced_by_scoped_projection(
+                    event, request,
                 )
             })
             .map(|event| event.event_id.as_str())
@@ -411,10 +428,7 @@ impl StoreEngine for EmbeddedStoreEngine {
             state.json.remove(address);
         }
         state.events.retain(|event| {
-            !crate::store_internal::transaction::event_matches_scoped_projection(
-                event,
-                &request.scope,
-            )
+            !crate::store_internal::engine::event_is_replaced_by_scoped_projection(event, request)
         });
         for doc in &request.json_docs {
             state

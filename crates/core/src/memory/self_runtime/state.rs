@@ -154,6 +154,7 @@ pub(super) fn load_self_runtime_state(
     let (active_relationship_scope_id, active_relationship_channel) =
         resolve_runtime_relationship_scope(
             ctx.mounted_subject_id,
+            ctx.active_relationship_id,
             chat_id,
             payload,
             self_continuity.as_ref(),
@@ -191,13 +192,28 @@ pub(super) fn load_self_runtime_state(
         });
     let sandbox_probe_text =
         load_self_runtime_sandbox_probe_text(ctx, &active_relationship_scope_id, profile);
-    let relationship_constitution = if relationship_governance_enabled {
-        load_optional_store("relationship_constitution", &mut load_health, || {
-            ctx.relationship_constitution_store
-                .get(&active_relationship_scope_id)
+    let relationship_constitutional_input = if relationship_governance_enabled {
+        load_optional_store("relationship_constitutional_view", &mut load_health, || {
+            ctx.relationship_constitutional_read_store
+                .get(ctx.mounted_subject_id, &active_relationship_scope_id)
         })
     } else {
         None
+    };
+    let relationship_constitution = match compile_self_runtime_relationship_constitutional_input(
+        ctx.mounted_subject_id,
+        relationship_constitutional_input.as_ref(),
+        mental_privacy_state.as_ref(),
+        &active_relationship_scope_id,
+        &active_relationship_channel,
+        chat_id,
+        payload.now_secs,
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            load_health.record("relationship_constitutional_view", &error);
+            None
+        }
     };
     let self_continuity = if payload.trigger == SelfRuntimeTrigger::PostReply {
         match self_continuity {
@@ -326,6 +342,7 @@ pub(super) fn load_self_runtime_state(
         inner_conflict,
         relationship_portfolio,
         relationship_topology,
+        relationship_constitutional_input,
         relationship_constitution,
         world_sense,
         autonomy_strategy,
@@ -341,8 +358,42 @@ pub(super) fn load_self_runtime_state(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(super) fn compile_self_runtime_relationship_constitutional_input(
+    mounted_subject_id: &str,
+    input: Option<&SubjectSoulRelationshipRuntimeInputV1>,
+    mental_privacy_state: Option<&MentalPrivacyState>,
+    relationship_scope_id: &str,
+    relationship_channel: &str,
+    chat_id: &str,
+    now_secs: u64,
+) -> Result<Option<RelationshipConstitution>> {
+    input
+        .map(|input| {
+            compile_subject_soul_relationship_runtime_view_v1(
+                mounted_subject_id,
+                input,
+                mental_privacy_state,
+            )
+            .map(|view| {
+                compile_relationship_constitutional_runtime_input_v1(
+                    &view,
+                    relationship_scope_id,
+                    relationship_channel,
+                    chat_id,
+                    now_secs,
+                )
+            })
+            .map_err(|error| {
+                crate::error::Error::config("relationship_constitutional_view", error.reason)
+            })
+        })
+        .transpose()
+}
+
 fn resolve_runtime_relationship_scope(
     mounted_subject_id: &str,
+    active_relationship_id: Option<&str>,
     chat_id: &str,
     payload: &SelfRuntimeJobPayload,
     self_continuity: Option<&crate::memory::SelfContinuity>,
@@ -350,6 +401,12 @@ fn resolve_runtime_relationship_scope(
     relationship_topology: Option<&RelationshipTopology>,
 ) -> (String, String) {
     let requested_channel = payload.source_channel.trim();
+    if let Some(active_relationship_id) = active_relationship_id {
+        return (
+            active_relationship_id.to_string(),
+            requested_channel.to_string(),
+        );
+    }
     if payload.trigger == SelfRuntimeTrigger::PostReply {
         return (
             relationship_scope_id(mounted_subject_id, requested_channel, chat_id),
@@ -437,6 +494,7 @@ fn pick_runtime_relationship_entry_for_chat<'a>(
 
 pub(super) fn sync_self_runtime_relationship_topology(
     ctx: &SelfRuntimeContext<'_>,
+    relationship_id: &str,
     relationship_channel: &str,
     chat_id: &str,
     now_secs: u64,
@@ -446,9 +504,11 @@ pub(super) fn sync_self_runtime_relationship_topology(
     if relationship_channel.is_empty() || chat_id.is_empty() {
         return;
     }
-    let relationship_id =
-        relationship_scope_id(ctx.mounted_subject_id, relationship_channel, chat_id);
-    let turn_ledger = match ctx.turn_ledger_store.get(&relationship_id) {
+    let relationship_id = relationship_id.trim();
+    if relationship_id.is_empty() {
+        return;
+    }
+    let turn_ledger = match ctx.turn_ledger_store.get(relationship_id) {
         Ok(value) => value,
         Err(error) => {
             log::warn!(
@@ -460,7 +520,7 @@ pub(super) fn sync_self_runtime_relationship_topology(
             return;
         }
     };
-    let mental_privacy_state = match ctx.mental_privacy_store.get(&relationship_id) {
+    let mental_privacy_state = match ctx.mental_privacy_store.get(relationship_id) {
         Ok(value) => value,
         Err(error) => {
             log::warn!(
@@ -472,7 +532,7 @@ pub(super) fn sync_self_runtime_relationship_topology(
             return;
         }
     };
-    let outer_voice = match ctx.outer_voice_store.get(&relationship_id) {
+    let outer_voice = match ctx.outer_voice_store.get(relationship_id) {
         Ok(value) => value,
         Err(error) => {
             log::warn!(
@@ -484,7 +544,7 @@ pub(super) fn sync_self_runtime_relationship_topology(
             return;
         }
     };
-    let world_sense = match ctx.world_sense_store.get(&relationship_id) {
+    let world_sense = match ctx.world_sense_store.get(relationship_id) {
         Ok(value) => value,
         Err(error) => {
             log::warn!(
@@ -498,7 +558,7 @@ pub(super) fn sync_self_runtime_relationship_topology(
     };
     let recent_persona_evidence = match load_recent_persona_evidence(
         ctx.turn_continuity_evidence_store,
-        &relationship_id,
+        relationship_id,
     ) {
         Ok(value) => value,
         Err(error) => {
@@ -515,6 +575,7 @@ pub(super) fn sync_self_runtime_relationship_topology(
         ctx.relationship_topology_store,
         crate::memory::RelationshipTopologyUpsertInput {
             mounted_subject_id: ctx.mounted_subject_id,
+            relationship_id: Some(relationship_id),
             channel: relationship_channel,
             chat_id,
             now_secs,
@@ -597,57 +658,6 @@ pub(super) fn sync_self_runtime_relationship_portfolio(
                 Err(fallback_error) => {
                     log::warn!(
                         "[self_runtime] relationship portfolio fallback read failed: {}",
-                        fallback_error
-                    );
-                    None
-                }
-            }
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn sync_self_runtime_relationship_constitution(
-    ctx: &SelfRuntimeContext<'_>,
-    scope_id: &str,
-    channel: &str,
-    chat_id: &str,
-    now_secs: u64,
-    self_authored_core: Option<&crate::memory::SelfAuthoredCore>,
-    relationship_portfolio: Option<&RelationshipPortfolio>,
-    relationship_topology: Option<&RelationshipTopology>,
-    mental_privacy_state: Option<&crate::memory::MentalPrivacyState>,
-    outer_voice: Option<&crate::memory::OuterVoice>,
-    recent_persona_evidence: Option<&crate::memory::RecentPersonaEvidence>,
-) -> Option<RelationshipConstitution> {
-    match sync_relationship_constitution(
-        ctx.relationship_constitution_store,
-        RelationshipConstitutionSyncInput {
-            scope_id,
-            channel,
-            chat_id,
-            now_secs,
-            self_authored_core,
-            relationship_portfolio,
-            relationship_topology,
-            mental_privacy_state,
-            outer_voice,
-            recent_persona_evidence,
-        },
-    ) {
-        Ok(value) => value,
-        Err(error) => {
-            log::warn!(
-                "[self_runtime] relationship constitution sync failed scope_id={}: {}",
-                scope_id,
-                error
-            );
-            match ctx.relationship_constitution_store.get(scope_id) {
-                Ok(existing) => existing,
-                Err(fallback_error) => {
-                    log::warn!(
-                        "[self_runtime] relationship constitution fallback read failed scope_id={}: {}",
-                        scope_id,
                         fallback_error
                     );
                     None

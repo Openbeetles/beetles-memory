@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 
 use super::{
-    relationship_scope_id, turn_ledger_observed_at_ms, MentalPrivacyState, OuterVoice,
+    resolve_relationship_id, turn_ledger_observed_at_ms, MentalPrivacyState, OuterVoice,
     RecentPersonaEvidence, TurnLedger, WorldSense,
 };
 
@@ -110,6 +110,9 @@ impl RelationshipTopologyEntry {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RelationshipTopologyUpsertInput<'a> {
     pub mounted_subject_id: &'a str,
+    /// Exact relationship owner selected by the governed runtime. `None` uses the single-agent
+    /// deterministic scope derived from channel/chat.
+    pub relationship_id: Option<&'a str>,
     pub channel: &'a str,
     pub chat_id: &'a str,
     pub now_secs: u64,
@@ -158,7 +161,12 @@ pub fn upsert_relationship_topology_entry(
         return Ok(RelationshipTopologyRefreshOutcome::Skipped);
     }
     let subject_id = input.mounted_subject_id;
-    let scope_id = relationship_scope_id(subject_id, channel.as_str(), chat_id.as_str());
+    let scope_id = resolve_relationship_id(
+        subject_id,
+        input.relationship_id,
+        channel.as_str(),
+        chat_id.as_str(),
+    )?;
     let mut topology = store.get(subject_id)?.unwrap_or_default();
     let next_entry = build_relationship_topology_entry(
         topology
@@ -698,6 +706,7 @@ mod tests {
             &store,
             RelationshipTopologyUpsertInput {
                 mounted_subject_id: TEST_SUBJECT_ID,
+                relationship_id: None,
                 channel: "qq",
                 chat_id: "c1",
                 now_secs: 60,
@@ -756,6 +765,61 @@ mod tests {
         );
         assert_eq!(entry.external_focus, "reply with continuity");
         assert_eq!(entry.disclosure_action, "explain_without_quote");
+    }
+
+    #[test]
+    fn topology_upsert_uses_exact_relationship_owner_without_derived_alias() {
+        let store = StubRelationshipTopologyStore::default();
+        let outcome = upsert_relationship_topology_entry(
+            &store,
+            RelationshipTopologyUpsertInput {
+                mounted_subject_id: TEST_SUBJECT_ID,
+                relationship_id: Some("relationship:custom"),
+                channel: "qq",
+                chat_id: "c1",
+                now_secs: 60,
+                touch_user_turn: false,
+                touch_runtime_refresh: true,
+                turn_ledger: None,
+                mental_privacy_state: None,
+                outer_voice: None,
+                world_sense: None,
+                recent_persona_evidence: None,
+            },
+        )
+        .expect("exact relationship upsert");
+        assert_eq!(outcome, RelationshipTopologyRefreshOutcome::Updated);
+        let topology = store.get(TEST_SUBJECT_ID).unwrap().unwrap();
+        assert_eq!(topology.entries.len(), 1);
+        assert_eq!(topology.entries[0].scope_id, "relationship:custom");
+        assert_ne!(
+            topology.entries[0].scope_id,
+            relationship_scope_id(TEST_SUBJECT_ID, "qq", "c1")
+        );
+
+        assert!(upsert_relationship_topology_entry(
+            &store,
+            RelationshipTopologyUpsertInput {
+                mounted_subject_id: TEST_SUBJECT_ID,
+                relationship_id: Some(" relationship:invalid "),
+                channel: "qq",
+                chat_id: "c1",
+                now_secs: 61,
+                touch_user_turn: false,
+                touch_runtime_refresh: true,
+                turn_ledger: None,
+                mental_privacy_state: None,
+                outer_voice: None,
+                world_sense: None,
+                recent_persona_evidence: None,
+            },
+        )
+        .is_err());
+        assert_eq!(
+            store.get(TEST_SUBJECT_ID).unwrap().unwrap().entries.len(),
+            1,
+            "invalid exact relationship must fail before topology mutation"
+        );
     }
 
     #[test]

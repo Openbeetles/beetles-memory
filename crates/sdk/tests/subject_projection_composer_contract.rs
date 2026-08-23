@@ -7,18 +7,18 @@ use std::sync::{Arc, Mutex};
 use bm_core::memory::{
     canonical_evidence_ref_from_source, governed_memory_recall_candidate_id, CanonicalEntityKey,
     CanonicalEntityKind, CanonicalEntityRef, GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef,
-    LongTermControlOperation, LongTermMemoryControlRevision, SelfAuthoredCore,
-    LONG_TERM_CONTROL_REVISION_NAMESPACE,
+    LongTermControlOperation, LongTermMemoryControlRevision, LONG_TERM_CONTROL_REVISION_NAMESPACE,
 };
-use bm_core::platform::Platform as _;
 use bm_sdk::{
-    default_agent_subject_id, LongTermMemoryDraft, LongTermMemoryKind, LongTermMemoryProvenance,
-    LongTermMemorySourceScope, MemoryAuditEvent, MemoryAuditSink, MemoryEvidenceAuthority,
-    MemoryIdentity, MemoryLongTermControlView, MemoryLongTermDetailRequest, MemoryLongTermMutation,
-    MemoryLongTermMutationRequest, MemoryLongTermTarget, MemoryPrivacyClass, MemoryPrivacyPolicy,
-    MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime, MemoryScope, MemoryStoreHandle,
+    default_agent_subject_id, primary_human_subject_id, LongTermMemoryDraft, LongTermMemoryKind,
+    LongTermMemoryProvenance, LongTermMemorySourceScope, MemoryAuditEvent, MemoryAuditSink,
+    MemoryEvidenceAuthority, MemoryIdentity, MemoryLongTermControlView,
+    MemoryLongTermDetailRequest, MemoryLongTermMutation, MemoryLongTermMutationRequest,
+    MemoryLongTermTarget, MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryProjectionRequest,
+    MemoryRecallRequest, MemoryRuntime, MemoryScope, MemoryStoreHandle,
     MemorySubjectVisibilityPolicy, MemoryWriteRequest, ParsedLongTermMemoryExtraction,
     PressureLevel, QueryFacetInput, RuntimeLifecycleModeInput, SubjectDescriptor, SubjectRegistry,
+    SubjectSoulFoundingCharterSeedV1, SubjectSoulProvisionIntentV1,
 };
 
 use support::empty_store_platform;
@@ -98,6 +98,34 @@ fn runtime_for_subject_with_audit(
         .expect("subject runtime with audit")
 }
 
+fn provision_subject_projection_soul(runtime: &MemoryRuntime, identity_anchor: &str) {
+    runtime
+        .provision_subject_soul(SubjectSoulProvisionIntentV1::Founding {
+            operation_id: format!("subject-projection-{identity_anchor}"),
+            human_actor_subject_id: primary_human_subject_id("owner-shared"),
+            charter: Box::new(
+                SubjectSoulFoundingCharterSeedV1 {
+                    identity_anchor: Some(identity_anchor.to_string()),
+                    character_tendencies: vec![identity_anchor.to_string()],
+                    priority_constitution: vec!["preserve subject ownership".to_string()],
+                    non_negotiables: vec!["do not claim another subject's Soul".to_string()],
+                    default_response_mode: Some(identity_anchor.to_string()),
+                    default_initiative_posture: None,
+                    default_relationship_posture: None,
+                    boundary_doctrine: None,
+                    truth_seeking_commitment: None,
+                    self_preservation_doctrine: None,
+                    repair_doctrine: None,
+                    change_principle: None,
+                }
+                .canonicalize()
+                .expect("canonical subject projection seed"),
+            ),
+            source_asserted_at: Some(1_700_000_000),
+        })
+        .expect("provision subject projection Soul");
+}
+
 fn project(runtime: &MemoryRuntime) -> bm_sdk::MemoryProjectionOutput {
     runtime
         .project(MemoryProjectionRequest {
@@ -173,27 +201,10 @@ fn one_shared_fact_can_produce_distinct_subject_projections() {
     let registry = two_agent_registry();
     let subject_a = default_agent_subject_id("agent-a");
     let subject_b = default_agent_subject_id("agent-b");
-    for (subject_id, identity_anchor) in [
-        (&subject_a, "AGENT-A-DIRECT-ENGINEERING-PERSONA"),
-        (&subject_b, "AGENT-B-CAUTIOUS-REVIEW-PERSONA"),
-    ] {
-        platform
-            .replay_harness()
-            .self_authored_core_store()
-            .set(
-                subject_id,
-                &SelfAuthoredCore {
-                    identity_anchor: identity_anchor.to_string(),
-                    default_response_mode: identity_anchor.to_string(),
-                    self_preservation_doctrine: "preserve subject ownership".to_string(),
-                    ..SelfAuthoredCore::default()
-                },
-            )
-            .expect("seed subject soul");
-    }
-
     let runtime_a = runtime_for_subject(platform.clone(), registry.clone(), "agent-a");
     let runtime_b = runtime_for_subject(platform.clone(), registry, "agent-b");
+    provision_subject_projection_soul(&runtime_a, "AGENT-A-DIRECT-ENGINEERING-PERSONA");
+    provision_subject_projection_soul(&runtime_b, "AGENT-B-CAUTIOUS-REVIEW-PERSONA");
     let write = runtime_a
         .write(MemoryWriteRequest::LongTermExtraction {
             extraction: ParsedLongTermMemoryExtraction {

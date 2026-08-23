@@ -3194,6 +3194,22 @@ impl StoreEngine for FileStoreEngine {
         };
         let mut deleted = self
             .read_scoped_json_unlocked_exact(&projection_request, admission.operation_capacity())?;
+        if request.preserve_protected_owner_state {
+            let protected = deleted
+                .documents
+                .iter()
+                .filter_map(|(address, value)| {
+                    crate::store_internal::engine::json_document_is_protected_owner(
+                        &address.0, value,
+                    )
+                    .map(|protected| protected.then_some(address.clone()))
+                    .transpose()
+                })
+                .collect::<Result<BTreeSet<_>>>()?;
+            for address in protected {
+                deleted.documents.remove(&address);
+            }
+        }
 
         for doc in &request.json_docs {
             if let Some(existing) = self.get_json_value_unlocked(&doc.namespace, &doc.key)? {
@@ -3220,18 +3236,16 @@ impl StoreEngine for FileStoreEngine {
         let deleted_events = existing_events
             .iter()
             .filter(|event| {
-                crate::store_internal::transaction::event_matches_scoped_projection(
-                    event,
-                    &request.scope,
+                crate::store_internal::engine::event_is_replaced_by_scoped_projection(
+                    event, request,
                 )
             })
             .count();
         let mut next_events = existing_events
             .iter()
             .filter(|event| {
-                !crate::store_internal::transaction::event_matches_scoped_projection(
-                    event,
-                    &request.scope,
+                !crate::store_internal::engine::event_is_replaced_by_scoped_projection(
+                    event, request,
                 )
             })
             .cloned()

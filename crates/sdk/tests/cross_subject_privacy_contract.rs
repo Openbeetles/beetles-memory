@@ -4,14 +4,13 @@ mod support;
 
 use std::sync::{Arc, Mutex};
 
-use bm_core::memory::{PrivateDocEntry, PrivateDocWorkspace, SelfAuthoredCore};
-use bm_core::platform::Platform as _;
 use bm_sdk::{
-    default_agent_subject_id, default_memory_space_id, MemoryAuditEvent, MemoryAuditSink,
-    MemoryIdentity, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRuntime, MemoryScope,
-    MemoryStoreHandle, PressureLevel, RuntimeLifecycleModeInput, SubjectDescriptor,
-    SubjectRegistry,
+    default_agent_subject_id, default_memory_space_id, primary_human_subject_id, MemoryAuditEvent,
+    MemoryAuditSink, MemoryIdentity, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRuntime,
+    MemoryScope, MemoryStoreHandle, PressureLevel, RuntimeLifecycleModeInput, SubjectDescriptor,
+    SubjectRegistry, SubjectSoulFoundingCharterSeedV1, SubjectSoulProvisionIntentV1,
 };
+use serde_json::json;
 
 use support::empty_store_platform;
 
@@ -69,46 +68,59 @@ fn runtime_for_subject(
         .expect("subject runtime")
 }
 
-fn seed_private_surfaces(platform: &MemoryStoreHandle, subject_id: &str, label: &str) {
+fn provision_subject_soul(runtime: &MemoryRuntime, label: &str) {
+    runtime
+        .provision_subject_soul(SubjectSoulProvisionIntentV1::Founding {
+            operation_id: format!("cross-subject-founding-{label}"),
+            human_actor_subject_id: primary_human_subject_id("owner-shared"),
+            charter: Box::new(
+                SubjectSoulFoundingCharterSeedV1 {
+                    identity_anchor: Some(format!("{label}-SOUL-ONLY")),
+                    character_tendencies: vec![format!("{label}-TENDENCY-ONLY")],
+                    priority_constitution: vec![
+                        "preserve exact mounted-subject ownership".to_string()
+                    ],
+                    non_negotiables: vec![
+                        "never disclose another subject's private state".to_string()
+                    ],
+                    default_response_mode: Some(format!("{label}-RESPONSE-ONLY")),
+                    default_initiative_posture: None,
+                    default_relationship_posture: None,
+                    boundary_doctrine: None,
+                    truth_seeking_commitment: None,
+                    self_preservation_doctrine: None,
+                    repair_doctrine: None,
+                    change_principle: None,
+                }
+                .canonicalize()
+                .expect("canonical founding charter"),
+            ),
+            source_asserted_at: Some(1_700_000_000),
+        })
+        .expect("provision typed subject Soul");
+}
+
+fn seed_unowned_replay_harness_private_values(
+    platform: &MemoryStoreHandle,
+    subject_id: &str,
+    label: &str,
+) {
     platform
         .replay_harness()
-        .self_authored_core_store()
-        .set(
+        .tamper_json_document_for_nonproduction_harness(
+            "private_doc",
             subject_id,
-            &SelfAuthoredCore {
-                identity_anchor: format!("{label}-SOUL-ONLY"),
-                default_response_mode: format!("{label}-RESPONSE-ONLY"),
-                self_preservation_doctrine: "never disclose another subject's private state"
-                    .to_string(),
-                ..SelfAuthoredCore::default()
-            },
+            json!({"sentinel": format!("{label}-PRIVATE-DOC-ONLY")}),
         )
-        .expect("seed soul");
+        .expect("seed unowned nonproduction private-doc value");
     platform
         .replay_harness()
-        .private_doc_store()
-        .set(
+        .tamper_json_document_for_nonproduction_harness(
+            "private_garden",
             subject_id,
-            &PrivateDocWorkspace {
-                inner_journal: Some(PrivateDocEntry {
-                    content: format!("{label}-PRIVATE-DOC-ONLY"),
-                    updated_at: 1_800_000_000,
-                    revision: 1,
-                }),
-                ..PrivateDocWorkspace::default()
-            },
+            json!({"sentinel": format!("{label}-PRIVATE-GARDEN-ONLY")}),
         )
-        .expect("seed private doc");
-    platform
-        .replay_harness()
-        .private_garden_store()
-        .write(
-            subject_id,
-            &format!("journal/{label}.md"),
-            &format!("{label}-PRIVATE-GARDEN-ONLY"),
-            1_800_000_000,
-        )
-        .expect("seed private garden");
+        .expect("seed unowned nonproduction private-garden value");
 }
 
 fn project(runtime: &MemoryRuntime) -> bm_sdk::MemoryProjectionOutput {
@@ -133,8 +145,6 @@ fn mounted_subject_private_surfaces_are_isolated_and_disclosure_audited() {
     let registry = two_agent_registry();
     let subject_a = default_agent_subject_id("agent-a");
     let subject_b = default_agent_subject_id("agent-b");
-    seed_private_surfaces(&platform, &subject_a, "AGENT-A");
-    seed_private_surfaces(&platform, &subject_b, "AGENT-B");
 
     let audit_a = Arc::new(CapturingAuditSink::default());
     let audit_b = Arc::new(CapturingAuditSink::default());
@@ -144,18 +154,18 @@ fn mounted_subject_private_surfaces_are_isolated_and_disclosure_audited() {
         "agent-a",
         audit_a.clone(),
     );
-    let runtime_b = runtime_for_subject(platform, registry, "agent-b", audit_b.clone());
+    let runtime_b = runtime_for_subject(platform.clone(), registry, "agent-b", audit_b.clone());
+    provision_subject_soul(&runtime_a, "AGENT-A");
+    provision_subject_soul(&runtime_b, "AGENT-B");
+    seed_unowned_replay_harness_private_values(&platform, &subject_a, "AGENT-A");
+    seed_unowned_replay_harness_private_values(&platform, &subject_b, "AGENT-B");
 
     let projection_a = project(&runtime_a);
     let projection_b = project(&runtime_b);
     let prompt_a = projection_a.provider_payload().system_memory_block();
     let prompt_b = projection_b.provider_payload().system_memory_block();
 
-    for own in [
-        "AGENT-A-SOUL-ONLY",
-        "AGENT-A-PRIVATE-DOC-ONLY",
-        "AGENT-A-PRIVATE-GARDEN-ONLY",
-    ] {
+    for own in ["AGENT-A-SOUL-ONLY", "AGENT-A-TENDENCY-ONLY"] {
         assert!(
             prompt_a.contains(own),
             "agent-a missed own private source {own}:\n{prompt_a}"
@@ -165,11 +175,7 @@ fn mounted_subject_private_surfaces_are_isolated_and_disclosure_audited() {
             "agent-b received agent-a private source {own}"
         );
     }
-    for own in [
-        "AGENT-B-SOUL-ONLY",
-        "AGENT-B-PRIVATE-DOC-ONLY",
-        "AGENT-B-PRIVATE-GARDEN-ONLY",
-    ] {
+    for own in ["AGENT-B-SOUL-ONLY", "AGENT-B-TENDENCY-ONLY"] {
         assert!(
             prompt_b.contains(own),
             "agent-b missed own private source {own}:\n{prompt_b}"

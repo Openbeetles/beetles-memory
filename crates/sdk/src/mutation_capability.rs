@@ -22,10 +22,19 @@ pub enum MemoryMutationSurface {
     MemorySpaceImport,
     Recover,
     Close,
+    SubjectSoulEvidence,
+    SubjectSoulProvision,
+    SubjectSoulRevision,
+    SubjectSoulArchive,
+    SubjectSoulRestore,
+    SubjectSoulReset,
+    SubjectSoulReseed,
+    SubjectSoulDelete,
+    RelationshipSourceControl,
 }
 
 impl MemoryMutationSurface {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 28] = [
         Self::WriteWithOperation,
         Self::WriteWithoutOperation,
         Self::LongTermMutateWithOperation,
@@ -45,13 +54,30 @@ impl MemoryMutationSurface {
         Self::MemorySpaceImport,
         Self::Recover,
         Self::Close,
+        Self::SubjectSoulEvidence,
+        Self::SubjectSoulProvision,
+        Self::SubjectSoulRevision,
+        Self::SubjectSoulArchive,
+        Self::SubjectSoulRestore,
+        Self::SubjectSoulReset,
+        Self::SubjectSoulReseed,
+        Self::SubjectSoulDelete,
+        Self::RelationshipSourceControl,
     ];
 
     pub const fn reliability(self) -> MemoryMutationReliability {
         match self {
-            Self::WriteWithOperation | Self::LongTermMutateWithOperation => {
-                MemoryMutationReliability::DurableStoreReceipt
-            }
+            Self::WriteWithOperation
+            | Self::LongTermMutateWithOperation
+            | Self::SubjectSoulEvidence
+            | Self::SubjectSoulProvision
+            | Self::SubjectSoulRevision
+            | Self::SubjectSoulArchive
+            | Self::SubjectSoulRestore
+            | Self::SubjectSoulReset
+            | Self::SubjectSoulReseed
+            | Self::SubjectSoulDelete
+            | Self::RelationshipSourceControl => MemoryMutationReliability::DurableStoreReceipt,
             Self::FinalizeTurn | Self::GovernanceJob | Self::TranscriptCommit => {
                 MemoryMutationReliability::DomainOwnedReceipt
             }
@@ -135,7 +161,7 @@ mod tests {
                     item.reliability == MemoryMutationReliability::DurableStoreReceipt
                 })
                 .count(),
-            2
+            11
         );
         assert!(catalog.operations.iter().any(|item| {
             item.surface == MemoryMutationSurface::WriteWithoutOperation

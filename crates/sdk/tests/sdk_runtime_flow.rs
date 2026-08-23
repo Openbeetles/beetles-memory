@@ -4,18 +4,18 @@ mod support;
 
 use std::sync::Arc;
 
-use bm_core::memory::{
-    GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef, GovernedOwnerRevisionRef, InnerLife,
-    PrivateDocEntry, PrivateDocWorkspace, SelfContinuity, SelfModel,
-};
+use bm_core::memory::{GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef, GovernedOwnerRevisionRef};
 use bm_core::platform::Platform as _;
 use bm_sdk::{
-    default_agent_subject_id, IngressKind, MemoryAuditSink, MemoryClock, MemoryIdentity,
-    MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryPrivacyClass, MemoryPrivacyPolicy,
-    MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime, MemoryScope, MemoryWriteRequest,
-    NoopMemoryAuditSink, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
+    CanonicalTurnDelta, ConversationScope, IngressKind, LlmClient, LlmHttpClient, LlmResponse,
+    MemoryAuditSink, MemoryClock, MemoryIdentity, MemoryInspectionRequest,
+    MemoryMaintenanceRequest, MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryProjectionRequest,
+    MemoryRecallRequest, MemoryRuntime, MemoryScope, MemoryTurnDeliveryStatus,
+    MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteRequest, Message,
+    NoopMemoryAuditSink, PressureLevel, ProfileId, Result, RuntimeLifecycleModeInput,
     RuntimeSkillCreationRef, RuntimeSkillOwningScope, RuntimeSkillPremiseObservation,
-    RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource, StopReason,
+    ToolChoicePolicy, ToolSpec, TranscriptInputMessage,
 };
 
 use support::{
@@ -32,6 +32,100 @@ impl MemoryClock for RuntimeSkillPremiseTestClock {
     fn now_secs(&self) -> u64 {
         1_800_000_000
     }
+}
+
+struct PrivateGardenFixtureLlm<'a> {
+    content: &'a str,
+}
+
+impl LlmClient for PrivateGardenFixtureLlm<'_> {
+    fn chat(
+        &self,
+        _http: &mut dyn LlmHttpClient,
+        system: &str,
+        _messages: &[Message],
+        _tools: Option<&[ToolSpec]>,
+        _tool_choice: ToolChoicePolicy,
+    ) -> Result<LlmResponse> {
+        let content = if system.contains("private garden") {
+            serde_json::json!({
+                "writes": [{
+                    "path": "diary/private-projection-contract.md",
+                    "content": self.content
+                }]
+            })
+            .to_string()
+        } else if system.contains("inward autonomy runtime") {
+            "{}".to_string()
+        } else if system.contains("long-term memory") {
+            "[]".to_string()
+        } else {
+            "null".to_string()
+        };
+        Ok(LlmResponse {
+            content,
+            stop_reason: StopReason::EndTurn,
+            tool_calls: None,
+        })
+    }
+}
+
+fn seed_private_garden_with_production_owner(
+    runtime: &MemoryRuntime,
+    content: &str,
+    turn_id: &str,
+) {
+    let request = MemoryTurnFinalizeRequest {
+        turn: CanonicalTurnDelta {
+            turn_id: turn_id.to_string(),
+            conversation: ConversationScope {
+                channel: "local".to_string(),
+                chat_id: "chat-1".to_string(),
+                conversation_id: Some("private-projection-contract".to_string()),
+            },
+            subject: runtime.subject_id().to_string(),
+            delivery_status: MemoryTurnDeliveryStatus::Delivered,
+            source: MemoryTurnSource {
+                ingress: IngressKind::User,
+                channel: "local".to_string(),
+                provider: None,
+                protocol: MemoryTurnProtocol::Native,
+                endpoint: None,
+                model_alias: Some("fixture".to_string()),
+                model_resolved: Some("fixture".to_string()),
+                request_id: Some(turn_id.to_string()),
+                client_conversation_hint: Some("private-projection-contract".to_string()),
+            },
+            actor: None,
+            input_messages: vec![TranscriptInputMessage::user(
+                "Retain this protected inward note for governed self-work.",
+            )],
+            assistant_message: Some(TranscriptInputMessage::assistant(
+                "I will keep it within the governed private owner.",
+            )),
+            tool_observations: Vec::new(),
+            external_content_used: false,
+            candidate_ids: Vec::new(),
+        },
+        tool_calls: 0,
+        runtime_skill_selected_ids: Vec::new(),
+        task_learning_selected_ids: Vec::new(),
+        reuse_outcome_note: String::new(),
+        tool_usage_feedback: None,
+        pressure: PressureLevel::Normal,
+        mode_input: RuntimeLifecycleModeInput::default(),
+    };
+    let mut http = StaticHttpClient;
+    let report = runtime
+        .finalize_turn_with_inline_governance(
+            Some(&mut http),
+            Some(&PrivateGardenFixtureLlm { content }),
+            request,
+        )
+        .expect("seed private garden through production post-turn Soul owner");
+    assert!(report.private_garden_self_work.attempted);
+    assert!(report.private_garden_self_work.executed);
+    assert_eq!(report.private_garden_self_work.writes, 1);
 }
 
 #[test]
@@ -1045,47 +1139,6 @@ fn runtime_maintain_and_inspect_return_structured_reports() {
 #[test]
 fn runtime_projection_includes_private_planes_when_policy_allows_it() {
     let platform = empty_store_platform(support::host_test_profile());
-    let mounted_subject_id = default_agent_subject_id("agent-main");
-    platform
-        .replay_harness()
-        .private_doc_store()
-        .set(
-            &mounted_subject_id,
-            &PrivateDocWorkspace {
-                inner_journal: Some(PrivateDocEntry {
-                    content: "private workspace release note".to_string(),
-                    updated_at: 1_800_000_000,
-                    revision: 1,
-                }),
-                ..PrivateDocWorkspace::default()
-            },
-        )
-        .expect("private workspace seed");
-    platform
-        .replay_harness()
-        .private_garden_store()
-        .write(
-            &mounted_subject_id,
-            "diary/release.md",
-            "private garden release note",
-            1_800_000_000,
-        )
-        .expect("private garden seed");
-    platform
-        .replay_harness()
-        .self_model_store()
-        .set(
-            &mounted_subject_id,
-            &SelfModel {
-                continuity_anchor: "private self model release anchor".to_string(),
-                attachment_style: "steady".to_string(),
-                privacy_need: "high".to_string(),
-                directness: "direct".to_string(),
-                ..SelfModel::default()
-            },
-        )
-        .expect("self model seed");
-
     let mut privacy = MemoryPrivacyPolicy::standard_private_boundary();
     privacy.private_plane_projection_allowed = true;
     let runtime = MemoryRuntime::builder()
@@ -1098,6 +1151,11 @@ fn runtime_projection_includes_private_planes_when_policy_allows_it() {
         .audit_sink(Arc::new(NoopMemoryAuditSink) as Arc<dyn MemoryAuditSink>)
         .build()
         .expect("runtime");
+    seed_private_garden_with_production_owner(
+        &runtime,
+        "private garden release note",
+        "private-projection-allowed",
+    );
 
     let projection = runtime
         .project(MemoryProjectionRequest {
@@ -1113,9 +1171,8 @@ fn runtime_projection_includes_private_planes_when_policy_allows_it() {
         .expect("projection");
 
     let provider_prompt = projection.provider_payload().system_memory_block();
-    assert!(provider_prompt.contains("private workspace release note"));
-    assert!(provider_prompt.contains("private garden release note"));
-    assert!(provider_prompt.contains("Continuity tendencies"));
+    assert!(provider_prompt.contains("Private garden owner"));
+    assert!(!provider_prompt.contains("private garden release note"));
     let lower = provider_prompt.to_ascii_lowercase();
     for forbidden in [
         "roleplay",
@@ -1166,16 +1223,11 @@ fn runtime_projection_includes_private_planes_when_policy_allows_it() {
             projection.report().gateway_audit().block.as_str(),
         ),
     ] {
-        for private_raw in [
-            "private workspace release note",
-            "private garden release note",
-            "private self model release anchor",
-        ] {
-            assert!(
-                !block.contains(private_raw),
-                "{surface} leaked exact protected content: {private_raw}"
-            );
-        }
+        let private_raw = "private garden release note";
+        assert!(
+            !block.contains(private_raw),
+            "{surface} leaked exact protected content: {private_raw}"
+        );
     }
     assert!(projection.report().audit().disclosure_integrity_passed);
     assert_eq!(projection.report().audit().raw_private_violation_count, 0);
@@ -1184,70 +1236,13 @@ fn runtime_projection_includes_private_planes_when_policy_allows_it() {
 #[test]
 fn runtime_projection_excludes_private_planes_when_policy_denies_it() {
     let platform = empty_store_platform(support::host_test_profile());
-    let mounted_subject_id = default_agent_subject_id("agent-main");
-    platform
-        .replay_harness()
-        .self_model_store()
-        .set(
-            &mounted_subject_id,
-            &SelfModel {
-                continuity_anchor: "denied private self model anchor".to_string(),
-                private_notes: "denied private self model note".to_string(),
-                ..SelfModel::default()
-            },
-        )
-        .expect("self model seed");
-    platform
-        .replay_harness()
-        .self_continuity_store()
-        .set(
-            &mounted_subject_id,
-            &SelfContinuity {
-                wake_anchor: "denied private self continuity anchor".to_string(),
-                current_self_state: "denied private self continuity state".to_string(),
-                ..SelfContinuity::default()
-            },
-        )
-        .expect("self continuity seed");
-    platform
-        .replay_harness()
-        .inner_life_store()
-        .set(
-            &mounted_subject_id,
-            &InnerLife {
-                internal_monologue: "denied private inner monologue".to_string(),
-                private_journal: "denied private inner journal".to_string(),
-                ..InnerLife::default()
-            },
-        )
-        .expect("inner life seed");
-    platform
-        .replay_harness()
-        .private_doc_store()
-        .set(
-            &mounted_subject_id,
-            &PrivateDocWorkspace {
-                inner_journal: Some(PrivateDocEntry {
-                    content: "denied private workspace note".to_string(),
-                    updated_at: 1_800_000_000,
-                    revision: 1,
-                }),
-                ..PrivateDocWorkspace::default()
-            },
-        )
-        .expect("private workspace seed");
-    platform
-        .replay_harness()
-        .private_garden_store()
-        .write(
-            &mounted_subject_id,
-            "diary/denied.md",
-            "denied private garden note",
-            1_800_000_000,
-        )
-        .expect("private garden seed");
     let runtime =
         test_runtime_with_scope(platform, support::host_test_profile(), "local", "chat-1");
+    seed_private_garden_with_production_owner(
+        &runtime,
+        "denied private garden note",
+        "private-projection-denied",
+    );
 
     let projection = runtime
         .project(MemoryProjectionRequest {
@@ -1265,22 +1260,12 @@ fn runtime_projection_excludes_private_planes_when_policy_denies_it() {
     assert!(!projection.report().audit().runtime_private_context_allowed);
     assert!(!projection.report().audit().foreground_disclosure_allowed);
     let provider_prompt = projection.provider_payload().system_memory_block();
-    for private_text in [
-        "denied private self model anchor",
-        "denied private self model note",
-        "denied private self continuity anchor",
-        "denied private self continuity state",
-        "denied private inner monologue",
-        "denied private inner journal",
-        "denied private workspace note",
-        "denied private garden note",
-    ] {
-        assert!(
-            !provider_prompt.contains(private_text),
-            "{}",
-            provider_prompt
-        );
-    }
+    let private_text = "denied private garden note";
+    assert!(
+        !provider_prompt.contains(private_text),
+        "{}",
+        provider_prompt
+    );
     assert_eq!(projection.report().audit().raw_private_violation_count, 0);
 }
 

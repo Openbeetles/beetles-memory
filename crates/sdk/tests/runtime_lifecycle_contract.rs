@@ -4,7 +4,7 @@ mod support;
 
 use bm_core::memory::{
     memory_facet_manifest_key, ContinuitySnapshot, ContinuitySnapshotManifest,
-    ContinuitySnapshotMode, MEMORY_FACET_POSTING_NAMESPACE,
+    ContinuitySnapshotMode, SelfAuthoredCore, MEMORY_FACET_POSTING_NAMESPACE,
 };
 use bm_core::platform::Platform as _;
 use bm_core::runtime::continuity_flush::{
@@ -20,7 +20,8 @@ use bm_sdk::{
     RuntimeLifecycleDisposition, RuntimeLifecycleModeInput, RuntimeLifecycleOperation,
     RuntimeLifecycleTrigger, RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource,
     StoreBackendConfig, StoreRuntimeBudget, SubjectRegistry, SubjectRelationshipGraph,
-    SubjectScopedRuntime,
+    SubjectScopedRuntime, SubjectSoulFoundingCharterSeedV1, SubjectSoulProvisionIntentV1,
+    SubjectSoulReadSelectorV1,
 };
 
 use support::{
@@ -486,7 +487,7 @@ fn runtime_builder_rejects_missing_or_unbound_soul_owners_before_opening_runtime
 }
 
 #[test]
-fn runtime_recover_commits_bundle_owner_facet_soul_and_lifecycle_atomically() {
+fn runtime_recover_commits_bundle_owner_facet_and_lifecycle_atomically() {
     let source_platform = seeded_store_platform(support::host_test_profile());
     let snapshot = recovery_snapshot(
         &source_platform,
@@ -569,6 +570,106 @@ fn runtime_recover_commits_bundle_owner_facet_soul_and_lifecycle_atomically() {
             .expect("target facet manifest")
             .len(),
         1
+    );
+}
+
+#[test]
+fn runtime_recover_never_restores_soul_owned_core_from_generic_continuity_bundle() {
+    let source_platform = seeded_store_platform(support::host_test_profile());
+    let subject_id = default_agent_subject_id("agent-main");
+    let mut snapshot = recovery_snapshot(
+        &source_platform,
+        "space:owner-default",
+        &subject_id,
+        "chat-target",
+    );
+    snapshot.self_authored_core = Some(SelfAuthoredCore {
+        identity_anchor: "GENERIC_RECOVERY_MUST_NOT_RESTORE_SOUL".to_string(),
+        ..SelfAuthoredCore::default()
+    });
+
+    let target_platform = empty_store_platform(support::host_test_profile());
+    target_platform
+        .replay_harness()
+        .session_store()
+        .append("chat-target", "user", "recover non-Soul continuity only")
+        .expect("seed degraded session");
+    target_platform
+        .replay_harness()
+        .state_fs()
+        .write(
+            REL_PATH_REBOOT_CONTINUITY_BUNDLE,
+            &serde_json::to_vec(&ContinuitySnapshotBundle {
+                version: 1,
+                reason: "spv1_generic_recovery_boundary".to_string(),
+                flushed_at: 1_800_000_000,
+                primary_chat_id: Some("chat-target".to_string()),
+                snapshots: vec![snapshot],
+            })
+            .expect("serialize recovery bundle"),
+        )
+        .expect("write recovery bundle");
+    let runtime = test_runtime_with_identity_scope(
+        target_platform.clone(),
+        support::host_test_profile(),
+        "agent-main",
+        "owner-default",
+        "llm.gateway",
+        "chat-target",
+    );
+    runtime
+        .provision_subject_soul(SubjectSoulProvisionIntentV1::Founding {
+            operation_id: "recovery-existing-soul".to_string(),
+            human_actor_subject_id: primary_human_subject_id("owner-default"),
+            charter: Box::new(
+                SubjectSoulFoundingCharterSeedV1 {
+                    identity_anchor: Some("EXISTING_SOUL_MUST_SURVIVE_RECOVERY".to_string()),
+                    character_tendencies: vec!["persistent across recovery".to_string()],
+                    priority_constitution: vec!["preserve governed ownership".to_string()],
+                    non_negotiables: vec!["never import Soul through generic recovery".to_string()],
+                    default_response_mode: None,
+                    default_initiative_posture: None,
+                    default_relationship_posture: None,
+                    boundary_doctrine: None,
+                    truth_seeking_commitment: None,
+                    self_preservation_doctrine: None,
+                    repair_doctrine: None,
+                    change_principle: None,
+                }
+                .canonicalize()
+                .expect("canonical recovery guard seed"),
+            ),
+            source_asserted_at: Some(1_700_000_000),
+        })
+        .expect("seed existing Soul through lifecycle owner");
+    let soul_before = runtime
+        .export_subject_soul_operator_safe(SubjectSoulReadSelectorV1::Current)
+        .expect("read Soul root before generic recovery");
+
+    let report = runtime
+        .recover(MemoryRecoverRequest {
+            trigger: RuntimeLifecycleTrigger::BootRecovery,
+            mode_input: RuntimeLifecycleModeInput {
+                recovery_safe_mode_active: true,
+                ..RuntimeLifecycleModeInput::default()
+            },
+        })
+        .expect("recover non-Soul continuity");
+
+    assert!(
+        !report
+            .report
+            .restored_layers
+            .iter()
+            .any(|layer| layer == "self_authored_core"),
+        "generic recovery must not claim a Soul-owned layer"
+    );
+    assert_eq!(
+        runtime
+            .export_subject_soul_operator_safe(SubjectSoulReadSelectorV1::Current)
+            .expect("read Soul root after generic recovery"),
+        soul_before,
+        "generic recovery must leave the existing protected Soul root exactly unchanged"
     );
 }
 

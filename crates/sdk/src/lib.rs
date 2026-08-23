@@ -44,6 +44,27 @@
 //! fn main() {}
 //! ```
 //!
+//! Subject Soul lifecycle planning, owned-document envelopes, and generation
+//! layer mutation capabilities are sealed inside Core/SDK owners. Hosts use
+//! the typed lifecycle request/report surface and cannot submit raw Soul JSON.
+//!
+//! ```compile_fail
+//! use bm_sdk::SubjectSoulOwnedDocumentV1;
+//! fn main() {}
+//! ```
+//!
+//! ```compile_fail
+//! use bm_sdk::SubjectSoulGenerationLayerMutationRequestV1;
+//! fn main() {}
+//! ```
+//!
+//! ```compile_fail
+//! # use bm_sdk::MemoryRuntime;
+//! fn cannot_extract_internal_soul_capability(runtime: &MemoryRuntime) {
+//!     let _ = runtime.subject_soul_self_governance_capability_digest();
+//! }
+//! ```
+//!
 //! ```compile_fail
 //! use bm_sdk::export_memory_space;
 //! fn main() {}
@@ -208,39 +229,65 @@ pub use bm_core::memory::{
     RecallPlane, RecallQuery, RecallSelectionReport, WorkingRecallInspection,
 };
 pub use bm_core::memory::{
-    default_agent_subject_id, default_memory_space_id, primary_human_subject_id,
-    system_governor_subject_id, ActorAttribution, CanonicalTurnDelta, CommittedSessionMessage,
-    ConversationKey, ConversationScope, DeferredGovernanceJobStatus, DeferredGovernanceJobSummary,
-    DeferredGovernanceQueueReport, DerivedMemoryPlane, DerivedMemoryRef, GovernedWriteDecision,
-    HostOpaqueRef, HostRefRelation, HostRefVisibility, LongTermInvalidationContract,
-    LongTermInvalidationReasonCode, MemoryCandidateContent, MemoryCandidateSemanticDecision,
-    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryEvidenceAuthority,
-    MemoryGovernancePolicyMutation, MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration,
-    MemoryLongTermControlView, MemoryLongTermGovernancePolicy, MemoryLongTermMutation,
-    MemoryLongTermSelector, MemoryLongTermTarget, MemoryMutationEffect,
-    MemoryMutationOperationKind, MemoryMutationReceipt, MemoryPlaneGovernanceReport,
-    MemoryPrivacyClass, MemorySemanticJudgmentSource, MemorySubjectVisibilityPolicy,
-    MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteAuthority,
-    MemoryWriteCandidate, MemoryWriteDomain, PostTurnGovernanceAttemptAuthorityV2,
-    PostTurnGovernanceErrorClassV2, PostTurnGovernanceIdentityV2, PostTurnGovernanceJobRefV1,
-    PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV2, PostTurnGovernanceReceiptV2,
-    PostTurnGovernanceReconciliationCursorV1, PostTurnGovernanceScopeIndexV2,
-    PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport, PrivateDocEntry,
-    PrivateDocWorkspace, PrivateGardenAdmissionDecision, PrivateGardenGovernanceManifestAction,
-    PrivateGardenGovernanceManifestEntry, RedactedTranscriptSlice, SessionTurnCommitReport,
+    compile_subject_soul_founding_core, default_agent_subject_id, default_memory_space_id,
+    plan_relationship_source_control, plan_subject_soul_lifecycle_v1,
+    plan_subject_soul_provision_v1, primary_human_subject_id,
+    render_subject_soul_constitutional_block, subject_soul_lifecycle_intent_digest_v1,
+    subject_soul_provision_intent_digest_v1, system_governor_subject_id,
+    validate_subject_soul_post_image, ActorAttribution, CanonicalTurnDelta,
+    CommittedSessionMessage, ConversationKey, ConversationScope, DeferredGovernanceJobStatus,
+    DeferredGovernanceJobSummary, DeferredGovernanceQueueReport, DerivedMemoryPlane,
+    DerivedMemoryRef, GovernedWriteDecision, HostOpaqueRef, HostRefRelation, HostRefVisibility,
+    HumanSoulLifecycleConfirmationV1, LongTermInvalidationContract, LongTermInvalidationReasonCode,
+    MemoryCandidateContent, MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment,
+    MemoryCandidateTarget, MemoryEvidenceAuthority, MemoryGovernancePolicyMutation,
+    MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration, MemoryLongTermControlView,
+    MemoryLongTermGovernancePolicy, MemoryLongTermMutation, MemoryLongTermSelector,
+    MemoryLongTermTarget, MemoryMutationEffect, MemoryMutationOperationKind, MemoryMutationReceipt,
+    MemoryPlaneGovernanceReport, MemoryPrivacyClass, MemorySemanticJudgmentSource,
+    MemorySubjectVisibilityPolicy, MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource,
+    MemoryWriteAuthority, MemoryWriteCandidate, MemoryWriteDomain,
+    PostTurnGovernanceAttemptAuthorityV2, PostTurnGovernanceErrorClassV2,
+    PostTurnGovernanceIdentityV2, PostTurnGovernanceJobRefV1, PostTurnGovernanceJobStatusV2,
+    PostTurnGovernanceJobV2, PostTurnGovernanceReceiptV2, PostTurnGovernanceReconciliationCursorV1,
+    PostTurnGovernanceScopeIndexV2, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
+    PrivateDocEntry, PrivateDocWorkspace, PrivateGardenAdmissionDecision,
+    PrivateGardenGovernanceManifestAction, PrivateGardenGovernanceManifestEntry,
+    RedactedTranscriptSlice, RelationshipAccessConstraintV1, RelationshipConstraintLatticeV1,
+    RelationshipDisclosureCeilingV1, RelationshipSourceAuthorityKindV1,
+    RelationshipSourceClausesV1, RelationshipSourceConstitutionV1,
+    RelationshipSourceControlActionV1, RelationshipSourceControlAuthorityV1,
+    RelationshipSourceControlContractErrorV1, RelationshipSourceControlErrorKeyV1,
+    RelationshipSourceControlIntentActionV1, RelationshipSourceControlIntentV1,
+    RelationshipSourceControlOutcomeV1, RelationshipSourceControlPlanV1,
+    RelationshipSourceControlReportV1, RelationshipSourceControlResultV1,
+    RelationshipSourceExpectedStateV1, RelationshipSourceProvenanceV1,
+    RelationshipSourceReadRequestV1, RelationshipSourceReadSelectorV1,
+    RelationshipSourceScopeManifestV1, RelationshipSourceStateV1, SessionTurnCommitReport,
     SharedFactWriteGovernanceContext, SharedMemoryWriteOutcome, SoulCandidateDisposition,
     SoulCandidateHandoffReport, SubjectDescriptor, SubjectKind, SubjectLifecycleState,
     SubjectRegistry, SubjectRelationshipEdge, SubjectRelationshipGraph, SubjectRelationshipKind,
-    SubjectScopedRuntime, SubjectSoulBinding, SubjectSoulSurface, SubjectVisibility,
-    TranscriptAttrEnvelope, TranscriptAttrGovernance, TranscriptAttrLink,
-    TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
-    TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind,
-    TranscriptAttrWriteRejection, TranscriptAttrWriteReport, TranscriptCommitReport,
-    TranscriptConversationAlias, TranscriptEvidenceRef, TranscriptInputMessage,
-    TranscriptLifecycleState, TranscriptLifecycleTransition, TranscriptRedactionReason,
-    TranscriptRedactionReportItem, TranscriptRedactionState, TranscriptRepairIssue,
-    TranscriptRepairIssueKind, TranscriptRepairReport, TranscriptReplayAudit, TranscriptReplayView,
-    TranscriptTurnPage, TranscriptTurnRecord,
+    SubjectScopedRuntime, SubjectSoulBinding, SubjectSoulConstitutionalViewV1,
+    SubjectSoulContractError, SubjectSoulContractResult, SubjectSoulExpectedStateV1,
+    SubjectSoulFoundingCharterSeedV1, SubjectSoulGenerationTombstoneV1,
+    SubjectSoulLifecycleActionV1, SubjectSoulLifecycleAuthorityV1, SubjectSoulLifecycleErrorKey,
+    SubjectSoulLifecycleMutationRequestV1, SubjectSoulLifecycleStateV1,
+    SubjectSoulManifestOwnerRoleV1, SubjectSoulMutationOutcomeV1, SubjectSoulMutationReportV1,
+    SubjectSoulOperatorSafeExportV1, SubjectSoulProvisionIntentV1, SubjectSoulReadOutcomeV1,
+    SubjectSoulReadRequestV1, SubjectSoulReadSelectorV1, SubjectSoulReadViewV1,
+    SubjectSoulRelationshipProjectionV1, SubjectSoulRevisionOriginV1,
+    SubjectSoulRevisionProvenanceV1, SubjectSoulSourceAuthorityV1, SubjectSoulSurface,
+    SubjectSoulTerminalActionV1, SubjectVisibility, TranscriptAttrEnvelope,
+    TranscriptAttrGovernance, TranscriptAttrLink, TranscriptAttrRedactionPolicy,
+    TranscriptAttrScope, TranscriptAttrSource, TranscriptAttrSourceKind, TranscriptAttrTarget,
+    TranscriptAttrValueKind, TranscriptAttrWriteRejection, TranscriptAttrWriteReport,
+    TranscriptCommitReport, TranscriptConversationAlias, TranscriptEvidenceRef,
+    TranscriptInputMessage, TranscriptLifecycleState, TranscriptLifecycleTransition,
+    TranscriptRedactionReason, TranscriptRedactionReportItem, TranscriptRedactionState,
+    TranscriptRepairIssue, TranscriptRepairIssueKind, TranscriptRepairReport,
+    TranscriptReplayAudit, TranscriptReplayView, TranscriptTurnPage, TranscriptTurnRecord,
+    VerifiedSubjectSoulReadViewV1, SUBJECT_SOUL_MAX_CLAUSES_PER_FIELD,
+    SUBJECT_SOUL_MAX_CLAUSE_CHARS, SUBJECT_SOUL_MAX_TOTAL_CHARS, SUBJECT_SOUL_SCHEMA_VERSION,
 };
 pub use bm_core::memory::{
     governed_evidence_document_content_digest, governed_evidence_source_locator_digest,
@@ -366,12 +413,16 @@ pub use ops::{
     MemoryTranscriptReplayReport, MemoryTranscriptReplayRequest, MemoryTurnFinalizeReport,
     MemoryTurnFinalizeRequest, MemoryWriteReport, MemoryWriteRequest, MemoryWriteTransactionReport,
     PrivateDisclosureIntegrityReport, PrivateDisclosureSurfaceReport, ProceduralMemoryDeliveryView,
-    ProviderProjectionMaintenanceCarry, ProviderProjectionPayload, RuntimeDisclosureProtocolReport,
-    RuntimeOperatorAction, RuntimeOperatorActionReport, RuntimeSkillDetailReport,
-    RuntimeSkillDetailRequest, RuntimeSkillEditRequest, RuntimeSkillListReport,
-    RuntimeSkillListRequest, RuntimeSkillMutationReport, RuntimeSkillRetireRequest,
-    RuntimeSkillSetEnabledRequest, RuntimeSkillSummary, SoulLifeProjectionReport,
-    TemporalMemoryGraphMutationReport, TemporalMemoryGraphNodeOwnerRef,
+    ProviderProjectionMaintenanceCarry, ProviderProjectionPayload, RelationshipSourceReadReportV1,
+    RelationshipSourceSdkError, RelationshipSourceSdkOperation, RelationshipSourceSdkResult,
+    RuntimeDisclosureProtocolReport, RuntimeOperatorAction, RuntimeOperatorActionReport,
+    RuntimeSkillDetailReport, RuntimeSkillDetailRequest, RuntimeSkillEditRequest,
+    RuntimeSkillListReport, RuntimeSkillListRequest, RuntimeSkillMutationReport,
+    RuntimeSkillRetireRequest, RuntimeSkillSetEnabledRequest, RuntimeSkillSummary,
+    SoulGovernanceSdkErrorDisposition, SoulLifeProjectionReport,
+    SubjectSoulGovernedDisclosureDispositionV1, SubjectSoulGovernedDisclosureReportV1,
+    SubjectSoulGovernedDisclosureRequestV1, SubjectSoulSdkError, SubjectSoulSdkOperation,
+    SubjectSoulSdkResult, TemporalMemoryGraphMutationReport, TemporalMemoryGraphNodeOwnerRef,
     TemporalMemoryGraphWriteRequest, WorkIntegrityReport,
     GOVERNED_SCOPE_ARCHIVE_ROOT_SCHEMA_VERSION, MEMORY_PROJECTION_DELIVERY_DIGEST_SCHEMA_VERSION,
     MEMORY_RECALL_DELIVERY_SCHEMA_VERSION,

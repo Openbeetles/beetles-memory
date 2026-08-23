@@ -94,6 +94,7 @@ mod shared_factual_plane;
 mod shared_memory_governance;
 mod skill_routing;
 mod subject_shell;
+mod subject_soul_provisioning;
 mod subject_space;
 mod temperament_continuity;
 mod transcript;
@@ -380,10 +381,10 @@ pub(crate) use mental_privacy::{
     run_mental_privacy_review,
 };
 pub use mental_privacy::{
-    mental_privacy_adjudication_failure_fallback, run_mental_privacy_disclosure_adjudication,
-    BoundaryDisclosureStyle, BoundaryPersonaPosture, BoundaryPersonaRefreshContext,
-    BoundaryPersonaRefreshInput, BoundaryPersonaRefreshOutcome, BoundaryPersonaState,
-    MentalPrivacyConsentLog, MentalPrivacyDisclosureAdjudication,
+    mental_privacy_adjudication_failure_fallback, mental_privacy_safety_baseline,
+    run_mental_privacy_disclosure_adjudication, BoundaryDisclosureStyle, BoundaryPersonaPosture,
+    BoundaryPersonaRefreshContext, BoundaryPersonaRefreshInput, BoundaryPersonaRefreshOutcome,
+    BoundaryPersonaState, MentalPrivacyConsentLog, MentalPrivacyDisclosureAdjudication,
     MentalPrivacyDisclosureAdjudicationContext, MentalPrivacyDisclosureAdjudicationInput,
     MentalPrivacyEnvelope, MentalPrivacyLayer, MentalPrivacyLogStage, MentalPrivacyOwnerAccessMode,
     MentalPrivacyQuotePolicy, MentalPrivacyRequester, MentalPrivacyReviewContext,
@@ -588,13 +589,14 @@ pub use recent_persona_evidence::{
 pub(crate) use relationship_constitution::compact_relationship_constitution_for_profile;
 pub use relationship_constitution::{
     audit_relationship_constitution, clamp_boundary_persona_to_constitution,
-    derive_relationship_constitution, enforce_relationship_constitution_share_action,
-    render_relationship_constitution_block, sync_relationship_constitution,
-    RelationshipBoundaryShift, RelationshipConstitution, RelationshipConstitutionAlignment,
-    RelationshipConstitutionAudit, RelationshipConstitutionOverride,
-    RelationshipConstitutionOverrideDomain, RelationshipConstitutionStore,
-    RelationshipConstitutionSyncInput, RelationshipDisclosureAllowance,
-    RelationshipOuterVoiceShift, RelationshipTaskScopeCeiling, REL_PATH_RELATIONSHIP_CONSTITUTIONS,
+    compile_relationship_constitutional_runtime_input_v1, derive_relationship_constitution,
+    enforce_relationship_constitution_share_action, render_relationship_constitution_block,
+    sync_relationship_constitution, RelationshipBoundaryShift, RelationshipConstitution,
+    RelationshipConstitutionAlignment, RelationshipConstitutionAudit,
+    RelationshipConstitutionOverride, RelationshipConstitutionOverrideDomain,
+    RelationshipConstitutionStore, RelationshipConstitutionSyncInput,
+    RelationshipDisclosureAllowance, RelationshipOuterVoiceShift, RelationshipTaskScopeCeiling,
+    REL_PATH_RELATIONSHIP_CONSTITUTIONS,
 };
 pub use relationship_portfolio::{
     render_relationship_portfolio_block, select_relationship_portfolio_targets,
@@ -609,11 +611,12 @@ pub use relationship_topology::{
     RelationshipTopology, RelationshipTopologyEntry, RelationshipTopologyRefreshOutcome,
     RelationshipTopologyStore, RelationshipTopologyUpsertInput, REL_PATH_RELATIONSHIP_TOPOLOGIES,
 };
-pub(crate) use self_authored_core::run_self_authored_core_refresh_with_state;
 pub use self_authored_core::{
+    compute_self_authored_core_expected_prior_v1, plan_self_authored_core_refresh_with_state,
     render_persistent_self_authored_core_block, render_self_authored_core_block, SelfAuthoredCore,
-    SelfAuthoredCoreRefreshContext, SelfAuthoredCoreRefreshInput, SelfAuthoredCoreRefreshOutcome,
-    SELF_AUTHORED_CORE_SYSTEM_PROMPT, SELF_AUTHORED_CORE_TOTAL_CHAR_LIMIT,
+    SelfAuthoredCoreExpectedPriorV1, SelfAuthoredCoreRefreshInput, SelfAuthoredCoreRefreshOutcome,
+    SelfAuthoredCoreRefreshPlanV1, SELF_AUTHORED_CORE_SYSTEM_PROMPT,
+    SELF_AUTHORED_CORE_TOTAL_CHAR_LIMIT,
 };
 pub(crate) use self_continuity::estimate_self_continuity_chars;
 pub(crate) use self_continuity::run_self_continuity_refresh_with_state;
@@ -631,14 +634,15 @@ pub use self_model::{
 };
 pub use self_runtime::{
     enqueue_self_runtime_idle_tick, enqueue_self_runtime_operator_request,
-    enqueue_self_runtime_post_reply, run_self_runtime, self_runtime_tick, SelfRuntimeContext,
-    SelfRuntimeDecision, SelfRuntimeJobPayload, SelfRuntimeOutcome, SelfRuntimeTrigger,
-    SELF_RUNTIME_CHANNEL, SELF_RUNTIME_SYSTEM_PROMPT,
+    enqueue_self_runtime_post_reply, plan_self_runtime, self_runtime_tick, SelfRuntimeContext,
+    SelfRuntimeDecision, SelfRuntimeExecutionPlanV1, SelfRuntimeInitialPlanningStateV1,
+    SelfRuntimeJobPayload, SelfRuntimeOutcome, SelfRuntimePlannedEffectV1, SelfRuntimeTrigger,
+    SubjectSoulRelationshipRuntimeReadStore, SELF_RUNTIME_CHANNEL, SELF_RUNTIME_SYSTEM_PROMPT,
 };
 pub use self_scope::{
     default_agent_subject_id, default_memory_space_id, primary_human_subject_id,
-    relationship_scope, relationship_scope_id, system_governor_subject_id, MemorySpaceId,
-    RelationshipId, RelationshipScope, SubjectId,
+    relationship_scope, relationship_scope_id, resolve_relationship_id, system_governor_subject_id,
+    MemorySpaceId, RelationshipId, RelationshipScope, SubjectId,
 };
 pub use self_state::{
     build_self_state, render_self_state_block, SelfAutonomyState, SelfAutonomyStatus,
@@ -669,6 +673,55 @@ pub(crate) use shared_memory_governance::{
 };
 pub(crate) use skill_routing::{route_long_term_draft, MemoryPlane};
 pub(crate) use subject_shell::{compile_subject_shell, SubjectShell, SubjectShellCompileInput};
+pub use subject_soul_provisioning::{
+    canonical_relationship_source_revision_ref_v1, compile_subject_soul_founding_core,
+    compile_subject_soul_relationship_runtime_view_v1, plan_relationship_source_control,
+    plan_subject_soul_autonomous_cycle_v1, plan_subject_soul_generation_layer_delta_v1,
+    plan_subject_soul_lifecycle_v1, plan_subject_soul_provision_v1,
+    plan_subject_soul_relationship_projection_v1, plan_subject_soul_self_authored_revision_v1,
+    relationship_mental_privacy_ceiling_v1, relationship_soul_self_boundary_ceiling_v1,
+    render_subject_soul_constitutional_block, subject_soul_autonomous_cycle_intent_digest_v1,
+    subject_soul_generation_layer_intent_digest_v1, subject_soul_lifecycle_intent_digest_v1,
+    subject_soul_provision_intent_digest_v1, subject_soul_self_authored_revision_intent_digest_v1,
+    validate_relationship_source_post_image, validate_subject_soul_post_image,
+    HumanSoulLifecycleConfirmationV1, RelationshipAccessConstraintV1,
+    RelationshipConstraintLatticeV1, RelationshipDisclosureCeilingV1,
+    RelationshipSourceAuthorityKindV1, RelationshipSourceClausesV1,
+    RelationshipSourceConstitutionV1, RelationshipSourceContributionV1,
+    RelationshipSourceControlActionV1, RelationshipSourceControlAuthorityV1,
+    RelationshipSourceControlContractErrorV1, RelationshipSourceControlErrorKeyV1,
+    RelationshipSourceControlIntentActionV1, RelationshipSourceControlIntentV1,
+    RelationshipSourceControlOutcomeV1, RelationshipSourceControlPlanV1,
+    RelationshipSourceControlReportV1, RelationshipSourceControlResultV1,
+    RelationshipSourceExpectedStateV1, RelationshipSourceProvenanceV1,
+    RelationshipSourceReadRequestV1, RelationshipSourceReadSelectorV1,
+    RelationshipSourceScopeManifestV1, RelationshipSourceStateV1,
+    SubjectSoulAutonomousCycleIntentV1, SubjectSoulAutonomousCyclePlanV1,
+    SubjectSoulAutonomousCyclePostImageV1, SubjectSoulAutonomousRevisionDeltaV1,
+    SubjectSoulConstitutionalViewV1, SubjectSoulContractError, SubjectSoulContractResult,
+    SubjectSoulExpectedStateV1, SubjectSoulFoundingCharterSeedV1,
+    SubjectSoulGenerationLayerAuthorityV1, SubjectSoulGenerationLayerBasisV1,
+    SubjectSoulGenerationLayerDeltaPlanV1, SubjectSoulGenerationLayerIntentV1,
+    SubjectSoulGenerationLayerKindV1, SubjectSoulGenerationLayerMutationV1,
+    SubjectSoulGenerationTombstoneV1, SubjectSoulLifecycleActionV1,
+    SubjectSoulLifecycleAuthorityV1, SubjectSoulLifecycleErrorKey, SubjectSoulLifecycleHeadV1,
+    SubjectSoulLifecycleMutationRequestV1, SubjectSoulLifecyclePlanV1, SubjectSoulLifecycleStateV1,
+    SubjectSoulManifestAddressV1, SubjectSoulManifestOwnerRoleV1, SubjectSoulMutationOutcomeV1,
+    SubjectSoulMutationReportV1, SubjectSoulOperatorSafeExportV1, SubjectSoulOwnedDocumentV1,
+    SubjectSoulOwnerV1, SubjectSoulProvisionIntentV1, SubjectSoulProvisionPlanV1,
+    SubjectSoulReadOutcomeV1, SubjectSoulReadRequestV1, SubjectSoulReadSelectorV1,
+    SubjectSoulReadViewV1, SubjectSoulRelationshipProjectionPlanV1,
+    SubjectSoulRelationshipProjectionV1, SubjectSoulRelationshipRuntimeInputV1,
+    SubjectSoulRelationshipRuntimeProjectionDispositionV1, SubjectSoulRelationshipRuntimeViewV1,
+    SubjectSoulRevisionAddressBindingsV1, SubjectSoulRevisionMaterialV1,
+    SubjectSoulRevisionOriginV1, SubjectSoulRevisionProvenanceV1, SubjectSoulScopeManifestEntryV1,
+    SubjectSoulScopeManifestV1, SubjectSoulSelfAuthoredCommitPlanV1,
+    SubjectSoulSelfAuthoredPostImageAddressesV1, SubjectSoulSelfAuthoredRevisionBasisV1,
+    SubjectSoulSourceAuthorityV1, SubjectSoulTerminalActionV1, SubjectSoulTerminatedGenerationV1,
+    SubjectSoulVerifiedSnapshotV1, VerifiedSubjectSoulReadViewV1,
+    SUBJECT_SOUL_MAX_CLAUSES_PER_FIELD, SUBJECT_SOUL_MAX_CLAUSE_CHARS,
+    SUBJECT_SOUL_MAX_TOTAL_CHARS, SUBJECT_SOUL_SCHEMA_VERSION,
+};
 pub use subject_space::{
     SubjectContractValidation, SubjectDescriptor, SubjectKind, SubjectLifecycleState,
     SubjectRegistry, SubjectRelationshipEdge, SubjectRelationshipGraph, SubjectRelationshipKind,

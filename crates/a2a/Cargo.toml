@@ -1,6 +1,6 @@
 [package]
 name = "bm-a2a"
-version = "0.3.0"
+version = "0.4.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -28,7 +28,7 @@ profile-server-linux-dev-full = ["bm-adapter/profile-server-linux-dev-full"]
 
 [dependencies]
 bm-adapter.workspace = true
-bm-entry = { version = "0.3.0", path = "../entry", optional = true }
+bm-entry = { version = "0.4.0", path = "../entry", optional = true }
 bm-sdk.workspace = true
 serde.workspace = true
 serde_json.workspace = true

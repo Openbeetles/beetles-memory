@@ -42,8 +42,8 @@ use crate::store_internal::{
 };
 use crate::{
     enforce_event_key_budget, enforce_logical_key_budget, store_budget_error, MemoryStoreEvent,
-    MemoryStoreEventKind, StoreCapacityBudget, StoreEventScope, StoreJsonPrecondition,
-    StoreMutationBatch, StoreMutationBudgetReport, StoreSnapshotJsonDoc,
+    MemoryStoreEventKind, StoreBlobPrecondition, StoreCapacityBudget, StoreEventScope,
+    StoreJsonPrecondition, StoreMutationBatch, StoreMutationBudgetReport, StoreSnapshotJsonDoc,
 };
 
 #[derive(Clone)]
@@ -388,6 +388,7 @@ impl GraphRepairAuthority {
 pub struct StoreTransactionRequest {
     pub transaction_id: String,
     pub preconditions: Vec<StoreJsonPrecondition>,
+    pub blob_preconditions: Vec<StoreBlobPrecondition>,
     pub mutations: Vec<StoreEngineMutation>,
     pub governed_batch: Option<Box<StoreMutationBatch>>,
     graph_repair_authority: Option<GraphRepairAuthority>,
@@ -407,6 +408,7 @@ impl StoreTransactionRequest {
         Self {
             transaction_id: transaction_id.into(),
             preconditions,
+            blob_preconditions: Vec::new(),
             mutations,
             governed_batch,
             graph_repair_authority: None,
@@ -414,6 +416,47 @@ impl StoreTransactionRequest {
             governed_runtime_skill_owner_limit: None,
             read_set,
         }
+    }
+
+    pub(crate) fn with_blob_preconditions(
+        mut self,
+        preconditions: Vec<StoreBlobPrecondition>,
+    ) -> Self {
+        for precondition in &preconditions {
+            let (namespace, key) = match precondition {
+                StoreBlobPrecondition::Absent { namespace, key }
+                | StoreBlobPrecondition::ExactDigest { namespace, key, .. } => (namespace, key),
+            };
+            self.read_set.blobs.insert((namespace.clone(), key.clone()));
+        }
+        self.blob_preconditions.extend(preconditions);
+        self
+    }
+
+    #[cfg(feature = "nonproduction-replay-harness")]
+    pub fn with_blob_absent_precondition(
+        self,
+        namespace: impl Into<String>,
+        key: impl Into<String>,
+    ) -> Self {
+        self.with_blob_preconditions(vec![StoreBlobPrecondition::Absent {
+            namespace: namespace.into(),
+            key: key.into(),
+        }])
+    }
+
+    #[cfg(feature = "nonproduction-replay-harness")]
+    pub fn with_blob_exact_digest_precondition(
+        self,
+        namespace: impl Into<String>,
+        key: impl Into<String>,
+        content_digest: impl Into<String>,
+    ) -> Self {
+        self.with_blob_preconditions(vec![StoreBlobPrecondition::ExactDigest {
+            namespace: namespace.into(),
+            key: key.into(),
+            content_digest: content_digest.into(),
+        }])
     }
 
     pub(crate) fn authorize_graph_repair(mut self, authority: GraphRepairAuthority) -> Self {
@@ -856,6 +899,7 @@ pub(crate) fn apply_transaction(
     }
     let effective = materialize_conditional_mutations(request, current)?;
     validate_preconditions(capacity, &effective.preconditions, &current.json)?;
+    validate_blob_preconditions(capacity, &effective.blob_preconditions, &current.blobs)?;
 
     let mut next = current.clone();
     let mut changed_json = BTreeSet::new();
@@ -3376,6 +3420,55 @@ fn validate_preconditions(
     Ok(())
 }
 
+fn validate_blob_preconditions(
+    capacity: StoreCapacityBudget,
+    preconditions: &[StoreBlobPrecondition],
+    blobs: &BTreeMap<(String, String), Vec<u8>>,
+) -> Result<()> {
+    let mut addresses = BTreeSet::new();
+    for precondition in preconditions {
+        let (namespace, key, expected_digest) = match precondition {
+            StoreBlobPrecondition::Absent { namespace, key } => (namespace, key, None),
+            StoreBlobPrecondition::ExactDigest {
+                namespace,
+                key,
+                content_digest,
+            } => {
+                let canonical = content_digest.strip_prefix("sha256:").is_some_and(|hex| {
+                    hex.len() == 64
+                        && hex
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                });
+                if !canonical {
+                    return Err(Error::config(
+                        "memory_write_transaction_preflight_failed",
+                        format!("non-canonical blob digest for {namespace}/{key}"),
+                    ));
+                }
+                (namespace, key, Some(content_digest))
+            }
+        };
+        enforce_logical_key_budget(capacity, namespace, key, "memory_write_transaction")?;
+        if !addresses.insert((namespace.as_str(), key.as_str())) {
+            return Err(Error::config(
+                "memory_write_transaction_preflight_failed",
+                format!("duplicate blob precondition for {namespace}/{key}"),
+            ));
+        }
+        let observed = blobs
+            .get(&(namespace.clone(), key.clone()))
+            .map(|value| format!("sha256:{:x}", Sha256::digest(value)));
+        if observed.as_ref() != expected_digest {
+            return Err(Error::config(
+                "memory_write_transaction_precondition_failed",
+                format!("blob precondition failed for {namespace}/{key}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn reject_duplicate_mutation(
     addresses: &mut BTreeSet<(String, String)>,
     namespace: &str,
@@ -4022,6 +4115,54 @@ mod tests {
         .expect_err("json and blob entries share the kv entry budget");
 
         assert_eq!(error.stage(), "store_budget_exceeded");
+    }
+
+    #[test]
+    fn stale_blob_digest_precondition_rejects_without_a_post_image() {
+        let mut current = BackendTransactionState::default();
+        current.blobs.insert(
+            ("skills".to_string(), "owner.md".to_string()),
+            b"concurrent-owner".to_vec(),
+        );
+        let request = StoreTransactionRequest::new(
+            "blob-cas",
+            Vec::new(),
+            vec![StoreEngineMutation::PutBlob {
+                namespace: "skills".to_string(),
+                key: "owner.md".to_string(),
+                value: b"stale-plan".to_vec(),
+            }],
+            None,
+        )
+        .with_blob_preconditions(vec![StoreBlobPrecondition::ExactDigest {
+            namespace: "skills".to_string(),
+            key: "owner.md".to_string(),
+            content_digest: format!("sha256:{:x}", Sha256::digest(b"observed-before")),
+        }]);
+        let authority = StoreAdmissionAuthority::new();
+        let admission = StoreTransactionAdmission::for_nonproduction_harness(
+            StoreCapacityBudget::full(),
+            &authority,
+        );
+        let context = StoreTransactionContext {
+            touched: current.clone(),
+            usage: StoreBackendUsage {
+                kv_entries: 1,
+                blob_bytes: b"concurrent-owner".len(),
+                event_count: 0,
+            },
+            existing_event_ids: BTreeSet::new(),
+        };
+
+        let error = apply_transaction(&admission, &request, &context)
+            .expect_err("a stale SkillStorage plan must fail before mutation");
+
+        assert_eq!(
+            error.stage(),
+            "memory_write_transaction_precondition_failed"
+        );
+        assert_eq!(context.touched.blobs, current.blobs);
+        assert!(context.touched.events.is_empty());
     }
 
     #[test]

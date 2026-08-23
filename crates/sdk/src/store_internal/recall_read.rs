@@ -1,7 +1,9 @@
+use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
 use bm_core::agent::{ActiveWorkRecord, ActiveWorkStore};
+use bm_core::budget::RuntimeBudgetReport;
 use bm_core::memory::{
     build_long_term_current_recall_authority, build_long_term_historical_recall_authority,
     long_term_version_head_key, long_term_version_material_key,
@@ -17,10 +19,10 @@ use bm_core::memory::{
     LongTermMemoryVersionMaterial, LongTermMemoryVersionReadProjection,
     LongTermMemoryVersionScopeManifest, MemoryStore, PremiseTypedSource, RedactedTranscriptSlice,
     SessionMessage, SessionMessageRecord, SessionStore, SessionSummaryStore,
-    TranscriptAttrEnvelope, TranscriptAttrWriteReport, TranscriptCommitReport,
-    TranscriptConversationAlias, TranscriptLifecycleReport, TranscriptLifecycleRequest,
-    TranscriptReplayView, TranscriptTurnRecord, TurnLedger, TurnLedgerStore,
-    LONG_TERM_CONTROL_REVISION_NAMESPACE, LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
+    SubjectSoulReadRequestV1, TranscriptAttrEnvelope, TranscriptAttrWriteReport,
+    TranscriptCommitReport, TranscriptConversationAlias, TranscriptLifecycleReport,
+    TranscriptLifecycleRequest, TranscriptReplayView, TranscriptTurnRecord, TurnLedger,
+    TurnLedgerStore, LONG_TERM_CONTROL_REVISION_NAMESPACE, LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
 };
 use bm_core::platform::SkillStorage;
 use bm_core::skills::{
@@ -33,7 +35,13 @@ use serde::{de::DeserializeOwned, Deserialize};
 use sha2::{Digest, Sha256};
 
 use super::recall_index::{decode_typed_recall_index, TypedRecallIndex};
-use super::transaction::StoreImmutableReadSession;
+use super::subject_soul::{
+    read_verified_subject_soul_in_session, read_verified_subject_soul_with_relationship_in_session,
+    StoreOpenClosureCertificate, SubjectSoulStoreFailure, SubjectSoulVerifiedStoreRead,
+};
+use super::transaction::{
+    StoreBoundedKnownBlobRead, StoreBoundedKnownJsonRead, StoreImmutableReadSession,
+};
 use crate::StoreReadReceipt;
 
 type RecallJsonRead = ((String, String), Option<serde_json::Value>);
@@ -84,6 +92,8 @@ impl MaterializedRuntimeSkillScopeClosure {
 )]
 pub(crate) struct RecallImmutableReadContext<'a> {
     session: Box<dyn StoreImmutableReadSession + 'a>,
+    final_receipt: RefCell<Option<StoreReadReceipt>>,
+    subject_soul_open_closure_certificate: Option<StoreOpenClosureCertificate>,
     json_cache: BTreeMap<(String, String), Option<serde_json::Value>>,
     blob_cache: BTreeMap<(String, String), Option<Vec<u8>>>,
     json_observations: BTreeMap<(String, String), Option<serde_json::Value>>,
@@ -93,6 +103,61 @@ pub(crate) struct RecallImmutableReadContext<'a> {
         BTreeMap<(String, RuntimeSkillOwningScope), MaterializedRuntimeSkillScopeClosure>,
     runtime_skill_premise_evidence: BTreeMap<GovernedOwnerRevisionRef, bool>,
     runtime_skill_task_evidence: BTreeMap<(PremiseTypedSource, String), (String, String, String)>,
+}
+
+struct RecallSubjectSoulSession<'context, 'session> {
+    context: &'context mut RecallImmutableReadContext<'session>,
+}
+
+impl StoreImmutableReadSession for RecallSubjectSoulSession<'_, '_> {
+    fn read_json_known_keys(
+        &mut self,
+        addresses: &[(String, String)],
+    ) -> Result<Vec<StoreBoundedKnownJsonRead>> {
+        self.context.read_json_values(addresses).map(|reads| {
+            reads
+                .into_iter()
+                .map(|((namespace, key), value)| StoreBoundedKnownJsonRead {
+                    namespace,
+                    key,
+                    value,
+                })
+                .collect()
+        })
+    }
+
+    fn read_blob_known_keys(
+        &mut self,
+        addresses: &[(String, String)],
+    ) -> Result<Vec<StoreBoundedKnownBlobRead>> {
+        addresses
+            .iter()
+            .map(|(namespace, key)| {
+                self.context
+                    .read_blob(namespace, key)
+                    .map(|value| StoreBoundedKnownBlobRead {
+                        namespace: namespace.clone(),
+                        key: key.clone(),
+                        value,
+                    })
+            })
+            .collect()
+    }
+
+    fn receipt(&self) -> Result<StoreReadReceipt> {
+        if let Some(receipt) = self.context.final_receipt.borrow().as_ref() {
+            return Ok(receipt.clone());
+        }
+        let receipt = self.context.session.receipt()?;
+        self.context.final_receipt.replace(Some(receipt.clone()));
+        Ok(receipt)
+    }
+}
+
+fn current_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 pub(crate) struct RecallReadSetClosureEvidence {
@@ -107,6 +172,8 @@ impl<'a> RecallImmutableReadContext<'a> {
     pub(crate) fn new(session: Box<dyn StoreImmutableReadSession + 'a>) -> Self {
         Self {
             session,
+            final_receipt: RefCell::new(None),
+            subject_soul_open_closure_certificate: None,
             json_cache: BTreeMap::new(),
             blob_cache: BTreeMap::new(),
             json_observations: BTreeMap::new(),
@@ -116,6 +183,86 @@ impl<'a> RecallImmutableReadContext<'a> {
             runtime_skill_premise_evidence: BTreeMap::new(),
             runtime_skill_task_evidence: BTreeMap::new(),
         }
+    }
+
+    fn ensure_receipt_not_finalized(&self) -> Result<()> {
+        if self.final_receipt.borrow().is_some() {
+            return Err(Error::config(
+                "recall_immutable_read_session",
+                "immutable read attempted after the final receipt was pinned",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn with_subject_soul_open_closure_certificate(
+        mut self,
+        certificate: StoreOpenClosureCertificate,
+    ) -> Self {
+        self.subject_soul_open_closure_certificate = Some(certificate);
+        self
+    }
+
+    pub(crate) fn read_verified_subject_soul(
+        &mut self,
+        memory_space_id: &str,
+        soul_id: &str,
+        request: &SubjectSoulReadRequestV1,
+        runtime_budget: &RuntimeBudgetReport,
+    ) -> std::result::Result<SubjectSoulVerifiedStoreRead, SubjectSoulStoreFailure> {
+        runtime_budget
+            .validate_for_admission(current_unix_secs())
+            .map_err(SubjectSoulStoreFailure::from_store)?;
+        let certificate = self
+            .subject_soul_open_closure_certificate
+            .clone()
+            .ok_or_else(|| {
+                SubjectSoulStoreFailure::from_store(Error::config(
+                    "subject_soul_recall_session",
+                    "recall session has no pinned Subject Soul closure certificate",
+                ))
+            })?;
+        let mut session = RecallSubjectSoulSession { context: self };
+        read_verified_subject_soul_in_session(
+            &mut session,
+            memory_space_id,
+            &request.target_subject_id,
+            soul_id,
+            request,
+            &certificate,
+        )
+    }
+
+    pub(crate) fn read_verified_subject_soul_with_relationship(
+        &mut self,
+        memory_space_id: &str,
+        soul_id: &str,
+        request: &SubjectSoulReadRequestV1,
+        relationship_id: Option<&str>,
+        runtime_budget: &RuntimeBudgetReport,
+    ) -> std::result::Result<SubjectSoulVerifiedStoreRead, SubjectSoulStoreFailure> {
+        runtime_budget
+            .validate_for_admission(current_unix_secs())
+            .map_err(SubjectSoulStoreFailure::from_store)?;
+        let certificate = self
+            .subject_soul_open_closure_certificate
+            .clone()
+            .ok_or_else(|| {
+                SubjectSoulStoreFailure::from_store(Error::config(
+                    "subject_soul_recall_session",
+                    "recall session has no pinned Subject Soul closure certificate",
+                ))
+            })?;
+        let mut session = RecallSubjectSoulSession { context: self };
+        read_verified_subject_soul_with_relationship_in_session(
+            &mut session,
+            memory_space_id,
+            &request.target_subject_id,
+            soul_id,
+            request,
+            relationship_id,
+            &certificate,
+        )
     }
 
     fn ensure_long_term_owner_join_budget(
@@ -169,6 +316,7 @@ impl<'a> RecallImmutableReadContext<'a> {
         namespace: &str,
         key: &str,
     ) -> Result<Option<serde_json::Value>> {
+        self.ensure_receipt_not_finalized()?;
         let address = (namespace.to_string(), key.to_string());
         if let Some(value) = self.json_cache.get(&address) {
             return Ok(value.clone());
@@ -197,6 +345,7 @@ impl<'a> RecallImmutableReadContext<'a> {
         &mut self,
         addresses: &[(String, String)],
     ) -> Result<Vec<RecallJsonRead>> {
+        self.ensure_receipt_not_finalized()?;
         let mut unique = BTreeSet::new();
         let addresses = addresses
             .iter()
@@ -243,6 +392,7 @@ impl<'a> RecallImmutableReadContext<'a> {
         &mut self,
         addresses: &[(String, String)],
     ) -> Result<Vec<RecallJsonRead>> {
+        self.ensure_receipt_not_finalized()?;
         let mut unique = BTreeSet::new();
         let addresses = addresses
             .iter()
@@ -1120,6 +1270,7 @@ impl<'a> RecallImmutableReadContext<'a> {
     }
 
     pub(crate) fn read_blob(&mut self, namespace: &str, key: &str) -> Result<Option<Vec<u8>>> {
+        self.ensure_receipt_not_finalized()?;
         let address = (namespace.to_string(), key.to_string());
         if let Some(value) = self.blob_cache.get(&address) {
             return Ok(value.clone());
@@ -1145,7 +1296,11 @@ impl<'a> RecallImmutableReadContext<'a> {
     }
 
     pub(crate) fn finish(self) -> Result<(StoreReadReceipt, RecallReadSetClosureEvidence)> {
-        let receipt = self.session.receipt()?;
+        let receipt = if let Some(receipt) = self.final_receipt.borrow().as_ref() {
+            receipt.clone()
+        } else {
+            self.session.receipt()?
+        };
         let json_doc_count = self
             .json_observations
             .values()

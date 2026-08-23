@@ -20,7 +20,7 @@ Beetle Memory 是面向 agent 系统的 Rust 记忆运行时。它提供 SDK-fir
 | 模型网关与透明本地模型控制 | `bm-llm-gateway`, `bm-ollama-transparent` |
 | Adapters | `bm-cli`, `bm-http`, `bm-wss`, `bm-mcp`, `bm-a2a` |
 
-当前 Cargo workspace 的发布面版本为 `0.3.0`。打开已有持久 Store 前，请先阅读 [0.3.0 发布说明](docs/zh-CN/release-notes-0.3.0.md)。仓库包含 `examples/` 下的五个 smoke 示例，以及 `fixtures/platform/capabilities/` 下的 profile capability fixtures。
+当前 Cargo workspace 的发布面版本为 `0.4.0`。打开已有持久 Store 前，请先阅读 [0.4.0 发布说明](docs/zh-CN/release-notes-0.4.0.md)。仓库包含 `examples/` 下的五个 smoke 示例，以及 `fixtures/platform/capabilities/` 下的 profile capability fixtures。
 
 ## 能力范围
 
@@ -29,6 +29,7 @@ Beetle Memory 是面向 agent 系统的 Rust 记忆运行时。它提供 SDK-fir
 - 从 working、procedural、long-term、continuity 等表面召回记忆。
 - 生成受长度限制的模型上下文 memory block。
 - 检查运行状态、生命周期报告和 operator-safe recovery action。
+- 在不生成默认人格、不导出内在 raw material 的前提下，完成 AgentPersona Soul 的建档、治理、归档、reset、reseed、delete 与安全检查。
 - 导出、导入 typed memory-space archive，并回放受治理的 runtime history；continuity snapshot 仅作为内部 Soul recovery 载荷。
 - 通过 SDK、CLI、HTTP、WebSocket、MCP 或 A2A adapter shell 进入同一套记忆语义。
 - 面向 ESP、Linux 硬件设备、macOS 桌面独立 App、macOS/Windows/Linux SDK 宿主和 Linux server gateway profile 编译。
@@ -136,6 +137,7 @@ fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
 - [回放与归档](docs/zh-CN/replay-and-archive.md)
 - [运维与检查](docs/zh-CN/operator-guide.md)
 - [发布清单](docs/zh-CN/release-checklist.md)
+- [0.4.0 发布说明](docs/zh-CN/release-notes-0.4.0.md)
 - [0.3.0 发布说明](docs/zh-CN/release-notes-0.3.0.md)
 
 English documentation:
@@ -152,6 +154,7 @@ English documentation:
 - [Replay and Archive](docs/en/replay-and-archive.md)
 - [Operator Guide](docs/en/operator-guide.md)
 - [Release Checklist](docs/en/release-checklist.md)
+- [0.4.0 Release Notes](docs/en/release-notes-0.4.0.md)
 - [0.3.0 Release Notes](docs/en/release-notes-0.3.0.md)
 
 文档索引见 [docs/README.md](docs/README.md)。

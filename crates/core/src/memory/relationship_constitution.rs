@@ -10,6 +10,7 @@ use super::{
     BoundaryDisclosureStyle, BoundaryPersonaPosture, MentalPrivacyShareAction, MentalPrivacyState,
     OuterVoice, RecentPersonaEvidence, RelationshipGovernanceState, RelationshipInheritanceMode,
     RelationshipPortfolio, RelationshipTopology, SelfAuthoredCore,
+    SubjectSoulRelationshipRuntimeViewV1,
 };
 
 const RELATIONSHIP_CONSTITUTION_TEXT_MAX_CHARS: usize = 160;
@@ -131,6 +132,108 @@ impl RelationshipConstitution {
         !self.scope_id.trim().is_empty()
             && !self.channel.trim().is_empty()
             && !self.chat_id.trim().is_empty()
+    }
+}
+
+/// Compiles the immutable SPV1 relationship/source view into the existing runtime enforcement
+/// shape. The result is derived-only and must never be persisted as a second relationship truth.
+pub fn compile_relationship_constitutional_runtime_input_v1(
+    view: &SubjectSoulRelationshipRuntimeViewV1,
+    scope_id: &str,
+    channel: &str,
+    chat_id: &str,
+    now_secs: u64,
+) -> RelationshipConstitution {
+    let disclosure_allowance = match view.effective_disclosure_ceiling {
+        super::RelationshipDisclosureCeilingV1::None
+        | super::RelationshipDisclosureCeilingV1::RefusalOnly => {
+            RelationshipDisclosureAllowance::Closed
+        }
+        super::RelationshipDisclosureCeilingV1::GovernedSummary
+        | super::RelationshipDisclosureCeilingV1::FullGovernedDisclosure => {
+            RelationshipDisclosureAllowance::SummaryOnly
+        }
+    };
+    let mut task_scope_ceiling = match view.effective_disclosure_ceiling {
+        super::RelationshipDisclosureCeilingV1::None => RelationshipTaskScopeCeiling::Defer,
+        super::RelationshipDisclosureCeilingV1::RefusalOnly => RelationshipTaskScopeCeiling::Narrow,
+        super::RelationshipDisclosureCeilingV1::GovernedSummary => {
+            RelationshipTaskScopeCeiling::Brief
+        }
+        super::RelationshipDisclosureCeilingV1::FullGovernedDisclosure => {
+            RelationshipTaskScopeCeiling::Full
+        }
+    };
+    if view
+        .access_constraints
+        .contains(&super::RelationshipAccessConstraintV1::NoToolAuthority)
+        && matches!(
+            task_scope_ceiling,
+            RelationshipTaskScopeCeiling::Full | RelationshipTaskScopeCeiling::Brief
+        )
+    {
+        task_scope_ceiling = RelationshipTaskScopeCeiling::Narrow;
+    }
+    let (inheritance_mode, allowed_outer_voice_shift, allowed_boundary_shift) =
+        match view.effective_disclosure_ceiling {
+            super::RelationshipDisclosureCeilingV1::None => (
+                RelationshipInheritanceMode::Quarantined,
+                RelationshipOuterVoiceShift::Minimal,
+                RelationshipBoundaryShift::Sealed,
+            ),
+            super::RelationshipDisclosureCeilingV1::RefusalOnly => (
+                RelationshipInheritanceMode::Limited,
+                RelationshipOuterVoiceShift::Limited,
+                RelationshipBoundaryShift::SummaryOnly,
+            ),
+            super::RelationshipDisclosureCeilingV1::GovernedSummary => (
+                RelationshipInheritanceMode::Guarded,
+                RelationshipOuterVoiceShift::Guarded,
+                RelationshipBoundaryShift::TightenOnly,
+            ),
+            super::RelationshipDisclosureCeilingV1::FullGovernedDisclosure => (
+                RelationshipInheritanceMode::Full,
+                RelationshipOuterVoiceShift::Adaptive,
+                RelationshipBoundaryShift::Calibrated,
+            ),
+        };
+    let inactive = view.relationship_source_state != super::RelationshipSourceStateV1::Active;
+    RelationshipConstitution {
+        scope_id: scope_id.to_string(),
+        channel: channel.to_string(),
+        chat_id: chat_id.to_string(),
+        board_revision: view.relationship_source_revision,
+        governance_state: if inactive {
+            RelationshipGovernanceState::Deprioritize
+        } else {
+            RelationshipGovernanceState::Maintain
+        },
+        inheritance_mode,
+        alignment: if inactive {
+            RelationshipConstitutionAlignment::Isolated
+        } else {
+            RelationshipConstitutionAlignment::Aligned
+        },
+        inherited_priority_constitution: view.response_commitments.clone(),
+        inherited_relationship_posture: view.inherited_postures.join("; "),
+        task_scope_ceiling,
+        allowed_outer_voice_shift,
+        allowed_boundary_shift,
+        disclosure_allowance,
+        boundary_floor: view.mutual_boundary_commitments.join("; "),
+        truth_floor: view.truth_commitments.join("; "),
+        self_preservation_floor: view
+            .access_constraints
+            .iter()
+            .map(|constraint| format!("{constraint:?}").to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join("; "),
+        repair_floor: view.repair_commitments.join("; "),
+        must_realign: inactive
+            || view.effective_disclosure_ceiling
+                <= super::RelationshipDisclosureCeilingV1::RefusalOnly,
+        updated_at: now_secs,
+        ..RelationshipConstitution::default()
     }
 }
 

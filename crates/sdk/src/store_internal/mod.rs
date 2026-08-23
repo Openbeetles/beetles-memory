@@ -21,6 +21,7 @@ pub(crate) mod schema;
 mod snapshot;
 #[cfg(feature = "sqlite-store")]
 mod sqlite;
+pub(crate) mod subject_soul;
 mod transaction;
 
 pub(crate) use config::{enforce_event_key_budget, enforce_logical_key_budget, store_budget_error};
@@ -46,19 +47,20 @@ pub use event::{
 pub use file::FileStoreEngine;
 pub use in_memory::InMemoryStoreEngine;
 pub use mutation::{
-    StoreJsonPrecondition, StoreMutation, StoreMutationBatch, StoreMutationBatchReport,
-    StoreMutationBudgetReport,
+    StoreBlobPrecondition, StoreJsonPrecondition, StoreMutation, StoreMutationBatch,
+    StoreMutationBatchReport, StoreMutationBudgetReport,
 };
 pub use platform::StorePlatform;
 #[cfg(feature = "nonproduction-replay-harness")]
 pub(crate) use platform::StorePlatformPreparation;
 pub(crate) use platform::{
-    materialize_runtime_lifecycle_store_event, snapshot_json_requires_private_export,
-    snapshot_key_requires_private_export, snapshot_namespace_requires_private_export,
-    transcript_derived_ref_storage_key, transcript_turn_storage_key,
-    validate_scoped_projection_governed_closure, RuntimeLifecycleStoreBinding,
-    StoreMutationOperationOutcome, StoreMutationOperationPlan, StoreMutationOperationPreflight,
-    GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE, GOVERNED_EVIDENCE_SOURCE_REF_NAMESPACE,
+    canonical_subject_soul_full_intent_digest, materialize_runtime_lifecycle_store_event,
+    snapshot_json_requires_private_export, snapshot_key_requires_private_export,
+    snapshot_namespace_requires_private_export, transcript_derived_ref_storage_key,
+    transcript_turn_storage_key, validate_scoped_projection_governed_closure,
+    RuntimeLifecycleStoreBinding, StoreMutationOperationOutcome, StoreMutationOperationPlan,
+    StoreMutationOperationPreflight, StoreOwnerMutationPlan, GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE,
+    GOVERNED_EVIDENCE_SOURCE_REF_NAMESPACE,
 };
 pub(crate) use schema::{
     governed_evidence_source_claim_manifest_key,

@@ -2,12 +2,11 @@
 
 mod support;
 
-use bm_core::memory::SelfAuthoredCore;
-use bm_core::platform::Platform as _;
 use bm_sdk::{
-    default_agent_subject_id, MemoryIdentity, MemoryPrivacyPolicy, MemoryProjectionRequest,
-    MemoryRuntime, MemoryScope, MemoryStoreHandle, PressureLevel, RuntimeLifecycleModeInput,
-    SubjectDescriptor, SubjectRegistry,
+    default_agent_subject_id, primary_human_subject_id, MemoryIdentity, MemoryPrivacyPolicy,
+    MemoryProjectionOutput, MemoryProjectionRequest, MemoryRuntime, MemoryScope, MemoryStoreHandle,
+    PressureLevel, RuntimeLifecycleModeInput, SubjectDescriptor, SubjectRegistry,
+    SubjectSoulFoundingCharterSeedV1, SubjectSoulProvisionIntentV1, SubjectSoulReadSelectorV1,
 };
 
 use support::empty_store_platform;
@@ -41,7 +40,35 @@ fn runtime_for_subject(
         .expect("subject runtime")
 }
 
-fn project(runtime: &MemoryRuntime) {
+fn provision(runtime: &MemoryRuntime, label: &str) {
+    runtime
+        .provision_subject_soul(SubjectSoulProvisionIntentV1::Founding {
+            operation_id: format!("projection-no-mutation-{label}"),
+            human_actor_subject_id: primary_human_subject_id("owner-shared"),
+            charter: Box::new(
+                SubjectSoulFoundingCharterSeedV1 {
+                    identity_anchor: Some(format!("{label}-SOUL-PROVIDER-ONLY")),
+                    character_tendencies: vec![format!("{label}-STABLE-TENDENCY")],
+                    priority_constitution: vec!["projection remains read-only".to_string()],
+                    non_negotiables: vec!["never expose private raw material".to_string()],
+                    default_response_mode: Some(format!("direct work mode for {label}")),
+                    default_initiative_posture: None,
+                    default_relationship_posture: None,
+                    boundary_doctrine: None,
+                    truth_seeking_commitment: None,
+                    self_preservation_doctrine: None,
+                    repair_doctrine: None,
+                    change_principle: None,
+                }
+                .canonicalize()
+                .expect("canonical no-mutation Soul seed"),
+            ),
+            source_asserted_at: Some(1_700_000_000),
+        })
+        .expect("provision typed Soul");
+}
+
+fn project(runtime: &MemoryRuntime) -> MemoryProjectionOutput {
     runtime
         .project(MemoryProjectionRequest {
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
@@ -53,7 +80,7 @@ fn project(runtime: &MemoryRuntime) {
             mode_input: RuntimeLifecycleModeInput::default(),
             tool_registry_refs: Vec::new(),
         })
-        .expect("project");
+        .expect("project")
 }
 
 #[test]
@@ -61,110 +88,127 @@ fn projection_composer_does_not_mutate_either_subject_soul_or_private_surfaces()
     let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let registry = two_agent_registry();
-    let subject_a = default_agent_subject_id("agent-a");
-    let subject_b = default_agent_subject_id("agent-b");
-
-    for (subject_id, label) in [(&subject_a, "agent-a"), (&subject_b, "agent-b")] {
-        platform
-            .replay_harness()
-            .self_authored_core_store()
-            .set(
-                subject_id,
-                &SelfAuthoredCore {
-                    identity_anchor: format!("stable soul core for {label}"),
-                    default_response_mode: format!("direct work mode for {label}"),
-                    self_preservation_doctrine: "never expose private raw material".to_string(),
-                    ..SelfAuthoredCore::default()
-                },
-            )
-            .expect("seed core");
-        platform
-            .replay_harness()
-            .private_garden_store()
-            .write(
-                subject_id,
-                &format!("journal/{label}.md"),
-                &format!("raw private note for {label}"),
-                1_800_000_000,
-            )
-            .expect("seed private garden");
-    }
-
-    let before_a = (
-        platform
-            .replay_harness()
-            .self_authored_core_store()
-            .get(&subject_a)
-            .expect("read agent-a core"),
-        platform
-            .replay_harness()
-            .private_garden_store()
-            .list(&subject_a, 16)
-            .expect("list agent-a garden"),
-        platform
-            .replay_harness()
-            .core_revision_ledger_store()
-            .get(&subject_a)
-            .expect("read agent-a ledger"),
-    );
-    let before_b = (
-        platform
-            .replay_harness()
-            .self_authored_core_store()
-            .get(&subject_b)
-            .expect("read agent-b core"),
-        platform
-            .replay_harness()
-            .private_garden_store()
-            .list(&subject_b, 16)
-            .expect("list agent-b garden"),
-        platform
-            .replay_harness()
-            .core_revision_ledger_store()
-            .get(&subject_b)
-            .expect("read agent-b ledger"),
-    );
-
     let runtime_a = runtime_for_subject(platform.clone(), registry.clone(), "agent-a");
     let runtime_b = runtime_for_subject(platform.clone(), registry, "agent-b");
-    project(&runtime_a);
-    project(&runtime_b);
+    provision(&runtime_a, "agent-a");
+    provision(&runtime_b, "agent-b");
+    let before_a = runtime_a
+        .export_subject_soul_operator_safe(SubjectSoulReadSelectorV1::Current)
+        .expect("agent-a verified Soul before projection");
+    let before_b = runtime_b
+        .export_subject_soul_operator_safe(SubjectSoulReadSelectorV1::Current)
+        .expect("agent-b verified Soul before projection");
+    let before_store = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("canonical store before projection");
+    let protected_namespaces = [
+        "self_model",
+        "self_authored_core",
+        "core_revision_ledger",
+        "self_continuity",
+        "relationship_portfolio",
+        "relationship_topology",
+        "autonomy_strategy",
+        "inner_life",
+        "felt_significance",
+        "temperament_continuity",
+        "inner_conflict",
+        "mental_privacy",
+        "private_doc",
+        "private_garden",
+        "outer_voice",
+        "subject_soul_lifecycle_heads",
+        "subject_soul_revision_materials",
+        "subject_soul_scope_manifests",
+        "subject_soul_generation_tombstones",
+        "subject_soul_relationship_projections",
+        "subject_soul_operation_results",
+        "memory_mutation_receipts",
+        "memory_mutation_audits",
+    ];
+    let before_protected_docs = before_store
+        .json_docs
+        .iter()
+        .filter(|document| protected_namespaces.contains(&document.namespace.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let before_events = before_store
+        .events
+        .iter()
+        .filter(|event| protected_namespaces.contains(&event.plane.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
 
-    let after_a = (
-        platform
-            .replay_harness()
-            .self_authored_core_store()
-            .get(&subject_a)
-            .expect("read agent-a core after"),
-        platform
-            .replay_harness()
-            .private_garden_store()
-            .list(&subject_a, 16)
-            .expect("list agent-a garden after"),
-        platform
-            .replay_harness()
-            .core_revision_ledger_store()
-            .get(&subject_a)
-            .expect("read agent-a ledger after"),
-    );
-    let after_b = (
-        platform
-            .replay_harness()
-            .self_authored_core_store()
-            .get(&subject_b)
-            .expect("read agent-b core after"),
-        platform
-            .replay_harness()
-            .private_garden_store()
-            .list(&subject_b, 16)
-            .expect("list agent-b garden after"),
-        platform
-            .replay_harness()
-            .core_revision_ledger_store()
-            .get(&subject_b)
-            .expect("read agent-b ledger after"),
-    );
+    let projection_a = project(&runtime_a);
+    let projection_b = project(&runtime_b);
+    let prompt_a = projection_a.provider_payload().system_memory_block();
+    let prompt_b = projection_b.provider_payload().system_memory_block();
+    assert!(prompt_a.contains("agent-a-SOUL-PROVIDER-ONLY"));
+    assert!(!prompt_a.contains("agent-b-SOUL-PROVIDER-ONLY"));
+    assert!(prompt_b.contains("agent-b-SOUL-PROVIDER-ONLY"));
+    assert!(!prompt_b.contains("agent-a-SOUL-PROVIDER-ONLY"));
+    for projection in [&projection_a, &projection_b] {
+        assert!(projection
+            .provider_payload()
+            .system_memory_block()
+            .contains("## Soul Private Runtime Context"));
+        assert!(projection.report().audit().runtime_private_context_allowed);
+        assert_eq!(projection.report().audit().raw_private_violation_count, 0);
+    }
+    assert!(!projection_a
+        .report()
+        .ui_api_projection()
+        .contains("agent-b-SOUL-PROVIDER-ONLY"));
+    assert!(!projection_b
+        .report()
+        .ui_api_projection()
+        .contains("agent-a-SOUL-PROVIDER-ONLY"));
+    assert!(!projection_a
+        .report()
+        .gateway_audit()
+        .block
+        .contains("agent-b-SOUL-PROVIDER-ONLY"));
+    assert!(!projection_b
+        .report()
+        .gateway_audit()
+        .block
+        .contains("agent-a-SOUL-PROVIDER-ONLY"));
 
-    assert_eq!(after_a, before_a, "agent-a projection mutated owned state");
-    assert_eq!(after_b, before_b, "agent-b projection mutated owned state");
+    assert_eq!(
+        runtime_a
+            .export_subject_soul_operator_safe(SubjectSoulReadSelectorV1::Current)
+            .expect("agent-a verified Soul after projection"),
+        before_a
+    );
+    assert_eq!(
+        runtime_b
+            .export_subject_soul_operator_safe(SubjectSoulReadSelectorV1::Current)
+            .expect("agent-b verified Soul after projection"),
+        before_b
+    );
+    let after_store = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("canonical store after projection");
+    assert_eq!(
+        after_store
+            .json_docs
+            .iter()
+            .filter(|document| protected_namespaces.contains(&document.namespace.as_str()))
+            .cloned()
+            .collect::<Vec<_>>(),
+        before_protected_docs,
+        "projection must not mutate any typed Soul, private layer, receipt, or audit"
+    );
+    assert_eq!(
+        after_store
+            .events
+            .iter()
+            .filter(|event| protected_namespaces.contains(&event.plane.as_str()))
+            .cloned()
+            .collect::<Vec<_>>(),
+        before_events,
+        "projection must not append a Soul or mutation event"
+    );
 }

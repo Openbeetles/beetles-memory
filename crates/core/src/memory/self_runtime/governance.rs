@@ -474,30 +474,6 @@ pub(super) fn apply_personality_runtime_governance_gate(
     }
 }
 
-pub(super) fn refresh_runtime_relationship_constitution(
-    ctx: &SelfRuntimeContext<'_>,
-    state: &LoadedSelfRuntimeState,
-    chat_id: &str,
-    now_secs: u64,
-    self_authored_core: Option<&crate::memory::SelfAuthoredCore>,
-    mental_privacy_state: Option<&crate::memory::MentalPrivacyState>,
-    outer_voice: Option<&crate::memory::OuterVoice>,
-) -> Option<RelationshipConstitution> {
-    sync_self_runtime_relationship_constitution(
-        ctx,
-        state.active_relationship_scope_id.as_str(),
-        &state.active_relationship_channel,
-        chat_id,
-        now_secs,
-        self_authored_core,
-        state.relationship_portfolio.as_ref(),
-        state.relationship_topology.as_ref(),
-        mental_privacy_state,
-        outer_voice,
-        state.recent_persona_evidence.as_ref(),
-    )
-}
-
 fn normalize_boundary_and_factual_decisions(
     decision: &mut SelfRuntimeDecision,
     self_state: &SelfState,

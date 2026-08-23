@@ -38,6 +38,28 @@ The SDK API is the primary entry point. Host projects should enter through `bm-s
 | Memory-Space Export / Import | `MemoryRuntime::export_memory_space` / `MemoryRuntime::import_memory_space` | Export an opaque archive and atomically replace the same exact `MemoryArchiveScope` under an explicit private-material policy. |
 | Recover / Close | `MemoryRuntime::recover` / `MemoryRuntime::close` | Control runtime lifecycle and emit lifecycle reports. |
 
+## Subject Soul Provisioning
+
+`bm-sdk` 0.4.0 exposes a host-neutral Subject Soul provisioning and lifecycle contract. Hosts submit typed intent only; Core, SDK, and Store own Soul revisions, generations, material, manifests, ledgers, audit records, events, and durable operation receipts in one transaction. Adapters, HTTP, MCP, Console, and host databases must not maintain a second Soul state or create a default personality and overwrite it later.
+
+| Operation | SDK surface | Contract |
+| --- | --- | --- |
+| Optional provisioning | `MemoryRuntime::provision_subject_soul` + `SubjectSoulProvisionIntentV1` | `Unseeded` is a legal zero-mutation state. `Founding` accepts only a canonical partial charter from an active `HumanUser` in the same MemorySpace and atomically creates generation 1 / revision 1. |
+| Safe read | `MemoryRuntime::read_subject_soul` + `SubjectSoulReadRequestV1` | Public reads expose only `OperatorSafe` metadata. `Current` and `Exact` selectors are verified through an immutable closure; terminated generations return tombstone metadata only. |
+| Safe export | `MemoryRuntime::export_subject_soul_operator_safe` | Returns only state, generation, revision, digests, origin, and safe tombstones. It never returns the founding charter, SelfAuthoredCore, Private Garden, Inner Life, private documents, or relationship-private bodies. |
+| Governed disclosure | `MemoryRuntime::disclose_subject_soul_governed` | Consumes only Store-verified Soul/relationship closure data and applies the effective MentalPrivacy and Relationship Source disclosure ceiling to return a governed summary, rewrite, or refusal. Hosts cannot submit a purportedly safe summary. |
+| Lifecycle | `MemoryRuntime::archive_subject_soul_self_governed` / `restore_subject_soul_self_governed` / `mutate_subject_soul` | SDK injects the capability for self-governed archive/restore and never exposes it to callers. Maintenance archive/restore uses a typed `SystemGovernor`. Reset/reseed/delete bind a `SystemGovernor`, an active same-space `HumanUser` confirmation, and the exact generation/head/manifest. |
+| Relationship source | `MemoryRuntime::control_relationship_source` / `read_relationship_source` | Public contributions accept only an exact relationship-member `HumanUser`; SDK-internal capability owners apply Agent self-boundaries and SystemGovernor floors. Relationship Source Constitution uses independent source and manifest roots with dual-root/four-CAS closure; Soul lifecycle does not replace relationship governance. |
+| Governed projection | `MemoryRuntime::project_with_subject_soul_selector` | Current projection reads the verified current Soul. Historical projection requires an explicit exact Soul selector and never applies the current Soul to historical memory projection. |
+
+A founding charter is an optional, partial constitutional seed, not a raw character profile. It may contain an identity anchor, character tendencies, priority/non-negotiable constitution, default response/initiative/relationship postures, and boundary, truth-seeking, self-preservation, repair, and change principles. Display names, forms of address, appearance/background, task roles, tool habits, and host presentation remain with their respective host owners and cannot be promoted into Soul through provisioning.
+
+After provisioning, personality changes must enter the existing self-authored revision proposal and governance path; a host must not provision on every turn. Reset/reseed/delete are separate destructive lifecycle operations: old-generation raw material and derived private data are removed in the same transaction, and old exact selectors can return safe tombstones only. SPV1 does not define raw Soul import, Portable Vault, encrypted wire formats, or key lifecycle; EAP2 continues to own those concerns.
+
+Failures are returned as typed `SubjectSoulSdkError { operation, key, disposition }` values. A caller may re-read verified state and retry an `ExpectedStateConflict`; it must not bypass `RepairRequired`, `AuthorityRejected`, `CapacityRejected`, or `StoreCommitRejected` by writing directly to Store.
+
+Generation-owned Soul layer envelopes, autonomous capabilities, Core revision plans, and Store post-images are not public host write surfaces. SDK runs autonomous adjudication from a durable governance job, a verified Soul snapshot, and typed evidence, then commits one operation-aware Store batch. A host cannot submit `origin`, `revision`, `next_core`, a ledger, or raw private-layer JSON and claim that it is self-authored growth.
+
 ## Memory Evidence System
 
 The Conversation Transcript Substrate release surface is the current base evidence contract for hosts that need governed transcript commit, redacted replay, lifecycle review, and archive-ready evidence handling. It is not a host task system and it does not replace Soul Governance, Subject Projection, Program Memory, procedural memory, or accepted long-term memory planes.

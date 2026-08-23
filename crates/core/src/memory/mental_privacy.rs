@@ -16,9 +16,9 @@ use super::{
         coerce_json_text, get_object_bool, get_object_string_list, get_object_text,
         parse_llm_json_payload, LlmJsonPayload,
     },
-    normalize_private_garden_doc_path, relationship_scope_id, render_inner_life_block,
-    render_outer_voice_block, render_recent_persona_evidence_block,
-    render_relationship_constitution_block, render_self_continuity_block, render_self_model_block,
+    normalize_private_garden_doc_path, render_inner_life_block, render_outer_voice_block,
+    render_recent_persona_evidence_block, render_relationship_constitution_block,
+    render_self_continuity_block, render_self_model_block, resolve_relationship_id,
     scrub_private_source_echoes, InnerLife, InnerLifeStore, OuterVoice, OuterVoiceStore,
     PrivateDocStore, PrivateDocWorkspace, PrivateGardenDoc, PrivateGardenDocRecord,
     PrivateGardenDocRole, PrivateGardenStore, RecentPersonaEvidence, RelationshipConstitution,
@@ -414,6 +414,8 @@ pub struct BoundaryPersonaRefreshContext<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MentalPrivacyDisclosureAdjudicationInput<'a> {
     pub mounted_subject_id: &'a str,
+    /// Exact typed relationship owner; `None` is the deterministic single-agent path.
+    pub relationship_id: Option<&'a str>,
     pub channel: &'a str,
     pub chat_id: &'a str,
     pub user_content: &'a str,
@@ -439,6 +441,8 @@ pub struct MentalPrivacyDisclosureAdjudication {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MentalPrivacyReviewInput<'a> {
     pub mounted_subject_id: &'a str,
+    /// Exact typed relationship owner; `None` is the deterministic single-agent path.
+    pub relationship_id: Option<&'a str>,
     pub channel: &'a str,
     pub chat_id: &'a str,
     pub user_content: &'a str,
@@ -475,6 +479,8 @@ pub fn mental_privacy_adjudication_failure_fallback() -> MentalPrivacyDisclosure
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BoundaryPersonaRefreshInput<'a> {
     pub mounted_subject_id: &'a str,
+    /// Exact typed relationship owner; `None` is the deterministic single-agent path.
+    pub relationship_id: Option<&'a str>,
     pub channel: &'a str,
     pub chat_id: &'a str,
     pub trigger: &'a str,
@@ -487,6 +493,8 @@ pub struct BoundaryPersonaRefreshInput<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BoundaryPersonaRefreshOutcome {
     Skipped,
+    /// A deny-biased relationship privacy safety baseline was created without inventing a Soul.
+    Bootstrapped,
     Updated,
 }
 
@@ -564,6 +572,32 @@ fn default_relational_refusal_hardness() -> u8 {
 
 fn default_relational_defer_tendency() -> u8 {
     36
+}
+
+/// Creates the relationship-local privacy safety baseline used before governed relationship
+/// evidence has authored a specific boundary state. This is deny-biased policy state, not a
+/// personality, trust claim, founding charter, or self-authored Soul revision.
+pub fn mental_privacy_safety_baseline(now_secs: u64) -> MentalPrivacyState {
+    let mut state = MentalPrivacyState::default();
+    state.boundary_persona.current_boundary_feeling =
+        "System privacy safety baseline: no governed relationship-specific boundary evidence is established."
+            .to_string();
+    state.boundary_persona.updated_at = now_secs;
+    state.relational_state.relation_maturity_reason =
+        "System privacy safety baseline; no governed relationship maturity evidence is established."
+            .to_string();
+    state.relational_state.trust_reason =
+        "System privacy safety baseline; no governed relationship trust evidence is established."
+            .to_string();
+    state.relational_state.intrusion_reason =
+        "No governed intrusion evidence is established.".to_string();
+    state.relational_state.repair_reason =
+        "No governed repair evidence is established; retain the deny-biased baseline.".to_string();
+    state.relational_state.disclosure_preference_drift =
+        "No governed drift; protected raw material remains unavailable by default.".to_string();
+    state.relational_state.updated_at = now_secs;
+    state.updated_at = now_secs;
+    state
 }
 
 pub fn private_doc_target(slot: &str) -> String {
@@ -1526,7 +1560,12 @@ pub fn run_mental_privacy_review(
     input: MentalPrivacyReviewInput<'_>,
 ) -> Result<MentalPrivacyReviewOutcome> {
     let subject_id = input.mounted_subject_id;
-    let relationship_id = relationship_scope_id(subject_id, input.channel, input.chat_id);
+    let relationship_id = resolve_relationship_id(
+        subject_id,
+        input.relationship_id,
+        input.channel,
+        input.chat_id,
+    )?;
     let self_model = ctx.self_model_store.get(subject_id)?;
     let self_continuity = ctx.self_continuity_store.get(subject_id)?;
     let inner_life = ctx.inner_life_store.get(subject_id)?;
@@ -1685,7 +1724,12 @@ pub fn run_mental_privacy_disclosure_adjudication(
         return Ok(None);
     }
     let subject_id = input.mounted_subject_id;
-    let relationship_id = relationship_scope_id(subject_id, input.channel, input.chat_id);
+    let relationship_id = resolve_relationship_id(
+        subject_id,
+        input.relationship_id,
+        input.channel,
+        input.chat_id,
+    )?;
     let self_model = ctx.self_model_store.get(subject_id)?;
     let self_continuity = ctx.self_continuity_store.get(subject_id)?;
     let inner_life = ctx.inner_life_store.get(subject_id)?;
@@ -1853,14 +1897,20 @@ pub(crate) fn run_boundary_persona_refresh_with_state(
     recent: &[SessionMessage],
     decision_override: Option<bool>,
 ) -> Result<BoundaryPersonaRefreshOutcome> {
-    let relationship_id =
-        relationship_scope_id(input.mounted_subject_id, input.channel, input.chat_id);
-    let Some(mut state) = existing_state.or_else(|| {
-        ctx.mental_privacy_store
-            .get(&relationship_id)
-            .ok()
-            .flatten()
-    }) else {
+    let relationship_id = resolve_relationship_id(
+        input.mounted_subject_id,
+        input.relationship_id,
+        input.channel,
+        input.chat_id,
+    )?;
+    let existing_state = match existing_state {
+        Some(state) => Some(state),
+        None => ctx.mental_privacy_store.get(&relationship_id)?,
+    };
+    let bootstrapped = existing_state.is_none() && decision_override == Some(true);
+    let Some(mut state) = existing_state
+        .or_else(|| bootstrapped.then(|| mental_privacy_safety_baseline(input.now_secs)))
+    else {
         return Ok(BoundaryPersonaRefreshOutcome::Skipped);
     };
     let should_refresh = decision_override.unwrap_or_else(|| {
@@ -1873,6 +1923,10 @@ pub(crate) fn run_boundary_persona_refresh_with_state(
                 .is_some_and(|entry| entry.at >= state.boundary_persona.updated_at)
     });
     if !should_refresh {
+        if bootstrapped {
+            ctx.mental_privacy_store.set(&relationship_id, &state)?;
+            return Ok(BoundaryPersonaRefreshOutcome::Bootstrapped);
+        }
         return Ok(BoundaryPersonaRefreshOutcome::Skipped);
     }
     crate::platform::task_wdt::feed_current_task();
@@ -1916,6 +1970,10 @@ pub(crate) fn run_boundary_persona_refresh_with_state(
         input.now_secs,
     );
     if !parsed.refresh {
+        if bootstrapped {
+            ctx.mental_privacy_store.set(&relationship_id, &state)?;
+            return Ok(BoundaryPersonaRefreshOutcome::Bootstrapped);
+        }
         return Ok(BoundaryPersonaRefreshOutcome::Skipped);
     }
     let prior_persona = state.boundary_persona.clone();
@@ -1937,6 +1995,10 @@ pub(crate) fn run_boundary_persona_refresh_with_state(
         && state.boundary_persona == prior_persona
         && state.relational_state == prior_relational_state
     {
+        if bootstrapped {
+            ctx.mental_privacy_store.set(&relationship_id, &state)?;
+            return Ok(BoundaryPersonaRefreshOutcome::Bootstrapped);
+        }
         return Ok(BoundaryPersonaRefreshOutcome::Skipped);
     }
     state.updated_at = input.now_secs;
@@ -2261,6 +2323,39 @@ mod tests {
     use super::*;
     use crate::memory::PrivateDocEntry;
     use serde_json::json;
+
+    #[test]
+    fn safety_baseline_is_deny_biased_and_makes_no_relationship_claims() {
+        let baseline = mental_privacy_safety_baseline(42);
+        assert_eq!(
+            baseline.boundary_persona.posture,
+            BoundaryPersonaPosture::Guarded
+        );
+        assert_eq!(
+            baseline.boundary_persona.disclosure_style,
+            BoundaryDisclosureStyle::SummaryFirst
+        );
+        assert!(baseline
+            .boundary_persona
+            .current_boundary_feeling
+            .contains("no governed relationship-specific boundary evidence"));
+        assert!(baseline
+            .relational_state
+            .trust_reason
+            .contains("no governed relationship trust evidence"));
+        assert!(!baseline
+            .relational_state
+            .trust_reason
+            .contains("Warmth exists"));
+        assert!(baseline.envelopes.is_empty());
+        assert_eq!(baseline.updated_at, 42);
+        let envelope = MentalPrivacyEnvelope::default();
+        assert_eq!(
+            envelope.owner_access_mode,
+            MentalPrivacyOwnerAccessMode::RequestOnly
+        );
+        assert_eq!(envelope.quote_policy, MentalPrivacyQuotePolicy::NeverQuote);
+    }
 
     #[test]
     fn default_envelope_reflects_target_kind() {

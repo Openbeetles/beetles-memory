@@ -2,13 +2,9 @@
 
 mod support;
 
-use bm_core::memory::{
-    relationship_scope_id, RelationshipConstitution, RelationshipConstitutionAlignment,
-    RelationshipGovernanceState, SelfAuthoredCore, SelfContinuity,
-};
-use bm_core::platform::Platform as _;
 use bm_sdk::{
-    default_agent_subject_id, MemoryProjectionRequest, PressureLevel, RuntimeLifecycleModeInput,
+    primary_human_subject_id, MemoryProjectionRequest, PressureLevel, RuntimeLifecycleModeInput,
+    SubjectSoulFoundingCharterSeedV1, SubjectSoulProvisionIntentV1,
 };
 
 use support::{empty_store_platform, seeded_store_platform, test_runtime_with_scope};
@@ -17,60 +13,34 @@ use support::{empty_store_platform, seeded_store_platform, test_runtime_with_sco
 fn projection_report_exposes_sdk_owned_safe_budget_and_privacy_audit() {
     let profile = support::host_test_profile();
     let platform = seeded_store_platform(profile);
-    let mounted_subject_id = default_agent_subject_id("agent-main");
-    platform
-        .replay_harness()
-        .self_authored_core_store()
-        .set(
-            &mounted_subject_id,
-            &SelfAuthoredCore {
-                identity_anchor: "mounted inhabited subject".to_string(),
-                default_response_mode: "work-first direct reply".to_string(),
-                default_task_scope: "complete the user task".to_string(),
-                default_initiative_posture: "continue without theatrical drift".to_string(),
-                self_preservation_doctrine: "protect private inner material".to_string(),
-                ..SelfAuthoredCore::default()
-            },
-        )
-        .expect("seed self-authored core");
-    platform
-        .replay_harness()
-        .self_continuity_store()
-        .set(
-            &mounted_subject_id,
-            &SelfContinuity {
-                wake_anchor: "wake as the same mounted subject".to_string(),
-                continuity_bridge: "carry release work forward from governed memory".to_string(),
-                task_posture: "do the requested engineering work first".to_string(),
-                ..SelfContinuity::default()
-            },
-        )
-        .expect("seed self continuity");
-    let relationship_id = relationship_scope_id(&mounted_subject_id, "sdk.direct", "chat-a");
-    platform
-        .replay_harness()
-        .relationship_constitution_store()
-        .set(
-            &relationship_id,
-            &RelationshipConstitution {
-                scope_id: relationship_id.clone(),
-                channel: "sdk.direct".to_string(),
-                chat_id: "chat-a".to_string(),
-                governance_state: RelationshipGovernanceState::Maintain,
-                alignment: RelationshipConstitutionAlignment::Adaptive,
-                inherited_relationship_posture: "engineering collaborator".to_string(),
-                inherited_response_mode: "work-first direct reply".to_string(),
-                ..RelationshipConstitution::default()
-            },
-        )
-        .expect("seed relationship constitution");
-    assert!(platform
-        .replay_harness()
-        .self_authored_core_store()
-        .get(&mounted_subject_id)
-        .expect("read seeded core")
-        .is_some());
     let runtime = test_runtime_with_scope(platform, profile, "sdk.direct", "chat-a");
+    runtime
+        .provision_subject_soul(SubjectSoulProvisionIntentV1::Founding {
+            operation_id: "projection-audit-soul".to_string(),
+            human_actor_subject_id: primary_human_subject_id("owner-default"),
+            charter: Box::new(
+                SubjectSoulFoundingCharterSeedV1 {
+                    identity_anchor: Some("mounted inhabited subject".to_string()),
+                    character_tendencies: vec!["work-first direct reply".to_string()],
+                    priority_constitution: vec!["complete the user task".to_string()],
+                    non_negotiables: vec!["protect private inner material".to_string()],
+                    default_response_mode: Some("work-first direct reply".to_string()),
+                    default_initiative_posture: Some(
+                        "continue without theatrical drift".to_string(),
+                    ),
+                    default_relationship_posture: Some("engineering collaborator".to_string()),
+                    boundary_doctrine: None,
+                    truth_seeking_commitment: None,
+                    self_preservation_doctrine: Some("protect private inner material".to_string()),
+                    repair_doctrine: None,
+                    change_principle: None,
+                }
+                .canonicalize()
+                .expect("canonical audit Soul seed"),
+            ),
+            source_asserted_at: Some(1_700_000_000),
+        })
+        .expect("seed typed Soul through lifecycle owner");
 
     let report = runtime
         .project(MemoryProjectionRequest {

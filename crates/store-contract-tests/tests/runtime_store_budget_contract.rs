@@ -8,12 +8,13 @@ use bm_sdk::nonproduction_replay_harness::SqliteStoreEngine;
 use bm_sdk::nonproduction_replay_harness::{
     EmbeddedStoreEngine, FileStoreEngine, InMemoryStoreEngine, MemoryStoreEvent,
     MemoryStoreEventKind, StoreBackendConfig, StoreBackendKind, StoreCapacityBudget, StoreEngine,
-    StoreEventLog, StoreEventScope, StoreScopedProjectionReplaceRequest,
+    StoreEngineMutation, StoreEventLog, StoreEventScope, StoreScopedProjectionReplaceRequest,
     StoreScopedProjectionScope, StoreSnapshot, StoreSnapshotBlob, StoreSnapshotJsonDoc,
-    LONG_TERM_HEAD_MANIFEST_NAMESPACE, LONG_TERM_VERSION_MATERIAL_NAMESPACE,
-    LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
+    StoreTransactionRequest, LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+    LONG_TERM_VERSION_MATERIAL_NAMESPACE, LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 const TYPED_RESTORE_MEMORY_SPACE_ID: &str = "space:typed-restore";
 const TYPED_RESTORE_SUBJECT_ID: &str = "subject:typed-restore";
@@ -95,6 +96,7 @@ fn typed_restore_request() -> StoreScopedProjectionReplaceRequest {
         ],
         json_docs: vec![typed_restore_document(2)],
         events: vec![typed_restore_event("typed-restore:new", "replacement")],
+        preserve_protected_owner_state: false,
     }
 }
 
@@ -244,6 +246,85 @@ fn typed_restore_post_image_budgets_are_atomic_across_all_backends() {
             .expect("open sqlite restore engine");
         Box::new(engine)
     });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+fn assert_stale_blob_cas_changes_nothing(backend: &str, engine: &dyn StoreEngine) {
+    engine
+        .put_blob("skills", "owner.md", b"observed")
+        .unwrap_or_else(|error| panic!("{backend} seed observed blob: {error}"));
+    let observed_digest = format!("sha256:{:x}", Sha256::digest(b"observed"));
+    engine
+        .put_blob("skills", "owner.md", b"concurrent")
+        .unwrap_or_else(|error| panic!("{backend} seed concurrent blob: {error}"));
+    let before_events = engine
+        .read_events()
+        .unwrap_or_else(|error| panic!("{backend} events before stale commit: {error}"));
+    let request = StoreTransactionRequest::new(
+        format!("blob-cas:{backend}"),
+        Vec::new(),
+        vec![StoreEngineMutation::PutBlob {
+            namespace: "skills".to_string(),
+            key: "owner.md".to_string(),
+            value: b"stale".to_vec(),
+        }],
+        None,
+    )
+    .with_blob_exact_digest_precondition("skills", "owner.md", observed_digest);
+
+    let error = engine
+        .commit_transaction(&request)
+        .expect_err("stale blob CAS must fail before mutation");
+
+    assert_eq!(
+        error.stage(),
+        "memory_write_transaction_precondition_failed",
+        "backend={backend}"
+    );
+    assert_eq!(
+        engine
+            .get_blob("skills", "owner.md")
+            .unwrap_or_else(|error| panic!("{backend} read preserved blob: {error}")),
+        Some(b"concurrent".to_vec()),
+        "backend={backend}"
+    );
+    assert_eq!(
+        engine
+            .read_events()
+            .unwrap_or_else(|error| panic!("{backend} events after stale commit: {error}")),
+        before_events,
+        "backend={backend}"
+    );
+}
+
+#[test]
+fn stale_blob_cas_is_atomic_across_in_memory_file_and_sqlite_backends() {
+    let capacity = StoreCapacityBudget::full();
+    assert_stale_blob_cas_changes_nothing("in_memory", &InMemoryStoreEngine::new(capacity));
+    assert_stale_blob_cas_changes_nothing("embedded", &EmbeddedStoreEngine::new(capacity));
+
+    let root = std::env::temp_dir().join(format!(
+        "beetle-memory-blob-cas-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    let profile = support::native_persistent_profile();
+    let file_config =
+        StoreBackendConfig::file(root.join("file"), profile).expect("file blob CAS config");
+    let (file, _, _) = FileStoreEngine::open_with_capacity(&file_config, capacity)
+        .expect("open file blob CAS store");
+    assert_stale_blob_cas_changes_nothing("file", &file);
+    #[cfg(feature = "sqlite-store")]
+    {
+        let sqlite_config = StoreBackendConfig::sqlite(root.join("sqlite.db"), profile)
+            .expect("sqlite blob CAS config");
+        let (sqlite, _) = SqliteStoreEngine::open_with_capacity(&sqlite_config, capacity)
+            .expect("open sqlite blob CAS store");
+        assert_stale_blob_cas_changes_nothing("sqlite", &sqlite);
+    }
     let _ = std::fs::remove_dir_all(root);
 }
 

@@ -15,11 +15,13 @@ use bm_core::memory::{
     MemoryPrivacyClass, MemoryProjectionImpactReport, PostTurnGovernanceAttemptAuthorityV2,
     PostTurnGovernanceErrorClassV2, PostTurnGovernanceJobV2, PostTurnPrivateGardenReport,
     PostTurnSemanticGovernanceReport, ProceduralMemoryPromotionInput,
-    ProceduralMemoryPromotionReport, QueryFacetInput, RedactedTranscriptSlice, SessionMessage,
-    SessionTurnCommitReport, SkillEvolutionReport, SubjectScopedRuntime, TranscriptAttrEnvelope,
-    TranscriptAttrWriteRejection, TranscriptCommitReport, TranscriptEvidenceRef,
-    TranscriptLifecycleReport, TranscriptLifecycleTransition, TranscriptRedactionReportItem,
-    TranscriptRepairReport, TranscriptReplayView,
+    ProceduralMemoryPromotionReport, QueryFacetInput, RedactedTranscriptSlice,
+    RelationshipDisclosureCeilingV1, RelationshipSourceControlErrorKeyV1,
+    RelationshipSourceStateV1, SessionMessage, SessionTurnCommitReport, SkillEvolutionReport,
+    SubjectScopedRuntime, SubjectSoulLifecycleErrorKey, SubjectSoulReadSelectorV1,
+    TranscriptAttrEnvelope, TranscriptAttrWriteRejection, TranscriptCommitReport,
+    TranscriptEvidenceRef, TranscriptLifecycleReport, TranscriptLifecycleTransition,
+    TranscriptRedactionReportItem, TranscriptRepairReport, TranscriptReplayView,
 };
 use bm_core::memory::{
     CompactMemoryGraph, EvidenceBacklink, FacetCoverageSelectionReport, FacetRankFusionReport,
@@ -207,6 +209,136 @@ pub enum MemoryMutationExecution<T> {
     Rejected {
         report: T,
     },
+}
+
+/// Stable public operation labels for the Subject Soul lifecycle.
+///
+/// Hosts can branch on this value together with [`SubjectSoulLifecycleErrorKey`]
+/// and never need to inspect an error message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubjectSoulSdkOperation {
+    Provision,
+    Read,
+    Export,
+    Archive,
+    Restore,
+    Reset,
+    Reseed,
+    Delete,
+    Project,
+    EvidenceUpdate,
+    SelfGovernedRevision,
+}
+
+/// Host-neutral failure boundary for SDK-owned Soul admission and Store closure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SoulGovernanceSdkErrorDisposition {
+    ContractRejected,
+    RegistryRejected,
+    AuthorityRejected,
+    ExpectedStateConflict,
+    OperationConflict,
+    RepairRequired,
+    CapacityRejected,
+    StoreCommitRejected,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubjectSoulSdkError {
+    pub operation: SubjectSoulSdkOperation,
+    pub key: SubjectSoulLifecycleErrorKey,
+    pub disposition: SoulGovernanceSdkErrorDisposition,
+}
+
+impl std::fmt::Display for SubjectSoulSdkError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Subject Soul {:?} failed: {:?} ({:?})",
+            self.operation, self.key, self.disposition
+        )
+    }
+}
+
+impl std::error::Error for SubjectSoulSdkError {}
+
+pub type SubjectSoulSdkResult<T> = std::result::Result<T, SubjectSoulSdkError>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationshipSourceSdkOperation {
+    Control,
+    Read,
+    Project,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelationshipSourceSdkError {
+    pub operation: RelationshipSourceSdkOperation,
+    pub key: RelationshipSourceControlErrorKeyV1,
+    pub disposition: SoulGovernanceSdkErrorDisposition,
+}
+
+impl std::fmt::Display for RelationshipSourceSdkError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "relationship source {:?} failed: {:?} ({:?})",
+            self.operation, self.key, self.disposition
+        )
+    }
+}
+
+impl std::error::Error for RelationshipSourceSdkError {}
+
+pub type RelationshipSourceSdkResult<T> = std::result::Result<T, RelationshipSourceSdkError>;
+
+/// Safe public relationship-root read. Clause bodies and contribution evidence
+/// remain inside the verified Store read used by runtime projection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelationshipSourceReadReportV1 {
+    pub memory_space_id: String,
+    pub relationship_id: String,
+    pub mounted_subject_id: String,
+    pub counterparty_subject_ids: Vec<String>,
+    pub selected_revision: u64,
+    pub selected_state: RelationshipSourceStateV1,
+    pub selected_source_digest: String,
+    pub current_revision: u64,
+    pub current_state: Option<RelationshipSourceStateV1>,
+    pub current_source_digest: String,
+    pub current_manifest_digest: String,
+    pub immutable_read_state_digest: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubjectSoulGovernedDisclosureRequestV1 {
+    pub target_subject_id: String,
+    pub relationship_id: String,
+    pub selector: SubjectSoulReadSelectorV1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubjectSoulGovernedDisclosureDispositionV1 {
+    Refused,
+    GovernedSummary,
+    Rewritten,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubjectSoulGovernedDisclosureReportV1 {
+    pub disposition: SubjectSoulGovernedDisclosureDispositionV1,
+    pub disclosure_ceiling: RelationshipDisclosureCeilingV1,
+    pub governed_text: Option<String>,
+    pub soul_material_digest: Option<String>,
+    pub relationship_source_digest: Option<String>,
+    pub immutable_read_state_digest: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

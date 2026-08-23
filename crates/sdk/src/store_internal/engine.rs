@@ -1,6 +1,10 @@
 use std::io::{self, Write};
 
-use bm_core::Result;
+use bm_core::memory::{
+    MemoryMutationAuditRecord, MemoryMutationOperationKind, MemoryMutationReceipt,
+    MEMORY_MUTATION_AUDIT_NAMESPACE, MEMORY_MUTATION_RECEIPT_NAMESPACE,
+};
+use bm_core::{Error, Result};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -112,6 +116,64 @@ pub struct StoreScopedProjectionReplaceRequest {
     pub json_namespaces: Vec<String>,
     pub json_docs: Vec<StoreSnapshotJsonDoc>,
     pub events: Vec<MemoryStoreEvent>,
+    pub preserve_protected_owner_state: bool,
+}
+
+fn operation_kind_is_protected_owner(operation_kind: MemoryMutationOperationKind) -> bool {
+    matches!(
+        operation_kind,
+        MemoryMutationOperationKind::SoulEvidence
+            | MemoryMutationOperationKind::SoulProvision
+            | MemoryMutationOperationKind::SoulRevision
+            | MemoryMutationOperationKind::SoulArchive
+            | MemoryMutationOperationKind::SoulRestore
+            | MemoryMutationOperationKind::SoulReset
+            | MemoryMutationOperationKind::SoulReseed
+            | MemoryMutationOperationKind::SoulDelete
+            | MemoryMutationOperationKind::RelationshipControl
+    )
+}
+
+pub(crate) fn json_document_is_protected_owner(namespace: &str, value: &Value) -> Result<bool> {
+    if crate::store_internal::schema::is_subject_soul_protected_json_namespace(namespace)
+        || crate::store_internal::schema::is_relationship_source_protected_json_namespace(namespace)
+    {
+        return Ok(true);
+    }
+    let operation_kind = match namespace {
+        MEMORY_MUTATION_RECEIPT_NAMESPACE => {
+            let receipt = serde_json::from_value::<MemoryMutationReceipt>(value.clone())
+                .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?;
+            receipt.validate_contract()?;
+            Some(receipt.identity.operation_kind())
+        }
+        MEMORY_MUTATION_AUDIT_NAMESPACE => {
+            let audit = serde_json::from_value::<MemoryMutationAuditRecord>(value.clone())
+                .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?;
+            audit.validate_contract()?;
+            Some(audit.identity.operation_kind())
+        }
+        _ => None,
+    };
+    Ok(operation_kind.is_some_and(operation_kind_is_protected_owner))
+}
+
+pub(crate) fn event_is_protected_owner(event: &MemoryStoreEvent) -> bool {
+    crate::store_internal::schema::is_subject_soul_protected_json_namespace(&event.plane)
+        || crate::store_internal::schema::is_relationship_source_protected_json_namespace(
+            &event.plane,
+        )
+        || event.payload.get("operation").is_some_and(|operation| {
+            operation.starts_with("subject_soul.") || operation.starts_with("relationship_source.")
+        })
+}
+
+pub(crate) fn event_is_replaced_by_scoped_projection(
+    event: &MemoryStoreEvent,
+    request: &StoreScopedProjectionReplaceRequest,
+) -> bool {
+    crate::store_internal::transaction::event_matches_scoped_projection(event, &request.scope)
+        && !(request.preserve_protected_owner_state && event_is_protected_owner(event))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -137,6 +137,9 @@ fn compile_body_ownership(core: Option<&SelfAuthoredCore>) -> String {
     };
     let mut parts = Vec::new();
     push_trimmed(&mut parts, &core.identity_anchor);
+    for tendency in &core.character_tendencies {
+        push_trimmed(&mut parts, tendency);
+    }
     push_trimmed(&mut parts, &core.default_response_mode);
     push_trimmed(&mut parts, &core.self_preservation_doctrine);
     join_limited(&parts)

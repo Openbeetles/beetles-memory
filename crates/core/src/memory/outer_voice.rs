@@ -12,14 +12,14 @@ use std::fmt::Write as _;
 use super::{
     collect_private_targets,
     llm_json::{get_object_text, parse_llm_json_payload, LlmJsonPayload},
-    memory_policy, relationship_scope_id, render_autonomy_strategy_block,
-    render_execution_state_block, render_inner_life_block, render_mental_privacy_boundary_block,
+    memory_policy, render_autonomy_strategy_block, render_execution_state_block,
+    render_inner_life_block, render_mental_privacy_boundary_block,
     render_recent_persona_evidence_block, render_relationship_constitution_block,
     render_self_continuity_block, render_self_model_block, render_world_sense_block,
-    render_world_snapshot_block, scrub_private_source_echoes, whole_record_lease_advanced,
-    AutonomyStrategy, ExecutionState, InnerLife, MentalPrivacyState, OuterVoicePolicy,
-    PrivateDocWorkspace, PrivateGardenDocRecord, RecentPersonaEvidence, RelationshipConstitution,
-    SelfContinuity, SelfModel, SessionMessage, WorldSense, WorldSnapshot,
+    render_world_snapshot_block, resolve_relationship_id, scrub_private_source_echoes,
+    whole_record_lease_advanced, AutonomyStrategy, ExecutionState, InnerLife, MentalPrivacyState,
+    OuterVoicePolicy, PrivateDocWorkspace, PrivateGardenDocRecord, RecentPersonaEvidence,
+    RelationshipConstitution, SelfContinuity, SelfModel, SessionMessage, WorldSense, WorldSnapshot,
 };
 
 pub const OUTER_VOICE_SYSTEM_PROMPT: &str = "You maintain the assistant's outer voice layer. Return JSON only: either null or one object with fields expression_mode, tone, pacing, initiative, boundary_style, relational_response_style. This layer is outward-facing: it shapes how the assistant should speak across user-visible channels in the near term. It is not a transcript summary, not a private diary, not factual memory, and not an identity truth source. Use world-sense, autonomy strategy, self-model, inner-life drift, self-continuity, mental privacy boundaries, relationship constitution, and recent persona evidence as grounding. Keep it compact, stable enough to guide future replies, and willing to shift when the surrounding situation changes. Never copy private text into this layer; encode expression guidance only. It must not invent identity claims, existential doctrine, or hidden system truths. Selfhood language must come from subject-state or constitutional grounding, not outer-voice styling. Treat recent persona evidence as multi-turn support, not as single-turn override, and let relationship constitution bound relation-local style drift.";
@@ -59,6 +59,8 @@ impl OuterVoice {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OuterVoiceRefreshInput<'a> {
     pub mounted_subject_id: &'a str,
+    /// Exact typed relationship owner; `None` is the deterministic single-agent path.
+    pub relationship_id: Option<&'a str>,
     pub chat_id: &'a str,
     pub ingress: IngressKind,
     pub channel: &'a str,
@@ -174,8 +176,12 @@ pub(crate) fn run_outer_voice_refresh_with_state(
     decision_override: Option<bool>,
     recent_override: Option<&[SessionMessage]>,
 ) -> Result<OuterVoiceRefreshOutcome> {
-    let relationship_id =
-        relationship_scope_id(input.mounted_subject_id, input.channel, input.chat_id);
+    let relationship_id = resolve_relationship_id(
+        input.mounted_subject_id,
+        input.relationship_id,
+        input.channel,
+        input.chat_id,
+    )?;
     let should_refresh = decision_override.unwrap_or_else(|| {
         memory_policy(profile)
             .outer_voice
@@ -685,6 +691,7 @@ mod tests {
         assert!(policy.should_refresh(
             OuterVoiceRefreshInput {
                 mounted_subject_id: TEST_SUBJECT_ID,
+                relationship_id: None,
                 chat_id: "c",
                 ingress: IngressKind::System,
                 channel: "_self_runtime",

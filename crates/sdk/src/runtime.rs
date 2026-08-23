@@ -16,15 +16,32 @@ use crate::store_internal::recall_index::{
 use crate::store_internal::recall_read::{
     RecallImmutableReadContext, RecallReadSetClosureEvidence, RecallReadView,
 };
+use crate::store_internal::schema::{
+    canonical_mor_intent_digest_from_core_digest, is_relationship_source_protected_json_namespace,
+    is_subject_soul_protected_json_namespace, relationship_source_revision_key,
+    relationship_source_scope_key, subject_soul_generation_tombstone_key,
+    subject_soul_relationship_projection_key, subject_soul_revision_material_key,
+    subject_soul_scope_key, RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE,
+    RELATIONSHIP_SOURCE_SCOPE_MANIFEST_NAMESPACE, SUBJECT_SOUL_GENERATION_TOMBSTONE_NAMESPACE,
+    SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE, SUBJECT_SOUL_RELATIONSHIP_PROJECTION_NAMESPACE,
+    SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE, SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE,
+};
+use crate::store_internal::subject_soul::{
+    RelationshipSourceStoreMutationOutcome, RelationshipSourceStoreMutationPlan,
+    RelationshipSourceVerifiedStoreRead, SubjectSoulStoreFailure, SubjectSoulStoreFailureStage,
+    SubjectSoulStoreMutationOutcome, SubjectSoulStoreMutationPlan, SubjectSoulStorePostImage,
+    SubjectSoulVerifiedStoreRead,
+};
 use crate::store_internal::{
-    governed_evidence_source_claim_manifest_key, materialize_runtime_lifecycle_store_event,
+    canonical_subject_soul_full_intent_digest, governed_evidence_source_claim_manifest_key,
+    materialize_runtime_lifecycle_store_event,
     validate_governed_evidence_source_claim_scope_closure, GovernedEvidenceOwnerClaimBinding,
     GovernedEvidenceSourceClaimManifest, GraphRepairAuthority, MemoryStoreEvent,
-    MemoryStoreEventKind, RuntimeLifecycleStoreBinding, StoreBackendKind, StoreEventScope,
-    StoreGovernedEvidenceExactReadRequest, StoreJsonPrecondition, StoreMutation,
+    MemoryStoreEventKind, RuntimeLifecycleStoreBinding, StoreBackendKind, StoreBlobPrecondition,
+    StoreEventScope, StoreGovernedEvidenceExactReadRequest, StoreJsonPrecondition, StoreMutation,
     StoreMutationBatch, StoreMutationBatchReport, StoreMutationBudgetReport,
     StoreMutationOperationOutcome, StoreMutationOperationPlan, StoreMutationOperationPreflight,
-    StorePlatform, StoreReadReceipt, GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE,
+    StoreOwnerMutationPlan, StorePlatform, StoreReadReceipt, GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE,
     GOVERNED_EVIDENCE_SOURCE_CLAIM_MANIFEST_NAMESPACE, GOVERNED_EVIDENCE_SOURCE_REF_NAMESPACE,
 };
 use bm_core::budget::{RuntimeBudgetAuthority, RuntimeBudgetReport, TranscriptGovernanceBudget};
@@ -53,8 +70,11 @@ use bm_core::memory::{
     plan_governed_evidence_document_delete, plan_governed_evidence_document_upsert,
     plan_governed_shared_memory_in_space, plan_long_term_memory_control_mutation,
     plan_long_term_memory_governance_policy_mutation, plan_long_term_memory_owner_mutation,
-    plan_long_term_memory_upsert, plan_temporal_memory_graph_write,
-    post_turn_governance_transcript_digest, project_current_long_term_recall_lifecycle_facts,
+    plan_long_term_memory_upsert, plan_relationship_source_control, plan_self_runtime,
+    plan_subject_soul_autonomous_cycle_v1, plan_subject_soul_lifecycle_v1,
+    plan_subject_soul_provision_v1, plan_subject_soul_relationship_projection_v1,
+    plan_temporal_memory_graph_write, post_turn_governance_transcript_digest,
+    project_current_long_term_recall_lifecycle_facts,
     project_historical_long_term_recall_lifecycle_facts, promote_task_experience_to_procedure,
     relationship_scope, rerank_recall_with_temporal_graph,
     rerank_recall_with_temporal_graph_and_facets, run_long_term_memory_refresh,
@@ -64,24 +84,27 @@ use bm_core::memory::{
     scoped_governed_evidence_source_ref_key, scoped_long_term_control_storage_key,
     scoped_long_term_memory_storage_key, scoped_memory_facet_owner_storage_key,
     score_recall_delivery_texts, select_long_term_current_recall_query_time,
-    select_long_term_historical_recall_query_time, validate_governed_evidence_document,
+    select_long_term_historical_recall_query_time, subject_soul_lifecycle_intent_digest_v1,
+    subject_soul_provision_intent_digest_v1, validate_governed_evidence_document,
     validate_governed_evidence_source_ref, validate_memory_facet_manifest,
     validate_memory_facet_posting, validate_memory_facet_read_chain,
     validate_memory_graph_read_chain, validate_memory_graph_revision_doc,
-    validate_memory_graph_scope_manifest, CanonicalTurnDelta, CompactMemoryGraph,
-    ContinuitySnapshotImportContext, ContinuitySnapshotImportPlan, ConversationKey,
-    ConversationTranscriptStore, DeferredGovernanceQueueReport, DerivedMemoryPlane,
-    DerivedMemoryRef, DroppedProjectionCandidate, DynamicStateResolutionReport, EvidenceBacklink,
+    validate_memory_graph_scope_manifest, AutonomyStrategy, AutonomyStrategyStore,
+    CanonicalTurnDelta, CompactMemoryGraph, ContinuitySnapshotImportContext,
+    ContinuitySnapshotImportPlan, ConversationKey, ConversationTranscriptStore, CoreRevisionLedger,
+    CoreRevisionLedgerStore, DeferredGovernanceQueueReport, DerivedMemoryPlane, DerivedMemoryRef,
+    DroppedProjectionCandidate, DynamicStateResolutionReport, EvidenceBacklink,
     FacetCoverageSelectionReport, FacetRankFusionCandidateReport, FacetRankFusionReport,
-    FacetReportAudience, GovernedEvidenceBinding, GovernedEvidenceDocument,
-    GovernedEvidenceDocumentDeletePlan, GovernedEvidenceDocumentPlan, GovernedEvidenceSourceRef,
-    GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef, GovernedProfileBudgetDrop,
-    GovernedRecallAuthorityGates, GovernedRecallDisclosure, GovernedRecallEligibility,
-    GovernedRecallEligibilityDecision, GovernedRecallEligibilityReason,
+    FacetReportAudience, FeltSignificance, FeltSignificanceStore, GovernedEvidenceBinding,
+    GovernedEvidenceDocument, GovernedEvidenceDocumentDeletePlan, GovernedEvidenceDocumentPlan,
+    GovernedEvidenceSourceRef, GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef,
+    GovernedProfileBudgetDrop, GovernedRecallAuthorityGates, GovernedRecallDisclosure,
+    GovernedRecallEligibility, GovernedRecallEligibilityDecision, GovernedRecallEligibilityReason,
     GovernedRecallEligibilityReport, GovernedRecallTemporalQuery, GovernedRequiredPremiseGate,
     GovernedWriteDecision, GraphFacetPropagationContext, GraphRecallCandidateScore,
     GraphRecallExpansionBudget, GraphRecallRerankReport, IngressKind, InhabitedSubjectProjection,
-    InhabitedSubjectProjectionInput, LongTermControlOperation, LongTermMemoryControlAuditEvent,
+    InhabitedSubjectProjectionInput, InnerConflict, InnerConflictStore, InnerLife, InnerLifeStore,
+    LongTermControlOperation, LongTermMemoryControlAuditEvent,
     LongTermMemoryControlDetailRequest as CoreLongTermMemoryControlDetailRequest,
     LongTermMemoryControlListRequest as CoreLongTermMemoryControlListRequest,
     LongTermMemoryControlMutationRequest as CoreLongTermMemoryControlMutationRequest,
@@ -104,11 +127,12 @@ use bm_core::memory::{
     MemoryMutationOperationIdentity, MemoryMutationOperationKind, MemoryMutationReceipt,
     MemoryPlaneGovernanceReport, MemoryPrivacyClass, MemorySubjectVisibilityDecision,
     MemorySubjectVisibilityPolicy, MemoryUpdateLineageReport, MemoryWriteAuthority,
-    MemoryWriteCandidate, MemoryWriteDomain, ParsedLongTermMemoryExtraction,
-    PostReplyMemoryMaintenanceContext, PostReplyMemoryMaintenanceInput,
-    PostTurnGovernanceAttemptAuthorityV2, PostTurnGovernanceIdentityV2,
-    PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV2, PostTurnPrivateGardenReport,
-    PostTurnSemanticGovernanceReport, PremiseTypedSource, PrivateGardenDoc, PrivateGardenDocRecord,
+    MemoryWriteCandidate, MemoryWriteDomain, MentalPrivacyState, MentalPrivacyStore, OuterVoice,
+    OuterVoiceStore, ParsedLongTermMemoryExtraction, PostReplyMemoryMaintenanceContext,
+    PostReplyMemoryMaintenanceInput, PostTurnGovernanceAttemptAuthorityV2,
+    PostTurnGovernanceIdentityV2, PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV2,
+    PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport, PremiseTypedSource,
+    PrivateDocStore, PrivateDocWorkspace, PrivateGardenDoc, PrivateGardenDocRecord,
     PrivateGardenGovernanceContext, PrivateGardenGovernanceInput,
     PrivateGardenGovernanceManifestEntry, PrivateGardenGovernanceOutcome, PrivateGardenStore,
     ProceduralMemoryDeliveryReport, ProceduralMemoryPromotionPolicy,
@@ -117,12 +141,35 @@ use bm_core::memory::{
     PromptProjectionSource, PromptProjectionSurfaceRole, PromptRecallIntent, QueryFacet,
     QueryFacetInput, QueryFacetParser, RecallCandidate, RecallDeliveryCandidate,
     RecallDeliveryOrderingPolicy, RecallDeliveryText, RecallSelectionReport,
-    RedactedTranscriptSlice, SessionMessage, SessionMessageRecord, SessionStore,
-    SessionSummaryStore, SharedFactWriteGovernanceContext, SharedMemoryWriteAction,
-    SharedMemoryWriteOutcome, SharedMemoryWriteReason, SharedMemoryWriteSource,
-    SkillEvolutionReport, SubjectKind, SubjectProjectionBoundaryProtocolReport,
-    SubjectProjectionMountReport, SubjectProjectionReport, SubjectProjectionWorkIntegrityReport,
-    SubjectRegistry, SubjectRelationshipGraph, SubjectScopedRuntime,
+    RedactedTranscriptSlice, RelationshipConstitution, RelationshipConstitutionStore,
+    RelationshipPortfolio, RelationshipPortfolioStore, RelationshipSourceConstitutionV1,
+    RelationshipSourceControlAuthorityV1, RelationshipSourceControlErrorKeyV1,
+    RelationshipSourceControlIntentV1, RelationshipSourceControlReportV1,
+    RelationshipSourceExpectedStateV1, RelationshipSourceReadRequestV1,
+    RelationshipSourceReadSelectorV1, RelationshipTopology, RelationshipTopologyStore,
+    SelfAuthoredCore, SelfAuthoredCoreRefreshPlanV1, SelfAuthoredCoreStore, SelfContinuity,
+    SelfContinuityStore, SelfModel, SelfModelStore, SelfRuntimeContext,
+    SelfRuntimeInitialPlanningStateV1, SelfRuntimeJobPayload, SelfRuntimePlannedEffectV1,
+    SelfRuntimeTrigger, SessionMessage, SessionMessageRecord, SessionStore, SessionSummaryStore,
+    SharedFactWriteGovernanceContext, SharedMemoryWriteAction, SharedMemoryWriteOutcome,
+    SharedMemoryWriteReason, SharedMemoryWriteSource, SkillEvolutionReport, SubjectKind,
+    SubjectLifecycleState, SubjectProjectionBoundaryProtocolReport, SubjectProjectionMountReport,
+    SubjectProjectionReport, SubjectProjectionWorkIntegrityReport, SubjectRegistry,
+    SubjectRelationshipGraph, SubjectRelationshipKind, SubjectScopedRuntime,
+    SubjectSoulAutonomousCycleIntentV1, SubjectSoulAutonomousCyclePlanV1,
+    SubjectSoulAutonomousRevisionDeltaV1, SubjectSoulExpectedStateV1,
+    SubjectSoulGenerationLayerKindV1, SubjectSoulGenerationLayerMutationV1,
+    SubjectSoulGenerationTombstoneV1, SubjectSoulLifecycleActionV1,
+    SubjectSoulLifecycleAuthorityV1, SubjectSoulLifecycleErrorKey,
+    SubjectSoulLifecycleMutationRequestV1, SubjectSoulLifecycleStateV1,
+    SubjectSoulManifestAddressV1, SubjectSoulMutationOutcomeV1, SubjectSoulMutationReportV1,
+    SubjectSoulOperatorSafeExportV1, SubjectSoulOwnedDocumentV1, SubjectSoulOwnerV1,
+    SubjectSoulProvisionIntentV1, SubjectSoulProvisionPlanV1, SubjectSoulReadOutcomeV1,
+    SubjectSoulReadRequestV1, SubjectSoulReadSelectorV1, SubjectSoulReadViewV1,
+    SubjectSoulRelationshipProjectionPlanV1, SubjectSoulRelationshipRuntimeInputV1,
+    SubjectSoulRelationshipRuntimeReadStore, SubjectSoulRevisionAddressBindingsV1,
+    SubjectSoulSelfAuthoredPostImageAddressesV1, SubjectSoulSelfAuthoredRevisionBasisV1,
+    SubjectSoulVerifiedSnapshotV1, TemperamentContinuity, TemperamentContinuityStore,
     TemporalMemoryGraphBuildReport, TemporalMemoryGraphGateReport, TranscriptAttrEnvelope,
     TranscriptAttrWriteRejection, TranscriptAttrWriteReport, TranscriptConversationAlias,
     TranscriptEvidenceRef, TranscriptInputMessage,
@@ -183,11 +230,16 @@ use crate::ops::{
     LLMRuntimeProjectionEnvelope, MemoryProjectionDeliveryDigestContentEntry,
     MemoryProjectionDeliveryDigestEntry, MemoryProjectionDeliveryDigestManifest,
     MemoryProjectionProceduralDigestContentEntry, MemoryProjectionProceduralDigestReceipt,
-    MemoryProjectionSurfaceSet, RuntimeProjectionSourceBlock,
+    MemoryProjectionSurfaceSet, RelationshipSourceReadReportV1, RelationshipSourceSdkError,
+    RelationshipSourceSdkOperation, RelationshipSourceSdkResult, RuntimeProjectionSourceBlock,
+    SoulGovernanceSdkErrorDisposition, SubjectSoulGovernedDisclosureDispositionV1,
+    SubjectSoulGovernedDisclosureReportV1, SubjectSoulGovernedDisclosureRequestV1,
+    SubjectSoulSdkError, SubjectSoulSdkOperation, SubjectSoulSdkResult,
 };
 use crate::store_internal::post_turn_governance::{
     block_claimed_governance_job, block_governance_job, cancel_governance_job,
-    claim_governance_job, complete_governance_job_with_memory_plan, dead_letter_governance_job,
+    claim_governance_job, complete_governance_job_with_memory_plan,
+    complete_governance_job_with_subject_soul_plan, dead_letter_governance_job,
     ensure_governance_intent, governance_completion_transaction_id,
     read_job as read_governance_job, read_scope_index as read_governance_scope_index,
     reconcile_governance_intents, renew_governance_job_lease, resume_governance_job,
@@ -995,14 +1047,75 @@ struct LongTermMutationExecution {
     deleted_raw_addresses: Vec<(String, String)>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct MemoryStoreMutationPlan {
     mutations: Vec<StoreMutation>,
     preconditions: Vec<StoreJsonPrecondition>,
+    blob_preconditions: Vec<StoreBlobPrecondition>,
 }
+
+/// Generic continuity recovery is deliberately outside the Subject Soul lifecycle owner.
+/// Any attempt by the generic importer to inspect or restore a protected Soul layer must fail
+/// before a Store read or mutation can escape this sealed boundary.
+struct RejectingContinuitySoulImportStore;
+
+impl RejectingContinuitySoulImportStore {
+    fn reject<T>() -> Result<T> {
+        Err(Error::config(
+            "continuity_snapshot_soul_boundary",
+            "generic continuity import must not read or restore Subject Soul state",
+        ))
+    }
+}
+
+macro_rules! impl_rejecting_continuity_soul_store {
+    ($trait_name:ident, $value_ty:ty) => {
+        impl $trait_name for RejectingContinuitySoulImportStore {
+            fn get(&self, _key: &str) -> Result<Option<$value_ty>> {
+                Self::reject()
+            }
+
+            fn set(&self, _key: &str, _value: &$value_ty) -> Result<()> {
+                Self::reject()
+            }
+
+            fn clear(&self, _key: &str) -> Result<()> {
+                Self::reject()
+            }
+        }
+    };
+}
+
+impl_rejecting_continuity_soul_store!(SelfModelStore, SelfModel);
+impl_rejecting_continuity_soul_store!(SelfAuthoredCoreStore, SelfAuthoredCore);
+impl_rejecting_continuity_soul_store!(CoreRevisionLedgerStore, CoreRevisionLedger);
+impl_rejecting_continuity_soul_store!(SelfContinuityStore, SelfContinuity);
+impl_rejecting_continuity_soul_store!(RelationshipConstitutionStore, RelationshipConstitution);
+impl_rejecting_continuity_soul_store!(RelationshipPortfolioStore, RelationshipPortfolio);
 
 fn continuity_snapshot_plan_changed(plan: &ContinuitySnapshotImportPlan) -> bool {
     continuity_snapshot_plan_changed_count(plan) > 0
+}
+
+fn continuity_snapshot_without_soul_owned_layers(
+    snapshot: &bm_core::memory::ContinuitySnapshot,
+) -> bm_core::memory::ContinuitySnapshot {
+    let mut sanitized = snapshot.clone();
+    sanitized.self_model = None;
+    sanitized.self_authored_core = None;
+    sanitized.core_revision_ledger = None;
+    sanitized.self_continuity = None;
+    sanitized.relationship_constitution = None;
+    sanitized.relationship_portfolio = None;
+    sanitized.manifest.includes_self_model = false;
+    sanitized.manifest.includes_self_authored_core = false;
+    sanitized.manifest.includes_core_revision_ledger = false;
+    sanitized.manifest.includes_self_continuity = false;
+    sanitized.manifest.includes_relationship_constitution = false;
+    sanitized.manifest.includes_relationship_portfolio = false;
+    sanitized.manifest.relationship_scope_id = None;
+    sanitized.manifest.content_fingerprint.clear();
+    sanitized
 }
 
 fn continuity_snapshot_plan_changed_count(plan: &ContinuitySnapshotImportPlan) -> usize {
@@ -1059,12 +1172,21 @@ impl MemoryStoreMutationPlan {
         Self {
             mutations,
             preconditions: Vec::new(),
+            blob_preconditions: Vec::new(),
         }
     }
 
     fn merge(&mut self, other: Self) -> Result<()> {
         self.mutations.extend(other.mutations);
-        merge_json_preconditions(&mut self.preconditions, other.preconditions)
+        merge_json_preconditions(&mut self.preconditions, other.preconditions)?;
+        merge_blob_preconditions(&mut self.blob_preconditions, other.blob_preconditions)
+    }
+
+    fn merge_store_owner_plan(&mut self, other: StoreOwnerMutationPlan) -> Result<()> {
+        let (mutations, preconditions, blob_preconditions) = other.into_parts();
+        self.mutations.extend(mutations);
+        merge_json_preconditions(&mut self.preconditions, preconditions)?;
+        merge_blob_preconditions(&mut self.blob_preconditions, blob_preconditions)
     }
 }
 
@@ -1095,6 +1217,31 @@ fn merge_json_preconditions(
         }
     }
     target.extend(by_address.into_values());
+    Ok(())
+}
+
+fn merge_blob_preconditions(
+    target: &mut Vec<StoreBlobPrecondition>,
+    incoming: impl IntoIterator<Item = StoreBlobPrecondition>,
+) -> Result<()> {
+    let mut by_address = BTreeMap::<(String, String), StoreBlobPrecondition>::new();
+    for precondition in target.drain(..).chain(incoming) {
+        let address = match &precondition {
+            StoreBlobPrecondition::Absent { namespace, key }
+            | StoreBlobPrecondition::ExactDigest { namespace, key, .. } => {
+                (namespace.clone(), key.clone())
+            }
+        };
+        if let Some(previous) = by_address.insert(address, precondition.clone()) {
+            if previous != precondition {
+                return Err(Error::conflict(
+                    "memory_write_transaction_blob_precondition",
+                    "merged plans require different blob values at the same address",
+                ));
+            }
+        }
+    }
+    *target = by_address.into_values().collect();
     Ok(())
 }
 
@@ -1435,6 +1582,7 @@ struct MaterializedProductionRecall {
     long_term: MaterializedLongTermRecallClosure,
     procedural: Vec<MaterializedRuntimeSkillProjection>,
     runtime_skill_materializer: Option<RuntimeSkillMaterializerObservation>,
+    subject_soul: Option<SubjectSoulVerifiedStoreRead>,
     manifest_closure: ValidatedRecallManifestClosure,
 }
 
@@ -1551,6 +1699,7 @@ struct ProductionRecallClosure {
     authority: RecallOperationAuthoritySnapshot,
     immutable_session: RecallImmutableSessionBinding,
     runtime_skill_materializer_dispatch: Option<RuntimeSkillMaterializerDispatchReceipt>,
+    subject_soul: Option<SubjectSoulVerifiedStoreRead>,
     #[cfg(feature = "nonproduction-replay-harness")]
     p8_no_execution_authority: crate::P8NoExecutionCounterfactualAuthority,
 }
@@ -2048,6 +2197,156 @@ mod runtime_skill_materializer_resolver_contract_tests {
 
 fn checked_safe_count(stage: &'static str, value: usize) -> Result<u64> {
     u64::try_from(value).map_err(|_| Error::config(stage, "safe report count exceeds u64"))
+}
+
+fn subject_soul_sdk_error(
+    operation: SubjectSoulSdkOperation,
+    key: SubjectSoulLifecycleErrorKey,
+    disposition: SoulGovernanceSdkErrorDisposition,
+) -> SubjectSoulSdkError {
+    SubjectSoulSdkError {
+        operation,
+        key,
+        disposition,
+    }
+}
+
+fn subject_soul_error_disposition(
+    key: SubjectSoulLifecycleErrorKey,
+) -> SoulGovernanceSdkErrorDisposition {
+    match key {
+        SubjectSoulLifecycleErrorKey::TargetNotMounted
+        | SubjectSoulLifecycleErrorKey::SubjectNotFound
+        | SubjectSoulLifecycleErrorKey::TargetMustBeActiveAgentPersona => {
+            SoulGovernanceSdkErrorDisposition::RegistryRejected
+        }
+        SubjectSoulLifecycleErrorKey::AuthorityDenied => {
+            SoulGovernanceSdkErrorDisposition::AuthorityRejected
+        }
+        SubjectSoulLifecycleErrorKey::GenerationConflict
+        | SubjectSoulLifecycleErrorKey::AlreadyInitialized
+        | SubjectSoulLifecycleErrorKey::Archived
+        | SubjectSoulLifecycleErrorKey::Deleted => {
+            SoulGovernanceSdkErrorDisposition::ExpectedStateConflict
+        }
+        SubjectSoulLifecycleErrorKey::OperationConflict => {
+            SoulGovernanceSdkErrorDisposition::OperationConflict
+        }
+        SubjectSoulLifecycleErrorKey::CapacityExceeded => {
+            SoulGovernanceSdkErrorDisposition::CapacityRejected
+        }
+        SubjectSoulLifecycleErrorKey::RepairRequired => {
+            SoulGovernanceSdkErrorDisposition::RepairRequired
+        }
+        SubjectSoulLifecycleErrorKey::InvalidFoundingCharter => {
+            SoulGovernanceSdkErrorDisposition::ContractRejected
+        }
+    }
+}
+
+fn map_subject_soul_store_failure(
+    operation: SubjectSoulSdkOperation,
+    error: SubjectSoulStoreFailure,
+) -> SubjectSoulSdkError {
+    let key = error.lifecycle_error_key();
+    let disposition = match error.stage() {
+        SubjectSoulStoreFailureStage::Contract => subject_soul_error_disposition(key),
+        SubjectSoulStoreFailureStage::ExpectedState => {
+            SoulGovernanceSdkErrorDisposition::ExpectedStateConflict
+        }
+        SubjectSoulStoreFailureStage::RepairRequired => {
+            SoulGovernanceSdkErrorDisposition::RepairRequired
+        }
+        SubjectSoulStoreFailureStage::Capacity => {
+            SoulGovernanceSdkErrorDisposition::CapacityRejected
+        }
+        SubjectSoulStoreFailureStage::Commit => {
+            SoulGovernanceSdkErrorDisposition::StoreCommitRejected
+        }
+    };
+    subject_soul_sdk_error(operation, key, disposition)
+}
+
+fn relationship_source_sdk_error(
+    operation: RelationshipSourceSdkOperation,
+    key: RelationshipSourceControlErrorKeyV1,
+    disposition: SoulGovernanceSdkErrorDisposition,
+) -> RelationshipSourceSdkError {
+    RelationshipSourceSdkError {
+        operation,
+        key,
+        disposition,
+    }
+}
+
+fn relationship_source_error_disposition(
+    key: RelationshipSourceControlErrorKeyV1,
+) -> SoulGovernanceSdkErrorDisposition {
+    match key {
+        RelationshipSourceControlErrorKeyV1::TargetMismatch
+        | RelationshipSourceControlErrorKeyV1::MembershipMismatch => {
+            SoulGovernanceSdkErrorDisposition::RegistryRejected
+        }
+        RelationshipSourceControlErrorKeyV1::AuthorityDenied => {
+            SoulGovernanceSdkErrorDisposition::AuthorityRejected
+        }
+        RelationshipSourceControlErrorKeyV1::RevisionConflict
+        | RelationshipSourceControlErrorKeyV1::Archived
+        | RelationshipSourceControlErrorKeyV1::Terminated => {
+            SoulGovernanceSdkErrorDisposition::ExpectedStateConflict
+        }
+        RelationshipSourceControlErrorKeyV1::OperationConflict => {
+            SoulGovernanceSdkErrorDisposition::OperationConflict
+        }
+        RelationshipSourceControlErrorKeyV1::CapacityExceeded => {
+            SoulGovernanceSdkErrorDisposition::CapacityRejected
+        }
+        RelationshipSourceControlErrorKeyV1::RepairRequired => {
+            SoulGovernanceSdkErrorDisposition::RepairRequired
+        }
+        RelationshipSourceControlErrorKeyV1::InvalidClauseMutation => {
+            SoulGovernanceSdkErrorDisposition::ContractRejected
+        }
+    }
+}
+
+fn map_relationship_source_store_failure(
+    operation: RelationshipSourceSdkOperation,
+    error: SubjectSoulStoreFailure,
+) -> RelationshipSourceSdkError {
+    let (key, disposition) = match error.stage() {
+        SubjectSoulStoreFailureStage::Contract => (
+            RelationshipSourceControlErrorKeyV1::RepairRequired,
+            SoulGovernanceSdkErrorDisposition::ContractRejected,
+        ),
+        SubjectSoulStoreFailureStage::ExpectedState => (
+            RelationshipSourceControlErrorKeyV1::RevisionConflict,
+            SoulGovernanceSdkErrorDisposition::ExpectedStateConflict,
+        ),
+        SubjectSoulStoreFailureStage::RepairRequired => (
+            RelationshipSourceControlErrorKeyV1::RepairRequired,
+            SoulGovernanceSdkErrorDisposition::RepairRequired,
+        ),
+        SubjectSoulStoreFailureStage::Capacity => (
+            RelationshipSourceControlErrorKeyV1::CapacityExceeded,
+            SoulGovernanceSdkErrorDisposition::CapacityRejected,
+        ),
+        SubjectSoulStoreFailureStage::Commit => (
+            RelationshipSourceControlErrorKeyV1::RepairRequired,
+            SoulGovernanceSdkErrorDisposition::StoreCommitRejected,
+        ),
+    };
+    relationship_source_sdk_error(operation, key, disposition)
+}
+
+fn relationship_source_repair_error(
+    operation: RelationshipSourceSdkOperation,
+) -> RelationshipSourceSdkError {
+    relationship_source_sdk_error(
+        operation,
+        RelationshipSourceControlErrorKeyV1::RepairRequired,
+        SoulGovernanceSdkErrorDisposition::RepairRequired,
+    )
 }
 
 impl MemoryRuntime {
@@ -2919,6 +3218,1033 @@ const fn runtime_skill_deep_premise_sources_allowed(profile: ProfileId) -> bool 
     )
 }
 
+#[derive(Clone)]
+struct VerifiedSubjectSoulProjectionStores {
+    mounted_subject_id: String,
+    core: Option<SelfAuthoredCore>,
+    ledger: Option<CoreRevisionLedger>,
+    documents: BTreeMap<(String, String), SubjectSoulOwnedDocumentV1>,
+}
+
+struct SubjectSoulGenerationLayerMutationRequestV1 {
+    mutations: Vec<SubjectSoulGenerationLayerMutationV1>,
+}
+
+struct SubjectSoulAutonomousPlanningBase {
+    owner: SubjectSoulOwnerV1,
+    verified: SubjectSoulVerifiedStoreRead,
+    generation: u64,
+    revision: Option<u64>,
+    include_current_generation_layers: bool,
+    selected_core: Option<SelfAuthoredCore>,
+}
+
+struct SubjectSoulAutonomousStoreMutationInput<'a> {
+    base: &'a SubjectSoulAutonomousPlanningBase,
+    operation_id: &'a str,
+    layer_mutations: Vec<SubjectSoulGenerationLayerMutationV1>,
+    refresh_plan: &'a SelfAuthoredCoreRefreshPlanV1,
+    additional_plan: MemoryStoreMutationPlan,
+    scope: StoreEventScope,
+    planned_at: u64,
+}
+
+struct PostTurnPrivateGardenPlanningInput<'a> {
+    base: &'a SubjectSoulAutonomousPlanningBase,
+    http: &'a mut (dyn LlmHttpClient + 'a),
+    governance_llm: &'a (dyn CoreLlmClient + Send + Sync + 'a),
+    request: &'a MemoryTurnFinalizeRequest,
+    session_store: &'a dyn SessionStore,
+    session_summary_store: &'a dyn SessionSummaryStore,
+    strict_model_contract: bool,
+}
+
+struct PostTurnSelfRuntimePlanningInput<'a> {
+    base: &'a SubjectSoulAutonomousPlanningBase,
+    operation_id: &'a str,
+    initial_effects: Vec<SelfRuntimePlannedEffectV1>,
+    http: &'a mut (dyn LlmHttpClient + 'a),
+    governance_llm: &'a (dyn CoreLlmClient + Send + Sync + 'a),
+    request: &'a MemoryTurnFinalizeRequest,
+    session_store: &'a dyn SessionStore,
+    session_summary_store: &'a dyn SessionSummaryStore,
+}
+
+struct VerifiedSubjectSoulRelationshipRuntimeStore<'a> {
+    mounted_subject_id: &'a str,
+    verified: Option<&'a SubjectSoulVerifiedStoreRead>,
+}
+
+impl SubjectSoulRelationshipRuntimeReadStore for VerifiedSubjectSoulRelationshipRuntimeStore<'_> {
+    fn get(
+        &self,
+        mounted_subject_id: &str,
+        relationship_id: &str,
+    ) -> Result<Option<SubjectSoulRelationshipRuntimeInputV1>> {
+        if mounted_subject_id != self.mounted_subject_id {
+            return Err(Error::config(
+                "subject_soul_relationship_runtime_read",
+                "relationship runtime read escaped the mounted Soul owner",
+            ));
+        }
+        let Some(verified) = self.verified else {
+            return Ok(None);
+        };
+        verified
+            .relationship_runtime_input(relationship_id)
+            .map_err(SubjectSoulStoreFailure::into_store_error)
+    }
+}
+
+impl VerifiedSubjectSoulProjectionStores {
+    fn empty(mounted_subject_id: &str) -> Self {
+        Self {
+            mounted_subject_id: mounted_subject_id.to_string(),
+            core: None,
+            ledger: None,
+            documents: BTreeMap::new(),
+        }
+    }
+
+    fn from_verified_read(
+        mounted_subject_id: &str,
+        owner: &SubjectSoulOwnerV1,
+        read: &SubjectSoulVerifiedStoreRead,
+        include_current_generation_layers: bool,
+        selected_core: Option<SelfAuthoredCore>,
+    ) -> Result<Self> {
+        let mut documents = BTreeMap::new();
+        if include_current_generation_layers {
+            for ((namespace, physical_key), value) in &read.closure_documents {
+                if !is_subject_soul_generation_layer_namespace(namespace) {
+                    continue;
+                }
+                let document = serde_json::from_value::<SubjectSoulOwnedDocumentV1>(value.clone())
+                    .map_err(|error| {
+                        Error::config(
+                            "subject_soul_projection_read",
+                            format!("protected Soul document envelope is invalid: {error}"),
+                        )
+                    })?;
+                document.validate_contract().map_err(|error| {
+                    Error::config("subject_soul_projection_read", error.to_string())
+                })?;
+                if document.memory_space_id != owner.memory_space_id
+                    || document.subject_id != owner.subject_id
+                    || document.soul_id != owner.soul_id
+                    || document.namespace != *namespace
+                    || document.physical_key != *physical_key
+                {
+                    return Err(Error::config(
+                        "subject_soul_projection_read",
+                        "protected Soul document escaped its verified owner/address",
+                    ));
+                }
+                if documents
+                    .insert((namespace.clone(), physical_key.clone()), document)
+                    .is_some()
+                {
+                    return Err(Error::config(
+                        "subject_soul_projection_read",
+                        "protected Soul closure contains a duplicate address",
+                    ));
+                }
+            }
+        }
+        Ok(Self {
+            mounted_subject_id: mounted_subject_id.to_string(),
+            core: selected_core,
+            ledger: include_current_generation_layers
+                .then(|| read.current_ledger.clone())
+                .flatten(),
+            documents,
+        })
+    }
+
+    fn get_typed<T: DeserializeOwned>(&self, namespace: &str, key: &str) -> Result<Option<T>> {
+        self.documents
+            .get(&(namespace.to_string(), key.to_string()))
+            .map(|document| {
+                serde_json::from_value(document.body.clone()).map_err(|error| {
+                    Error::config(
+                        "subject_soul_projection_read",
+                        format!("verified {namespace} document body is invalid: {error}"),
+                    )
+                })
+            })
+            .transpose()
+    }
+
+    fn reject_write(operation: &'static str) -> Result<()> {
+        Err(Error::config(
+            operation,
+            "verified Subject Soul projection store is immutable",
+        ))
+    }
+}
+
+fn is_subject_soul_generation_layer_namespace(namespace: &str) -> bool {
+    matches!(
+        namespace,
+        "self_model"
+            | "self_authored_core"
+            | "core_revision_ledger"
+            | "self_continuity"
+            | "relationship_portfolio"
+            | "relationship_topology"
+            | "autonomy_strategy"
+            | "inner_life"
+            | "felt_significance"
+            | "temperament_continuity"
+            | "inner_conflict"
+            | "mental_privacy"
+            | "private_doc"
+            | "private_garden"
+            | "outer_voice"
+    )
+}
+
+fn validate_subject_soul_generation_layer_document_body(
+    layer: SubjectSoulGenerationLayerKindV1,
+    document: &SubjectSoulOwnedDocumentV1,
+) -> Result<()> {
+    fn decode<T: DeserializeOwned>(document: &SubjectSoulOwnedDocumentV1) -> Result<()> {
+        serde_json::from_value::<T>(document.body.clone())
+            .map(|_| ())
+            .map_err(|error| {
+                Error::config(
+                    "subject_soul_generation_layer_body",
+                    format!("typed protected Soul layer body is invalid: {error}"),
+                )
+            })
+    }
+    match layer {
+        SubjectSoulGenerationLayerKindV1::SelfModel => decode::<SelfModel>(document),
+        SubjectSoulGenerationLayerKindV1::SelfContinuity => decode::<SelfContinuity>(document),
+        SubjectSoulGenerationLayerKindV1::RelationshipPortfolio => {
+            decode::<RelationshipPortfolio>(document)
+        }
+        SubjectSoulGenerationLayerKindV1::RelationshipTopology => {
+            decode::<RelationshipTopology>(document)
+        }
+        SubjectSoulGenerationLayerKindV1::AutonomyStrategy => decode::<AutonomyStrategy>(document),
+        SubjectSoulGenerationLayerKindV1::InnerLife => decode::<InnerLife>(document),
+        SubjectSoulGenerationLayerKindV1::FeltSignificance => decode::<FeltSignificance>(document),
+        SubjectSoulGenerationLayerKindV1::TemperamentContinuity => {
+            decode::<TemperamentContinuity>(document)
+        }
+        SubjectSoulGenerationLayerKindV1::InnerConflict => decode::<InnerConflict>(document),
+        SubjectSoulGenerationLayerKindV1::MentalPrivacy => decode::<MentalPrivacyState>(document),
+        SubjectSoulGenerationLayerKindV1::PrivateDocument => {
+            decode::<PrivateDocWorkspace>(document)
+        }
+        SubjectSoulGenerationLayerKindV1::PrivateGarden => decode::<PrivateGardenDoc>(document),
+        SubjectSoulGenerationLayerKindV1::OuterVoice => decode::<OuterVoice>(document),
+    }
+}
+
+struct PlanningSubjectSoulGenerationStores {
+    base: VerifiedSubjectSoulProjectionStores,
+    changes: Mutex<BTreeMap<(SubjectSoulGenerationLayerKindV1, String), Option<serde_json::Value>>>,
+}
+
+impl PlanningSubjectSoulGenerationStores {
+    fn new(base: VerifiedSubjectSoulProjectionStores) -> Self {
+        Self {
+            base,
+            changes: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn get_typed<T: DeserializeOwned>(
+        &self,
+        layer: SubjectSoulGenerationLayerKindV1,
+        key: &str,
+    ) -> Result<Option<T>> {
+        if let Some(value) = self
+            .changes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&(layer, key.to_string()))
+            .cloned()
+        {
+            return value
+                .map(|value| {
+                    serde_json::from_value(value).map_err(|error| {
+                        Error::config(
+                            "subject_soul_generation_layer_plan",
+                            format!("planning layer body is invalid: {error}"),
+                        )
+                    })
+                })
+                .transpose();
+        }
+        self.base.get_typed(layer.canonical_namespace(), key)
+    }
+
+    fn set_typed<T: Serialize>(
+        &self,
+        layer: SubjectSoulGenerationLayerKindV1,
+        key: &str,
+        value: &T,
+    ) -> Result<()> {
+        let value = serde_json::to_value(value).map_err(|error| {
+            Error::config(
+                "subject_soul_generation_layer_plan",
+                format!("planning layer body is not serializable: {error}"),
+            )
+        })?;
+        self.changes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert((layer, key.to_string()), Some(value));
+        Ok(())
+    }
+
+    fn clear_typed(&self, layer: SubjectSoulGenerationLayerKindV1, key: &str) -> Result<()> {
+        self.changes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert((layer, key.to_string()), None);
+        Ok(())
+    }
+
+    fn into_layer_mutations(
+        self,
+        owner: &SubjectSoulOwnerV1,
+        generation: u64,
+        revision: Option<u64>,
+    ) -> Result<Vec<SubjectSoulGenerationLayerMutationV1>> {
+        let changes = self
+            .changes
+            .into_inner()
+            .map_err(|_| Error::config("subject_soul_generation_layer_plan", "lock poisoned"))?;
+        let mut mutations = Vec::with_capacity(changes.len());
+        for ((layer, key), value) in changes {
+            let namespace = layer.canonical_namespace().to_string();
+            let address = SubjectSoulManifestAddressV1 {
+                namespace: namespace.clone(),
+                physical_key: key.clone(),
+            };
+            let prior = self.base.documents.get(&(namespace, key));
+            match value {
+                Some(body) => {
+                    let document = SubjectSoulOwnedDocumentV1::new(
+                        owner, generation, revision, &address, &body,
+                    )
+                    .map_err(|error| {
+                        Error::config("subject_soul_generation_layer_plan", error.to_string())
+                    })?;
+                    validate_subject_soul_generation_layer_document_body(layer, &document)?;
+                    if prior.is_some_and(|prior| prior.content_digest == document.content_digest) {
+                        continue;
+                    }
+                    mutations.push(SubjectSoulGenerationLayerMutationV1::Upsert {
+                        layer,
+                        expected_previous_digest: prior.map(|prior| prior.content_digest.clone()),
+                        document: Box::new(document),
+                    });
+                }
+                None => {
+                    let Some(prior) = prior else {
+                        continue;
+                    };
+                    mutations.push(SubjectSoulGenerationLayerMutationV1::Delete {
+                        layer,
+                        address,
+                        expected_content_digest: prior.content_digest.clone(),
+                    });
+                }
+            }
+        }
+        Ok(mutations)
+    }
+
+    fn apply_self_runtime_effects(
+        &self,
+        effects: &[SelfRuntimePlannedEffectV1],
+        relationship_scope_id: &str,
+    ) -> Result<()> {
+        for effect in effects {
+            if self_runtime_subject_owned_soul_scope_id(effect)
+                .is_some_and(|scope_id| scope_id != self.base.mounted_subject_id)
+            {
+                return Err(Error::config(
+                    "subject_soul_autonomous_cycle",
+                    "planned subject-owned Soul effect escaped the mounted subject",
+                ));
+            }
+            if self_runtime_relationship_owned_soul_scope_id(effect)
+                .is_some_and(|scope_id| scope_id != relationship_scope_id)
+            {
+                return Err(Error::config(
+                    "subject_soul_autonomous_cycle",
+                    "planned relationship-owned Soul effect escaped the active relationship",
+                ));
+            }
+            match effect {
+                SelfRuntimePlannedEffectV1::SetAutonomyStrategy { scope_id, value } => {
+                    AutonomyStrategyStore::set(self, scope_id, value)?;
+                }
+                SelfRuntimePlannedEffectV1::ClearAutonomyStrategy { scope_id } => {
+                    AutonomyStrategyStore::clear(self, scope_id)?;
+                }
+                SelfRuntimePlannedEffectV1::SetInnerLife { scope_id, value } => {
+                    InnerLifeStore::set(self, scope_id, value)?;
+                }
+                SelfRuntimePlannedEffectV1::ClearInnerLife { scope_id } => {
+                    InnerLifeStore::clear(self, scope_id)?;
+                }
+                SelfRuntimePlannedEffectV1::SetSelfModel { scope_id, value } => {
+                    SelfModelStore::set(self, scope_id, value)?;
+                }
+                SelfRuntimePlannedEffectV1::ClearSelfModel { scope_id } => {
+                    SelfModelStore::clear(self, scope_id)?;
+                }
+                SelfRuntimePlannedEffectV1::SetSelfContinuity { scope_id, value } => {
+                    SelfContinuityStore::set(self, scope_id, value)?;
+                }
+                SelfRuntimePlannedEffectV1::ClearSelfContinuity { scope_id } => {
+                    SelfContinuityStore::clear(self, scope_id)?;
+                }
+                SelfRuntimePlannedEffectV1::SetFeltSignificance { scope_id, value } => {
+                    FeltSignificanceStore::set(self, scope_id, value)?;
+                }
+                SelfRuntimePlannedEffectV1::ClearFeltSignificance { scope_id } => {
+                    FeltSignificanceStore::clear(self, scope_id)?;
+                }
+                SelfRuntimePlannedEffectV1::SetTemperamentContinuity { scope_id, value } => {
+                    TemperamentContinuityStore::set(self, scope_id, value)?;
+                }
+                SelfRuntimePlannedEffectV1::ClearTemperamentContinuity { scope_id } => {
+                    TemperamentContinuityStore::clear(self, scope_id)?;
+                }
+                SelfRuntimePlannedEffectV1::SetInnerConflict { scope_id, value } => {
+                    InnerConflictStore::set(self, scope_id, value)?;
+                }
+                SelfRuntimePlannedEffectV1::ClearInnerConflict { scope_id } => {
+                    InnerConflictStore::clear(self, scope_id)?;
+                }
+                SelfRuntimePlannedEffectV1::SetPrivateDoc { scope_id, value } => {
+                    PrivateDocStore::set(self, scope_id, value)?;
+                }
+                SelfRuntimePlannedEffectV1::ClearPrivateDoc { scope_id } => {
+                    PrivateDocStore::clear(self, scope_id)?;
+                }
+                SelfRuntimePlannedEffectV1::SetMentalPrivacy { scope_id, value } => {
+                    MentalPrivacyStore::set(self, scope_id, value)?;
+                }
+                SelfRuntimePlannedEffectV1::ClearMentalPrivacy { scope_id } => {
+                    MentalPrivacyStore::clear(self, scope_id)?;
+                }
+                SelfRuntimePlannedEffectV1::SetOuterVoice { scope_id, value } => {
+                    OuterVoiceStore::set(self, scope_id, value)?;
+                }
+                SelfRuntimePlannedEffectV1::ClearOuterVoice { scope_id } => {
+                    OuterVoiceStore::clear(self, scope_id)?;
+                }
+                SelfRuntimePlannedEffectV1::SetRelationshipTopology { scope_id, value } => {
+                    RelationshipTopologyStore::set(self, scope_id, value)?;
+                }
+                SelfRuntimePlannedEffectV1::ClearRelationshipTopology { scope_id } => {
+                    RelationshipTopologyStore::clear(self, scope_id)?;
+                }
+                SelfRuntimePlannedEffectV1::SetRelationshipPortfolio { scope_id, value } => {
+                    RelationshipPortfolioStore::set(self, scope_id, value)?;
+                }
+                SelfRuntimePlannedEffectV1::ClearRelationshipPortfolio { scope_id } => {
+                    RelationshipPortfolioStore::clear(self, scope_id)?;
+                }
+                SelfRuntimePlannedEffectV1::UpsertPrivateGardenDoc {
+                    subject_id,
+                    document,
+                } => {
+                    if subject_id != &self.base.mounted_subject_id {
+                        return Err(Error::config(
+                            "subject_soul_autonomous_cycle",
+                            "private-garden effect escaped the mounted Soul owner",
+                        ));
+                    }
+                    PrivateGardenStore::write(
+                        self,
+                        subject_id,
+                        &document.path,
+                        &document.content,
+                        document.updated_at,
+                    )?;
+                }
+                SelfRuntimePlannedEffectV1::DeletePrivateGardenDoc {
+                    subject_id,
+                    doc_path,
+                } => {
+                    if subject_id != &self.base.mounted_subject_id {
+                        return Err(Error::config(
+                            "subject_soul_autonomous_cycle",
+                            "private-garden delete escaped the mounted Soul owner",
+                        ));
+                    }
+                    PrivateGardenStore::delete(self, subject_id, doc_path)?;
+                }
+                SelfRuntimePlannedEffectV1::SetWorldSense { .. }
+                | SelfRuntimePlannedEffectV1::ClearWorldSense { .. }
+                | SelfRuntimePlannedEffectV1::UpsertContinuityCapsules { .. }
+                | SelfRuntimePlannedEffectV1::UpsertTaskLearning { .. }
+                | SelfRuntimePlannedEffectV1::PutTaskArtifact { .. }
+                | SelfRuntimePlannedEffectV1::DeleteTaskArtifact { .. }
+                | SelfRuntimePlannedEffectV1::WriteRuntimeSkill { .. }
+                | SelfRuntimePlannedEffectV1::RemoveRuntimeSkill { .. }
+                | SelfRuntimePlannedEffectV1::SetLegacyMemory { .. }
+                | SelfRuntimePlannedEffectV1::WriteDailyNote { .. } => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+fn self_runtime_subject_soul_scope_id(effect: &SelfRuntimePlannedEffectV1) -> Option<&str> {
+    self_runtime_subject_owned_soul_scope_id(effect)
+        .or_else(|| self_runtime_relationship_owned_soul_scope_id(effect))
+}
+
+fn self_runtime_subject_owned_soul_scope_id(effect: &SelfRuntimePlannedEffectV1) -> Option<&str> {
+    match effect {
+        SelfRuntimePlannedEffectV1::SetAutonomyStrategy { scope_id, .. }
+        | SelfRuntimePlannedEffectV1::ClearAutonomyStrategy { scope_id }
+        | SelfRuntimePlannedEffectV1::SetInnerLife { scope_id, .. }
+        | SelfRuntimePlannedEffectV1::ClearInnerLife { scope_id }
+        | SelfRuntimePlannedEffectV1::SetSelfModel { scope_id, .. }
+        | SelfRuntimePlannedEffectV1::ClearSelfModel { scope_id }
+        | SelfRuntimePlannedEffectV1::SetSelfContinuity { scope_id, .. }
+        | SelfRuntimePlannedEffectV1::ClearSelfContinuity { scope_id }
+        | SelfRuntimePlannedEffectV1::SetFeltSignificance { scope_id, .. }
+        | SelfRuntimePlannedEffectV1::ClearFeltSignificance { scope_id }
+        | SelfRuntimePlannedEffectV1::SetTemperamentContinuity { scope_id, .. }
+        | SelfRuntimePlannedEffectV1::ClearTemperamentContinuity { scope_id }
+        | SelfRuntimePlannedEffectV1::SetInnerConflict { scope_id, .. }
+        | SelfRuntimePlannedEffectV1::ClearInnerConflict { scope_id }
+        | SelfRuntimePlannedEffectV1::SetPrivateDoc { scope_id, .. }
+        | SelfRuntimePlannedEffectV1::ClearPrivateDoc { scope_id }
+        | SelfRuntimePlannedEffectV1::SetRelationshipTopology { scope_id, .. }
+        | SelfRuntimePlannedEffectV1::ClearRelationshipTopology { scope_id }
+        | SelfRuntimePlannedEffectV1::SetRelationshipPortfolio { scope_id, .. }
+        | SelfRuntimePlannedEffectV1::ClearRelationshipPortfolio { scope_id } => Some(scope_id),
+        _ => None,
+    }
+}
+
+fn self_runtime_relationship_owned_soul_scope_id(
+    effect: &SelfRuntimePlannedEffectV1,
+) -> Option<&str> {
+    match effect {
+        SelfRuntimePlannedEffectV1::SetMentalPrivacy { scope_id, .. }
+        | SelfRuntimePlannedEffectV1::ClearMentalPrivacy { scope_id }
+        | SelfRuntimePlannedEffectV1::SetOuterVoice { scope_id, .. }
+        | SelfRuntimePlannedEffectV1::ClearOuterVoice { scope_id } => Some(scope_id),
+        _ => None,
+    }
+}
+
+fn self_runtime_relationship_scope_id(
+    scoped_runtime: &SubjectScopedRuntime,
+    channel: &str,
+    chat_id: &str,
+) -> String {
+    scoped_runtime
+        .relationship_scope
+        .as_ref()
+        .map(|scope| scope.relationship_id.clone())
+        .unwrap_or_else(|| {
+            bm_core::memory::relationship_scope_id(
+                &scoped_runtime.mounted_subject_id,
+                channel,
+                chat_id,
+            )
+        })
+}
+
+fn self_runtime_initial_effects_from_private_garden_mutations(
+    mounted_subject_id: &str,
+    mutations: &[SubjectSoulGenerationLayerMutationV1],
+) -> Result<Vec<SelfRuntimePlannedEffectV1>> {
+    mutations
+        .iter()
+        .map(|mutation| match mutation {
+            SubjectSoulGenerationLayerMutationV1::Upsert {
+                layer: SubjectSoulGenerationLayerKindV1::PrivateGarden,
+                document,
+                ..
+            } => Ok(SelfRuntimePlannedEffectV1::UpsertPrivateGardenDoc {
+                subject_id: mounted_subject_id.to_string(),
+                document: serde_json::from_value(document.body.clone()).map_err(|error| {
+                    Error::config("subject_soul_autonomous_cycle", error.to_string())
+                })?,
+            }),
+            SubjectSoulGenerationLayerMutationV1::Delete {
+                layer: SubjectSoulGenerationLayerKindV1::PrivateGarden,
+                address,
+                ..
+            } => Ok(SelfRuntimePlannedEffectV1::DeletePrivateGardenDoc {
+                subject_id: mounted_subject_id.to_string(),
+                doc_path: address
+                    .physical_key
+                    .strip_prefix(&private_garden_storage_key_prefix(mounted_subject_id))
+                    .ok_or_else(|| {
+                        Error::config(
+                            "subject_soul_autonomous_cycle",
+                            "private-garden mutation address escaped the mounted owner",
+                        )
+                    })?
+                    .to_string(),
+            }),
+            _ => Err(Error::config(
+                "subject_soul_autonomous_cycle",
+                "specialized private-garden planner emitted a non-private effect",
+            )),
+        })
+        .collect()
+}
+
+macro_rules! impl_planning_subject_soul_keyed_store {
+    ($trait_name:ident, $value_ty:ty, $layer:ident) => {
+        impl $trait_name for PlanningSubjectSoulGenerationStores {
+            fn get(&self, key: &str) -> Result<Option<$value_ty>> {
+                self.get_typed(SubjectSoulGenerationLayerKindV1::$layer, key)
+            }
+
+            fn set(&self, key: &str, value: &$value_ty) -> Result<()> {
+                self.set_typed(SubjectSoulGenerationLayerKindV1::$layer, key, value)
+            }
+
+            fn clear(&self, key: &str) -> Result<()> {
+                self.clear_typed(SubjectSoulGenerationLayerKindV1::$layer, key)
+            }
+        }
+    };
+}
+
+impl_planning_subject_soul_keyed_store!(SelfModelStore, SelfModel, SelfModel);
+impl_planning_subject_soul_keyed_store!(SelfContinuityStore, SelfContinuity, SelfContinuity);
+impl_planning_subject_soul_keyed_store!(
+    RelationshipPortfolioStore,
+    RelationshipPortfolio,
+    RelationshipPortfolio
+);
+impl_planning_subject_soul_keyed_store!(
+    RelationshipTopologyStore,
+    RelationshipTopology,
+    RelationshipTopology
+);
+impl_planning_subject_soul_keyed_store!(AutonomyStrategyStore, AutonomyStrategy, AutonomyStrategy);
+impl_planning_subject_soul_keyed_store!(OuterVoiceStore, OuterVoice, OuterVoice);
+impl_planning_subject_soul_keyed_store!(InnerLifeStore, InnerLife, InnerLife);
+impl_planning_subject_soul_keyed_store!(FeltSignificanceStore, FeltSignificance, FeltSignificance);
+impl_planning_subject_soul_keyed_store!(
+    TemperamentContinuityStore,
+    TemperamentContinuity,
+    TemperamentContinuity
+);
+impl_planning_subject_soul_keyed_store!(InnerConflictStore, InnerConflict, InnerConflict);
+impl_planning_subject_soul_keyed_store!(MentalPrivacyStore, MentalPrivacyState, MentalPrivacy);
+impl_planning_subject_soul_keyed_store!(PrivateDocStore, PrivateDocWorkspace, PrivateDocument);
+
+impl SelfAuthoredCoreStore for PlanningSubjectSoulGenerationStores {
+    fn get(&self, scope_id: &str) -> Result<Option<SelfAuthoredCore>> {
+        SelfAuthoredCoreStore::get(&self.base, scope_id)
+    }
+
+    fn set(&self, _scope_id: &str, _core: &SelfAuthoredCore) -> Result<()> {
+        Err(Error::config(
+            "subject_soul_autonomous_cycle",
+            "Self-Authored Core must be committed by the canonical revision planner",
+        ))
+    }
+
+    fn clear(&self, _scope_id: &str) -> Result<()> {
+        Err(Error::config(
+            "subject_soul_autonomous_cycle",
+            "Self-Authored Core cannot be cleared by a generation-layer overlay",
+        ))
+    }
+}
+
+impl CoreRevisionLedgerStore for PlanningSubjectSoulGenerationStores {
+    fn get(&self, scope_id: &str) -> Result<Option<CoreRevisionLedger>> {
+        CoreRevisionLedgerStore::get(&self.base, scope_id)
+    }
+
+    fn set(&self, _scope_id: &str, _ledger: &CoreRevisionLedger) -> Result<()> {
+        Err(Error::config(
+            "subject_soul_autonomous_cycle",
+            "Core revision ledger must be committed by the canonical revision planner",
+        ))
+    }
+
+    fn clear(&self, _scope_id: &str) -> Result<()> {
+        Err(Error::config(
+            "subject_soul_autonomous_cycle",
+            "Core revision ledger cannot be cleared by a generation-layer overlay",
+        ))
+    }
+}
+
+impl PrivateGardenStore for PlanningSubjectSoulGenerationStores {
+    fn list(&self, mounted_subject_id: &str, limit: usize) -> Result<Vec<PrivateGardenDocRecord>> {
+        if mounted_subject_id != self.base.mounted_subject_id {
+            return Err(Error::config(
+                "subject_soul_generation_layer_plan",
+                "private garden list escaped the mounted Soul owner",
+            ));
+        }
+        let prefix = private_garden_storage_key_prefix(mounted_subject_id);
+        let mut records = self
+            .base
+            .list(mounted_subject_id, usize::MAX)?
+            .into_iter()
+            .map(|record| (record.path.clone(), record))
+            .collect::<BTreeMap<_, _>>();
+        for ((layer, key), value) in self
+            .changes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .filter(|((layer, key), _)| {
+                *layer == SubjectSoulGenerationLayerKindV1::PrivateGarden
+                    && key.starts_with(&prefix)
+            })
+        {
+            let _ = layer;
+            let path = key.trim_start_matches(&prefix).to_string();
+            match value {
+                Some(value) => {
+                    let doc = serde_json::from_value::<PrivateGardenDoc>(value.clone()).map_err(
+                        |error| {
+                            Error::config(
+                                "subject_soul_generation_layer_plan",
+                                format!("private garden planning body is invalid: {error}"),
+                            )
+                        },
+                    )?;
+                    records.insert(path, private_garden_doc_record(&doc));
+                }
+                None => {
+                    records.remove(&path);
+                }
+            }
+        }
+        let mut rows = records.into_values().collect::<Vec<_>>();
+        rows.sort_by_key(|row| std::cmp::Reverse(row.updated_at));
+        if limit > 0 {
+            rows.truncate(limit);
+        }
+        Ok(rows)
+    }
+
+    fn read(&self, mounted_subject_id: &str, doc_path: &str) -> Result<Option<PrivateGardenDoc>> {
+        if mounted_subject_id != self.base.mounted_subject_id {
+            return Err(Error::config(
+                "subject_soul_generation_layer_plan",
+                "private garden read escaped the mounted Soul owner",
+            ));
+        }
+        let path = normalize_private_garden_doc_path(doc_path)?;
+        self.get_typed(
+            SubjectSoulGenerationLayerKindV1::PrivateGarden,
+            &private_garden_storage_key(mounted_subject_id, &path),
+        )
+    }
+
+    fn write(
+        &self,
+        mounted_subject_id: &str,
+        doc_path: &str,
+        content: &str,
+        now_secs: u64,
+    ) -> Result<PrivateGardenDocRecord> {
+        if content.len() > PRIVATE_GARDEN_MAX_DOC_BYTES {
+            return Err(Error::config(
+                "subject_soul_generation_layer_plan",
+                "private garden document exceeds the governed byte budget",
+            ));
+        }
+        let path = normalize_private_garden_doc_path(doc_path)?;
+        let revision = self
+            .read(mounted_subject_id, &path)?
+            .map_or(1, |doc| doc.revision.saturating_add(1));
+        let doc = PrivateGardenDoc {
+            path: path.clone(),
+            content: content.to_string(),
+            updated_at: now_secs,
+            revision,
+        };
+        self.set_typed(
+            SubjectSoulGenerationLayerKindV1::PrivateGarden,
+            &private_garden_storage_key(mounted_subject_id, &path),
+            &doc,
+        )?;
+        Ok(private_garden_doc_record(&doc))
+    }
+
+    fn move_doc(
+        &self,
+        mounted_subject_id: &str,
+        from_path: &str,
+        to_path: &str,
+        now_secs: u64,
+    ) -> Result<Option<PrivateGardenDocRecord>> {
+        let Some(from) = self.read(mounted_subject_id, from_path)? else {
+            return Ok(None);
+        };
+        let moved = self.write(mounted_subject_id, to_path, &from.content, now_secs)?;
+        self.delete(mounted_subject_id, from_path)?;
+        Ok(Some(moved))
+    }
+
+    fn delete(&self, mounted_subject_id: &str, doc_path: &str) -> Result<bool> {
+        let path = normalize_private_garden_doc_path(doc_path)?;
+        let existed = self.read(mounted_subject_id, &path)?.is_some();
+        if existed {
+            self.clear_typed(
+                SubjectSoulGenerationLayerKindV1::PrivateGarden,
+                &private_garden_storage_key(mounted_subject_id, &path),
+            )?;
+        }
+        Ok(existed)
+    }
+}
+
+impl SelfAuthoredCoreStore for VerifiedSubjectSoulProjectionStores {
+    fn get(&self, scope_id: &str) -> Result<Option<SelfAuthoredCore>> {
+        if scope_id != self.mounted_subject_id {
+            return Err(Error::config(
+                "subject_soul_projection_read",
+                "Self-Authored Core read escaped the verified mounted Soul owner",
+            ));
+        }
+        Ok(self.core.clone())
+    }
+
+    fn set(&self, _scope_id: &str, _core: &SelfAuthoredCore) -> Result<()> {
+        Err(Error::config(
+            "subject_soul_projection_read",
+            "verified projection read store is immutable",
+        ))
+    }
+
+    fn clear(&self, _scope_id: &str) -> Result<()> {
+        Err(Error::config(
+            "subject_soul_projection_read",
+            "verified projection read store is immutable",
+        ))
+    }
+}
+
+impl CoreRevisionLedgerStore for VerifiedSubjectSoulProjectionStores {
+    fn get(&self, scope_id: &str) -> Result<Option<CoreRevisionLedger>> {
+        if scope_id != self.mounted_subject_id {
+            return Err(Error::config(
+                "subject_soul_projection_read",
+                "Core revision ledger read escaped the verified mounted Soul owner",
+            ));
+        }
+        Ok(self.ledger.clone())
+    }
+
+    fn set(&self, _scope_id: &str, _ledger: &CoreRevisionLedger) -> Result<()> {
+        Self::reject_write("subject_soul_projection_read")
+    }
+
+    fn clear(&self, _scope_id: &str) -> Result<()> {
+        Self::reject_write("subject_soul_projection_read")
+    }
+}
+
+macro_rules! impl_verified_subject_soul_keyed_store {
+    ($trait_name:ident, $value_ty:ty, $namespace:literal) => {
+        impl $trait_name for VerifiedSubjectSoulProjectionStores {
+            fn get(&self, key: &str) -> Result<Option<$value_ty>> {
+                self.get_typed($namespace, key)
+            }
+
+            fn set(&self, _key: &str, _value: &$value_ty) -> Result<()> {
+                Self::reject_write("subject_soul_projection_read")
+            }
+
+            fn clear(&self, _key: &str) -> Result<()> {
+                Self::reject_write("subject_soul_projection_read")
+            }
+        }
+    };
+}
+
+impl_verified_subject_soul_keyed_store!(SelfModelStore, SelfModel, "self_model");
+impl_verified_subject_soul_keyed_store!(SelfContinuityStore, SelfContinuity, "self_continuity");
+impl_verified_subject_soul_keyed_store!(
+    RelationshipPortfolioStore,
+    RelationshipPortfolio,
+    "relationship_portfolio"
+);
+impl_verified_subject_soul_keyed_store!(
+    RelationshipTopologyStore,
+    RelationshipTopology,
+    "relationship_topology"
+);
+impl_verified_subject_soul_keyed_store!(
+    AutonomyStrategyStore,
+    AutonomyStrategy,
+    "autonomy_strategy"
+);
+impl_verified_subject_soul_keyed_store!(OuterVoiceStore, OuterVoice, "outer_voice");
+impl_verified_subject_soul_keyed_store!(InnerLifeStore, InnerLife, "inner_life");
+impl_verified_subject_soul_keyed_store!(
+    FeltSignificanceStore,
+    FeltSignificance,
+    "felt_significance"
+);
+impl_verified_subject_soul_keyed_store!(
+    TemperamentContinuityStore,
+    TemperamentContinuity,
+    "temperament_continuity"
+);
+impl_verified_subject_soul_keyed_store!(InnerConflictStore, InnerConflict, "inner_conflict");
+impl_verified_subject_soul_keyed_store!(MentalPrivacyStore, MentalPrivacyState, "mental_privacy");
+impl_verified_subject_soul_keyed_store!(PrivateDocStore, PrivateDocWorkspace, "private_doc");
+
+impl PrivateGardenStore for VerifiedSubjectSoulProjectionStores {
+    fn list(&self, mounted_subject_id: &str, limit: usize) -> Result<Vec<PrivateGardenDocRecord>> {
+        if mounted_subject_id != self.mounted_subject_id {
+            return Err(Error::config(
+                "subject_soul_projection_read",
+                "private garden list escaped the verified mounted Soul owner",
+            ));
+        }
+        let prefix = private_garden_storage_key_prefix(mounted_subject_id);
+        let mut records = self
+            .documents
+            .iter()
+            .filter(|((namespace, key), _)| {
+                namespace == "private_garden" && key.starts_with(&prefix)
+            })
+            .map(|(_, document)| {
+                serde_json::from_value::<PrivateGardenDoc>(document.body.clone())
+                    .map(|doc| private_garden_doc_record(&doc))
+                    .map_err(|error| {
+                        Error::config(
+                            "subject_soul_projection_read",
+                            format!("verified private garden document is invalid: {error}"),
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        records.sort_by_key(|record| std::cmp::Reverse(record.updated_at));
+        if limit > 0 {
+            records.truncate(limit);
+        }
+        Ok(records)
+    }
+
+    fn read(&self, mounted_subject_id: &str, doc_path: &str) -> Result<Option<PrivateGardenDoc>> {
+        if mounted_subject_id != self.mounted_subject_id {
+            return Err(Error::config(
+                "subject_soul_projection_read",
+                "private garden read escaped the verified mounted Soul owner",
+            ));
+        }
+        let path = normalize_private_garden_doc_path(doc_path)?;
+        self.get_typed(
+            "private_garden",
+            &private_garden_storage_key(mounted_subject_id, &path),
+        )
+    }
+
+    fn write(
+        &self,
+        _mounted_subject_id: &str,
+        _doc_path: &str,
+        _content: &str,
+        _now_secs: u64,
+    ) -> Result<PrivateGardenDocRecord> {
+        Err(Error::config(
+            "subject_soul_projection_read",
+            "verified Subject Soul projection store is immutable",
+        ))
+    }
+
+    fn move_doc(
+        &self,
+        _mounted_subject_id: &str,
+        _from_path: &str,
+        _to_path: &str,
+        _now_secs: u64,
+    ) -> Result<Option<PrivateGardenDocRecord>> {
+        Err(Error::config(
+            "subject_soul_projection_read",
+            "verified Subject Soul projection store is immutable",
+        ))
+    }
+
+    fn delete(&self, _mounted_subject_id: &str, _doc_path: &str) -> Result<bool> {
+        Err(Error::config(
+            "subject_soul_projection_read",
+            "verified Subject Soul projection store is immutable",
+        ))
+    }
+}
+
+fn render_governed_subject_soul_summary(
+    core: &SelfAuthoredCore,
+    origin: bm_core::memory::SubjectSoulRevisionOriginV1,
+) -> String {
+    let origin = match origin {
+        bm_core::memory::SubjectSoulRevisionOriginV1::HumanFoundingCharter => {
+            "human founding charter"
+        }
+        bm_core::memory::SubjectSoulRevisionOriginV1::SelfAuthoredBootstrap => {
+            "self-authored bootstrap"
+        }
+        bm_core::memory::SubjectSoulRevisionOriginV1::SelfGovernedRevision => {
+            "self-governed revision"
+        }
+    };
+    let identity_status = if core.identity_anchor.trim().is_empty() {
+        "no identity anchor"
+    } else {
+        "an identity anchor"
+    };
+    format!(
+        "Governed Soul summary: revision {} originates from {}; it carries {}, {} character-tendency commitments, {} constitutional priorities, and {} non-negotiable boundaries. Raw charter text, private evidence, inner-life material, and relationship-source clauses are withheld.",
+        core.revision,
+        origin,
+        identity_status,
+        core.character_tendencies.len(),
+        core.priority_constitution.len(),
+        core.non_negotiables.len(),
+    )
+}
+
+fn effective_subject_soul_projection_selector(
+    temporal_operation: crate::MemoryRecallTemporalOperation,
+    requested: Option<&SubjectSoulReadSelectorV1>,
+) -> Result<Option<SubjectSoulReadSelectorV1>> {
+    match (temporal_operation, requested) {
+        (crate::MemoryRecallTemporalOperation::Current, None) => {
+            Ok(Some(SubjectSoulReadSelectorV1::Current))
+        }
+        (_, Some(SubjectSoulReadSelectorV1::Exact { .. })) => Ok(requested.cloned()),
+        (
+            crate::MemoryRecallTemporalOperation::Current,
+            Some(SubjectSoulReadSelectorV1::Current),
+        ) => Ok(Some(SubjectSoulReadSelectorV1::Current)),
+        (crate::MemoryRecallTemporalOperation::HistoricalAsOf { .. }, None) => Ok(None),
+        (
+            crate::MemoryRecallTemporalOperation::HistoricalAsOf { .. },
+            Some(SubjectSoulReadSelectorV1::Current),
+        ) => Err(Error::invalid_input(
+            "subject_soul_projection_selector",
+            "historical projection requires an exact Subject Soul selector",
+        )),
+    }
+}
+
 impl MemoryRuntime {
     #[cfg(feature = "nonproduction-replay-harness")]
     pub fn replay_harness(&self) -> crate::store::ReplayStoreHarness<'_> {
@@ -2958,6 +4284,2653 @@ impl MemoryRuntime {
         &self.config.subject_registry
     }
 
+    /// Reads only the operator-safe Subject Soul view for the exact mounted
+    /// AgentPersona. Raw Soul material is intentionally not a public SDK read.
+    pub fn read_subject_soul(
+        &self,
+        request: SubjectSoulReadRequestV1,
+    ) -> SubjectSoulSdkResult<SubjectSoulReadOutcomeV1> {
+        let operation = SubjectSoulSdkOperation::Read;
+        if request.view != SubjectSoulReadViewV1::OperatorSafe {
+            return Err(subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::AuthorityDenied,
+                SoulGovernanceSdkErrorDisposition::AuthorityRejected,
+            ));
+        }
+        if !self.config.privacy_policy.operator_inspection_allowed {
+            return Err(subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::AuthorityDenied,
+                SoulGovernanceSdkErrorDisposition::AuthorityRejected,
+            ));
+        }
+        self.read_verified_subject_soul(request, operation)
+            .map(|read| read.outcome)
+    }
+
+    /// Exports only lifecycle metadata and digests. Soul body, private evidence,
+    /// relationship clauses, and raw revision material never cross this API.
+    pub fn export_subject_soul_operator_safe(
+        &self,
+        selector: SubjectSoulReadSelectorV1,
+    ) -> SubjectSoulSdkResult<SubjectSoulOperatorSafeExportV1> {
+        let operation = SubjectSoulSdkOperation::Export;
+        if !self.config.privacy_policy.export_allowed
+            || !self.config.privacy_policy.operator_inspection_allowed
+        {
+            return Err(subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::AuthorityDenied,
+                SoulGovernanceSdkErrorDisposition::AuthorityRejected,
+            ));
+        }
+        let target_subject_id = self.config.scoped_runtime.mounted_subject_id.clone();
+        let read = self.read_verified_subject_soul(
+            SubjectSoulReadRequestV1 {
+                target_subject_id,
+                selector,
+                view: SubjectSoulReadViewV1::OperatorSafe,
+            },
+            operation,
+        )?;
+        let export = match read.outcome {
+            SubjectSoulReadOutcomeV1::ImplicitUnseeded {
+                subject_id,
+                soul_id,
+                generation,
+                ..
+            } => SubjectSoulOperatorSafeExportV1 {
+                subject_id,
+                soul_id,
+                state: SubjectSoulLifecycleStateV1::Unseeded,
+                generation,
+                revision: None,
+                material_digest: None,
+                origin: None,
+                terminated_generations: Vec::new(),
+            },
+            SubjectSoulReadOutcomeV1::Verified { view } => {
+                let mut terminated_generations = read
+                    .closure_documents
+                    .iter()
+                    .filter_map(|(_, value)| {
+                        serde_json::from_value::<SubjectSoulGenerationTombstoneV1>(value.clone())
+                            .ok()
+                    })
+                    .filter(|tombstone| {
+                        tombstone.memory_space_id == view.memory_space_id
+                            && tombstone.subject_id == view.subject_id
+                            && tombstone.soul_id == view.soul_id
+                    })
+                    .map(
+                        |tombstone| bm_core::memory::SubjectSoulTerminatedGenerationV1 {
+                            generation: tombstone.generation,
+                            terminal_revision: tombstone.terminal_revision,
+                            terminal_material_digest: tombstone.terminal_material_digest,
+                            terminal_action: tombstone.terminal_action,
+                            tombstone_digest: tombstone.tombstone_digest,
+                            terminated_at: tombstone.terminated_at,
+                            current_generation: view.generation,
+                            current_state: view.state,
+                        },
+                    )
+                    .collect::<Vec<_>>();
+                terminated_generations.sort();
+                terminated_generations.dedup();
+                SubjectSoulOperatorSafeExportV1 {
+                    subject_id: view.subject_id,
+                    soul_id: view.soul_id,
+                    state: view.state,
+                    generation: view.generation,
+                    revision: view.revision,
+                    material_digest: view.material_digest,
+                    origin: view.origin,
+                    terminated_generations,
+                }
+            }
+            SubjectSoulReadOutcomeV1::TerminatedGeneration {
+                subject_id,
+                soul_id,
+                terminal,
+                ..
+            } => SubjectSoulOperatorSafeExportV1 {
+                subject_id,
+                soul_id,
+                state: SubjectSoulLifecycleStateV1::Deleted,
+                generation: terminal.generation,
+                revision: None,
+                material_digest: None,
+                origin: None,
+                terminated_generations: vec![*terminal],
+            },
+        };
+        export.validate_contract().map_err(|error| {
+            subject_soul_sdk_error(
+                operation,
+                error.key,
+                subject_soul_error_disposition(error.key),
+            )
+        })?;
+        Ok(export)
+    }
+
+    /// Produces only a Store-verified, relationship-clamped disclosure. Hosts
+    /// cannot submit a purportedly safe summary and raw Soul material never
+    /// leaves the runtime through this surface.
+    pub fn disclose_subject_soul_governed(
+        &self,
+        request: SubjectSoulGovernedDisclosureRequestV1,
+    ) -> SubjectSoulSdkResult<SubjectSoulGovernedDisclosureReportV1> {
+        let operation = SubjectSoulSdkOperation::Read;
+        if request.relationship_id.trim().is_empty() {
+            return Err(subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::AuthorityDenied,
+                SoulGovernanceSdkErrorDisposition::ContractRejected,
+            ));
+        }
+        let read = self.read_verified_subject_soul(
+            SubjectSoulReadRequestV1 {
+                target_subject_id: request.target_subject_id,
+                selector: request.selector,
+                view: SubjectSoulReadViewV1::RuntimePrivate,
+            },
+            operation,
+        )?;
+        if read.receipt.state_digest.trim().is_empty() {
+            return Err(subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::RepairRequired,
+                SoulGovernanceSdkErrorDisposition::RepairRequired,
+            ));
+        }
+        let soul_material_digest = match &read.outcome {
+            SubjectSoulReadOutcomeV1::Verified { view }
+                if view.state == SubjectSoulLifecycleStateV1::Active =>
+            {
+                view.material_digest.clone()
+            }
+            _ => None,
+        };
+        let Some((projection, source)) = read
+            .relationship_projection(&request.relationship_id)
+            .map_err(|error| map_subject_soul_store_failure(operation, error))?
+        else {
+            return Ok(SubjectSoulGovernedDisclosureReportV1 {
+                disposition: SubjectSoulGovernedDisclosureDispositionV1::Refused,
+                disclosure_ceiling: bm_core::memory::RelationshipDisclosureCeilingV1::RefusalOnly,
+                governed_text: Some(
+                    "Disclosure refused: no verified relationship-governance projection."
+                        .to_string(),
+                ),
+                soul_material_digest,
+                relationship_source_digest: None,
+                immutable_read_state_digest: read.receipt.state_digest,
+            });
+        };
+        self.ensure_relationship_source_membership(
+            &source,
+            RelationshipSourceSdkOperation::Project,
+        )
+        .map_err(|error| {
+            subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::AuthorityDenied,
+                error.disposition,
+            )
+        })?;
+        let mental_privacy_sealed = read
+            .closure_documents
+            .iter()
+            .filter(|((namespace, _), _)| namespace == "mental_privacy")
+            .map(|(_, value)| {
+                serde_json::from_value::<SubjectSoulOwnedDocumentV1>(value.clone())
+                    .map_err(|_| {
+                        subject_soul_sdk_error(
+                            operation,
+                            SubjectSoulLifecycleErrorKey::RepairRequired,
+                            SoulGovernanceSdkErrorDisposition::RepairRequired,
+                        )
+                    })
+                    .and_then(|document| {
+                        serde_json::from_value::<MentalPrivacyState>(document.body).map_err(|_| {
+                            subject_soul_sdk_error(
+                                operation,
+                                SubjectSoulLifecycleErrorKey::RepairRequired,
+                                SoulGovernanceSdkErrorDisposition::RepairRequired,
+                            )
+                        })
+                    })
+            })
+            .collect::<SubjectSoulSdkResult<Vec<_>>>()?
+            .iter()
+            .any(|state| {
+                state.boundary_persona.posture == bm_core::memory::BoundaryPersonaPosture::Sealed
+                    || state.envelopes.values().any(|envelope| {
+                        envelope.visibility == bm_core::memory::MentalPrivacyVisibility::Sealed
+                    })
+            });
+        let selected_core = match &read.outcome {
+            SubjectSoulReadOutcomeV1::Verified { view }
+                if view.state == SubjectSoulLifecycleStateV1::Active =>
+            {
+                view.runtime_private_core.as_ref().zip(view.origin)
+            }
+            _ => None,
+        };
+        let (disposition, governed_text) = match projection.effective_disclosure_ceiling {
+            bm_core::memory::RelationshipDisclosureCeilingV1::None
+            | bm_core::memory::RelationshipDisclosureCeilingV1::RefusalOnly => (
+                SubjectSoulGovernedDisclosureDispositionV1::Refused,
+                Some(
+                    "Disclosure refused by the verified relationship and mental-privacy ceiling."
+                        .to_string(),
+                ),
+            ),
+            _ if mental_privacy_sealed || selected_core.is_none() => (
+                SubjectSoulGovernedDisclosureDispositionV1::Refused,
+                Some(
+                    "Disclosure refused by the verified relationship and mental-privacy ceiling."
+                        .to_string(),
+                ),
+            ),
+            bm_core::memory::RelationshipDisclosureCeilingV1::GovernedSummary => (
+                SubjectSoulGovernedDisclosureDispositionV1::GovernedSummary,
+                selected_core
+                    .map(|(core, origin)| render_governed_subject_soul_summary(core, origin)),
+            ),
+            bm_core::memory::RelationshipDisclosureCeilingV1::FullGovernedDisclosure => (
+                SubjectSoulGovernedDisclosureDispositionV1::Rewritten,
+                selected_core
+                    .map(|(core, origin)| render_governed_subject_soul_summary(core, origin)),
+            ),
+        };
+        Ok(SubjectSoulGovernedDisclosureReportV1 {
+            disposition,
+            disclosure_ceiling: projection.effective_disclosure_ceiling,
+            governed_text,
+            soul_material_digest,
+            relationship_source_digest: Some(source.content_digest),
+            immutable_read_state_digest: read.receipt.state_digest,
+        })
+    }
+
+    fn read_verified_subject_soul(
+        &self,
+        request: SubjectSoulReadRequestV1,
+        operation: SubjectSoulSdkOperation,
+    ) -> SubjectSoulSdkResult<SubjectSoulVerifiedStoreRead> {
+        let soul_id = self.subject_soul_id_for_target(&request.target_subject_id, operation)?;
+        request.validate_contract().map_err(|error| {
+            subject_soul_sdk_error(
+                operation,
+                error.key,
+                subject_soul_error_disposition(error.key),
+            )
+        })?;
+        let store = self.config.store_platform.as_ref().ok_or_else(|| {
+            subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::RepairRequired,
+                SoulGovernanceSdkErrorDisposition::RepairRequired,
+            )
+        })?;
+        store
+            .read_verified_subject_soul(
+                &self.config.memory_space_id,
+                &soul_id,
+                &request,
+                &self.runtime_budget(),
+            )
+            .map_err(|error| map_subject_soul_store_failure(operation, error))
+    }
+
+    fn subject_soul_id_for_target(
+        &self,
+        target_subject_id: &str,
+        operation: SubjectSoulSdkOperation,
+    ) -> SubjectSoulSdkResult<String> {
+        let registry_validation = self.config.subject_registry.validate_contract();
+        if !registry_validation.accepted
+            || self.config.subject_registry.memory_space_id != self.config.memory_space_id
+        {
+            return Err(subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::RepairRequired,
+                SoulGovernanceSdkErrorDisposition::RegistryRejected,
+            ));
+        }
+        let Some(target) = self.config.subject_registry.subject(target_subject_id) else {
+            return Err(subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::SubjectNotFound,
+                SoulGovernanceSdkErrorDisposition::RegistryRejected,
+            ));
+        };
+        if target.subject_id != self.config.scoped_runtime.mounted_subject_id {
+            return Err(subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::TargetNotMounted,
+                SoulGovernanceSdkErrorDisposition::RegistryRejected,
+            ));
+        }
+        if target.kind != SubjectKind::AgentPersona
+            || target.lifecycle_state != SubjectLifecycleState::Active
+        {
+            return Err(subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::TargetMustBeActiveAgentPersona,
+                SoulGovernanceSdkErrorDisposition::RegistryRejected,
+            ));
+        }
+        let binding = target.soul_binding.as_ref().ok_or_else(|| {
+            subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::RepairRequired,
+                SoulGovernanceSdkErrorDisposition::RepairRequired,
+            )
+        })?;
+        if binding.owner_subject_id != target.subject_id || binding.soul_id.trim().is_empty() {
+            return Err(subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::RepairRequired,
+                SoulGovernanceSdkErrorDisposition::RepairRequired,
+            ));
+        }
+        Ok(binding.soul_id.clone())
+    }
+
+    fn subject_soul_owner_for_mounted(
+        &self,
+        operation: SubjectSoulSdkOperation,
+    ) -> SubjectSoulSdkResult<SubjectSoulOwnerV1> {
+        let subject_id = self.config.scoped_runtime.mounted_subject_id.clone();
+        let soul_id = self.subject_soul_id_for_target(&subject_id, operation)?;
+        Ok(SubjectSoulOwnerV1 {
+            memory_space_id: self.config.memory_space_id.clone(),
+            subject_id,
+            soul_id,
+        })
+    }
+
+    fn ensure_active_human_subject(
+        &self,
+        subject_id: &str,
+        operation: SubjectSoulSdkOperation,
+    ) -> SubjectSoulSdkResult<()> {
+        let Some(subject) = self.config.subject_registry.subject(subject_id) else {
+            return Err(subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::SubjectNotFound,
+                SoulGovernanceSdkErrorDisposition::RegistryRejected,
+            ));
+        };
+        if subject.kind != SubjectKind::HumanUser
+            || subject.lifecycle_state != SubjectLifecycleState::Active
+        {
+            return Err(subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::AuthorityDenied,
+                SoulGovernanceSdkErrorDisposition::AuthorityRejected,
+            ));
+        }
+        Ok(())
+    }
+
+    fn subject_soul_snapshot_from_read(
+        &self,
+        read: &SubjectSoulVerifiedStoreRead,
+        operation: SubjectSoulSdkOperation,
+    ) -> SubjectSoulSdkResult<SubjectSoulVerifiedSnapshotV1> {
+        let snapshot = SubjectSoulVerifiedSnapshotV1 {
+            head: read.head.clone().ok_or_else(|| {
+                subject_soul_sdk_error(
+                    operation,
+                    SubjectSoulLifecycleErrorKey::RepairRequired,
+                    SoulGovernanceSdkErrorDisposition::RepairRequired,
+                )
+            })?,
+            manifest: read.manifest.clone().ok_or_else(|| {
+                subject_soul_sdk_error(
+                    operation,
+                    SubjectSoulLifecycleErrorKey::RepairRequired,
+                    SoulGovernanceSdkErrorDisposition::RepairRequired,
+                )
+            })?,
+            current_material: read.selected_material.clone(),
+            current_core: read.current_core.clone(),
+            current_core_document: read.current_core_document.clone(),
+            current_revision_ledger: read.current_ledger.clone(),
+            current_revision_ledger_document: read.current_ledger_document.clone(),
+        };
+        snapshot.validate_contract().map_err(|error| {
+            subject_soul_sdk_error(
+                operation,
+                error.key,
+                subject_soul_error_disposition(error.key),
+            )
+        })?;
+        Ok(snapshot)
+    }
+
+    fn admit_subject_soul_lifecycle_authority(
+        &self,
+        request: &SubjectSoulLifecycleMutationRequestV1,
+        operation: SubjectSoulSdkOperation,
+    ) -> SubjectSoulSdkResult<(String, MemoryMutationOperationKind)> {
+        let target = self.config.scoped_runtime.mounted_subject_id.as_str();
+        let graph = &self.config.subject_relationship_graph;
+        if !graph
+            .validate_against_registry(&self.config.subject_registry)
+            .accepted
+        {
+            return Err(subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::RepairRequired,
+                SoulGovernanceSdkErrorDisposition::RegistryRejected,
+            ));
+        }
+        let governs_target = |actor_subject_id: &str| {
+            self.config
+                .subject_registry
+                .subject(actor_subject_id)
+                .is_some_and(|subject| {
+                    subject.kind == SubjectKind::SystemGovernor
+                        && subject.lifecycle_state == SubjectLifecycleState::Active
+                })
+                && graph.edges.iter().any(|edge| {
+                    edge.kind == SubjectRelationshipKind::Governs
+                        && edge.from_subject_id == actor_subject_id
+                        && edge.to_subject_id == target
+                })
+        };
+        match (&request.action, &request.authority) {
+            (
+                SubjectSoulLifecycleActionV1::Archive,
+                SubjectSoulLifecycleAuthorityV1::SelfGovernance { capability_digest },
+            )
+            | (
+                SubjectSoulLifecycleActionV1::Restore,
+                SubjectSoulLifecycleAuthorityV1::SelfGovernance { capability_digest },
+            ) if capability_digest == &self.subject_soul_self_governance_capability_digest() => {
+                let kind = match request.action {
+                    SubjectSoulLifecycleActionV1::Archive => {
+                        MemoryMutationOperationKind::SoulArchive
+                    }
+                    SubjectSoulLifecycleActionV1::Restore => {
+                        MemoryMutationOperationKind::SoulRestore
+                    }
+                    _ => unreachable!("matched archive/restore"),
+                };
+                Ok((target.to_string(), kind))
+            }
+            (
+                SubjectSoulLifecycleActionV1::Archive,
+                SubjectSoulLifecycleAuthorityV1::Maintenance {
+                    system_actor_subject_id,
+                },
+            )
+            | (
+                SubjectSoulLifecycleActionV1::Restore,
+                SubjectSoulLifecycleAuthorityV1::Maintenance {
+                    system_actor_subject_id,
+                },
+            ) if governs_target(system_actor_subject_id) => {
+                let kind = match request.action {
+                    SubjectSoulLifecycleActionV1::Archive => {
+                        MemoryMutationOperationKind::SoulArchive
+                    }
+                    SubjectSoulLifecycleActionV1::Restore => {
+                        MemoryMutationOperationKind::SoulRestore
+                    }
+                    _ => unreachable!("matched archive/restore"),
+                };
+                Ok((system_actor_subject_id.clone(), kind))
+            }
+            (
+                SubjectSoulLifecycleActionV1::Reset { .. },
+                SubjectSoulLifecycleAuthorityV1::Destructive {
+                    system_actor_subject_id,
+                    human_confirmation,
+                },
+            )
+            | (
+                SubjectSoulLifecycleActionV1::Reseed { .. },
+                SubjectSoulLifecycleAuthorityV1::Destructive {
+                    system_actor_subject_id,
+                    human_confirmation,
+                },
+            )
+            | (
+                SubjectSoulLifecycleActionV1::Delete { .. },
+                SubjectSoulLifecycleAuthorityV1::Destructive {
+                    system_actor_subject_id,
+                    human_confirmation,
+                },
+            ) if governs_target(system_actor_subject_id) => {
+                self.ensure_active_human_subject(&human_confirmation.human_subject_id, operation)?;
+                let human_is_related = graph.edges.iter().any(|edge| {
+                    (edge.from_subject_id == human_confirmation.human_subject_id
+                        && edge.to_subject_id == target)
+                        || (edge.to_subject_id == human_confirmation.human_subject_id
+                            && edge.from_subject_id == target)
+                });
+                if !human_is_related {
+                    return Err(subject_soul_sdk_error(
+                        operation,
+                        SubjectSoulLifecycleErrorKey::AuthorityDenied,
+                        SoulGovernanceSdkErrorDisposition::AuthorityRejected,
+                    ));
+                }
+                let kind = match request.action {
+                    SubjectSoulLifecycleActionV1::Reset { .. } => {
+                        MemoryMutationOperationKind::SoulReset
+                    }
+                    SubjectSoulLifecycleActionV1::Reseed { .. } => {
+                        MemoryMutationOperationKind::SoulReseed
+                    }
+                    SubjectSoulLifecycleActionV1::Delete { .. } => {
+                        MemoryMutationOperationKind::SoulDelete
+                    }
+                    _ => unreachable!("matched destructive action"),
+                };
+                Ok((system_actor_subject_id.clone(), kind))
+            }
+            _ => Err(subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::AuthorityDenied,
+                SoulGovernanceSdkErrorDisposition::AuthorityRejected,
+            )),
+        }
+    }
+
+    fn subject_soul_revision_addresses(
+        &self,
+        owner: &SubjectSoulOwnerV1,
+        generation: u64,
+        revision: u64,
+        operation: SubjectSoulSdkOperation,
+    ) -> SubjectSoulSdkResult<SubjectSoulRevisionAddressBindingsV1> {
+        let scope_key =
+            subject_soul_scope_key(&owner.memory_space_id, &owner.subject_id, &owner.soul_id)
+                .map_err(|_| {
+                    subject_soul_sdk_error(
+                        operation,
+                        SubjectSoulLifecycleErrorKey::RepairRequired,
+                        SoulGovernanceSdkErrorDisposition::RepairRequired,
+                    )
+                })?;
+        let material_key = subject_soul_revision_material_key(
+            &owner.memory_space_id,
+            &owner.subject_id,
+            &owner.soul_id,
+            generation,
+            revision,
+        )
+        .map_err(|_| {
+            subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::RepairRequired,
+                SoulGovernanceSdkErrorDisposition::RepairRequired,
+            )
+        })?;
+        Ok(SubjectSoulRevisionAddressBindingsV1 {
+            material: SubjectSoulManifestAddressV1 {
+                namespace: SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE.to_string(),
+                physical_key: material_key,
+            },
+            core: SubjectSoulManifestAddressV1 {
+                namespace: "self_authored_core".to_string(),
+                physical_key: scope_key.clone(),
+            },
+            revision_ledger: SubjectSoulManifestAddressV1 {
+                namespace: "core_revision_ledger".to_string(),
+                physical_key: scope_key,
+            },
+        })
+    }
+
+    /// Provisions the exact mounted AgentPersona Soul. A missing seed is a
+    /// typed no-effect and never invents a default personality.
+    pub fn provision_subject_soul(
+        &self,
+        intent: SubjectSoulProvisionIntentV1,
+    ) -> SubjectSoulSdkResult<SubjectSoulMutationReportV1> {
+        let operation = SubjectSoulSdkOperation::Provision;
+        intent.validate_canonical().map_err(|error| {
+            subject_soul_sdk_error(
+                operation,
+                error.key,
+                subject_soul_error_disposition(error.key),
+            )
+        })?;
+        let owner = self.subject_soul_owner_for_mounted(operation)?;
+        let store = self.config.store_platform.as_ref().ok_or_else(|| {
+            subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::RepairRequired,
+                SoulGovernanceSdkErrorDisposition::RepairRequired,
+            )
+        })?;
+        let founding_operation = match &intent {
+            SubjectSoulProvisionIntentV1::Unseeded => None,
+            SubjectSoulProvisionIntentV1::Founding {
+                operation_id,
+                human_actor_subject_id,
+                ..
+            } => {
+                self.ensure_active_human_subject(human_actor_subject_id, operation)?;
+                let intent_digest = subject_soul_provision_intent_digest_v1(&owner, &intent)
+                    .map_err(|error| {
+                        subject_soul_sdk_error(
+                            operation,
+                            error.key,
+                            subject_soul_error_disposition(error.key),
+                        )
+                    })?;
+                let identity = MemoryMutationOperationIdentity::new(
+                    operation_id,
+                    &owner.memory_space_id,
+                    &owner.subject_id,
+                    human_actor_subject_id,
+                    MemoryMutationOperationKind::SoulProvision,
+                )
+                .map_err(|_| {
+                    subject_soul_sdk_error(
+                        operation,
+                        SubjectSoulLifecycleErrorKey::OperationConflict,
+                        SoulGovernanceSdkErrorDisposition::OperationConflict,
+                    )
+                })?;
+                let runtime_budget = self.runtime_budget();
+                if let Some(report) = store
+                    .preflight_subject_soul_operation(&identity, &intent_digest, &runtime_budget)
+                    .map_err(|error| map_subject_soul_store_failure(operation, error))?
+                {
+                    return Ok(report);
+                }
+                Some((identity, intent_digest, runtime_budget))
+            }
+        };
+        let certificate = store.subject_soul_open_closure_certificate();
+        if !certificate.proves_zero_artifacts(
+            &owner.memory_space_id,
+            &owner.subject_id,
+            &owner.soul_id,
+        ) {
+            return Err(subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::AlreadyInitialized,
+                SoulGovernanceSdkErrorDisposition::ExpectedStateConflict,
+            ));
+        }
+        let expected_state = SubjectSoulExpectedStateV1::PristineAbsent {
+            closure_certificate_digest: certificate.digest().to_string(),
+        };
+        let revision_addresses = match &intent {
+            SubjectSoulProvisionIntentV1::Unseeded => None,
+            SubjectSoulProvisionIntentV1::Founding { .. } => {
+                Some(self.subject_soul_revision_addresses(&owner, 1, 1, operation)?)
+            }
+        };
+        let planned_at = self.config.clock.now_secs();
+        let plan = plan_subject_soul_provision_v1(
+            &owner,
+            &intent,
+            &expected_state,
+            revision_addresses.as_ref(),
+            planned_at,
+        )
+        .map_err(|error| {
+            subject_soul_sdk_error(
+                operation,
+                error.key,
+                subject_soul_error_disposition(error.key),
+            )
+        })?;
+        let SubjectSoulProvisionPlanV1::Commit {
+            intent_digest,
+            head,
+            manifest,
+            material,
+            core,
+            core_document,
+            revision_ledger,
+            revision_ledger_document,
+            ..
+        } = plan
+        else {
+            let report = SubjectSoulMutationReportV1 {
+                outcome: SubjectSoulMutationOutcomeV1::UnseededNoEffect,
+                state_before: SubjectSoulLifecycleStateV1::Unseeded,
+                state_after: SubjectSoulLifecycleStateV1::Unseeded,
+                generation: 1,
+                revision: None,
+                head_digest: None,
+                transaction_id: None,
+                durable_receipt_ref: None,
+                replayed: false,
+                safe_event_ref: None,
+            };
+            report.validate_contract().map_err(|error| {
+                subject_soul_sdk_error(
+                    operation,
+                    error.key,
+                    subject_soul_error_disposition(error.key),
+                )
+            })?;
+            return Ok(report);
+        };
+        let Some((identity, preflight_intent_digest, runtime_budget)) = founding_operation else {
+            return Err(subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::RepairRequired,
+                SoulGovernanceSdkErrorDisposition::RepairRequired,
+            ));
+        };
+        if intent_digest != preflight_intent_digest {
+            return Err(subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::RepairRequired,
+                SoulGovernanceSdkErrorDisposition::RepairRequired,
+            ));
+        }
+        let actor_subject_id = identity.actor_subject_id().to_string();
+        let operation_plan = StoreMutationOperationPlan::new(
+            identity.clone(),
+            canonical_mor_intent_digest_from_core_digest(&intent_digest).map_err(|_| {
+                subject_soul_sdk_error(
+                    operation,
+                    SubjectSoulLifecycleErrorKey::RepairRequired,
+                    SoulGovernanceSdkErrorDisposition::RepairRequired,
+                )
+            })?,
+            MemoryMutationEffect::Changed,
+            5,
+            &actor_subject_id,
+            planned_at,
+        )
+        .map_err(|_| {
+            subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::RepairRequired,
+                SoulGovernanceSdkErrorDisposition::RepairRequired,
+            )
+        })?;
+        let scope_key =
+            subject_soul_scope_key(&owner.memory_space_id, &owner.subject_id, &owner.soul_id)
+                .map_err(|_| {
+                    subject_soul_sdk_error(
+                        operation,
+                        SubjectSoulLifecycleErrorKey::RepairRequired,
+                        SoulGovernanceSdkErrorDisposition::RepairRequired,
+                    )
+                })?;
+        let event_id = format!("subject-soul-event:{}", identity.storage_key());
+        let scope = self.memory_write_transaction_scope();
+        let event = MemoryStoreEvent::new(
+            &event_id,
+            MemoryStoreEventKind::MemoryControl,
+            scope.clone(),
+            planned_at,
+        )
+        .with_plane(SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE)
+        .with_record_key(&scope_key)
+        .with_content_hash(&head.head_digest)
+        .with_payload("state", "active")
+        .with_payload("generation", head.generation.to_string())
+        .with_payload("revision", head.current_revision.unwrap_or(0).to_string())
+        .with_payload("origin", "human_founding_charter");
+        let material_key = subject_soul_revision_material_key(
+            &owner.memory_space_id,
+            &owner.subject_id,
+            &owner.soul_id,
+            material.generation,
+            material.revision,
+        )
+        .map_err(|_| {
+            subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::RepairRequired,
+                SoulGovernanceSdkErrorDisposition::RepairRequired,
+            )
+        })?;
+        let puts = [
+            (
+                SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE.to_string(),
+                scope_key.clone(),
+                serde_json::to_value(head.as_ref()),
+            ),
+            (
+                SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                scope_key.clone(),
+                serde_json::to_value(manifest.as_ref()),
+            ),
+            (
+                SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE.to_string(),
+                material_key.clone(),
+                serde_json::to_value(material.as_ref()),
+            ),
+            (
+                core_document.namespace.clone(),
+                core_document.physical_key.clone(),
+                serde_json::to_value(core_document.as_ref()),
+            ),
+            (
+                revision_ledger_document.namespace.clone(),
+                revision_ledger_document.physical_key.clone(),
+                serde_json::to_value(revision_ledger_document.as_ref()),
+            ),
+        ];
+        let mut mutations = Vec::with_capacity(6);
+        for (namespace, key, value) in puts {
+            mutations.push(StoreMutation::PutJson {
+                event_kind: MemoryStoreEventKind::MemoryControl,
+                plane: namespace.clone(),
+                record_key: key.clone(),
+                namespace,
+                key,
+                value: value.map_err(|_| {
+                    subject_soul_sdk_error(
+                        operation,
+                        SubjectSoulLifecycleErrorKey::RepairRequired,
+                        SoulGovernanceSdkErrorDisposition::RepairRequired,
+                    )
+                })?,
+            });
+        }
+        mutations.push(StoreMutation::AppendEvent {
+            event: Box::new(event),
+        });
+        let preconditions = vec![
+            StoreJsonPrecondition::Absent {
+                namespace: SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE.to_string(),
+                key: scope_key.clone(),
+            },
+            StoreJsonPrecondition::Absent {
+                namespace: SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                key: scope_key,
+            },
+            StoreJsonPrecondition::Absent {
+                namespace: SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE.to_string(),
+                key: material_key,
+            },
+            StoreJsonPrecondition::Absent {
+                namespace: core_document.namespace.clone(),
+                key: core_document.physical_key.clone(),
+            },
+            StoreJsonPrecondition::Absent {
+                namespace: revision_ledger_document.namespace.clone(),
+                key: revision_ledger_document.physical_key.clone(),
+            },
+        ];
+        let batch = StoreMutationBatch {
+            transaction_id: operation_plan.transaction_id().to_string(),
+            operation: "subject_soul.provision".to_string(),
+            scope,
+            mutations,
+        };
+        let store_plan = SubjectSoulStoreMutationPlan::new(
+            &intent_digest,
+            &intent_digest,
+            expected_state,
+            SubjectSoulStorePostImage {
+                head: *head,
+                manifest: *manifest,
+                current_material: Some(*material),
+                current_core: Some(*core),
+                current_core_document: Some(*core_document),
+                current_ledger: Some(*revision_ledger),
+                current_ledger_document: Some(*revision_ledger_document),
+            },
+            batch,
+            preconditions,
+            operation_plan,
+        )
+        .map_err(|error| map_subject_soul_store_failure(operation, error))?;
+        match store
+            .commit_subject_soul_mutation_with_runtime_budget(store_plan, &runtime_budget)
+            .map_err(|error| map_subject_soul_store_failure(operation, error))?
+        {
+            SubjectSoulStoreMutationOutcome::Committed { result, .. }
+            | SubjectSoulStoreMutationOutcome::Replayed { result, .. } => Ok(result),
+        }
+    }
+
+    /// Applies generation-owned Soul layer deltas through the same immutable
+    /// head/manifest/MOR transaction as the lifecycle root. This is the only
+    /// SDK write seam for the protected non-Core Soul layers.
+    fn plan_subject_soul_autonomous_store_mutation(
+        &self,
+        input: SubjectSoulAutonomousStoreMutationInput<'_>,
+    ) -> SubjectSoulSdkResult<Option<SubjectSoulStoreMutationPlan>> {
+        let operation = SubjectSoulSdkOperation::EvidenceUpdate;
+        let SubjectSoulAutonomousStoreMutationInput {
+            base,
+            operation_id,
+            layer_mutations,
+            refresh_plan,
+            additional_plan,
+            scope,
+            planned_at,
+        } = input;
+        let owner = &base.owner;
+        let current = &base.verified;
+        let _immutable_read_receipt = &current.receipt;
+        let (basis, snapshot) = match &current.outcome {
+            SubjectSoulReadOutcomeV1::ImplicitUnseeded {
+                closure_certificate_digest,
+                ..
+            } => (
+                SubjectSoulSelfAuthoredRevisionBasisV1::ImplicitUnseeded {
+                    closure_certificate_digest: closure_certificate_digest.clone(),
+                },
+                None,
+            ),
+            SubjectSoulReadOutcomeV1::Verified { view }
+                if matches!(
+                    view.state,
+                    SubjectSoulLifecycleStateV1::Unseeded | SubjectSoulLifecycleStateV1::Active
+                ) =>
+            {
+                let snapshot = self.subject_soul_snapshot_from_read(current, operation)?;
+                (
+                    SubjectSoulSelfAuthoredRevisionBasisV1::Verified {
+                        snapshot: Box::new(snapshot.clone()),
+                    },
+                    Some(snapshot),
+                )
+            }
+            SubjectSoulReadOutcomeV1::Verified { view } => {
+                let key = match view.state {
+                    SubjectSoulLifecycleStateV1::Archived => SubjectSoulLifecycleErrorKey::Archived,
+                    SubjectSoulLifecycleStateV1::Deleted => SubjectSoulLifecycleErrorKey::Deleted,
+                    _ => SubjectSoulLifecycleErrorKey::RepairRequired,
+                };
+                return Err(subject_soul_sdk_error(
+                    operation,
+                    key,
+                    subject_soul_error_disposition(key),
+                ));
+            }
+            SubjectSoulReadOutcomeV1::TerminatedGeneration { .. } => {
+                return Err(subject_soul_sdk_error(
+                    operation,
+                    SubjectSoulLifecycleErrorKey::GenerationConflict,
+                    SoulGovernanceSdkErrorDisposition::ExpectedStateConflict,
+                ));
+            }
+        };
+        let self_authored_addresses = match refresh_plan {
+            SelfAuthoredCoreRefreshPlanV1::Skipped => None,
+            SelfAuthoredCoreRefreshPlanV1::ReviewedRejected { .. } => {
+                let scope_key = subject_soul_scope_key(
+                    &owner.memory_space_id,
+                    &owner.subject_id,
+                    &owner.soul_id,
+                )
+                .map_err(|_| {
+                    subject_soul_sdk_error(
+                        operation,
+                        SubjectSoulLifecycleErrorKey::RepairRequired,
+                        SoulGovernanceSdkErrorDisposition::RepairRequired,
+                    )
+                })?;
+                Some(
+                    SubjectSoulSelfAuthoredPostImageAddressesV1::ReviewedRejected {
+                        revision_ledger: SubjectSoulManifestAddressV1 {
+                            namespace: "core_revision_ledger".to_string(),
+                            physical_key: scope_key,
+                        },
+                    },
+                )
+            }
+            SelfAuthoredCoreRefreshPlanV1::Adopt { next_core, .. } => {
+                Some(SubjectSoulSelfAuthoredPostImageAddressesV1::Adopt {
+                    revision: Box::new(self.subject_soul_revision_addresses(
+                        owner,
+                        snapshot.as_ref().map_or(1, |value| value.head.generation),
+                        next_core.revision,
+                        operation,
+                    )?),
+                })
+            }
+        };
+        let intent = SubjectSoulAutonomousCycleIntentV1 {
+            operation_id: operation_id.to_string(),
+            actor_subject_id: owner.subject_id.clone(),
+            layer_mutations,
+        };
+        let plan = plan_subject_soul_autonomous_cycle_v1(
+            owner,
+            &basis,
+            &intent,
+            refresh_plan,
+            self_authored_addresses.as_ref(),
+            planned_at,
+        )
+        .map_err(|error| {
+            subject_soul_sdk_error(
+                operation,
+                error.key,
+                subject_soul_error_disposition(error.key),
+            )
+        })?;
+        let SubjectSoulAutonomousCyclePlanV1::Commit {
+            expected_state,
+            intent_digest,
+            post_image,
+            revision_delta,
+            layer_upserts,
+            layer_deletes,
+        } = plan
+        else {
+            return Ok(None);
+        };
+        let scope_key =
+            subject_soul_scope_key(&owner.memory_space_id, &owner.subject_id, &owner.soul_id)
+                .map_err(|_| {
+                    subject_soul_sdk_error(
+                        operation,
+                        SubjectSoulLifecycleErrorKey::RepairRequired,
+                        SoulGovernanceSdkErrorDisposition::RepairRequired,
+                    )
+                })?;
+        let mut preconditions = if let Some(snapshot) = snapshot.as_ref() {
+            vec![
+                StoreJsonPrecondition::Exact {
+                    namespace: SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE.to_string(),
+                    key: scope_key.clone(),
+                    value: serde_json::to_value(&snapshot.head).map_err(|_| {
+                        subject_soul_sdk_error(
+                            operation,
+                            SubjectSoulLifecycleErrorKey::RepairRequired,
+                            SoulGovernanceSdkErrorDisposition::RepairRequired,
+                        )
+                    })?,
+                },
+                StoreJsonPrecondition::Exact {
+                    namespace: SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                    key: scope_key.clone(),
+                    value: serde_json::to_value(&snapshot.manifest).map_err(|_| {
+                        subject_soul_sdk_error(
+                            operation,
+                            SubjectSoulLifecycleErrorKey::RepairRequired,
+                            SoulGovernanceSdkErrorDisposition::RepairRequired,
+                        )
+                    })?,
+                },
+            ]
+        } else {
+            vec![
+                StoreJsonPrecondition::Absent {
+                    namespace: SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE.to_string(),
+                    key: scope_key.clone(),
+                },
+                StoreJsonPrecondition::Absent {
+                    namespace: SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                    key: scope_key.clone(),
+                },
+            ]
+        };
+        let mut mutations = vec![
+            StoreMutation::PutJson {
+                namespace: SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE.to_string(),
+                key: scope_key.clone(),
+                value: serde_json::to_value(post_image.head.as_ref()).map_err(|_| {
+                    subject_soul_sdk_error(
+                        operation,
+                        SubjectSoulLifecycleErrorKey::RepairRequired,
+                        SoulGovernanceSdkErrorDisposition::RepairRequired,
+                    )
+                })?,
+                event_kind: MemoryStoreEventKind::MemoryControl,
+                plane: SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE.to_string(),
+                record_key: scope_key.clone(),
+            },
+            StoreMutation::PutJson {
+                namespace: SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                key: scope_key.clone(),
+                value: serde_json::to_value(post_image.manifest.as_ref()).map_err(|_| {
+                    subject_soul_sdk_error(
+                        operation,
+                        SubjectSoulLifecycleErrorKey::RepairRequired,
+                        SoulGovernanceSdkErrorDisposition::RepairRequired,
+                    )
+                })?,
+                event_kind: MemoryStoreEventKind::MemoryControl,
+                plane: SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                record_key: scope_key.clone(),
+            },
+        ];
+        let mut upsert_documents = layer_upserts;
+        let mut delete_addresses = layer_deletes;
+        match *revision_delta {
+            SubjectSoulAutonomousRevisionDeltaV1::None => {}
+            SubjectSoulAutonomousRevisionDeltaV1::ReviewedRejected {
+                revision_ledger_document,
+                purge_manifest_addresses,
+            } => {
+                upsert_documents.push(*revision_ledger_document);
+                delete_addresses.extend(purge_manifest_addresses);
+            }
+            SubjectSoulAutonomousRevisionDeltaV1::Adopt {
+                material,
+                core_document,
+                revision_ledger_document,
+                purge_manifest_addresses,
+            } => {
+                let material_key = subject_soul_revision_material_key(
+                    &material.memory_space_id,
+                    &material.subject_id,
+                    &material.soul_id,
+                    material.generation,
+                    material.revision,
+                )
+                .map_err(|_| {
+                    subject_soul_sdk_error(
+                        operation,
+                        SubjectSoulLifecycleErrorKey::RepairRequired,
+                        SoulGovernanceSdkErrorDisposition::RepairRequired,
+                    )
+                })?;
+                let prior = current
+                    .closure_documents
+                    .iter()
+                    .find(|((namespace, key), _)| {
+                        namespace == SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE
+                            && key == &material_key
+                    })
+                    .map(|(_, value)| value.clone());
+                preconditions.push(match prior {
+                    Some(value) => StoreJsonPrecondition::Exact {
+                        namespace: SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE.to_string(),
+                        key: material_key.clone(),
+                        value,
+                    },
+                    None => StoreJsonPrecondition::Absent {
+                        namespace: SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE.to_string(),
+                        key: material_key.clone(),
+                    },
+                });
+                mutations.push(StoreMutation::PutJson {
+                    namespace: SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE.to_string(),
+                    key: material_key.clone(),
+                    value: serde_json::to_value(material.as_ref()).map_err(|_| {
+                        subject_soul_sdk_error(
+                            operation,
+                            SubjectSoulLifecycleErrorKey::RepairRequired,
+                            SoulGovernanceSdkErrorDisposition::RepairRequired,
+                        )
+                    })?,
+                    event_kind: MemoryStoreEventKind::MemoryControl,
+                    plane: SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE.to_string(),
+                    record_key: material_key,
+                });
+                upsert_documents.push(*core_document);
+                upsert_documents.push(*revision_ledger_document);
+                delete_addresses.extend(purge_manifest_addresses);
+            }
+        }
+        for document in upsert_documents {
+            let prior = current
+                .closure_documents
+                .iter()
+                .find(|((namespace, key), _)| {
+                    namespace == &document.namespace && key == &document.physical_key
+                })
+                .map(|(_, value)| value.clone());
+            preconditions.push(match prior {
+                Some(value) => StoreJsonPrecondition::Exact {
+                    namespace: document.namespace.clone(),
+                    key: document.physical_key.clone(),
+                    value,
+                },
+                None => StoreJsonPrecondition::Absent {
+                    namespace: document.namespace.clone(),
+                    key: document.physical_key.clone(),
+                },
+            });
+            mutations.push(StoreMutation::PutJson {
+                namespace: document.namespace.clone(),
+                key: document.physical_key.clone(),
+                value: serde_json::to_value(&document).map_err(|_| {
+                    subject_soul_sdk_error(
+                        operation,
+                        SubjectSoulLifecycleErrorKey::RepairRequired,
+                        SoulGovernanceSdkErrorDisposition::RepairRequired,
+                    )
+                })?,
+                event_kind: MemoryStoreEventKind::MemoryControl,
+                plane: document.namespace.clone(),
+                record_key: document.physical_key,
+            });
+        }
+        delete_addresses.sort_by(|left, right| {
+            (&left.namespace, &left.physical_key).cmp(&(&right.namespace, &right.physical_key))
+        });
+        delete_addresses.dedup();
+        for address in delete_addresses {
+            let prior = current
+                .closure_documents
+                .iter()
+                .find(|((namespace, key), _)| {
+                    namespace == &address.namespace && key == &address.physical_key
+                })
+                .map(|(_, value)| value.clone())
+                .ok_or_else(|| {
+                    subject_soul_sdk_error(
+                        operation,
+                        SubjectSoulLifecycleErrorKey::RepairRequired,
+                        SoulGovernanceSdkErrorDisposition::RepairRequired,
+                    )
+                })?;
+            preconditions.push(StoreJsonPrecondition::Exact {
+                namespace: address.namespace.clone(),
+                key: address.physical_key.clone(),
+                value: prior,
+            });
+            mutations.push(StoreMutation::DeleteJson {
+                namespace: address.namespace.clone(),
+                key: address.physical_key.clone(),
+                event_kind: MemoryStoreEventKind::MemoryControl,
+                plane: address.namespace,
+                record_key: address.physical_key,
+            });
+        }
+        if additional_plan.preconditions.iter().any(|precondition| {
+            let namespace = match precondition {
+                StoreJsonPrecondition::Absent { namespace, .. }
+                | StoreJsonPrecondition::Exact { namespace, .. } => namespace,
+            };
+            is_subject_soul_protected_json_namespace(namespace)
+                || is_relationship_source_protected_json_namespace(namespace)
+        }) || additional_plan.mutations.iter().any(|mutation| {
+            matches!(
+                mutation,
+                StoreMutation::PutJson { namespace, .. }
+                    | StoreMutation::DeleteJson { namespace, .. }
+                    if is_subject_soul_protected_json_namespace(namespace)
+                        || is_relationship_source_protected_json_namespace(namespace)
+            )
+        }) {
+            return Err(subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::AuthorityDenied,
+                SoulGovernanceSdkErrorDisposition::ContractRejected,
+            ));
+        }
+        let full_intent_digest = canonical_subject_soul_full_intent_digest(
+            &intent_digest,
+            &additional_plan.mutations,
+            &additional_plan.preconditions,
+            &additional_plan.blob_preconditions,
+        )
+        .map_err(|_| {
+            subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::RepairRequired,
+                SoulGovernanceSdkErrorDisposition::RepairRequired,
+            )
+        })?;
+        let additional_mutations = additional_plan.mutations;
+        let additional_preconditions = additional_plan.preconditions;
+        let additional_blob_preconditions = additional_plan.blob_preconditions;
+        preconditions.extend(additional_preconditions.clone());
+        mutations.extend(additional_mutations.clone());
+        let identity = MemoryMutationOperationIdentity::new(
+            operation_id,
+            &owner.memory_space_id,
+            &owner.subject_id,
+            &owner.subject_id,
+            MemoryMutationOperationKind::SoulRevision,
+        )
+        .map_err(|_| {
+            subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::OperationConflict,
+                SoulGovernanceSdkErrorDisposition::OperationConflict,
+            )
+        })?;
+        let changed_count = mutations.len();
+        let operation_plan = StoreMutationOperationPlan::new(
+            identity.clone(),
+            canonical_mor_intent_digest_from_core_digest(&full_intent_digest).map_err(|_| {
+                subject_soul_sdk_error(
+                    operation,
+                    SubjectSoulLifecycleErrorKey::RepairRequired,
+                    SoulGovernanceSdkErrorDisposition::RepairRequired,
+                )
+            })?,
+            MemoryMutationEffect::Changed,
+            changed_count,
+            &owner.subject_id,
+            planned_at,
+        )
+        .map_err(|_| {
+            subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::RepairRequired,
+                SoulGovernanceSdkErrorDisposition::RepairRequired,
+            )
+        })?;
+        let event_id = format!("subject-soul-event:{}", identity.storage_key());
+        mutations.push(StoreMutation::AppendEvent {
+            event: Box::new(
+                MemoryStoreEvent::new(
+                    &event_id,
+                    MemoryStoreEventKind::MemoryControl,
+                    scope.clone(),
+                    planned_at,
+                )
+                .with_plane(SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE)
+                .with_record_key(&scope_key)
+                .with_content_hash(&post_image.head.head_digest)
+                .with_payload("action", "autonomous_cycle")
+                .with_payload("generation", post_image.head.generation.to_string()),
+            ),
+        });
+        let batch = StoreMutationBatch {
+            transaction_id: operation_plan.transaction_id().to_string(),
+            operation: "subject_soul.autonomous_cycle".to_string(),
+            scope,
+            mutations,
+        };
+        let post_image = *post_image;
+        let store_plan = SubjectSoulStoreMutationPlan::new(
+            &intent_digest,
+            &full_intent_digest,
+            expected_state,
+            SubjectSoulStorePostImage {
+                head: *post_image.head,
+                manifest: *post_image.manifest,
+                current_material: post_image.current_material.map(|value| *value),
+                current_core: post_image.current_core.map(|value| *value),
+                current_core_document: post_image.current_core_document.map(|value| *value),
+                current_ledger: post_image.current_revision_ledger.map(|value| *value),
+                current_ledger_document: post_image
+                    .current_revision_ledger_document
+                    .map(|value| *value),
+            },
+            batch,
+            preconditions,
+            operation_plan,
+        )
+        .map_err(|error| map_subject_soul_store_failure(operation, error))?;
+        let store_plan = store_plan
+            .bind_additional_owner_plan(
+                &additional_mutations,
+                &additional_preconditions,
+                &additional_blob_preconditions,
+            )
+            .map_err(|error| map_subject_soul_store_failure(operation, error))?;
+        Ok(Some(store_plan))
+    }
+
+    /// Applies one archive/restore/reset/reseed/delete request against the
+    /// exact mounted Soul. Core owns lifecycle semantics; Store owns CAS,
+    /// durable replay, capacity admission, and atomic commit.
+    pub fn archive_subject_soul_self_governed(
+        &self,
+        operation_id: impl Into<String>,
+        expected_state: SubjectSoulExpectedStateV1,
+    ) -> SubjectSoulSdkResult<SubjectSoulMutationReportV1> {
+        self.mutate_subject_soul_internal(SubjectSoulLifecycleMutationRequestV1 {
+            operation_id: operation_id.into(),
+            target_subject_id: self.config.scoped_runtime.mounted_subject_id.clone(),
+            expected_state,
+            authority: SubjectSoulLifecycleAuthorityV1::SelfGovernance {
+                capability_digest: self.subject_soul_self_governance_capability_digest(),
+            },
+            action: SubjectSoulLifecycleActionV1::Archive,
+        })
+    }
+
+    pub fn restore_subject_soul_self_governed(
+        &self,
+        operation_id: impl Into<String>,
+        expected_state: SubjectSoulExpectedStateV1,
+    ) -> SubjectSoulSdkResult<SubjectSoulMutationReportV1> {
+        self.mutate_subject_soul_internal(SubjectSoulLifecycleMutationRequestV1 {
+            operation_id: operation_id.into(),
+            target_subject_id: self.config.scoped_runtime.mounted_subject_id.clone(),
+            expected_state,
+            authority: SubjectSoulLifecycleAuthorityV1::SelfGovernance {
+                capability_digest: self.subject_soul_self_governance_capability_digest(),
+            },
+            action: SubjectSoulLifecycleActionV1::Restore,
+        })
+    }
+
+    pub fn mutate_subject_soul(
+        &self,
+        request: SubjectSoulLifecycleMutationRequestV1,
+    ) -> SubjectSoulSdkResult<SubjectSoulMutationReportV1> {
+        if matches!(
+            &request.authority,
+            SubjectSoulLifecycleAuthorityV1::SelfGovernance { .. }
+        ) {
+            return Err(subject_soul_sdk_error(
+                match request.action {
+                    SubjectSoulLifecycleActionV1::Archive => SubjectSoulSdkOperation::Archive,
+                    SubjectSoulLifecycleActionV1::Restore => SubjectSoulSdkOperation::Restore,
+                    SubjectSoulLifecycleActionV1::Reset { .. } => SubjectSoulSdkOperation::Reset,
+                    SubjectSoulLifecycleActionV1::Reseed { .. } => SubjectSoulSdkOperation::Reseed,
+                    SubjectSoulLifecycleActionV1::Delete { .. } => SubjectSoulSdkOperation::Delete,
+                },
+                SubjectSoulLifecycleErrorKey::AuthorityDenied,
+                SoulGovernanceSdkErrorDisposition::AuthorityRejected,
+            ));
+        }
+        self.mutate_subject_soul_internal(request)
+    }
+
+    fn mutate_subject_soul_internal(
+        &self,
+        request: SubjectSoulLifecycleMutationRequestV1,
+    ) -> SubjectSoulSdkResult<SubjectSoulMutationReportV1> {
+        let operation = match request.action {
+            SubjectSoulLifecycleActionV1::Archive => SubjectSoulSdkOperation::Archive,
+            SubjectSoulLifecycleActionV1::Restore => SubjectSoulSdkOperation::Restore,
+            SubjectSoulLifecycleActionV1::Reset { .. } => SubjectSoulSdkOperation::Reset,
+            SubjectSoulLifecycleActionV1::Reseed { .. } => SubjectSoulSdkOperation::Reseed,
+            SubjectSoulLifecycleActionV1::Delete { .. } => SubjectSoulSdkOperation::Delete,
+        };
+        request.validate_contract().map_err(|error| {
+            subject_soul_sdk_error(
+                operation,
+                error.key,
+                subject_soul_error_disposition(error.key),
+            )
+        })?;
+        let owner = self.subject_soul_owner_for_mounted(operation)?;
+        if request.target_subject_id != owner.subject_id {
+            return Err(subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::TargetNotMounted,
+                SoulGovernanceSdkErrorDisposition::RegistryRejected,
+            ));
+        }
+        let (actor_subject_id, operation_kind) =
+            self.admit_subject_soul_lifecycle_authority(&request, operation)?;
+        let intent_digest =
+            subject_soul_lifecycle_intent_digest_v1(&owner, &request).map_err(|error| {
+                subject_soul_sdk_error(
+                    operation,
+                    error.key,
+                    subject_soul_error_disposition(error.key),
+                )
+            })?;
+        let identity = MemoryMutationOperationIdentity::new(
+            &request.operation_id,
+            &owner.memory_space_id,
+            &owner.subject_id,
+            &actor_subject_id,
+            operation_kind,
+        )
+        .map_err(|_| {
+            subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::OperationConflict,
+                SoulGovernanceSdkErrorDisposition::OperationConflict,
+            )
+        })?;
+        let store = self.config.store_platform.as_ref().ok_or_else(|| {
+            subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::RepairRequired,
+                SoulGovernanceSdkErrorDisposition::RepairRequired,
+            )
+        })?;
+        let runtime_budget = self.runtime_budget();
+        if let Some(report) = store
+            .preflight_subject_soul_operation(&identity, &intent_digest, &runtime_budget)
+            .map_err(|error| map_subject_soul_store_failure(operation, error))?
+        {
+            return Ok(report);
+        }
+        let current = store
+            .read_verified_subject_soul(
+                &owner.memory_space_id,
+                &owner.soul_id,
+                &SubjectSoulReadRequestV1 {
+                    target_subject_id: owner.subject_id.clone(),
+                    selector: SubjectSoulReadSelectorV1::Current,
+                    view: SubjectSoulReadViewV1::RuntimePrivate,
+                },
+                &runtime_budget,
+            )
+            .map_err(|error| map_subject_soul_store_failure(operation, error))?;
+        let snapshot = self.subject_soul_snapshot_from_read(&current, operation)?;
+        let next_generation = snapshot.head.generation.checked_add(1).ok_or_else(|| {
+            subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::CapacityExceeded,
+                SoulGovernanceSdkErrorDisposition::CapacityRejected,
+            )
+        })?;
+        let revision_addresses =
+            matches!(request.action, SubjectSoulLifecycleActionV1::Reseed { .. })
+                .then(|| {
+                    self.subject_soul_revision_addresses(&owner, next_generation, 1, operation)
+                })
+                .transpose()?;
+        let destructive = matches!(
+            request.action,
+            SubjectSoulLifecycleActionV1::Reset { .. }
+                | SubjectSoulLifecycleActionV1::Reseed { .. }
+                | SubjectSoulLifecycleActionV1::Delete { .. }
+        );
+        let tombstone_key = destructive
+            .then(|| {
+                subject_soul_generation_tombstone_key(
+                    &owner.memory_space_id,
+                    &owner.subject_id,
+                    &owner.soul_id,
+                    snapshot.head.generation,
+                )
+                .map_err(|_| {
+                    subject_soul_sdk_error(
+                        operation,
+                        SubjectSoulLifecycleErrorKey::RepairRequired,
+                        SoulGovernanceSdkErrorDisposition::RepairRequired,
+                    )
+                })
+            })
+            .transpose()?;
+        let planned_at = self.config.clock.now_secs();
+        let plan = plan_subject_soul_lifecycle_v1(
+            &owner,
+            &request,
+            &snapshot,
+            revision_addresses.as_ref(),
+            tombstone_key.as_deref(),
+            planned_at,
+        )
+        .map_err(|error| {
+            subject_soul_sdk_error(
+                operation,
+                error.key,
+                subject_soul_error_disposition(error.key),
+            )
+        })?;
+        if plan.intent_digest != intent_digest || plan.expected_state != request.expected_state {
+            return Err(subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::RepairRequired,
+                SoulGovernanceSdkErrorDisposition::RepairRequired,
+            ));
+        }
+
+        let scope_key =
+            subject_soul_scope_key(&owner.memory_space_id, &owner.subject_id, &owner.soul_id)
+                .map_err(|_| {
+                    subject_soul_sdk_error(
+                        operation,
+                        SubjectSoulLifecycleErrorKey::RepairRequired,
+                        SoulGovernanceSdkErrorDisposition::RepairRequired,
+                    )
+                })?;
+        let mut preconditions = vec![
+            StoreJsonPrecondition::Exact {
+                namespace: SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE.to_string(),
+                key: scope_key.clone(),
+                value: serde_json::to_value(&snapshot.head).map_err(|_| {
+                    subject_soul_sdk_error(
+                        operation,
+                        SubjectSoulLifecycleErrorKey::RepairRequired,
+                        SoulGovernanceSdkErrorDisposition::RepairRequired,
+                    )
+                })?,
+            },
+            StoreJsonPrecondition::Exact {
+                namespace: SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                key: scope_key.clone(),
+                value: serde_json::to_value(&snapshot.manifest).map_err(|_| {
+                    subject_soul_sdk_error(
+                        operation,
+                        SubjectSoulLifecycleErrorKey::RepairRequired,
+                        SoulGovernanceSdkErrorDisposition::RepairRequired,
+                    )
+                })?,
+            },
+        ];
+        let mut mutations = vec![
+            StoreMutation::PutJson {
+                namespace: SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE.to_string(),
+                key: scope_key.clone(),
+                value: serde_json::to_value(plan.post_head.as_ref()).map_err(|_| {
+                    subject_soul_sdk_error(
+                        operation,
+                        SubjectSoulLifecycleErrorKey::RepairRequired,
+                        SoulGovernanceSdkErrorDisposition::RepairRequired,
+                    )
+                })?,
+                event_kind: MemoryStoreEventKind::MemoryControl,
+                plane: SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE.to_string(),
+                record_key: scope_key.clone(),
+            },
+            StoreMutation::PutJson {
+                namespace: SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                key: scope_key.clone(),
+                value: serde_json::to_value(plan.post_manifest.as_ref()).map_err(|_| {
+                    subject_soul_sdk_error(
+                        operation,
+                        SubjectSoulLifecycleErrorKey::RepairRequired,
+                        SoulGovernanceSdkErrorDisposition::RepairRequired,
+                    )
+                })?,
+                event_kind: MemoryStoreEventKind::MemoryControl,
+                plane: SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                record_key: scope_key.clone(),
+            },
+        ];
+        let mut replacement_addresses = BTreeSet::new();
+        if let Some(material) = plan.new_material.as_deref() {
+            let key = subject_soul_revision_material_key(
+                &owner.memory_space_id,
+                &owner.subject_id,
+                &owner.soul_id,
+                material.generation,
+                material.revision,
+            )
+            .map_err(|_| {
+                subject_soul_sdk_error(
+                    operation,
+                    SubjectSoulLifecycleErrorKey::RepairRequired,
+                    SoulGovernanceSdkErrorDisposition::RepairRequired,
+                )
+            })?;
+            replacement_addresses.insert((
+                SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE.to_string(),
+                key.clone(),
+            ));
+            mutations.push(StoreMutation::PutJson {
+                namespace: SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE.to_string(),
+                key: key.clone(),
+                value: serde_json::to_value(material).map_err(|_| {
+                    subject_soul_sdk_error(
+                        operation,
+                        SubjectSoulLifecycleErrorKey::RepairRequired,
+                        SoulGovernanceSdkErrorDisposition::RepairRequired,
+                    )
+                })?,
+                event_kind: MemoryStoreEventKind::MemoryControl,
+                plane: SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE.to_string(),
+                record_key: key,
+            });
+        }
+        for document in [
+            plan.new_core_document.as_deref(),
+            plan.new_revision_ledger_document.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            replacement_addresses
+                .insert((document.namespace.clone(), document.physical_key.clone()));
+            mutations.push(StoreMutation::PutJson {
+                namespace: document.namespace.clone(),
+                key: document.physical_key.clone(),
+                value: serde_json::to_value(document).map_err(|_| {
+                    subject_soul_sdk_error(
+                        operation,
+                        SubjectSoulLifecycleErrorKey::RepairRequired,
+                        SoulGovernanceSdkErrorDisposition::RepairRequired,
+                    )
+                })?,
+                event_kind: MemoryStoreEventKind::MemoryControl,
+                plane: document.namespace.clone(),
+                record_key: document.physical_key.clone(),
+            });
+        }
+        preconditions.extend(
+            current
+                .relationship_projection_purge_preconditions(&plan.purge_manifest_addresses)
+                .map_err(|error| map_subject_soul_store_failure(operation, error))?,
+        );
+        for address in &plan.purge_manifest_addresses {
+            let key = (address.namespace.clone(), address.physical_key.clone());
+            let prior = current
+                .closure_documents
+                .iter()
+                .find(|(candidate, _)| candidate == &key)
+                .map(|(_, value)| value.clone())
+                .ok_or_else(|| {
+                    subject_soul_sdk_error(
+                        operation,
+                        SubjectSoulLifecycleErrorKey::RepairRequired,
+                        SoulGovernanceSdkErrorDisposition::RepairRequired,
+                    )
+                })?;
+            preconditions.push(StoreJsonPrecondition::Exact {
+                namespace: address.namespace.clone(),
+                key: address.physical_key.clone(),
+                value: prior,
+            });
+            if !replacement_addresses.contains(&key) {
+                mutations.push(StoreMutation::DeleteJson {
+                    namespace: address.namespace.clone(),
+                    key: address.physical_key.clone(),
+                    event_kind: MemoryStoreEventKind::MemoryControl,
+                    plane: address.namespace.clone(),
+                    record_key: address.physical_key.clone(),
+                });
+            }
+        }
+        for (namespace, key) in &replacement_addresses {
+            if !plan
+                .purge_manifest_addresses
+                .iter()
+                .any(|address| address.namespace == *namespace && address.physical_key == *key)
+            {
+                preconditions.push(StoreJsonPrecondition::Absent {
+                    namespace: namespace.clone(),
+                    key: key.clone(),
+                });
+            }
+        }
+        if let (Some(tombstone), Some(key)) = (plan.tombstone.as_deref(), tombstone_key.as_ref()) {
+            preconditions.push(StoreJsonPrecondition::Absent {
+                namespace: SUBJECT_SOUL_GENERATION_TOMBSTONE_NAMESPACE.to_string(),
+                key: key.clone(),
+            });
+            mutations.push(StoreMutation::PutJson {
+                namespace: SUBJECT_SOUL_GENERATION_TOMBSTONE_NAMESPACE.to_string(),
+                key: key.clone(),
+                value: serde_json::to_value(tombstone).map_err(|_| {
+                    subject_soul_sdk_error(
+                        operation,
+                        SubjectSoulLifecycleErrorKey::RepairRequired,
+                        SoulGovernanceSdkErrorDisposition::RepairRequired,
+                    )
+                })?,
+                event_kind: MemoryStoreEventKind::MemoryControl,
+                plane: SUBJECT_SOUL_GENERATION_TOMBSTONE_NAMESPACE.to_string(),
+                record_key: key.clone(),
+            });
+        }
+        let changed_count = mutations.len();
+        let operation_plan = StoreMutationOperationPlan::new(
+            identity.clone(),
+            canonical_mor_intent_digest_from_core_digest(&intent_digest).map_err(|_| {
+                subject_soul_sdk_error(
+                    operation,
+                    SubjectSoulLifecycleErrorKey::RepairRequired,
+                    SoulGovernanceSdkErrorDisposition::RepairRequired,
+                )
+            })?,
+            MemoryMutationEffect::Changed,
+            changed_count,
+            &actor_subject_id,
+            planned_at,
+        )
+        .map_err(|_| {
+            subject_soul_sdk_error(
+                operation,
+                SubjectSoulLifecycleErrorKey::RepairRequired,
+                SoulGovernanceSdkErrorDisposition::RepairRequired,
+            )
+        })?;
+        let action_label = match request.action {
+            SubjectSoulLifecycleActionV1::Archive => "archive",
+            SubjectSoulLifecycleActionV1::Restore => "restore",
+            SubjectSoulLifecycleActionV1::Reset { .. } => "reset",
+            SubjectSoulLifecycleActionV1::Reseed { .. } => "reseed",
+            SubjectSoulLifecycleActionV1::Delete { .. } => "delete",
+        };
+        let event_id = format!("subject-soul-event:{}", identity.storage_key());
+        mutations.push(StoreMutation::AppendEvent {
+            event: Box::new(
+                MemoryStoreEvent::new(
+                    &event_id,
+                    MemoryStoreEventKind::MemoryControl,
+                    self.memory_write_transaction_scope(),
+                    planned_at,
+                )
+                .with_plane(SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE)
+                .with_record_key(&scope_key)
+                .with_content_hash(&plan.post_head.head_digest)
+                .with_payload("action", action_label)
+                .with_payload("generation", plan.post_head.generation.to_string())
+                .with_payload(
+                    "state",
+                    format!("{:?}", plan.post_head.state).to_ascii_lowercase(),
+                ),
+            ),
+        });
+        let batch = StoreMutationBatch {
+            transaction_id: operation_plan.transaction_id().to_string(),
+            operation: format!("subject_soul.{action_label}"),
+            scope: self.memory_write_transaction_scope(),
+            mutations,
+        };
+        let post_image = match request.action {
+            SubjectSoulLifecycleActionV1::Archive | SubjectSoulLifecycleActionV1::Restore => {
+                SubjectSoulStorePostImage {
+                    head: *plan.post_head,
+                    manifest: *plan.post_manifest,
+                    current_material: snapshot.current_material,
+                    current_core: snapshot.current_core,
+                    current_core_document: snapshot.current_core_document,
+                    current_ledger: snapshot.current_revision_ledger,
+                    current_ledger_document: snapshot.current_revision_ledger_document,
+                }
+            }
+            SubjectSoulLifecycleActionV1::Reset { .. }
+            | SubjectSoulLifecycleActionV1::Delete { .. } => SubjectSoulStorePostImage {
+                head: *plan.post_head,
+                manifest: *plan.post_manifest,
+                current_material: None,
+                current_core: None,
+                current_core_document: None,
+                current_ledger: None,
+                current_ledger_document: None,
+            },
+            SubjectSoulLifecycleActionV1::Reseed { .. } => SubjectSoulStorePostImage {
+                head: *plan.post_head,
+                manifest: *plan.post_manifest,
+                current_material: plan.new_material.map(|value| *value),
+                current_core: plan.new_core.map(|value| *value),
+                current_core_document: plan.new_core_document.map(|value| *value),
+                current_ledger: plan.new_revision_ledger.map(|value| *value),
+                current_ledger_document: plan.new_revision_ledger_document.map(|value| *value),
+            },
+        };
+        let store_plan = SubjectSoulStoreMutationPlan::new(
+            &intent_digest,
+            &intent_digest,
+            request.expected_state,
+            post_image,
+            batch,
+            preconditions,
+            operation_plan,
+        )
+        .map_err(|error| map_subject_soul_store_failure(operation, error))?;
+        match store
+            .commit_subject_soul_mutation_with_runtime_budget(store_plan, &runtime_budget)
+            .map_err(|error| map_subject_soul_store_failure(operation, error))?
+        {
+            SubjectSoulStoreMutationOutcome::Committed { result, .. }
+            | SubjectSoulStoreMutationOutcome::Replayed { result, .. } => Ok(result),
+        }
+    }
+
+    /// Returns the Store-open proof required for the first relationship-root
+    /// mutation. A non-pristine relationship fails closed instead of returning
+    /// a reusable absence token.
+    pub fn relationship_source_pristine_expected_state(
+        &self,
+        relationship_id: &str,
+    ) -> RelationshipSourceSdkResult<RelationshipSourceExpectedStateV1> {
+        let operation = RelationshipSourceSdkOperation::Control;
+        let relationship_id = relationship_id.trim();
+        if relationship_id.is_empty() {
+            return Err(relationship_source_sdk_error(
+                operation,
+                RelationshipSourceControlErrorKeyV1::TargetMismatch,
+                SoulGovernanceSdkErrorDisposition::ContractRejected,
+            ));
+        }
+        let store = self.config.store_platform.as_ref().ok_or_else(|| {
+            relationship_source_sdk_error(
+                operation,
+                RelationshipSourceControlErrorKeyV1::RepairRequired,
+                SoulGovernanceSdkErrorDisposition::RepairRequired,
+            )
+        })?;
+        let certificate = store.subject_soul_open_closure_certificate();
+        if !certificate
+            .proves_zero_relationship_artifacts(&self.config.memory_space_id, relationship_id)
+        {
+            return Err(relationship_source_sdk_error(
+                operation,
+                RelationshipSourceControlErrorKeyV1::RevisionConflict,
+                SoulGovernanceSdkErrorDisposition::ExpectedStateConflict,
+            ));
+        }
+        Ok(RelationshipSourceExpectedStateV1::PristineAbsent {
+            closure_certificate_digest: certificate.digest().to_string(),
+        })
+    }
+
+    /// Applies one typed relationship-source mutation through Core planning and
+    /// the Store operation-aware transaction owner.
+    pub fn control_relationship_source(
+        &self,
+        intent: RelationshipSourceControlIntentV1,
+    ) -> RelationshipSourceSdkResult<RelationshipSourceControlReportV1> {
+        if !matches!(
+            &intent.authority,
+            RelationshipSourceControlAuthorityV1::HumanUser { .. }
+        ) {
+            return Err(relationship_source_sdk_error(
+                RelationshipSourceSdkOperation::Control,
+                RelationshipSourceControlErrorKeyV1::AuthorityDenied,
+                SoulGovernanceSdkErrorDisposition::AuthorityRejected,
+            ));
+        }
+        self.control_relationship_source_internal(intent)
+    }
+
+    fn control_relationship_source_internal(
+        &self,
+        intent: RelationshipSourceControlIntentV1,
+    ) -> RelationshipSourceSdkResult<RelationshipSourceControlReportV1> {
+        let operation = RelationshipSourceSdkOperation::Control;
+        intent.validate_contract().map_err(|error| {
+            relationship_source_sdk_error(
+                operation,
+                error.key,
+                relationship_source_error_disposition(error.key),
+            )
+        })?;
+        self.ensure_relationship_intent_membership(&intent, operation)?;
+        let intent_digest = intent.intent_digest().map_err(|error| {
+            relationship_source_sdk_error(
+                operation,
+                error.key,
+                relationship_source_error_disposition(error.key),
+            )
+        })?;
+        let identity = MemoryMutationOperationIdentity::new(
+            &intent.operation_id,
+            &intent.memory_space_id,
+            &intent.mounted_subject_id,
+            intent.authority.actor_subject_id(),
+            MemoryMutationOperationKind::RelationshipControl,
+        )
+        .map_err(|_| {
+            relationship_source_sdk_error(
+                operation,
+                RelationshipSourceControlErrorKeyV1::OperationConflict,
+                SoulGovernanceSdkErrorDisposition::OperationConflict,
+            )
+        })?;
+        let store = self.config.store_platform.as_ref().ok_or_else(|| {
+            relationship_source_sdk_error(
+                operation,
+                RelationshipSourceControlErrorKeyV1::RepairRequired,
+                SoulGovernanceSdkErrorDisposition::RepairRequired,
+            )
+        })?;
+        let runtime_budget = self.runtime_budget();
+        if let Some(report) = store
+            .preflight_relationship_source_operation(&identity, &intent_digest, &runtime_budget)
+            .map_err(|error| map_relationship_source_store_failure(operation, error))?
+        {
+            return Ok(report);
+        }
+
+        let previous = match &intent.expected_state {
+            RelationshipSourceExpectedStateV1::PristineAbsent {
+                closure_certificate_digest,
+            } => {
+                let certificate = store.subject_soul_open_closure_certificate();
+                if closure_certificate_digest != certificate.digest()
+                    || !certificate.proves_zero_relationship_artifacts(
+                        &intent.memory_space_id,
+                        &intent.relationship_id,
+                    )
+                {
+                    return Err(relationship_source_sdk_error(
+                        operation,
+                        RelationshipSourceControlErrorKeyV1::RevisionConflict,
+                        SoulGovernanceSdkErrorDisposition::ExpectedStateConflict,
+                    ));
+                }
+                None
+            }
+            RelationshipSourceExpectedStateV1::Exact {
+                revision,
+                state,
+                source_digest,
+                manifest_digest,
+            } => {
+                let read = store
+                    .read_verified_relationship_source(
+                        &intent.memory_space_id,
+                        &intent.relationship_id,
+                        Some(*revision),
+                        &runtime_budget,
+                    )
+                    .map_err(|error| map_relationship_source_store_failure(operation, error))?;
+                self.ensure_relationship_source_membership(&read.source, operation)?;
+                if read.source.revision != *revision
+                    || read.source.state != *state
+                    || read.source.content_digest != *source_digest
+                    || read.manifest.current_revision != *revision
+                    || read.manifest.closure_digest != *manifest_digest
+                {
+                    return Err(relationship_source_sdk_error(
+                        operation,
+                        RelationshipSourceControlErrorKeyV1::RevisionConflict,
+                        SoulGovernanceSdkErrorDisposition::ExpectedStateConflict,
+                    ));
+                }
+                Some(read)
+            }
+        };
+        let planned_at = self.config.clock.now_secs();
+        let plan = plan_relationship_source_control(
+            &intent,
+            previous.as_ref().map(|read| &read.source),
+            previous.as_ref().map(|read| &read.manifest),
+            planned_at,
+        )
+        .map_err(|error| {
+            relationship_source_sdk_error(
+                operation,
+                error.key,
+                relationship_source_error_disposition(error.key),
+            )
+        })?;
+        let source_key = relationship_source_revision_key(
+            &intent.memory_space_id,
+            &intent.relationship_id,
+            plan.post_source.revision,
+        )
+        .map_err(|_| relationship_source_repair_error(operation))?;
+        let manifest_key =
+            relationship_source_scope_key(&intent.memory_space_id, &intent.relationship_id)
+                .map_err(|_| relationship_source_repair_error(operation))?;
+        let source_value = serde_json::to_value(&plan.post_source)
+            .map_err(|_| relationship_source_repair_error(operation))?;
+        let manifest_value = serde_json::to_value(&plan.post_manifest)
+            .map_err(|_| relationship_source_repair_error(operation))?;
+        let mut soul_projection_mutations = Vec::new();
+        let mut soul_projection_preconditions = Vec::new();
+        let soul_projection_plan = {
+            let soul_id = self
+                .subject_soul_id_for_target(
+                    &intent.mounted_subject_id,
+                    SubjectSoulSdkOperation::Project,
+                )
+                .map_err(|_| relationship_source_repair_error(operation))?;
+            let soul_read = store
+                .read_verified_subject_soul(
+                    &intent.memory_space_id,
+                    &soul_id,
+                    &SubjectSoulReadRequestV1 {
+                        target_subject_id: intent.mounted_subject_id.clone(),
+                        selector: SubjectSoulReadSelectorV1::Current,
+                        view: SubjectSoulReadViewV1::RuntimePrivate,
+                    },
+                    &runtime_budget,
+                )
+                .map_err(|error| map_relationship_source_store_failure(operation, error))?;
+            match &soul_read.outcome {
+                SubjectSoulReadOutcomeV1::ImplicitUnseeded { .. }
+                | SubjectSoulReadOutcomeV1::TerminatedGeneration { .. } => None,
+                SubjectSoulReadOutcomeV1::Verified { .. } => {
+                    let snapshot = self
+                        .subject_soul_snapshot_from_read(
+                            &soul_read,
+                            SubjectSoulSdkOperation::Project,
+                        )
+                        .map_err(|_| relationship_source_repair_error(operation))?;
+                    let projection_key = subject_soul_relationship_projection_key(
+                        &intent.memory_space_id,
+                        &intent.mounted_subject_id,
+                        &soul_id,
+                        &intent.relationship_id,
+                        snapshot.head.generation,
+                    )
+                    .map_err(|_| relationship_source_repair_error(operation))?;
+                    let projection_address = SubjectSoulManifestAddressV1 {
+                        namespace: SUBJECT_SOUL_RELATIONSHIP_PROJECTION_NAMESPACE.to_string(),
+                        physical_key: projection_key.clone(),
+                    };
+                    let existing = soul_read
+                        .relationship_projection(&intent.relationship_id)
+                        .map_err(|error| map_relationship_source_store_failure(operation, error))?
+                        .map(|(projection, _)| projection);
+                    let privacy_ceiling = if self.config.privacy_policy.prompt_projection_allowed {
+                        bm_core::memory::RelationshipDisclosureCeilingV1::GovernedSummary
+                    } else {
+                        bm_core::memory::RelationshipDisclosureCeilingV1::None
+                    };
+                    let projection_plan = plan_subject_soul_relationship_projection_v1(
+                        &snapshot,
+                        &plan.post_source,
+                        &plan.post_manifest,
+                        existing.as_ref(),
+                        &projection_address,
+                        privacy_ceiling,
+                        bm_core::memory::RelationshipDisclosureCeilingV1::GovernedSummary,
+                        planned_at,
+                    )
+                    .map_err(|_| relationship_source_repair_error(operation))?;
+                    match &projection_plan {
+                        SubjectSoulRelationshipProjectionPlanV1::NoEffect => {}
+                        SubjectSoulRelationshipProjectionPlanV1::Upsert {
+                            projection,
+                            post_head,
+                            post_manifest,
+                        } => {
+                            soul_projection_preconditions.extend([
+                                StoreJsonPrecondition::Exact {
+                                    namespace: SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE.to_string(),
+                                    key: subject_soul_scope_key(
+                                        &post_head.memory_space_id,
+                                        &post_head.subject_id,
+                                        &post_head.soul_id,
+                                    )
+                                    .map_err(|_| relationship_source_repair_error(operation))?,
+                                    value: serde_json::to_value(&snapshot.head)
+                                        .map_err(|_| relationship_source_repair_error(operation))?,
+                                },
+                                StoreJsonPrecondition::Exact {
+                                    namespace: SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                                    key: subject_soul_scope_key(
+                                        &post_head.memory_space_id,
+                                        &post_head.subject_id,
+                                        &post_head.soul_id,
+                                    )
+                                    .map_err(|_| relationship_source_repair_error(operation))?,
+                                    value: serde_json::to_value(&snapshot.manifest)
+                                        .map_err(|_| relationship_source_repair_error(operation))?,
+                                },
+                            ]);
+                            soul_projection_preconditions.push(match existing.as_ref() {
+                                Some(prior) => StoreJsonPrecondition::Exact {
+                                    namespace: SUBJECT_SOUL_RELATIONSHIP_PROJECTION_NAMESPACE
+                                        .to_string(),
+                                    key: projection_key.clone(),
+                                    value: serde_json::to_value(prior)
+                                        .map_err(|_| relationship_source_repair_error(operation))?,
+                                },
+                                None => StoreJsonPrecondition::Absent {
+                                    namespace: SUBJECT_SOUL_RELATIONSHIP_PROJECTION_NAMESPACE
+                                        .to_string(),
+                                    key: projection_key.clone(),
+                                },
+                            });
+                            let soul_key = subject_soul_scope_key(
+                                &post_head.memory_space_id,
+                                &post_head.subject_id,
+                                &post_head.soul_id,
+                            )
+                            .map_err(|_| relationship_source_repair_error(operation))?;
+                            soul_projection_mutations.extend([
+                                StoreMutation::PutJson {
+                                    namespace: SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE.to_string(),
+                                    key: soul_key.clone(),
+                                    value: serde_json::to_value(post_head.as_ref())
+                                        .map_err(|_| relationship_source_repair_error(operation))?,
+                                    event_kind: MemoryStoreEventKind::MemoryControl,
+                                    plane: SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE.to_string(),
+                                    record_key: soul_key.clone(),
+                                },
+                                StoreMutation::PutJson {
+                                    namespace: SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                                    key: soul_key.clone(),
+                                    value: serde_json::to_value(post_manifest.as_ref())
+                                        .map_err(|_| relationship_source_repair_error(operation))?,
+                                    event_kind: MemoryStoreEventKind::MemoryControl,
+                                    plane: SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                                    record_key: soul_key,
+                                },
+                                StoreMutation::PutJson {
+                                    namespace: SUBJECT_SOUL_RELATIONSHIP_PROJECTION_NAMESPACE
+                                        .to_string(),
+                                    key: projection_key.clone(),
+                                    value: serde_json::to_value(projection.as_ref())
+                                        .map_err(|_| relationship_source_repair_error(operation))?,
+                                    event_kind: MemoryStoreEventKind::MemoryControl,
+                                    plane: SUBJECT_SOUL_RELATIONSHIP_PROJECTION_NAMESPACE
+                                        .to_string(),
+                                    record_key: projection_key,
+                                },
+                            ]);
+                        }
+                        SubjectSoulRelationshipProjectionPlanV1::Delete {
+                            post_head,
+                            post_manifest,
+                        } => {
+                            let prior = existing
+                                .as_ref()
+                                .ok_or_else(|| relationship_source_repair_error(operation))?;
+                            let soul_key = subject_soul_scope_key(
+                                &post_head.memory_space_id,
+                                &post_head.subject_id,
+                                &post_head.soul_id,
+                            )
+                            .map_err(|_| relationship_source_repair_error(operation))?;
+                            soul_projection_preconditions.extend([
+                                StoreJsonPrecondition::Exact {
+                                    namespace: SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE.to_string(),
+                                    key: soul_key.clone(),
+                                    value: serde_json::to_value(&snapshot.head)
+                                        .map_err(|_| relationship_source_repair_error(operation))?,
+                                },
+                                StoreJsonPrecondition::Exact {
+                                    namespace: SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                                    key: soul_key.clone(),
+                                    value: serde_json::to_value(&snapshot.manifest)
+                                        .map_err(|_| relationship_source_repair_error(operation))?,
+                                },
+                                StoreJsonPrecondition::Exact {
+                                    namespace: SUBJECT_SOUL_RELATIONSHIP_PROJECTION_NAMESPACE
+                                        .to_string(),
+                                    key: projection_key.clone(),
+                                    value: serde_json::to_value(prior)
+                                        .map_err(|_| relationship_source_repair_error(operation))?,
+                                },
+                            ]);
+                            soul_projection_mutations.extend([
+                                StoreMutation::PutJson {
+                                    namespace: SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE.to_string(),
+                                    key: soul_key.clone(),
+                                    value: serde_json::to_value(post_head.as_ref())
+                                        .map_err(|_| relationship_source_repair_error(operation))?,
+                                    event_kind: MemoryStoreEventKind::MemoryControl,
+                                    plane: SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE.to_string(),
+                                    record_key: soul_key.clone(),
+                                },
+                                StoreMutation::PutJson {
+                                    namespace: SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                                    key: soul_key.clone(),
+                                    value: serde_json::to_value(post_manifest.as_ref())
+                                        .map_err(|_| relationship_source_repair_error(operation))?,
+                                    event_kind: MemoryStoreEventKind::MemoryControl,
+                                    plane: SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                                    record_key: soul_key,
+                                },
+                                StoreMutation::DeleteJson {
+                                    namespace: SUBJECT_SOUL_RELATIONSHIP_PROJECTION_NAMESPACE
+                                        .to_string(),
+                                    key: projection_key.clone(),
+                                    event_kind: MemoryStoreEventKind::MemoryControl,
+                                    plane: SUBJECT_SOUL_RELATIONSHIP_PROJECTION_NAMESPACE
+                                        .to_string(),
+                                    record_key: projection_key,
+                                },
+                            ]);
+                        }
+                    }
+                    Some(projection_plan)
+                }
+            }
+        };
+        let operation_plan = StoreMutationOperationPlan::new(
+            identity.clone(),
+            canonical_mor_intent_digest_from_core_digest(&plan.intent_digest)
+                .map_err(|_| relationship_source_repair_error(operation))?,
+            MemoryMutationEffect::Changed,
+            2 + soul_projection_mutations.len(),
+            plan.actor_subject_id.clone(),
+            planned_at,
+        )
+        .map_err(|_| relationship_source_repair_error(operation))?;
+        let transaction_id = operation_plan.transaction_id().to_string();
+        let event_id = format!("relationship-source-event:{}", identity.storage_key());
+        let scope = self.memory_write_transaction_scope();
+        let event = MemoryStoreEvent::new(
+            &event_id,
+            MemoryStoreEventKind::MemoryControl,
+            scope.clone(),
+            planned_at,
+        )
+        .with_plane(RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE)
+        .with_record_key(&source_key)
+        .with_content_hash(&plan.post_source.content_digest)
+        .with_payload("relationship_id", intent.relationship_id.clone())
+        .with_payload("revision", plan.post_source.revision.to_string())
+        .with_payload(
+            "state",
+            format!("{:?}", plan.post_source.state).to_ascii_lowercase(),
+        );
+        let mut preconditions = vec![StoreJsonPrecondition::Absent {
+            namespace: RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE.to_string(),
+            key: source_key.clone(),
+        }];
+        match previous.as_ref() {
+            None => preconditions.push(StoreJsonPrecondition::Absent {
+                namespace: RELATIONSHIP_SOURCE_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                key: manifest_key.clone(),
+            }),
+            Some(read) => {
+                let prior_key = relationship_source_revision_key(
+                    &read.source.memory_space_id,
+                    &read.source.relationship_id,
+                    read.source.revision,
+                )
+                .map_err(|_| relationship_source_repair_error(operation))?;
+                preconditions.push(StoreJsonPrecondition::Exact {
+                    namespace: RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE.to_string(),
+                    key: prior_key,
+                    value: serde_json::to_value(&read.source)
+                        .map_err(|_| relationship_source_repair_error(operation))?,
+                });
+                preconditions.push(StoreJsonPrecondition::Exact {
+                    namespace: RELATIONSHIP_SOURCE_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                    key: manifest_key.clone(),
+                    value: serde_json::to_value(&read.manifest)
+                        .map_err(|_| relationship_source_repair_error(operation))?,
+                });
+            }
+        }
+        preconditions.extend(soul_projection_preconditions);
+        let mut mutations = vec![
+            StoreMutation::PutJson {
+                namespace: RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE.to_string(),
+                key: source_key.clone(),
+                value: source_value,
+                event_kind: MemoryStoreEventKind::MemoryControl,
+                plane: RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE.to_string(),
+                record_key: source_key,
+            },
+            StoreMutation::PutJson {
+                namespace: RELATIONSHIP_SOURCE_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                key: manifest_key.clone(),
+                value: manifest_value,
+                event_kind: MemoryStoreEventKind::MemoryControl,
+                plane: RELATIONSHIP_SOURCE_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                record_key: manifest_key,
+            },
+        ];
+        mutations.extend(soul_projection_mutations);
+        mutations.push(StoreMutation::AppendEvent {
+            event: Box::new(event),
+        });
+        let batch = StoreMutationBatch {
+            transaction_id,
+            operation: "relationship_source.control".to_string(),
+            scope,
+            mutations,
+        };
+        let store_plan = RelationshipSourceStoreMutationPlan::new(
+            plan,
+            soul_projection_plan,
+            batch,
+            preconditions,
+            operation_plan,
+        )
+        .map_err(|error| map_relationship_source_store_failure(operation, error))?;
+        let outcome = store
+            .commit_relationship_source_mutation_with_runtime_budget(store_plan, &runtime_budget)
+            .map_err(|error| map_relationship_source_store_failure(operation, error))?;
+        match outcome {
+            RelationshipSourceStoreMutationOutcome::Committed { result, .. }
+            | RelationshipSourceStoreMutationOutcome::Replayed { result, .. } => Ok(result),
+        }
+    }
+
+    /// Reads relationship-root metadata for the exact mounted relationship.
+    /// Clause bodies and private contribution evidence stay inside the SDK.
+    pub fn read_relationship_source(
+        &self,
+        request: RelationshipSourceReadRequestV1,
+    ) -> RelationshipSourceSdkResult<RelationshipSourceReadReportV1> {
+        let read =
+            self.read_verified_relationship_source(&request, RelationshipSourceSdkOperation::Read)?;
+        Ok(RelationshipSourceReadReportV1 {
+            memory_space_id: read.source.memory_space_id,
+            relationship_id: read.source.relationship_id,
+            mounted_subject_id: read.source.mounted_subject_id,
+            counterparty_subject_ids: read.source.counterparty_subject_ids,
+            selected_revision: read.source.revision,
+            selected_state: read.source.state,
+            selected_source_digest: read.source.content_digest,
+            current_revision: read.manifest.current_revision,
+            current_state: (read.source.revision == read.manifest.current_revision)
+                .then_some(read.source.state),
+            current_source_digest: read.manifest.current_digest,
+            current_manifest_digest: read.manifest.closure_digest,
+            immutable_read_state_digest: read.receipt.state_digest,
+        })
+    }
+
+    fn read_verified_relationship_source(
+        &self,
+        request: &RelationshipSourceReadRequestV1,
+        operation: RelationshipSourceSdkOperation,
+    ) -> RelationshipSourceSdkResult<RelationshipSourceVerifiedStoreRead> {
+        request.validate_contract().map_err(|error| {
+            relationship_source_sdk_error(
+                operation,
+                error.key,
+                relationship_source_error_disposition(error.key),
+            )
+        })?;
+        if request.memory_space_id != self.config.memory_space_id
+            || request.mounted_subject_id != self.config.scoped_runtime.mounted_subject_id
+        {
+            return Err(relationship_source_sdk_error(
+                operation,
+                RelationshipSourceControlErrorKeyV1::TargetMismatch,
+                SoulGovernanceSdkErrorDisposition::RegistryRejected,
+            ));
+        }
+        self.subject_soul_id_for_target(&request.mounted_subject_id, SubjectSoulSdkOperation::Read)
+            .map_err(|_| {
+                relationship_source_sdk_error(
+                    operation,
+                    RelationshipSourceControlErrorKeyV1::MembershipMismatch,
+                    SoulGovernanceSdkErrorDisposition::RegistryRejected,
+                )
+            })?;
+        let revision = match &request.selector {
+            RelationshipSourceReadSelectorV1::Current => None,
+            RelationshipSourceReadSelectorV1::Exact { revision, .. } => Some(*revision),
+        };
+        let store = self.config.store_platform.as_ref().ok_or_else(|| {
+            relationship_source_sdk_error(
+                operation,
+                RelationshipSourceControlErrorKeyV1::RepairRequired,
+                SoulGovernanceSdkErrorDisposition::RepairRequired,
+            )
+        })?;
+        let read = store
+            .read_verified_relationship_source(
+                &request.memory_space_id,
+                &request.relationship_id,
+                revision,
+                &self.runtime_budget(),
+            )
+            .map_err(|error| map_relationship_source_store_failure(operation, error))?;
+        if let RelationshipSourceReadSelectorV1::Exact { source_digest, .. } = &request.selector {
+            if &read.source.content_digest != source_digest {
+                return Err(relationship_source_sdk_error(
+                    operation,
+                    RelationshipSourceControlErrorKeyV1::RevisionConflict,
+                    SoulGovernanceSdkErrorDisposition::ExpectedStateConflict,
+                ));
+            }
+        }
+        self.ensure_relationship_source_membership(&read.source, operation)?;
+        Ok(read)
+    }
+
+    fn ensure_relationship_intent_membership(
+        &self,
+        intent: &RelationshipSourceControlIntentV1,
+        operation: RelationshipSourceSdkOperation,
+    ) -> RelationshipSourceSdkResult<()> {
+        if intent.memory_space_id != self.config.memory_space_id
+            || intent.mounted_subject_id != self.config.scoped_runtime.mounted_subject_id
+        {
+            return Err(relationship_source_sdk_error(
+                operation,
+                RelationshipSourceControlErrorKeyV1::TargetMismatch,
+                SoulGovernanceSdkErrorDisposition::RegistryRejected,
+            ));
+        }
+        let registry = &self.config.subject_registry;
+        let graph = &self.config.subject_relationship_graph;
+        if !registry.validate_contract().accepted
+            || !graph.validate_against_registry(registry).accepted
+        {
+            return Err(relationship_source_repair_error(operation));
+        }
+        let Some(mounted) = registry.subject(&intent.mounted_subject_id) else {
+            return Err(relationship_source_sdk_error(
+                operation,
+                RelationshipSourceControlErrorKeyV1::MembershipMismatch,
+                SoulGovernanceSdkErrorDisposition::RegistryRejected,
+            ));
+        };
+        if mounted.kind != SubjectKind::AgentPersona
+            || mounted.lifecycle_state != SubjectLifecycleState::Active
+        {
+            return Err(relationship_source_sdk_error(
+                operation,
+                RelationshipSourceControlErrorKeyV1::MembershipMismatch,
+                SoulGovernanceSdkErrorDisposition::RegistryRejected,
+            ));
+        }
+        for counterparty in &intent.counterparty_subject_ids {
+            let Some(subject) = registry.subject(counterparty) else {
+                return Err(relationship_source_sdk_error(
+                    operation,
+                    RelationshipSourceControlErrorKeyV1::MembershipMismatch,
+                    SoulGovernanceSdkErrorDisposition::RegistryRejected,
+                ));
+            };
+            if subject.lifecycle_state != SubjectLifecycleState::Active
+                || !graph.edges.iter().any(|edge| {
+                    edge.relationship_id.as_deref() == Some(intent.relationship_id.as_str())
+                        && ((edge.from_subject_id == intent.mounted_subject_id
+                            && edge.to_subject_id == *counterparty)
+                            || (edge.to_subject_id == intent.mounted_subject_id
+                                && edge.from_subject_id == *counterparty))
+                })
+            {
+                return Err(relationship_source_sdk_error(
+                    operation,
+                    RelationshipSourceControlErrorKeyV1::MembershipMismatch,
+                    SoulGovernanceSdkErrorDisposition::RegistryRejected,
+                ));
+            }
+        }
+        let actor_id = intent.authority.actor_subject_id();
+        let Some(actor) = registry.subject(actor_id) else {
+            return Err(relationship_source_sdk_error(
+                operation,
+                RelationshipSourceControlErrorKeyV1::MembershipMismatch,
+                SoulGovernanceSdkErrorDisposition::RegistryRejected,
+            ));
+        };
+        let allowed = match &intent.authority {
+            RelationshipSourceControlAuthorityV1::HumanUser { .. } => {
+                actor.kind == SubjectKind::HumanUser
+                    && actor.lifecycle_state == SubjectLifecycleState::Active
+                    && intent
+                        .counterparty_subject_ids
+                        .iter()
+                        .any(|subject_id| subject_id == actor_id)
+            }
+            RelationshipSourceControlAuthorityV1::MountedAgentPersona {
+                self_governance_capability_digest,
+                ..
+            } => {
+                actor.kind == SubjectKind::AgentPersona
+                    && actor.lifecycle_state == SubjectLifecycleState::Active
+                    && actor_id == intent.mounted_subject_id
+                    && self_governance_capability_digest
+                        == &self.subject_soul_self_governance_capability_digest()
+            }
+            RelationshipSourceControlAuthorityV1::SystemGovernor {
+                policy_capability_digest,
+                ..
+            } => {
+                actor.kind == SubjectKind::SystemGovernor
+                    && actor.lifecycle_state == SubjectLifecycleState::Active
+                    && policy_capability_digest
+                        == &self.relationship_source_policy_capability_digest(actor_id)
+                    && graph.edges.iter().any(|edge| {
+                        edge.kind == SubjectRelationshipKind::Governs
+                            && edge.from_subject_id == actor_id
+                            && edge.to_subject_id == intent.mounted_subject_id
+                    })
+            }
+        };
+        if !allowed {
+            return Err(relationship_source_sdk_error(
+                operation,
+                RelationshipSourceControlErrorKeyV1::AuthorityDenied,
+                SoulGovernanceSdkErrorDisposition::AuthorityRejected,
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_relationship_source_membership(
+        &self,
+        source: &RelationshipSourceConstitutionV1,
+        operation: RelationshipSourceSdkOperation,
+    ) -> RelationshipSourceSdkResult<()> {
+        if source.memory_space_id != self.config.memory_space_id
+            || source.mounted_subject_id != self.config.scoped_runtime.mounted_subject_id
+        {
+            return Err(relationship_source_sdk_error(
+                operation,
+                RelationshipSourceControlErrorKeyV1::TargetMismatch,
+                SoulGovernanceSdkErrorDisposition::RegistryRejected,
+            ));
+        }
+        let registry = &self.config.subject_registry;
+        let graph = &self.config.subject_relationship_graph;
+        if !registry.validate_contract().accepted
+            || !graph.validate_against_registry(registry).accepted
+        {
+            return Err(relationship_source_sdk_error(
+                operation,
+                RelationshipSourceControlErrorKeyV1::RepairRequired,
+                SoulGovernanceSdkErrorDisposition::RegistryRejected,
+            ));
+        }
+        for counterparty in &source.counterparty_subject_ids {
+            let Some(subject) = registry.subject(counterparty) else {
+                return Err(relationship_source_sdk_error(
+                    operation,
+                    RelationshipSourceControlErrorKeyV1::MembershipMismatch,
+                    SoulGovernanceSdkErrorDisposition::RegistryRejected,
+                ));
+            };
+            if subject.lifecycle_state != SubjectLifecycleState::Active
+                || !graph.edges.iter().any(|edge| {
+                    edge.relationship_id.as_deref() == Some(source.relationship_id.as_str())
+                        && ((edge.from_subject_id == source.mounted_subject_id
+                            && edge.to_subject_id == *counterparty)
+                            || (edge.to_subject_id == source.mounted_subject_id
+                                && edge.from_subject_id == *counterparty))
+                })
+            {
+                return Err(relationship_source_sdk_error(
+                    operation,
+                    RelationshipSourceControlErrorKeyV1::MembershipMismatch,
+                    SoulGovernanceSdkErrorDisposition::RegistryRejected,
+                ));
+            }
+        }
+        let actor_id = self.config.scoped_runtime.actor_subject_id.as_str();
+        let actor_is_member = actor_id == source.mounted_subject_id
+            || source
+                .counterparty_subject_ids
+                .iter()
+                .any(|subject_id| subject_id == actor_id);
+        let actor_is_governor = registry.subject(actor_id).is_some_and(|subject| {
+            subject.kind == SubjectKind::SystemGovernor
+                && subject.lifecycle_state == SubjectLifecycleState::Active
+                && graph.edges.iter().any(|edge| {
+                    edge.kind == SubjectRelationshipKind::Governs
+                        && edge.from_subject_id == actor_id
+                        && edge.to_subject_id == source.mounted_subject_id
+                })
+        });
+        if !actor_is_member && !actor_is_governor {
+            return Err(relationship_source_sdk_error(
+                operation,
+                RelationshipSourceControlErrorKeyV1::AuthorityDenied,
+                SoulGovernanceSdkErrorDisposition::AuthorityRejected,
+            ));
+        }
+        Ok(())
+    }
+
     pub fn subject_relationship_graph(&self) -> &SubjectRelationshipGraph {
         &self.config.subject_relationship_graph
     }
@@ -2968,6 +6941,45 @@ impl MemoryRuntime {
 
     pub fn capabilities(&self) -> &MemoryCapabilityCatalog {
         &self.capabilities
+    }
+
+    /// Returns the exact mounted-runtime capability used for typed Soul
+    /// self-governance admission. The token is owner/subject/Soul scoped and
+    /// deliberately independent from chat/session presentation state.
+    fn subject_soul_self_governance_capability_digest(&self) -> String {
+        let soul_id = self
+            .config
+            .subject_registry
+            .subject(&self.config.scoped_runtime.mounted_subject_id)
+            .and_then(|subject| subject.soul_binding.as_ref())
+            .map(|binding| binding.soul_id.as_str())
+            .unwrap_or("");
+        sha256_field_digest(&[
+            b"subject_soul_self_governance_capability_v1",
+            self.config.memory_space_id.as_bytes(),
+            self.config.scoped_runtime.mounted_subject_id.as_bytes(),
+            soul_id.as_bytes(),
+        ])
+        .strip_prefix("sha256:")
+        .expect("sha256_field_digest always uses the sha256 prefix")
+        .to_string()
+    }
+
+    /// Returns the policy capability bound to one active SystemGovernor and
+    /// this mounted relationship-control surface.
+    fn relationship_source_policy_capability_digest(
+        &self,
+        system_actor_subject_id: &str,
+    ) -> String {
+        sha256_field_digest(&[
+            b"relationship_source_policy_capability_v1",
+            self.config.memory_space_id.as_bytes(),
+            self.config.scoped_runtime.mounted_subject_id.as_bytes(),
+            system_actor_subject_id.as_bytes(),
+        ])
+        .strip_prefix("sha256:")
+        .expect("sha256_field_digest always uses the sha256 prefix")
+        .to_string()
     }
 
     pub fn mutation_capabilities(&self) -> crate::MemoryMutationCapabilityCatalog {
@@ -4195,6 +8207,7 @@ impl MemoryRuntime {
                     plan: MemoryStoreMutationPlan {
                         mutations: extraction_plan.mutations,
                         preconditions: extraction_plan.preconditions,
+                        blob_preconditions: Vec::new(),
                     },
                     changed_count: changed,
                 };
@@ -4961,6 +8974,7 @@ impl MemoryRuntime {
         let mut planned = MemoryStoreMutationPlan {
             mutations: owner_mutations,
             preconditions,
+            blob_preconditions: Vec::new(),
         };
         planned.mutations.extend(facet_plan.mutations);
         merge_json_preconditions(&mut planned.preconditions, facet_plan.preconditions)?;
@@ -5244,6 +9258,7 @@ impl MemoryRuntime {
             plan: MemoryStoreMutationPlan {
                 mutations,
                 preconditions,
+                blob_preconditions: Vec::new(),
             },
             changed_count: changed,
         };
@@ -6273,6 +10288,7 @@ impl MemoryRuntime {
         Ok(MemoryStoreMutationPlan {
             mutations,
             preconditions: normalized_preconditions,
+            blob_preconditions: Vec::new(),
         })
     }
 
@@ -7946,59 +11962,70 @@ impl MemoryRuntime {
             mutations: plan.mutations,
         };
         let runtime_budget = self.runtime_budget();
-        let (store_report, mutation_receipt, mutation_replayed) =
-            match (graph_repair_authority, mutation_operation_plan) {
-                (Some(_), Some(_)) => {
-                    return Err(Error::config(
-                        "memory_mutation_operation_commit",
-                        "operation receipts are not valid for graph repair authority",
-                    ));
+        if graph_repair_authority.is_some() && !plan.blob_preconditions.is_empty() {
+            return Err(Error::config(
+                "memory_graph_repair_blob_precondition",
+                "graph repair plans cannot carry unrelated blob owner mutations",
+            ));
+        }
+        let (store_report, mutation_receipt, mutation_replayed) = match (
+            graph_repair_authority,
+            mutation_operation_plan,
+        ) {
+            (Some(_), Some(_)) => {
+                return Err(Error::config(
+                    "memory_mutation_operation_commit",
+                    "operation receipts are not valid for graph repair authority",
+                ));
+            }
+            (Some(authority), None) => (
+                store_platform.commit_governed_graph_repair_transaction_with_runtime_budget(
+                    batch,
+                    &plan.preconditions,
+                    authority,
+                    &runtime_budget,
+                )?,
+                None,
+                false,
+            ),
+            (None, Some(operation)) => match store_platform
+                .commit_memory_mutation_operation_with_blob_preconditions_and_runtime_budget(
+                    batch,
+                    &plan.preconditions,
+                    &plan.blob_preconditions,
+                    operation,
+                    &runtime_budget,
+                )? {
+                StoreMutationOperationOutcome::Committed { receipt, report } => {
+                    (report, Some(receipt), false)
                 }
-                (Some(authority), None) => (
-                    store_platform.commit_governed_graph_repair_transaction_with_runtime_budget(
+                StoreMutationOperationOutcome::Replayed { receipt } => {
+                    let report = StoreMutationBatchReport {
+                        transaction_id: receipt.transaction_id.clone(),
+                        admitted: true,
+                        committed: true,
+                        mutations: 0,
+                        events: 0,
+                        changed_json: 0,
+                        changed_blobs: 0,
+                        event_ids: Vec::new(),
+                        budget_report: StoreMutationBudgetReport::default(),
+                    };
+                    (report, Some(receipt), true)
+                }
+            },
+            (None, None) => (
+                store_platform
+                    .commit_governed_memory_transaction_with_blob_preconditions_and_runtime_budget(
                         batch,
                         &plan.preconditions,
-                        authority,
+                        &plan.blob_preconditions,
                         &runtime_budget,
                     )?,
-                    None,
-                    false,
-                ),
-                (None, Some(operation)) => match store_platform
-                    .commit_memory_mutation_operation_with_runtime_budget(
-                        batch,
-                        &plan.preconditions,
-                        operation,
-                        &runtime_budget,
-                    )? {
-                    StoreMutationOperationOutcome::Committed { receipt, report } => {
-                        (report, Some(receipt), false)
-                    }
-                    StoreMutationOperationOutcome::Replayed { receipt } => {
-                        let report = StoreMutationBatchReport {
-                            transaction_id: receipt.transaction_id.clone(),
-                            admitted: true,
-                            committed: true,
-                            mutations: 0,
-                            events: 0,
-                            changed_json: 0,
-                            changed_blobs: 0,
-                            event_ids: Vec::new(),
-                            budget_report: StoreMutationBudgetReport::default(),
-                        };
-                        (report, Some(receipt), true)
-                    }
-                },
-                (None, None) => (
-                    store_platform.commit_governed_memory_transaction_with_runtime_budget(
-                        batch,
-                        &plan.preconditions,
-                        &runtime_budget,
-                    )?,
-                    None,
-                    false,
-                ),
-            };
+                None,
+                false,
+            ),
+        };
         Ok((
             lifecycle_report,
             memory_write_transaction_report(
@@ -8494,6 +12521,7 @@ impl MemoryRuntime {
             MemoryStoreMutationPlan {
                 mutations,
                 preconditions,
+                blob_preconditions: Vec::new(),
             },
         ))
     }
@@ -8604,6 +12632,7 @@ impl MemoryRuntime {
         let MemoryStoreMutationPlan {
             mut mutations,
             mut preconditions,
+            blob_preconditions: _,
         } = mutation_plan;
 
         let procedural_evolution = if extraction.skill_writes.is_empty() {
@@ -10395,6 +14424,7 @@ impl MemoryRuntime {
         purpose: RecallReadPurpose,
         trigger: RuntimeLifecycleTrigger,
         pinned_authority: Option<RecallOperationAuthoritySnapshot>,
+        projection_soul_selector: Option<SubjectSoulReadSelectorV1>,
     ) -> Result<ProductionRecallClosure> {
         self.ensure_visible("recall", self.capabilities.recall)?;
         if let crate::MemoryRecallTemporalOperation::HistoricalAsOf { as_of_time } =
@@ -10658,6 +14688,37 @@ impl MemoryRuntime {
                     delivery_report: &delivery_report,
                 });
                 let graph = public_safe_recall_graph_report(graph);
+                // Soul is the final read in this immutable projection session.
+                // Its typed receipt is therefore also the final exact read-set
+                // receipt reused by RecallImmutableReadContext::finish.
+                let subject_soul = if let Some(selector) = projection_soul_selector.as_ref() {
+                    let owner = self
+                        .subject_soul_owner_for_mounted(SubjectSoulSdkOperation::Project)
+                        .map_err(|error| {
+                            Error::config("subject_soul_projection_read", error.to_string())
+                        })?;
+                    Some(
+                        context
+                            .read_verified_subject_soul_with_relationship(
+                                &owner.memory_space_id,
+                                &owner.soul_id,
+                                &SubjectSoulReadRequestV1 {
+                                    target_subject_id: owner.subject_id,
+                                    selector: selector.clone(),
+                                    view: SubjectSoulReadViewV1::RuntimePrivate,
+                                },
+                                self.config
+                                    .scoped_runtime
+                                    .relationship_scope
+                                    .as_ref()
+                                    .map(|scope| scope.relationship_id.as_str()),
+                                &runtime_budget,
+                            )
+                            .map_err(SubjectSoulStoreFailure::into_store_error)?,
+                    )
+                } else {
+                    None
+                };
                 Ok(MaterializedProductionRecall {
                     report: MemoryRecallReport {
                         query: request.query.clone(),
@@ -10687,6 +14748,7 @@ impl MemoryRuntime {
                     long_term: long_term_recall_closure,
                     procedural: procedural_projection_items,
                     runtime_skill_materializer,
+                    subject_soul,
                     manifest_closure: ValidatedRecallManifestClosure,
                 })
             })?;
@@ -10715,6 +14777,7 @@ impl MemoryRuntime {
             long_term,
             procedural,
             runtime_skill_materializer: _,
+            subject_soul,
             manifest_closure: _,
         } = materialized_recall;
         #[cfg(feature = "nonproduction-replay-harness")]
@@ -10732,6 +14795,7 @@ impl MemoryRuntime {
             authority,
             immutable_session,
             runtime_skill_materializer_dispatch,
+            subject_soul,
             #[cfg(feature = "nonproduction-replay-harness")]
             p8_no_execution_authority,
         };
@@ -10790,7 +14854,7 @@ impl MemoryRuntime {
         purpose: RecallReadPurpose,
         trigger: RuntimeLifecycleTrigger,
     ) -> Result<MemoryRecallReport> {
-        self.recall_closure_with_feature_flags(request, feature_flags, purpose, trigger, None)
+        self.recall_closure_with_feature_flags(request, feature_flags, purpose, trigger, None, None)
             .map(|closure| closure.report)
     }
 
@@ -10806,6 +14870,7 @@ impl MemoryRuntime {
             RecallFeatureFlags::default(),
             purpose,
             trigger,
+            None,
             None,
         )
     }
@@ -11659,6 +15724,7 @@ impl MemoryRuntime {
                     .map(memory_graph_closure_delete_mutations)
                     .unwrap_or_default(),
                 preconditions: graph_preconditions,
+                blob_preconditions: Vec::new(),
             });
         }
 
@@ -11753,6 +15819,7 @@ impl MemoryRuntime {
         Ok(MemoryStoreMutationPlan {
             mutations: planned.mutations,
             preconditions: graph_preconditions,
+            blob_preconditions: Vec::new(),
         })
     }
 
@@ -12419,6 +16486,7 @@ impl MemoryRuntime {
                 plan: MemoryStoreMutationPlan {
                     mutations,
                     preconditions,
+                    blob_preconditions: Vec::new(),
                 },
                 changed_count,
             })?;
@@ -12781,6 +16849,7 @@ impl MemoryRuntime {
                         memory_space_id,
                         mounted_subject_id,
                     )?,
+                    blob_preconditions: Vec::new(),
                 },
                 changed_count,
             })?;
@@ -12806,9 +16875,22 @@ impl MemoryRuntime {
     }
 
     pub fn project(&self, request: MemoryProjectionRequest) -> Result<MemoryProjectionOutput> {
+        self.project_with_subject_soul_selector(request, None)
+    }
+
+    /// Projects with an optional exact Subject Soul generation/revision root.
+    /// `None` selects Current only for a Current temporal operation; historical
+    /// requests without an exact Soul selector omit Soul material fail closed.
+    pub fn project_with_subject_soul_selector(
+        &self,
+        request: MemoryProjectionRequest,
+        subject_soul_selector: Option<SubjectSoulReadSelectorV1>,
+    ) -> Result<MemoryProjectionOutput> {
         if RuntimeBudgetLease::active_report(&self.config.runtime_budget_authority).is_none() {
             let lease = self.acquire_runtime_budget_lease()?;
-            return self.execute_with_runtime_budget_lease(&lease, || self.project(request));
+            return self.execute_with_runtime_budget_lease(&lease, || {
+                self.project_with_subject_soul_selector(request, subject_soul_selector)
+            });
         }
         self.ensure_visible("project", self.capabilities.projection)?;
         let lifecycle = self.start_lifecycle(
@@ -12817,6 +16899,10 @@ impl MemoryRuntime {
             self.mode_input_for_request(request.mode_input, request.pressure),
         );
         let runtime_budget = self.runtime_budget();
+        let effective_soul_selector = effective_subject_soul_projection_selector(
+            request.temporal_operation,
+            subject_soul_selector.as_ref(),
+        )?;
         let project_recall_limit = runtime_budget
             .recall_delivery_budget
             .max_selected_candidates;
@@ -12838,6 +16924,7 @@ impl MemoryRuntime {
             RecallReadPurpose::SubjectProjection,
             RuntimeLifecycleTrigger::ProjectionDependency,
             Some(authority),
+            effective_soul_selector.clone(),
         )?;
         let ProductionRecallClosure {
             report: recall_report,
@@ -12846,6 +16933,7 @@ impl MemoryRuntime {
             authority,
             immutable_session,
             runtime_skill_materializer_dispatch,
+            subject_soul,
             #[cfg(feature = "nonproduction-replay-harness")]
                 p8_no_execution_authority: _,
         } = recall_closure;
@@ -12890,7 +16978,9 @@ impl MemoryRuntime {
             &lifecycle,
             &runtime_budget,
             authority.operation_time,
-        );
+            effective_soul_selector.as_ref(),
+            subject_soul.as_ref(),
+        )?;
         let render_max_chars =
             runtime_budget.projection_render_chars_for_request(request.system_max_len, None);
         let runtime_awareness = render_runtime_awareness_block(
@@ -12940,6 +17030,20 @@ impl MemoryRuntime {
             &inhabited_subject_projection,
             render_max_chars,
         );
+        if let Some(relationship_constitution_text) = context
+            .relationship_constitution_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            runtime_projection
+                .runtime_constraints
+                .push(relationship_constitution_text.to_string());
+            runtime_projection.rendered_block = render_bounded_llm_runtime_projection_envelope(
+                &runtime_projection,
+                render_max_chars,
+            );
+        }
         attach_recall_evidence_capsules_to_runtime_projection(
             &mut runtime_projection,
             &mut recall_delivery_report,
@@ -13144,7 +17248,9 @@ impl MemoryRuntime {
         lifecycle: &RuntimeLifecycleReport,
         runtime_budget: &RuntimeBudgetReport,
         operation_time: u64,
-    ) -> crate::PromptMemoryContext {
+        subject_soul_selector: Option<&SubjectSoulReadSelectorV1>,
+        subject_soul_read: Option<&SubjectSoulVerifiedStoreRead>,
+    ) -> Result<crate::PromptMemoryContext> {
         let platform = self.config.platform.as_ref();
         let session_store = self.transcript_backed_session_store(
             platform.session_store(),
@@ -13158,22 +17264,75 @@ impl MemoryRuntime {
         let task_run_store = platform.task_run_store();
         let task_artifact_store = platform.task_artifact_store();
         let task_learning_store = platform.task_learning_store();
-        let self_model_store = platform.self_model_store();
-        let self_authored_core_store = platform.self_authored_core_store();
-        let relationship_constitution_store = platform.relationship_constitution_store();
-        let relationship_portfolio_store = platform.relationship_portfolio_store();
-        let relationship_topology_store = platform.relationship_topology_store();
+        let mut subject_soul_current_projection_allowed = false;
+        let verified_soul_stores = if let Some(selector) = subject_soul_selector {
+            let owner = self
+                .subject_soul_owner_for_mounted(SubjectSoulSdkOperation::Project)
+                .map_err(|_| {
+                    Error::config(
+                        "subject_soul_projection_read",
+                        "mounted Subject Soul owner is invalid",
+                    )
+                })?;
+            let include_current_generation_layers =
+                matches!(selector, SubjectSoulReadSelectorV1::Current);
+            let read = subject_soul_read.ok_or_else(|| {
+                Error::config(
+                    "subject_soul_projection_read",
+                    "projection recall closure is missing its verified Subject Soul read",
+                )
+            })?;
+            if read.receipt.state_digest.trim().is_empty() {
+                return Err(Error::config(
+                    "subject_soul_projection_read",
+                    "verified Subject Soul read has no immutable-session receipt",
+                ));
+            }
+            subject_soul_current_projection_allowed = read.head.as_ref().is_none_or(|head| {
+                matches!(
+                    head.state,
+                    SubjectSoulLifecycleStateV1::Unseeded | SubjectSoulLifecycleStateV1::Active
+                )
+            });
+            let core = match &read.outcome {
+                SubjectSoulReadOutcomeV1::Verified { view }
+                    if subject_soul_current_projection_allowed
+                        && view.state == SubjectSoulLifecycleStateV1::Active =>
+                {
+                    view.runtime_private_core.clone()
+                }
+                SubjectSoulReadOutcomeV1::ImplicitUnseeded { .. }
+                | SubjectSoulReadOutcomeV1::TerminatedGeneration { .. }
+                | SubjectSoulReadOutcomeV1::Verified { .. } => None,
+            };
+            let include_current_generation_layers = subject_soul_current_projection_allowed
+                && include_current_generation_layers
+                && matches!(
+                    &read.outcome,
+                    SubjectSoulReadOutcomeV1::Verified { view }
+                        if view.state == SubjectSoulLifecycleStateV1::Active
+                );
+            VerifiedSubjectSoulProjectionStores::from_verified_read(
+                &self.config.scoped_runtime.mounted_subject_id,
+                &owner,
+                read,
+                include_current_generation_layers,
+                core,
+            )?
+        } else {
+            // Historical projection without an exact Soul selector must not
+            // reuse the current root.
+            VerifiedSubjectSoulProjectionStores::empty(
+                &self.config.scoped_runtime.mounted_subject_id,
+            )
+        };
+        let relationship_constitution_store = VerifiedSubjectSoulRelationshipRuntimeStore {
+            mounted_subject_id: &self.config.scoped_runtime.mounted_subject_id,
+            verified: subject_soul_read.filter(|_| {
+                subject_soul_selector.is_some() && subject_soul_current_projection_allowed
+            }),
+        };
         let world_sense_store = platform.world_sense_store();
-        let autonomy_strategy_store = platform.autonomy_strategy_store();
-        let outer_voice_store = platform.outer_voice_store();
-        let inner_life_store = platform.inner_life_store();
-        let self_continuity_store = platform.self_continuity_store();
-        let felt_significance_store = platform.felt_significance_store();
-        let temperament_continuity_store = platform.temperament_continuity_store();
-        let inner_conflict_store = platform.inner_conflict_store();
-        let private_doc_store = platform.private_doc_store();
-        let private_garden_store = platform.private_garden_store();
-        let mental_privacy_store = platform.mental_privacy_store();
         let remind_store = platform.remind_at_store();
         let task_store = platform.task_store();
         let turn_continuity_evidence_store = platform.turn_continuity_evidence_store();
@@ -13184,10 +17343,16 @@ impl MemoryRuntime {
         let include_private_runtime_projection =
             self.config.privacy_policy.private_plane_projection_allowed
                 && lifecycle.admission.private_depth_allowed;
-        load_prompt_memory_context(PromptMemoryContextParams {
+        let context = load_prompt_memory_context(PromptMemoryContextParams {
             mounted_subject_id: self.config.scoped_runtime.mounted_subject_id.as_str(),
             chat_id: &self.config.scope.chat_id,
             current_channel: &self.config.scope.channel,
+            relationship_id: self
+                .config
+                .scoped_runtime
+                .relationship_scope
+                .as_ref()
+                .map(|scope| scope.relationship_id.as_str()),
             user_query: &request.user_query,
             memory_system_kind,
             system_max_len: runtime_budget
@@ -13214,29 +17379,30 @@ impl MemoryRuntime {
             task_run_store: task_run_store.as_ref(),
             task_artifact_store: task_artifact_store.as_ref(),
             task_learning_store: task_learning_store.as_ref(),
-            self_model_store: self_model_store.as_ref(),
-            self_authored_core_store: self_authored_core_store.as_ref(),
-            relationship_constitution_store: relationship_constitution_store.as_ref(),
-            relationship_portfolio_store: relationship_portfolio_store.as_ref(),
-            relationship_topology_store: relationship_topology_store.as_ref(),
+            self_model_store: &verified_soul_stores,
+            self_authored_core_store: &verified_soul_stores,
+            relationship_constitution_store: &relationship_constitution_store,
+            relationship_portfolio_store: &verified_soul_stores,
+            relationship_topology_store: &verified_soul_stores,
             world_sense_store: world_sense_store.as_ref(),
-            autonomy_strategy_store: autonomy_strategy_store.as_ref(),
-            outer_voice_store: outer_voice_store.as_ref(),
-            inner_life_store: inner_life_store.as_ref(),
-            self_continuity_store: self_continuity_store.as_ref(),
-            felt_significance_store: felt_significance_store.as_ref(),
-            temperament_continuity_store: temperament_continuity_store.as_ref(),
-            inner_conflict_store: inner_conflict_store.as_ref(),
-            private_doc_store: private_doc_store.as_ref(),
-            private_garden_store: private_garden_store.as_ref(),
-            mental_privacy_store: mental_privacy_store.as_ref(),
+            autonomy_strategy_store: &verified_soul_stores,
+            outer_voice_store: &verified_soul_stores,
+            inner_life_store: &verified_soul_stores,
+            self_continuity_store: &verified_soul_stores,
+            felt_significance_store: &verified_soul_stores,
+            temperament_continuity_store: &verified_soul_stores,
+            inner_conflict_store: &verified_soul_stores,
+            private_doc_store: &verified_soul_stores,
+            private_garden_store: &verified_soul_stores,
+            mental_privacy_store: &verified_soul_stores,
             remind_store: remind_store.as_ref(),
             task_store: task_store.as_ref(),
             turn_continuity_evidence_store: turn_continuity_evidence_store.as_ref(),
             turn_ledger_store: turn_ledger_store.as_ref(),
             skill_storage: &runtime_skill_storage,
             continuity_capsule_store: continuity_capsule_store.as_ref(),
-        })
+        });
+        Ok(context)
     }
 
     pub fn maintain(
@@ -13579,31 +17745,106 @@ impl MemoryRuntime {
         })
     }
 
+    fn read_subject_soul_autonomous_planning_base(
+        &self,
+        stage: &'static str,
+    ) -> Result<SubjectSoulAutonomousPlanningBase> {
+        let owner = self
+            .subject_soul_owner_for_mounted(SubjectSoulSdkOperation::EvidenceUpdate)
+            .map_err(|error| Error::config(stage, error.to_string()))?;
+        let store = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(stage, "autonomous Soul governance requires StorePlatform")
+        })?;
+        let active_relationship_id = self
+            .config
+            .scoped_runtime
+            .relationship_scope
+            .as_ref()
+            .map(|scope| scope.relationship_id.as_str());
+        let verified = store
+            .read_verified_subject_soul_for_autonomous_cycle(
+                &owner.memory_space_id,
+                &owner.soul_id,
+                &SubjectSoulReadRequestV1 {
+                    target_subject_id: owner.subject_id.clone(),
+                    selector: SubjectSoulReadSelectorV1::Current,
+                    view: SubjectSoulReadViewV1::RuntimePrivate,
+                },
+                active_relationship_id,
+                &self.runtime_budget(),
+            )
+            .map_err(|error| Error::config(stage, error.to_string()))?;
+        let (generation, revision, include_current_generation_layers, selected_core) =
+            match &verified.outcome {
+                SubjectSoulReadOutcomeV1::ImplicitUnseeded { generation, .. } => {
+                    (*generation, None, false, None)
+                }
+                SubjectSoulReadOutcomeV1::Verified { view }
+                    if matches!(
+                        view.state,
+                        SubjectSoulLifecycleStateV1::Unseeded | SubjectSoulLifecycleStateV1::Active
+                    ) =>
+                {
+                    (
+                        view.generation,
+                        view.revision,
+                        true,
+                        view.runtime_private_core.clone(),
+                    )
+                }
+                _ => {
+                    return Err(Error::conflict(
+                        stage,
+                        "archived/deleted/terminated Soul cannot run autonomous governance",
+                    ));
+                }
+            };
+        Ok(SubjectSoulAutonomousPlanningBase {
+            owner,
+            verified,
+            generation,
+            revision,
+            include_current_generation_layers,
+            selected_core,
+        })
+    }
+
     fn plan_post_turn_private_garden(
         &self,
-        http: &mut (dyn LlmHttpClient + '_),
-        governance_llm: &(dyn CoreLlmClient + Send + Sync + '_),
-        request: &MemoryTurnFinalizeRequest,
-        session_store: &dyn SessionStore,
-        session_summary_store: &dyn SessionSummaryStore,
-        strict_model_contract: bool,
-    ) -> Result<(PostTurnPrivateGardenReport, MemoryStoreMutationPlan)> {
+        input: PostTurnPrivateGardenPlanningInput<'_>,
+    ) -> Result<(
+        PostTurnPrivateGardenReport,
+        Option<SubjectSoulGenerationLayerMutationRequestV1>,
+        MemoryStoreMutationPlan,
+    )> {
+        let PostTurnPrivateGardenPlanningInput {
+            base,
+            http,
+            governance_llm,
+            request,
+            session_store,
+            session_summary_store,
+            strict_model_contract,
+        } = input;
         let platform = self.config.platform.as_ref();
         let execution_state_store = platform.execution_state_store();
-        let self_model_store = platform.self_model_store();
-        let private_doc_store = platform.private_doc_store();
-        let private_garden_store = platform.private_garden_store();
-        let planning_private_garden_store =
-            PlanningPrivateGardenStore::new(private_garden_store.as_ref());
+        let verified_stores = VerifiedSubjectSoulProjectionStores::from_verified_read(
+            &base.owner.subject_id,
+            &base.owner,
+            &base.verified,
+            base.include_current_generation_layers,
+            base.selected_core.clone(),
+        )?;
+        let planning_soul_stores = PlanningSubjectSoulGenerationStores::new(verified_stores);
         let user_content = latest_user_content(&request.turn);
         let reply_content = assistant_content(&request.turn).unwrap_or_default();
         let context = PrivateGardenGovernanceContext {
             session_store,
             session_summary_store,
             execution_state_store: execution_state_store.as_ref(),
-            self_model_store: self_model_store.as_ref(),
-            private_doc_store: private_doc_store.as_ref(),
-            private_garden_store: &planning_private_garden_store,
+            self_model_store: &planning_soul_stores,
+            private_doc_store: &planning_soul_stores,
+            private_garden_store: &planning_soul_stores,
         };
         let input = PrivateGardenGovernanceInput {
             mounted_subject_id: self.config.scoped_runtime.mounted_subject_id.as_str(),
@@ -13636,6 +17877,7 @@ impl MemoryRuntime {
         match outcome {
             PrivateGardenGovernanceOutcome::Skipped => Ok((
                 PostTurnPrivateGardenReport::no_change("policy_skipped_or_no_private_change"),
+                None,
                 MemoryStoreMutationPlan::default(),
             )),
             PrivateGardenGovernanceOutcome::Updated {
@@ -13644,8 +17886,14 @@ impl MemoryRuntime {
                 deletes,
                 manifest,
             } => {
-                let mut plan = planning_private_garden_store.into_plan()?;
-                plan.mutations
+                let layer_mutations = planning_soul_stores.into_layer_mutations(
+                    &base.owner,
+                    base.generation,
+                    base.revision,
+                )?;
+                let mut additional_plan = MemoryStoreMutationPlan::default();
+                additional_plan
+                    .mutations
                     .extend(plan_private_garden_derived_memory_ref_mutations(
                         &self.config.memory_space_id,
                         &self.config.subject_id,
@@ -13657,10 +17905,225 @@ impl MemoryRuntime {
                     PostTurnPrivateGardenReport::applied_with_manifest(
                         writes, moves, deletes, manifest,
                     ),
-                    plan,
+                    Some(SubjectSoulGenerationLayerMutationRequestV1 {
+                        mutations: layer_mutations,
+                    }),
+                    additional_plan,
                 ))
             }
         }
+    }
+
+    fn plan_post_turn_self_runtime_cycle(
+        &self,
+        input: PostTurnSelfRuntimePlanningInput<'_>,
+    ) -> Result<(
+        SelfAuthoredCoreRefreshPlanV1,
+        Vec<SubjectSoulGenerationLayerMutationV1>,
+        Vec<SelfRuntimePlannedEffectV1>,
+    )> {
+        let PostTurnSelfRuntimePlanningInput {
+            base,
+            operation_id,
+            initial_effects,
+            http,
+            governance_llm,
+            request,
+            session_store,
+            session_summary_store,
+        } = input;
+        let verified_stores = VerifiedSubjectSoulProjectionStores::from_verified_read(
+            &base.owner.subject_id,
+            &base.owner,
+            &base.verified,
+            base.include_current_generation_layers,
+            base.selected_core.clone(),
+        )?;
+        let verified_relationship_store = VerifiedSubjectSoulRelationshipRuntimeStore {
+            mounted_subject_id: &base.owner.subject_id,
+            verified: Some(&base.verified),
+        };
+        let platform = self.config.platform.as_ref();
+        let memory_store = platform.memory_store();
+        let execution_state_store = platform.execution_state_store();
+        let long_term_memory_store = self.config.long_term_memory_read_store.clone();
+        let continuity_capsule_store = platform.continuity_capsule_store();
+        let world_sense_store = platform.world_sense_store();
+        let remind_store = platform.remind_at_store();
+        let task_store = platform.task_store();
+        let task_run_store = platform.task_run_store();
+        let task_artifact_store = platform.task_artifact_store();
+        let task_learning_store = platform.task_learning_store();
+        let turn_continuity_evidence_store = platform.turn_continuity_evidence_store();
+        let turn_ledger_store = platform.turn_ledger_store();
+        let skill_storage = platform.skill_storage();
+        let payload = SelfRuntimeJobPayload {
+            trigger: SelfRuntimeTrigger::PostReply,
+            source_channel: request.turn.source.channel.clone(),
+            user_content: latest_user_content(&request.turn),
+            reply_content: assistant_content(&request.turn).unwrap_or_default(),
+            tool_calls: request.tool_calls,
+            external_content_used: request.turn.external_content_used
+                || request
+                    .turn
+                    .tool_observations
+                    .iter()
+                    .any(|observation| observation.external_content),
+            now_secs: self.config.clock.now_secs(),
+        };
+        let plan = plan_self_runtime(
+            operation_id,
+            SelfRuntimeInitialPlanningStateV1 {
+                owner_subject_id: base.owner.subject_id.clone(),
+                planned_effects: initial_effects,
+            },
+            http,
+            governance_llm,
+            SelfRuntimeContext {
+                mounted_subject_id: &base.owner.subject_id,
+                active_relationship_id: self
+                    .config
+                    .scoped_runtime
+                    .relationship_scope
+                    .as_ref()
+                    .map(|scope| scope.relationship_id.as_str()),
+                memory_system_kind: self.memory_profile().memory_system_kind(),
+                session_store,
+                memory_store: memory_store.as_ref(),
+                session_summary_store,
+                execution_state_store: execution_state_store.as_ref(),
+                long_term_memory_store: long_term_memory_store.as_ref(),
+                continuity_capsule_store: continuity_capsule_store.as_ref(),
+                self_model_store: &verified_stores,
+                self_authored_core_store: &verified_stores,
+                core_revision_ledger_store: &verified_stores,
+                relationship_constitutional_read_store: &verified_relationship_store,
+                private_doc_store: &verified_stores,
+                private_garden_store: &verified_stores,
+                inner_life_store: &verified_stores,
+                self_continuity_store: &verified_stores,
+                felt_significance_store: &verified_stores,
+                temperament_continuity_store: &verified_stores,
+                inner_conflict_store: &verified_stores,
+                relationship_portfolio_store: &verified_stores,
+                relationship_topology_store: &verified_stores,
+                world_sense_store: world_sense_store.as_ref(),
+                autonomy_strategy_store: &verified_stores,
+                outer_voice_store: &verified_stores,
+                mental_privacy_store: &verified_stores,
+                remind_store: remind_store.as_ref(),
+                task_store: task_store.as_ref(),
+                task_run_store: task_run_store.as_ref(),
+                task_artifact_store: task_artifact_store.as_ref(),
+                task_learning_store: task_learning_store.as_ref(),
+                turn_continuity_evidence_store: turn_continuity_evidence_store.as_ref(),
+                turn_ledger_store: turn_ledger_store.as_ref(),
+                skill_storage: skill_storage.as_ref(),
+            },
+            &self.config.scope.chat_id,
+            &payload,
+        )?;
+        if plan.operation_id != operation_id || plan.owner_subject_id != base.owner.subject_id {
+            return Err(Error::config(
+                "post_turn.subject_soul",
+                "Core self-runtime plan identity differs from the durable governance job",
+            ));
+        }
+        let outcome = plan.outcome;
+        let refresh_plan = outcome
+            .self_authored_core_result
+            .map_err(|error| Error::config("post_turn.subject_soul", error.to_string()))?;
+        let planning_soul_stores = PlanningSubjectSoulGenerationStores::new(verified_stores);
+        let relationship_scope_id = self_runtime_relationship_scope_id(
+            &self.config.scoped_runtime,
+            &request.turn.source.channel,
+            &self.config.scope.chat_id,
+        );
+        planning_soul_stores
+            .apply_self_runtime_effects(&plan.planned_effects, &relationship_scope_id)?;
+        let layer_mutations = planning_soul_stores.into_layer_mutations(
+            &base.owner,
+            base.generation,
+            base.revision,
+        )?;
+        Ok((refresh_plan, layer_mutations, plan.planned_effects))
+    }
+
+    fn plan_self_runtime_non_soul_effects(
+        &self,
+        effects: &[SelfRuntimePlannedEffectV1],
+        planned_at: u64,
+    ) -> Result<MemoryStoreMutationPlan> {
+        let store = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "post_turn.self_runtime_owner_plan",
+                "self-runtime owner planning requires StorePlatform",
+            )
+        })?;
+        let relationship_scope_id = self_runtime_relationship_scope_id(
+            &self.config.scoped_runtime,
+            &self.config.scope.channel,
+            &self.config.scope.chat_id,
+        );
+        let mut plan = MemoryStoreMutationPlan::default();
+        for effect in effects {
+            let owner_plan = match effect {
+                effect if self_runtime_subject_soul_scope_id(effect).is_some() => continue,
+                SelfRuntimePlannedEffectV1::UpsertPrivateGardenDoc { .. }
+                | SelfRuntimePlannedEffectV1::DeletePrivateGardenDoc { .. } => continue,
+                SelfRuntimePlannedEffectV1::SetWorldSense { scope_id, value } => {
+                    if scope_id != &relationship_scope_id {
+                        return Err(Error::config(
+                            "post_turn.self_runtime_owner_plan",
+                            "world-sense effect escaped the active relationship",
+                        ));
+                    }
+                    store.plan_world_sense_set(scope_id, value)?
+                }
+                SelfRuntimePlannedEffectV1::ClearWorldSense { scope_id } => {
+                    if scope_id != &relationship_scope_id {
+                        return Err(Error::config(
+                            "post_turn.self_runtime_owner_plan",
+                            "world-sense clear escaped the active relationship",
+                        ));
+                    }
+                    store.plan_world_sense_clear(scope_id)?
+                }
+                SelfRuntimePlannedEffectV1::UpsertContinuityCapsules { drafts, now_secs } => {
+                    store.plan_continuity_capsule_upserts(drafts, *now_secs)?
+                }
+                SelfRuntimePlannedEffectV1::UpsertTaskLearning { record } => {
+                    store.plan_task_learning_upsert(record)?
+                }
+                SelfRuntimePlannedEffectV1::PutTaskArtifact { record } => {
+                    store.plan_task_artifact_put(record)?
+                }
+                SelfRuntimePlannedEffectV1::DeleteTaskArtifact {
+                    run_id,
+                    artifact_id,
+                } => store.plan_task_artifact_delete(run_id, artifact_id)?,
+                SelfRuntimePlannedEffectV1::WriteRuntimeSkill { name, content } => {
+                    store.plan_runtime_skill_write(name, content)?
+                }
+                SelfRuntimePlannedEffectV1::RemoveRuntimeSkill { name } => {
+                    store.plan_runtime_skill_remove(name)?
+                }
+                SelfRuntimePlannedEffectV1::SetLegacyMemory { content } => {
+                    store.plan_legacy_memory_set(content, planned_at)?
+                }
+                SelfRuntimePlannedEffectV1::WriteDailyNote { name, content } => {
+                    store.plan_daily_note_write(name, content, planned_at)?
+                }
+                _ => {
+                    return Err(Error::config(
+                        "post_turn.self_runtime_owner_plan",
+                        "self-runtime emitted an unowned mutation effect",
+                    ));
+                }
+            };
+            plan.merge_store_owner_plan(owner_plan)?;
+        }
+        Ok(plan)
     }
 
     fn run_post_turn_governance_after_commit(
@@ -13708,16 +18171,82 @@ impl MemoryRuntime {
                 mode_input: request.mode_input,
             },
         )?;
-        let (private_garden_self_work, private_garden_plan) = self.plan_post_turn_private_garden(
-            http,
-            governance_llm,
-            request,
-            session_store.as_ref(),
-            session_summary_store.as_ref(),
-            false,
+        let subject_soul_base =
+            self.read_subject_soul_autonomous_planning_base("post_turn.subject_soul_snapshot")?;
+        let (private_garden_self_work, private_garden_soul, private_garden_additional) = self
+            .plan_post_turn_private_garden(PostTurnPrivateGardenPlanningInput {
+                base: &subject_soul_base,
+                http,
+                governance_llm,
+                request,
+                session_store: session_store.as_ref(),
+                session_summary_store: session_summary_store.as_ref(),
+                strict_model_contract: false,
+            })?;
+        let private_garden_layer_mutations = private_garden_soul
+            .map(|request| request.mutations)
+            .unwrap_or_default();
+        let initial_effects = self_runtime_initial_effects_from_private_garden_mutations(
+            &subject_soul_base.owner.subject_id,
+            &private_garden_layer_mutations,
         )?;
-        if !private_garden_plan.mutations.is_empty() {
-            self.commit_memory_mutation_batch("post_turn.private_garden", private_garden_plan)?;
+        let autonomous_operation_id = format!("post-turn-autonomous:{}", request.turn.turn_id);
+        let planned_at = self.config.clock.now_secs();
+        let (refresh_plan, layer_mutations, planned_effects) = self
+            .plan_post_turn_self_runtime_cycle(PostTurnSelfRuntimePlanningInput {
+                base: &subject_soul_base,
+                operation_id: &autonomous_operation_id,
+                initial_effects,
+                http,
+                governance_llm,
+                request,
+                session_store: session_store.as_ref(),
+                session_summary_store: session_summary_store.as_ref(),
+            })?;
+        let mut autonomous_additional = private_garden_additional;
+        autonomous_additional
+            .merge(self.plan_self_runtime_non_soul_effects(&planned_effects, planned_at)?)?;
+        let has_soul_effect = !layer_mutations.is_empty()
+            || !matches!(refresh_plan, SelfAuthoredCoreRefreshPlanV1::Skipped);
+        if has_soul_effect {
+            let soul_plan = self
+                .plan_subject_soul_autonomous_store_mutation(
+                    SubjectSoulAutonomousStoreMutationInput {
+                        base: &subject_soul_base,
+                        operation_id: &autonomous_operation_id,
+                        layer_mutations,
+                        refresh_plan: &refresh_plan,
+                        additional_plan: autonomous_additional,
+                        scope: self.memory_write_transaction_scope(),
+                        planned_at,
+                    },
+                )
+                .map_err(|error| Error::config("post_turn.subject_soul", error.to_string()))?
+                .ok_or_else(|| {
+                    Error::config(
+                        "post_turn.subject_soul",
+                        "autonomous Soul effects produced no typed owner plan",
+                    )
+                })?;
+            let store = self.config.store_platform.as_ref().ok_or_else(|| {
+                Error::config(
+                    "post_turn.subject_soul",
+                    "autonomous Soul governance requires StorePlatform",
+                )
+            })?;
+            store
+                .commit_subject_soul_mutation_with_runtime_budget(soul_plan, &self.runtime_budget())
+                .map_err(|error| {
+                    Error::config(
+                        "post_turn.subject_soul",
+                        error.into_store_error().to_string(),
+                    )
+                })?;
+        } else if !autonomous_additional.mutations.is_empty() {
+            self.commit_memory_mutation_batch(
+                "post_turn.self_runtime_non_soul",
+                autonomous_additional,
+            )?;
         }
         let memory_store = platform.memory_store();
         let long_term_memory_store = self.config.long_term_memory_read_store.clone();
@@ -14637,14 +19166,44 @@ impl MemoryRuntime {
             inner: http,
         };
 
-        let (private_garden_self_work, mut mutation_plan) = self.plan_post_turn_private_garden(
-            &mut disclosure_http,
-            governance_llm,
-            &finalize_request,
-            session_store.as_ref(),
-            session_summary_store.as_ref(),
-            true,
+        let subject_soul_base =
+            self.read_subject_soul_autonomous_planning_base("post_turn.subject_soul_snapshot")?;
+        let (private_garden_self_work, private_garden_soul, mut autonomous_additional) = self
+            .plan_post_turn_private_garden(PostTurnPrivateGardenPlanningInput {
+                base: &subject_soul_base,
+                http: &mut disclosure_http,
+                governance_llm,
+                request: &finalize_request,
+                session_store: session_store.as_ref(),
+                session_summary_store: session_summary_store.as_ref(),
+                strict_model_contract: true,
+            })?;
+        let private_garden_layer_mutations = private_garden_soul
+            .map(|request| request.mutations)
+            .unwrap_or_default();
+        let autonomous_operation_id = format!(
+            "post-turn-autonomous:{}:{}",
+            leased.job_id, leased.lease_epoch
+        );
+        let planned_at = self.config.clock.now_secs();
+        let initial_effects = self_runtime_initial_effects_from_private_garden_mutations(
+            &subject_soul_base.owner.subject_id,
+            &private_garden_layer_mutations,
         )?;
+        let (refresh_plan, layer_mutations, planned_effects) = self
+            .plan_post_turn_self_runtime_cycle(PostTurnSelfRuntimePlanningInput {
+                base: &subject_soul_base,
+                operation_id: &autonomous_operation_id,
+                initial_effects,
+                http: &mut disclosure_http,
+                governance_llm,
+                request: &finalize_request,
+                session_store: session_store.as_ref(),
+                session_summary_store: session_summary_store.as_ref(),
+            })?;
+        autonomous_additional
+            .merge(self.plan_self_runtime_non_soul_effects(&planned_effects, planned_at)?)?;
+        let mut mutation_plan = MemoryStoreMutationPlan::default();
         let semantic_refresh_allowed = finalize_request.turn.source.ingress == IngressKind::User
             && finalize_request.turn.source.channel != "cron"
             && !finalize_request.turn.external_content_used
@@ -14693,18 +19252,58 @@ impl MemoryRuntime {
         let transaction_id =
             governance_completion_transaction_id(&leased.job_id, leased.lease_epoch)?;
         bind_control_audit_transaction_id(&mut mutation_plan.mutations, &transaction_id)?;
-        let completed = complete_governance_job_with_memory_plan(
-            store_platform,
-            self.memory_write_transaction_scope()
-                .with_conversation(leased.identity.conversation_id.clone()),
-            &self.runtime_budget(),
-            &leased.job_id,
-            &request.lease_owner,
-            request.lease_epoch,
-            mutation_plan.mutations,
-            mutation_plan.preconditions,
-            self.config.clock.now_secs(),
-        )?;
+        let completion_scope = self
+            .memory_write_transaction_scope()
+            .with_conversation(leased.identity.conversation_id.clone());
+        let has_soul_effect = !layer_mutations.is_empty()
+            || !matches!(refresh_plan, SelfAuthoredCoreRefreshPlanV1::Skipped);
+        let soul_plan = if has_soul_effect {
+            self.plan_subject_soul_autonomous_store_mutation(
+                SubjectSoulAutonomousStoreMutationInput {
+                    base: &subject_soul_base,
+                    operation_id: &autonomous_operation_id,
+                    layer_mutations,
+                    refresh_plan: &refresh_plan,
+                    additional_plan: autonomous_additional,
+                    scope: completion_scope.clone(),
+                    planned_at,
+                },
+            )
+            .map_err(|error| Error::config("post_turn.subject_soul", error.to_string()))?
+        } else {
+            mutation_plan.merge(autonomous_additional)?;
+            None
+        };
+        let completed = if let Some(soul_plan) = soul_plan {
+            let completed = complete_governance_job_with_subject_soul_plan(
+                store_platform,
+                completion_scope,
+                &self.runtime_budget(),
+                &leased.job_id,
+                &request.lease_owner,
+                request.lease_epoch,
+                soul_plan,
+                mutation_plan.mutations,
+                mutation_plan.preconditions,
+                mutation_plan.blob_preconditions,
+                planned_at,
+            )?;
+            let _durable_soul_result = completed.soul;
+            completed.job
+        } else {
+            complete_governance_job_with_memory_plan(
+                store_platform,
+                completion_scope,
+                &self.runtime_budget(),
+                &leased.job_id,
+                &request.lease_owner,
+                request.lease_epoch,
+                mutation_plan.mutations,
+                mutation_plan.preconditions,
+                mutation_plan.blob_preconditions,
+                planned_at,
+            )?
+        };
         Ok(MemoryGovernanceJobRunReport {
             job: completed,
             private_garden_self_work,
@@ -15539,8 +20138,9 @@ impl MemoryRuntime {
 
     pub fn recover(&self, request: MemoryRecoverRequest) -> Result<MemoryRecoverReport> {
         self.ensure_visible("recover", self.capabilities.lifecycle.recover)?;
+        self.ensure_mounted_subject_soul_owner("recover")?;
         let now_secs = self.config.clock.now_secs();
-        let recovery_plan = self.with_soul_kernel_inspect_context("recover", |ctx| {
+        let recovery_plan = self.with_non_soul_recovery_inspect_context(|ctx| {
             plan_soul_kernel_recovery(ctx, now_secs)
         })?;
         let lifecycle = self.start_lifecycle(
@@ -15583,14 +20183,10 @@ impl MemoryRuntime {
         )?;
         let session_summary_store = platform.session_summary_store();
         let execution_state_store = platform.execution_state_store();
-        let self_model_store = platform.self_model_store();
-        let self_authored_core_store = platform.self_authored_core_store();
-        let core_revision_ledger_store = platform.core_revision_ledger_store();
-        let self_continuity_store = platform.self_continuity_store();
-        let relationship_constitution_store = platform.relationship_constitution_store();
-        let relationship_portfolio_store = platform.relationship_portfolio_store();
+        let rejecting_soul_store = RejectingContinuitySoulImportStore;
         let mut snapshot_plans = Vec::with_capacity(recovery_plan.ordered_snapshots.len());
         for snapshot in &recovery_plan.ordered_snapshots {
+            let snapshot = continuity_snapshot_without_soul_owned_layers(snapshot);
             self.validate_long_term_entry_subject_visibility_registry_membership(
                 &snapshot.long_term_memory,
             )?;
@@ -15618,15 +20214,15 @@ impl MemoryRuntime {
                     long_term_memory_store: &planning_long_term,
                     session_summary_store: session_summary_store.as_ref(),
                     execution_state_store: execution_state_store.as_ref(),
-                    self_model_store: self_model_store.as_ref(),
-                    self_authored_core_store: self_authored_core_store.as_ref(),
-                    core_revision_ledger_store: core_revision_ledger_store.as_ref(),
-                    self_continuity_store: self_continuity_store.as_ref(),
-                    relationship_constitution_store: relationship_constitution_store.as_ref(),
-                    relationship_portfolio_store: relationship_portfolio_store.as_ref(),
+                    self_model_store: &rejecting_soul_store,
+                    self_authored_core_store: &rejecting_soul_store,
+                    core_revision_ledger_store: &rejecting_soul_store,
+                    self_continuity_store: &rejecting_soul_store,
+                    relationship_constitution_store: &rejecting_soul_store,
+                    relationship_portfolio_store: &rejecting_soul_store,
                 },
                 target_chat_id,
-                snapshot,
+                &snapshot,
                 bm_core::memory::ContinuitySnapshotImportMode::FullRestore,
                 governance_context,
             )?;
@@ -15654,6 +20250,7 @@ impl MemoryRuntime {
             mutation_plan.merge(MemoryStoreMutationPlan {
                 mutations,
                 preconditions,
+                blob_preconditions: Vec::new(),
             })?;
         }
 
@@ -15707,9 +20304,8 @@ impl MemoryRuntime {
         } else {
             SoulKernelRecoveryAction::RestoreAttemptedNoChange
         };
-        report.status_after = self.with_soul_kernel_inspect_context("recover", |ctx| {
-            inspect_soul_kernel(ctx, now_secs)
-        })?;
+        report.status_after =
+            self.with_non_soul_recovery_inspect_context(|ctx| inspect_soul_kernel(ctx, now_secs))?;
         Ok(MemoryRecoverReport {
             report,
             transaction,
@@ -15717,31 +20313,29 @@ impl MemoryRuntime {
         })
     }
 
-    fn with_soul_kernel_inspect_context<T>(
+    fn with_non_soul_recovery_inspect_context<T>(
         &self,
-        operation: &'static str,
         inspect: impl FnOnce(SoulKernelInspectContext<'_>) -> T,
     ) -> Result<T> {
-        self.ensure_mounted_subject_soul_owner(operation)?;
         let platform = self.config.platform.as_ref();
+        // Generic continuity recovery intentionally observes an empty sealed Soul view.
+        // Subject Soul state is inspected and mutated only through the SPV1 lifecycle owner;
+        // recovery may restore the non-Soul bundle without opening protected namespaces.
+        let sealed_empty_soul = VerifiedSubjectSoulProjectionStores::empty(
+            &self.config.scoped_runtime.mounted_subject_id,
+        );
         let session_store = platform.session_store();
-        let self_model_store = platform.self_model_store();
-        let self_authored_core_store = platform.self_authored_core_store();
-        let core_revision_ledger_store = platform.core_revision_ledger_store();
-        let self_continuity_store = platform.self_continuity_store();
-        let relationship_portfolio_store = platform.relationship_portfolio_store();
-        let relationship_topology_store = platform.relationship_topology_store();
         Ok(inspect(SoulKernelInspectContext {
             subject_id: &self.config.scoped_runtime.mounted_subject_id,
             state_fs: platform.state_fs().as_ref(),
             session_store: session_store.as_ref(),
             long_term_memory_store: self.config.long_term_memory_read_store.as_ref(),
-            self_model_store: self_model_store.as_ref(),
-            self_authored_core_store: self_authored_core_store.as_ref(),
-            core_revision_ledger_store: core_revision_ledger_store.as_ref(),
-            self_continuity_store: self_continuity_store.as_ref(),
-            relationship_portfolio_store: relationship_portfolio_store.as_ref(),
-            relationship_topology_store: relationship_topology_store.as_ref(),
+            self_model_store: &sealed_empty_soul,
+            self_authored_core_store: &sealed_empty_soul,
+            core_revision_ledger_store: &sealed_empty_soul,
+            self_continuity_store: &sealed_empty_soul,
+            relationship_portfolio_store: &sealed_empty_soul,
+            relationship_topology_store: &sealed_empty_soul,
         }))
     }
 
@@ -25369,197 +29963,6 @@ fn plan_control_writes(
     Ok(plan)
 }
 
-struct PlanningPrivateGardenStore<'a> {
-    base: &'a dyn PrivateGardenStore,
-    changes: Mutex<BTreeMap<String, Option<PrivateGardenDoc>>>,
-    read_set: Mutex<BTreeMap<String, Option<PrivateGardenDoc>>>,
-}
-
-impl<'a> PlanningPrivateGardenStore<'a> {
-    fn new(base: &'a dyn PrivateGardenStore) -> Self {
-        Self {
-            base,
-            changes: Mutex::new(BTreeMap::new()),
-            read_set: Mutex::new(BTreeMap::new()),
-        }
-    }
-
-    fn into_plan(self) -> Result<MemoryStoreMutationPlan> {
-        let changes = self
-            .changes
-            .into_inner()
-            .map_err(|_| Error::config("private_garden_plan", "planning store poisoned"))?;
-        let read_set = self
-            .read_set
-            .into_inner()
-            .map_err(|_| Error::config("private_garden_plan", "read set poisoned"))?;
-        let mut plan = MemoryStoreMutationPlan::default();
-        for (key, value) in changes {
-            let before = read_set.get(&key).ok_or_else(|| {
-                Error::config(
-                    "private_garden_plan",
-                    "private garden mutation is missing its planning read",
-                )
-            })?;
-            plan.preconditions.push(json_precondition(
-                "private_garden",
-                &key,
-                before
-                    .as_ref()
-                    .map(serde_json::to_value)
-                    .transpose()
-                    .map_err(|error| Error::config("private_garden_plan", error.to_string()))?,
-            ));
-            plan.mutations.push(match value {
-                Some(doc) => StoreMutation::PutJson {
-                    namespace: "private_garden".to_string(),
-                    key: key.clone(),
-                    value: serde_json::to_value(&doc)
-                        .map_err(|error| Error::config("private_garden_plan", error.to_string()))?,
-                    event_kind: MemoryStoreEventKind::MemoryWrite,
-                    plane: "private_garden".to_string(),
-                    record_key: key,
-                },
-                None => StoreMutation::DeleteJson {
-                    namespace: "private_garden".to_string(),
-                    key: key.clone(),
-                    event_kind: MemoryStoreEventKind::MemoryDelete,
-                    plane: "private_garden".to_string(),
-                    record_key: key,
-                },
-            });
-        }
-        Ok(plan)
-    }
-}
-
-impl PrivateGardenStore for PlanningPrivateGardenStore<'_> {
-    fn list(&self, mounted_subject_id: &str, limit: usize) -> Result<Vec<PrivateGardenDocRecord>> {
-        let mut records = self
-            .base
-            .list(mounted_subject_id, usize::MAX)?
-            .into_iter()
-            .map(|record| (record.path.clone(), record))
-            .collect::<BTreeMap<_, _>>();
-        let prefix = private_garden_storage_key_prefix(mounted_subject_id);
-        for (key, value) in self
-            .changes
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .iter()
-            .filter(|(key, _)| key.starts_with(&prefix))
-        {
-            let path = key.trim_start_matches(&prefix).to_string();
-            match value {
-                Some(doc) => {
-                    records.insert(path, private_garden_doc_record(doc));
-                }
-                None => {
-                    records.remove(&path);
-                }
-            }
-        }
-        let mut rows = records.into_values().collect::<Vec<_>>();
-        rows.sort_by_key(|row| std::cmp::Reverse(row.updated_at));
-        if limit > 0 {
-            rows.truncate(limit);
-        }
-        Ok(rows)
-    }
-
-    fn read(&self, mounted_subject_id: &str, doc_path: &str) -> Result<Option<PrivateGardenDoc>> {
-        let path = normalize_private_garden_doc_path(doc_path)?;
-        let key = private_garden_storage_key(mounted_subject_id, &path);
-        if let Some(value) = self
-            .changes
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .get(&key)
-            .cloned()
-        {
-            return Ok(value);
-        }
-        let value = self.base.read(mounted_subject_id, &path)?;
-        self.read_set
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .insert(key, value.clone());
-        Ok(value)
-    }
-
-    fn write(
-        &self,
-        mounted_subject_id: &str,
-        doc_path: &str,
-        content: &str,
-        now_secs: u64,
-    ) -> Result<PrivateGardenDocRecord> {
-        if content.len() > PRIVATE_GARDEN_MAX_DOC_BYTES {
-            return Err(Error::config(
-                "private_garden_write",
-                format!(
-                    "document size {} exceeds {}",
-                    content.len(),
-                    PRIVATE_GARDEN_MAX_DOC_BYTES
-                ),
-            ));
-        }
-        let path = normalize_private_garden_doc_path(doc_path)?;
-        let revision = PrivateGardenStore::read(self, mounted_subject_id, &path)?
-            .map(|doc| doc.revision.saturating_add(1))
-            .unwrap_or(1);
-        let doc = PrivateGardenDoc {
-            path: path.clone(),
-            content: content.to_string(),
-            updated_at: now_secs,
-            revision,
-        };
-        self.changes
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .insert(
-                private_garden_storage_key(mounted_subject_id, &path),
-                Some(doc.clone()),
-            );
-        Ok(private_garden_doc_record(&doc))
-    }
-
-    fn move_doc(
-        &self,
-        mounted_subject_id: &str,
-        from_path: &str,
-        to_path: &str,
-        now_secs: u64,
-    ) -> Result<Option<PrivateGardenDocRecord>> {
-        let from = normalize_private_garden_doc_path(from_path)?;
-        let to = normalize_private_garden_doc_path(to_path)?;
-        let Some(doc) = PrivateGardenStore::read(self, mounted_subject_id, &from)? else {
-            return Ok(None);
-        };
-        PrivateGardenStore::delete(self, mounted_subject_id, &from)?;
-        Ok(Some(PrivateGardenStore::write(
-            self,
-            mounted_subject_id,
-            &to,
-            &doc.content,
-            now_secs,
-        )?))
-    }
-
-    fn delete(&self, mounted_subject_id: &str, doc_path: &str) -> Result<bool> {
-        let path = normalize_private_garden_doc_path(doc_path)?;
-        if PrivateGardenStore::read(self, mounted_subject_id, &path)?.is_some() {
-            self.changes
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .insert(private_garden_storage_key(mounted_subject_id, &path), None);
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-}
-
 fn private_garden_storage_key_prefix(mounted_subject_id: &str) -> String {
     format!("{mounted_subject_id}::")
 }
@@ -26360,6 +30763,7 @@ mod recall_immutable_session_observer_tests {
     struct ObservedStoreEngine {
         inner: Arc<dyn StoreEngine>,
         state: Arc<Mutex<RecallReadObserverState>>,
+        before_next_commit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     }
 
     impl ObservedStoreEngine {
@@ -26367,7 +30771,17 @@ mod recall_immutable_session_observer_tests {
             Self {
                 inner,
                 state: Arc::new(Mutex::new(RecallReadObserverState::default())),
+                before_next_commit: Mutex::new(None),
             }
+        }
+
+        fn before_next_commit(&self, hook: impl FnOnce() + Send + 'static) {
+            let replaced = self
+                .before_next_commit
+                .lock()
+                .expect("commit hook")
+                .replace(Box::new(hook));
+            assert!(replaced.is_none(), "commit hook already armed");
         }
 
         fn arm(&self) {
@@ -26507,6 +30921,9 @@ mod recall_immutable_session_observer_tests {
             request: &StoreTransactionRequest,
             admission: &StoreTransactionAdmission,
         ) -> Result<StoreTransactionReport> {
+            if let Some(hook) = self.before_next_commit.lock().expect("commit hook").take() {
+                hook();
+            }
             self.inner.commit_transaction_admitted(request, admission)
         }
 
@@ -26707,6 +31124,7 @@ mod recall_immutable_session_observer_tests {
                     RecallFeatureFlags::default(),
                     RecallReadPurpose::Query,
                     RuntimeLifecycleTrigger::SdkCall,
+                    None,
                     None,
                 )
             })
@@ -27764,7 +32182,7 @@ mod recall_immutable_session_observer_tests {
         observer.arm_counting();
         let baseline = runtime.project(request()).expect("baseline projection");
         assert!(baseline.report().procedural_delivery_reports().is_empty());
-        let baseline_operations = observer.observation().direct_read_operations;
+        let baseline_observation = observer.observation();
 
         let write = runtime
             .write(MemoryWriteRequest::Procedural {
@@ -27805,38 +32223,265 @@ mod recall_immutable_session_observer_tests {
                 .count(),
             1
         );
-        let procedural_operations = observer.observation().direct_read_operations;
-        let is_soul_read = |operation: &&String| {
-            [
-                "inner_life",
-                "private_docs",
-                "private_garden",
-                "self_model",
-                "self_continuity",
-                "self_authored_core",
-                "boundary_persona",
-                "outer_voice",
-                "relationship",
-            ]
+        let procedural_observation = observer.observation();
+        let baseline_soul_reads = baseline_observation
+            .json_reads
             .iter()
-            .any(|namespace| operation.contains(namespace))
-        };
-        let baseline_soul_reads = baseline_operations
-            .iter()
-            .filter(is_soul_read)
+            .filter(|read| is_subject_soul_protected_json_namespace(&read.namespace))
             .cloned()
             .collect::<Vec<_>>();
-        let procedural_soul_reads = procedural_operations
+        let procedural_soul_reads = procedural_observation
+            .json_reads
             .iter()
-            .filter(is_soul_read)
+            .filter(|read| is_subject_soul_protected_json_namespace(&read.namespace))
             .cloned()
             .collect::<Vec<_>>();
         assert!(
             !baseline_soul_reads.is_empty(),
-            "Soul read delta evidence must be non-vacuous: {baseline_operations:#?}"
+            "Soul read delta evidence must include the typed immutable-session root probes: {:#?}",
+            baseline_observation.json_reads
         );
         assert_eq!(procedural_soul_reads, baseline_soul_reads);
-        assert_eq!(procedural_operations, baseline_operations);
+        assert_eq!(
+            procedural_observation.direct_read_operations,
+            baseline_observation.direct_read_operations
+        );
+    }
+
+    #[test]
+    fn relationship_source_successor_between_archive_plan_and_commit_rejects_all_archive_effects() {
+        fn relationship_runtime(
+            platform: StorePlatform,
+            owner: &str,
+            agent: &str,
+            relationship_id: &str,
+        ) -> MemoryRuntime {
+            let registry = SubjectRegistry::single_agent_default(owner, agent).expect("registry");
+            let mounted = default_agent_subject_id(agent);
+            let human = bm_core::memory::primary_human_subject_id(owner);
+            let mut graph =
+                SubjectRelationshipGraph::single_agent_default(&registry).expect("graph");
+            for edge in &mut graph.edges {
+                if (edge.from_subject_id == mounted && edge.to_subject_id == human)
+                    || (edge.from_subject_id == human && edge.to_subject_id == mounted)
+                {
+                    edge.relationship_id = Some(relationship_id.to_string());
+                }
+            }
+            MemoryRuntime::builder()
+                .identity(MemoryIdentity::new(agent, owner).expect("identity"))
+                .scope(MemoryScope::new("local", "chat-1").expect("scope"))
+                .store(MemoryStoreHandle::from_platform(platform))
+                .clock(Arc::new(FixedClock))
+                .subject_registry(registry)
+                .subject_relationship_graph(graph)
+                .scoped_runtime(SubjectScopedRuntime {
+                    memory_space_id: default_memory_space_id(owner),
+                    mounted_subject_id: mounted.clone(),
+                    actor_subject_id: mounted,
+                    agent_id: agent.to_string(),
+                    relationship_scope: Some(bm_core::memory::RelationshipScope {
+                        relationship_id: relationship_id.to_string(),
+                        channel: "local".to_string(),
+                        conversation_id: Some("chat-1".to_string()),
+                    }),
+                    projection_policy: "subject_aware_default".to_string(),
+                    write_policy: "subject_candidate_then_space_governance".to_string(),
+                })
+                .build()
+                .expect("relationship runtime")
+        }
+
+        fn relationship_clauses(
+            repair_commitments: Vec<String>,
+        ) -> bm_core::memory::RelationshipSourceClausesV1 {
+            bm_core::memory::RelationshipSourceClausesV1 {
+                disclosure_ceiling:
+                    bm_core::memory::RelationshipDisclosureCeilingV1::GovernedSummary,
+                access_constraints: vec![
+                    bm_core::memory::RelationshipAccessConstraintV1::NoPrivateRaw,
+                    bm_core::memory::RelationshipAccessConstraintV1::GovernedDisclosureOnly,
+                ],
+                truth_commitments: vec!["state uncertainty".to_string()],
+                mutual_boundary_commitments: vec!["respect explicit refusal".to_string()],
+                repair_commitments,
+            }
+        }
+
+        let owner = "owner-archive-race";
+        let agent = "agent-main";
+        let relationship_id = "relationship:archive-race";
+        let profile = test_host_profile();
+        let base_platform = open_test_store_platform(
+            crate::store_internal::StoreBackendConfig::in_memory(profile).expect("store config"),
+        )
+        .expect("store");
+        let setup_runtime =
+            relationship_runtime(base_platform.clone(), owner, agent, relationship_id);
+        setup_runtime
+            .provision_subject_soul(SubjectSoulProvisionIntentV1::Founding {
+                operation_id: "archive-race-founding".to_string(),
+                human_actor_subject_id: bm_core::memory::primary_human_subject_id(owner),
+                charter: Box::new(
+                    bm_core::memory::SubjectSoulFoundingCharterSeedV1 {
+                        identity_anchor: Some("archive race subject".to_string()),
+                        character_tendencies: vec!["evidence before mutation".to_string()],
+                        priority_constitution: vec!["preserve four-root CAS".to_string()],
+                        non_negotiables: vec!["never archive across a stale source".to_string()],
+                        default_response_mode: None,
+                        default_initiative_posture: None,
+                        default_relationship_posture: None,
+                        boundary_doctrine: None,
+                        truth_seeking_commitment: None,
+                        self_preservation_doctrine: None,
+                        repair_doctrine: None,
+                        change_principle: None,
+                    }
+                    .canonicalize()
+                    .expect("canonical founding charter"),
+                ),
+                source_asserted_at: Some(1_700_000_000),
+            })
+            .expect("active Soul");
+        let mounted = default_agent_subject_id(agent);
+        let human = bm_core::memory::primary_human_subject_id(owner);
+        setup_runtime
+            .control_relationship_source(RelationshipSourceControlIntentV1 {
+                operation_id: "archive-race-source-v1".to_string(),
+                memory_space_id: setup_runtime.memory_space_id().to_string(),
+                relationship_id: relationship_id.to_string(),
+                mounted_subject_id: mounted.clone(),
+                counterparty_subject_ids: vec![human.clone()],
+                expected_state: setup_runtime
+                    .relationship_source_pristine_expected_state(relationship_id)
+                    .expect("pristine relationship source"),
+                authority: RelationshipSourceControlAuthorityV1::HumanUser {
+                    actor_subject_id: human.clone(),
+                },
+                action: bm_core::memory::RelationshipSourceControlIntentActionV1::Create {
+                    clauses: relationship_clauses(vec!["repair before escalation".to_string()]),
+                    source_asserted_at: Some(1_700_000_000),
+                    evidence_digest: "a".repeat(64),
+                },
+            })
+            .expect("relationship source v1 with active Soul projection");
+
+        let source_v1 = setup_runtime
+            .read_relationship_source(RelationshipSourceReadRequestV1 {
+                memory_space_id: setup_runtime.memory_space_id().to_string(),
+                relationship_id: relationship_id.to_string(),
+                mounted_subject_id: mounted.clone(),
+                selector: RelationshipSourceReadSelectorV1::Current,
+            })
+            .expect("relationship source v1");
+        let soul_current = setup_runtime
+            .read_subject_soul(SubjectSoulReadRequestV1 {
+                target_subject_id: mounted.clone(),
+                selector: SubjectSoulReadSelectorV1::Current,
+                view: SubjectSoulReadViewV1::OperatorSafe,
+            })
+            .expect("active Soul before archive planning");
+        let SubjectSoulReadOutcomeV1::Verified { view: soul_current } = soul_current else {
+            panic!("active Soul must be verified")
+        };
+        let archive_expected = SubjectSoulExpectedStateV1::Exact {
+            generation: soul_current.generation,
+            revision: soul_current.revision,
+            lifecycle_state: soul_current.state,
+            head_digest: soul_current.head_digest,
+            manifest_digest: soul_current.manifest_digest,
+        };
+
+        let observer = Arc::new(ObservedStoreEngine::new(base_platform.engine_for_test()));
+        let archive_platform = base_platform.with_engine_for_test(observer.clone());
+        let archive_runtime = relationship_runtime(archive_platform, owner, agent, relationship_id);
+        let winner_snapshot = Arc::new(Mutex::new(None));
+        let winner_snapshot_out = winner_snapshot.clone();
+        let winner_platform = base_platform.clone();
+        observer.before_next_commit(move || {
+            let winner_runtime =
+                relationship_runtime(winner_platform.clone(), owner, agent, relationship_id);
+            winner_runtime
+                .control_relationship_source(RelationshipSourceControlIntentV1 {
+                    operation_id: "archive-race-source-v2".to_string(),
+                    memory_space_id: winner_runtime.memory_space_id().to_string(),
+                    relationship_id: relationship_id.to_string(),
+                    mounted_subject_id: mounted,
+                    counterparty_subject_ids: vec![human.clone()],
+                    expected_state: RelationshipSourceExpectedStateV1::Exact {
+                        revision: source_v1.current_revision,
+                        state: source_v1.current_state.expect("source state"),
+                        source_digest: source_v1.current_source_digest,
+                        manifest_digest: source_v1.current_manifest_digest,
+                    },
+                    authority: RelationshipSourceControlAuthorityV1::HumanUser {
+                        actor_subject_id: human,
+                    },
+                    action:
+                        bm_core::memory::RelationshipSourceControlIntentActionV1::UpdateContribution {
+                            clauses: relationship_clauses(vec![
+                                "repair before escalation".to_string(),
+                                "winner source must survive stale archive".to_string(),
+                            ]),
+                            source_asserted_at: Some(1_700_000_010),
+                            evidence_digest: "b".repeat(64),
+                        },
+                })
+                .expect("winner relationship source successor");
+            *winner_snapshot_out.lock().expect("winner snapshot") = Some(
+                winner_platform
+                    .export_store_snapshot()
+                    .expect("snapshot after winner source successor"),
+            );
+        });
+
+        let error = archive_runtime
+            .mutate_subject_soul(SubjectSoulLifecycleMutationRequestV1 {
+                operation_id: "archive-race-stale-archive".to_string(),
+                target_subject_id: archive_runtime.scoped_runtime().mounted_subject_id.clone(),
+                expected_state: archive_expected,
+                authority: SubjectSoulLifecycleAuthorityV1::Maintenance {
+                    system_actor_subject_id: bm_core::memory::system_governor_subject_id(owner),
+                },
+                action: SubjectSoulLifecycleActionV1::Archive,
+            })
+            .expect_err("source successor between planning and commit must reject archive");
+        assert_eq!(
+            error.disposition,
+            SoulGovernanceSdkErrorDisposition::ExpectedStateConflict
+        );
+        let winner_snapshot = winner_snapshot
+            .lock()
+            .expect("winner snapshot")
+            .clone()
+            .expect("commit hook ran");
+        assert_eq!(
+            base_platform
+                .export_store_snapshot()
+                .expect("snapshot after stale archive rejection"),
+            winner_snapshot,
+            "stale archive must add no Soul, Source, projection, receipt, audit, or event effect"
+        );
+        let source_v2 = setup_runtime
+            .read_relationship_source(RelationshipSourceReadRequestV1 {
+                memory_space_id: setup_runtime.memory_space_id().to_string(),
+                relationship_id: relationship_id.to_string(),
+                mounted_subject_id: default_agent_subject_id(agent),
+                selector: RelationshipSourceReadSelectorV1::Current,
+            })
+            .expect("winner relationship source remains current");
+        assert_eq!(source_v2.current_revision, 2);
+        let soul_after = setup_runtime
+            .read_subject_soul(SubjectSoulReadRequestV1 {
+                target_subject_id: default_agent_subject_id(agent),
+                selector: SubjectSoulReadSelectorV1::Current,
+                view: SubjectSoulReadViewV1::OperatorSafe,
+            })
+            .expect("Soul remains active after stale archive rejection");
+        let SubjectSoulReadOutcomeV1::Verified { view: soul_after } = soul_after else {
+            panic!("Soul must remain verified")
+        };
+        assert_eq!(soul_after.state, SubjectSoulLifecycleStateV1::Active);
     }
 
     #[test]
@@ -28621,6 +33266,7 @@ mod concurrent_memory_plan_tests {
             MemoryStoreMutationPlan {
                 mutations: plan.mutations,
                 preconditions: plan.preconditions,
+                blob_preconditions: Vec::new(),
             }
         };
         let first_plan = plan(&first, "owner_a", "first owner");

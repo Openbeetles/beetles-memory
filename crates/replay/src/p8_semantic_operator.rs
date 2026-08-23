@@ -624,15 +624,69 @@ fn reject_forbidden_raw_material(bytes: &[u8]) -> Result<(), Vec<P8ArtifactContr
 }
 
 pub(crate) fn run_p8_gate_contract() -> Result<(), String> {
-    use bm_core::memory::SelfAuthoredCore;
-    use bm_core::platform::Platform as _;
     use bm_sdk::{
-        default_agent_subject_id, GovernedRuntimeSkillWriteInput, MemoryIdentity,
-        MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallTemporalOperation, MemoryRuntime,
-        MemoryScope, MemoryStoreHandle, MemoryWriteRequest, PressureLevel, ProfileId,
-        RuntimeLifecycleModeInput, RuntimeSkillCreationRef, RuntimeSkillOwningScope,
-        RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
+        default_agent_subject_id, primary_human_subject_id, CanonicalTurnDelta, ConversationScope,
+        GovernedRuntimeSkillWriteInput, IngressKind, MemoryIdentity, MemoryPrivacyClass,
+        MemoryProjectionRequest, MemoryRecallTemporalOperation, MemoryRuntime, MemoryScope,
+        MemoryStoreHandle, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol,
+        MemoryTurnSource, MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
+        RuntimeSkillCreationRef, RuntimeSkillOwningScope, RuntimeSkillWrite,
+        RuntimeSkillWriteSource, StoreBackendConfig, SubjectSoulFoundingCharterSeedV1,
+        SubjectSoulProvisionIntentV1, TranscriptInputMessage,
     };
+
+    struct P8GateHttpClient;
+
+    impl bm_sdk::LlmHttpClient for P8GateHttpClient {
+        fn do_post(
+            &mut self,
+            _url: &str,
+            _headers: &[(&str, &str)],
+            _body: &[u8],
+        ) -> bm_sdk::Result<(u16, bm_sdk::ResponseBody)> {
+            Ok((200, bm_sdk::ResponseBody::Heap(Vec::new())))
+        }
+    }
+
+    struct P8GateLlmClient {
+        private_garden_content: &'static str,
+    }
+
+    impl bm_sdk::LlmClient for P8GateLlmClient {
+        fn model_compat(&self) -> bm_sdk::LlmModelCompat {
+            bm_sdk::LlmModelCompat::default()
+        }
+
+        fn chat(
+            &self,
+            _http: &mut dyn bm_sdk::LlmHttpClient,
+            system: &str,
+            _messages: &[bm_sdk::Message],
+            _tools: Option<&[bm_sdk::ToolSpec]>,
+            _tool_choice: bm_sdk::ToolChoicePolicy,
+        ) -> bm_sdk::Result<bm_sdk::LlmResponse> {
+            let content = if system.contains("private garden") {
+                serde_json::json!({
+                    "writes": [{
+                        "path": "journal/p8-gate-private.md",
+                        "content": self.private_garden_content,
+                    }],
+                })
+                .to_string()
+            } else if system.contains("inward autonomy runtime") {
+                "{}".to_string()
+            } else if system.contains("long-term memory") {
+                "[]".to_string()
+            } else {
+                "null".to_string()
+            };
+            Ok(bm_sdk::LlmResponse {
+                content,
+                stop_reason: bm_sdk::StopReason::EndTurn,
+                tool_calls: None,
+            })
+        }
+    }
 
     fn build_runtime(
         platform: MemoryStoreHandle,
@@ -774,67 +828,171 @@ pub(crate) fn run_p8_gate_contract() -> Result<(), String> {
         })
         .map_err(|error| error.to_string())?;
 
-    platform
-        .replay_harness()
-        .self_authored_core_store()
-        .set(
-            &mounted_subject_id,
-            &SelfAuthoredCore {
-                identity_anchor: "p8 gate stable soul".into(),
-                default_response_mode: "direct".into(),
-                self_preservation_doctrine: "never expose private procedure".into(),
-                ..SelfAuthoredCore::default()
+    let soul_content = "p8 gate stable soul";
+    runtime
+        .provision_subject_soul(SubjectSoulProvisionIntentV1::Founding {
+            operation_id: "p8-gate-subject-soul-founding".to_string(),
+            human_actor_subject_id: primary_human_subject_id("owner-default"),
+            charter: Box::new(
+                SubjectSoulFoundingCharterSeedV1 {
+                    identity_anchor: Some(soul_content.to_string()),
+                    character_tendencies: vec!["direct".to_string()],
+                    priority_constitution: vec![
+                        "preserve exact subject and space ownership".to_string()
+                    ],
+                    non_negotiables: vec!["never expose private procedure".to_string()],
+                    default_response_mode: Some("direct".to_string()),
+                    default_initiative_posture: None,
+                    default_relationship_posture: None,
+                    boundary_doctrine: None,
+                    truth_seeking_commitment: None,
+                    self_preservation_doctrine: None,
+                    repair_doctrine: None,
+                    change_principle: None,
+                }
+                .canonicalize()
+                .map_err(|error| error.to_string())?,
+            ),
+            source_asserted_at: Some(1_780_000_000),
+        })
+        .map_err(|error| error.to_string())?;
+
+    let private_garden_content = "p8-gate-private-store-sentinel";
+    let mut http = P8GateHttpClient;
+    let llm = P8GateLlmClient {
+        private_garden_content,
+    };
+    let private_report = runtime
+        .finalize_turn_with_inline_governance(
+            Some(&mut http),
+            Some(&llm),
+            MemoryTurnFinalizeRequest {
+                turn: CanonicalTurnDelta {
+                    turn_id: "p8-gate-private-founding-turn".to_string(),
+                    conversation: ConversationScope {
+                        channel: "p8.gate".to_string(),
+                        chat_id: "chat-a".to_string(),
+                        conversation_id: Some("p8-gate-private-conversation".to_string()),
+                    },
+                    subject: mounted_subject_id.clone(),
+                    delivery_status: MemoryTurnDeliveryStatus::Delivered,
+                    source: MemoryTurnSource {
+                        ingress: IngressKind::User,
+                        channel: "p8.gate".to_string(),
+                        provider: Some("synthetic-p8-gate".to_string()),
+                        protocol: MemoryTurnProtocol::OllamaChat,
+                        endpoint: None,
+                        model_alias: Some("synthetic-p8-gate".to_string()),
+                        model_resolved: Some("synthetic-p8-gate".to_string()),
+                        request_id: Some("p8-gate-private-request".to_string()),
+                        client_conversation_hint: Some("p8-gate-private-conversation".to_string()),
+                    },
+                    actor: None,
+                    input_messages: vec![TranscriptInputMessage::user(
+                        "Keep one governed private P8 gate note.",
+                    )],
+                    assistant_message: Some(TranscriptInputMessage::assistant(
+                        "The governed private note is retained.",
+                    )),
+                    tool_observations: Vec::new(),
+                    external_content_used: false,
+                    candidate_ids: Vec::new(),
+                },
+                tool_calls: 0,
+                runtime_skill_selected_ids: Vec::new(),
+                task_learning_selected_ids: Vec::new(),
+                reuse_outcome_note: String::new(),
+                tool_usage_feedback: None,
+                pressure: PressureLevel::Normal,
+                mode_input: RuntimeLifecycleModeInput::default(),
             },
         )
         .map_err(|error| error.to_string())?;
-    platform
+    if !private_report.private_garden_self_work.executed
+        || private_report.private_garden_self_work.writes != 1
+    {
+        return Err("P8 gate failed to create its governed private positive control".into());
+    }
+
+    let before_store = platform
         .replay_harness()
-        .private_garden_store()
-        .write(
-            &mounted_subject_id,
-            "p8-gate-private.md",
-            "p8-gate-private-store-sentinel",
-            1_780_000_000,
-        )
+        .export_store_snapshot()
         .map_err(|error| error.to_string())?;
-    let before_core = platform
-        .replay_harness()
-        .self_authored_core_store()
-        .get(&mounted_subject_id)
-        .map_err(|error| error.to_string())?;
-    let before_private = platform
-        .replay_harness()
-        .private_garden_store()
-        .list(&mounted_subject_id, 16)
-        .map_err(|error| error.to_string())?;
-    let before_ledger = platform
-        .replay_harness()
-        .core_revision_ledger_store()
-        .get(&mounted_subject_id)
-        .map_err(|error| error.to_string())?;
+    let before_store_json = serde_json::to_string(&before_store)
+        .map_err(|_| "P8 gate store positive-control serialization failed".to_string())?;
+    if !before_store_json.contains(soul_content)
+        || !before_store_json.contains(private_garden_content)
+    {
+        return Err("P8 gate typed Soul/private positive controls are absent".into());
+    }
+    let protected_namespaces = [
+        "self_model",
+        "self_authored_core",
+        "core_revision_ledger",
+        "self_continuity",
+        "relationship_portfolio",
+        "relationship_topology",
+        "autonomy_strategy",
+        "inner_life",
+        "felt_significance",
+        "temperament_continuity",
+        "inner_conflict",
+        "mental_privacy",
+        "private_doc",
+        "private_garden",
+        "outer_voice",
+        "subject_soul_lifecycle_heads",
+        "subject_soul_revision_materials",
+        "subject_soul_scope_manifests",
+        "subject_soul_generation_tombstones",
+        "subject_soul_relationship_projections",
+        "subject_soul_operation_results",
+        "memory_mutation_receipts",
+        "memory_mutation_audits",
+    ];
+    let before_protected_docs = before_store
+        .json_docs
+        .iter()
+        .filter(|document| protected_namespaces.contains(&document.namespace.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let before_protected_events = before_store
+        .events
+        .iter()
+        .filter(|event| protected_namespaces.contains(&event.plane.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
 
     assert_safe_surfaces(&project(&runtime)?, &[private_procedure, soul_procedure])?;
     let cross_subject = build_runtime(platform.clone(), "owner-default", Some("p8-other-subject"))?;
-    assert_safe_surfaces(&project(&cross_subject)?, &[cross_scope_procedure])?;
+    assert_safe_surfaces(
+        &project(&cross_subject)?,
+        &[cross_scope_procedure, soul_content, private_garden_content],
+    )?;
     let cross_space = build_runtime(platform.clone(), "owner-other", None)?;
-    assert_safe_surfaces(&project(&cross_space)?, &[cross_scope_procedure])?;
+    assert_safe_surfaces(
+        &project(&cross_space)?,
+        &[cross_scope_procedure, soul_content, private_garden_content],
+    )?;
 
-    let after_core = platform
+    let after_store = platform
         .replay_harness()
-        .self_authored_core_store()
-        .get(&mounted_subject_id)
+        .export_store_snapshot()
         .map_err(|error| error.to_string())?;
-    let after_private = platform
-        .replay_harness()
-        .private_garden_store()
-        .list(&mounted_subject_id, 16)
-        .map_err(|error| error.to_string())?;
-    let after_ledger = platform
-        .replay_harness()
-        .core_revision_ledger_store()
-        .get(&mounted_subject_id)
-        .map_err(|error| error.to_string())?;
-    if before_core != after_core || before_private != after_private || before_ledger != after_ledger
+    let after_protected_docs = after_store
+        .json_docs
+        .iter()
+        .filter(|document| protected_namespaces.contains(&document.namespace.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let after_protected_events = after_store
+        .events
+        .iter()
+        .filter(|event| protected_namespaces.contains(&event.plane.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if before_protected_docs != after_protected_docs
+        || before_protected_events != after_protected_events
     {
         return Err("P8 gate observed Soul/private projection mutation".into());
     }

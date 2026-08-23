@@ -435,36 +435,67 @@ pub fn write_agent_tool_experience_record(
     storage: &dyn SkillStorage,
     record: &AgentToolExperienceRecord,
 ) -> Result<bool> {
-    let name = agent_tool_experience_storage_name(record);
-    let rendered = serde_json::to_string_pretty(record)
-        .map_err(|error| Error::config("agent_tool_experience", error.to_string()))?;
-    let changed = super::get_skill_content(storage, &name)
-        .map(|existing| existing.trim() != rendered.trim())
-        .unwrap_or(true);
-    if changed {
+    if let Some((name, rendered)) = reconcile_agent_tool_experience_record(storage, record)? {
         super::write_skill(storage, &name, &rendered)?;
+        Ok(true)
+    } else {
+        Ok(false)
     }
-    Ok(changed)
 }
 
 pub fn plan_agent_tool_experience_record(
     storage: &dyn SkillStorage,
     record: &AgentToolExperienceRecord,
 ) -> Result<Option<RuntimeSkillStorageMutation>> {
-    let name = agent_tool_experience_storage_name(record);
-    let rendered = serde_json::to_string_pretty(record)
-        .map_err(|error| Error::config("agent_tool_experience", error.to_string()))?;
-    let changed = super::get_skill_content(storage, &name)
-        .map(|existing| existing.trim() != rendered.trim())
-        .unwrap_or(true);
-    if changed {
-        Ok(Some(RuntimeSkillStorageMutation::Upsert {
+    reconcile_agent_tool_experience_record(storage, record).map(|planned| {
+        planned.map(|(name, rendered)| RuntimeSkillStorageMutation::Upsert {
             name,
             content: rendered.into_bytes(),
-        }))
-    } else {
-        Ok(None)
+        })
+    })
+}
+
+fn reconcile_agent_tool_experience_record(
+    storage: &dyn SkillStorage,
+    record: &AgentToolExperienceRecord,
+) -> Result<Option<(String, String)>> {
+    let name = agent_tool_experience_storage_name(record);
+    let existing = super::get_skill_content(storage, &name)
+        .and_then(|content| serde_json::from_str::<AgentToolExperienceRecord>(&content).ok())
+        .filter(|existing| {
+            existing.experience_id == record.experience_id
+                && existing.created_at <= existing.updated_at
+        });
+    let mut post_image = record.clone();
+    if let Some(existing) = existing {
+        if agent_tool_experience_semantically_equal(&existing, record) {
+            return Ok(None);
+        }
+        post_image.created_at = existing.created_at;
+        let minimum_updated_at = existing.updated_at.checked_add(1).ok_or_else(|| {
+            Error::config(
+                "agent_tool_experience",
+                "updated_at cannot advance beyond u64::MAX",
+            )
+        })?;
+        post_image.updated_at = post_image.updated_at.max(minimum_updated_at);
     }
+    let rendered = serde_json::to_string_pretty(&post_image)
+        .map_err(|error| Error::config("agent_tool_experience", error.to_string()))?;
+    Ok(Some((name, rendered)))
+}
+
+fn agent_tool_experience_semantically_equal(
+    left: &AgentToolExperienceRecord,
+    right: &AgentToolExperienceRecord,
+) -> bool {
+    let mut left = left.clone();
+    let mut right = right.clone();
+    left.created_at = 0;
+    left.updated_at = 0;
+    right.created_at = 0;
+    right.updated_at = 0;
+    left == right
 }
 
 pub fn build_agent_tool_registry_report(
@@ -946,6 +977,76 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct TestSkillStorage {
+        files: Mutex<HashMap<String, Vec<u8>>>,
+    }
+
+    impl TestSkillStorage {
+        fn seed_record(&self, record: &AgentToolExperienceRecord) {
+            self.files
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(
+                    agent_tool_experience_storage_name(record),
+                    serde_json::to_vec_pretty(record).expect("serialize experience fixture"),
+                );
+        }
+
+        fn seed_raw(&self, name: String, content: &[u8]) {
+            self.files
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(name, content.to_vec());
+        }
+    }
+
+    impl SkillStorage for TestSkillStorage {
+        fn list_names(&self) -> Result<Vec<String>> {
+            Ok(self
+                .files
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .keys()
+                .cloned()
+                .collect())
+        }
+
+        fn read(&self, name: &str) -> Result<Vec<u8>> {
+            self.files
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(name)
+                .cloned()
+                .ok_or_else(|| Error::config("agent_tool_test_storage", "missing"))
+        }
+
+        fn write(&self, name: &str, content: &[u8]) -> Result<()> {
+            self.files
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(name.to_string(), content.to_vec());
+            Ok(())
+        }
+
+        fn remove(&self, name: &str) -> Result<()> {
+            self.files
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(name);
+            Ok(())
+        }
+    }
+
+    fn planned_experience(mutation: RuntimeSkillStorageMutation) -> AgentToolExperienceRecord {
+        let RuntimeSkillStorageMutation::Upsert { content, .. } = mutation else {
+            panic!("experience planner must use an upsert");
+        };
+        serde_json::from_slice(&content).expect("parse planned experience")
+    }
 
     fn registry() -> AgentToolRegistrySnapshot {
         let mut tool =
@@ -984,6 +1085,90 @@ mod tests {
         assert_eq!(report.tool_hints[0].tool_id, "pdf.extract");
         assert!(report.tool_hints[0].host_execution_required);
         assert!(!report.audit.cold_start_selection_used);
+    }
+
+    #[test]
+    fn identical_experience_semantics_across_time_are_a_noop() {
+        let storage = TestSkillStorage::default();
+        let existing = AgentToolExperienceRecord::active(
+            "exp-stable",
+            "host-tools",
+            "pdf.extract",
+            "schema-pdf-v1",
+            "Use the governed PDF path.",
+            100,
+        );
+        storage.seed_record(&existing);
+        let mut repeated = existing.clone();
+        repeated.created_at = 200;
+        repeated.updated_at = 200;
+
+        assert!(plan_agent_tool_experience_record(&storage, &repeated)
+            .expect("plan repeated experience")
+            .is_none());
+    }
+
+    #[test]
+    fn changed_experience_preserves_creation_and_advances_update_time() {
+        let storage = TestSkillStorage::default();
+        let existing = AgentToolExperienceRecord::active(
+            "exp-changing",
+            "host-tools",
+            "pdf.extract",
+            "schema-pdf-v1",
+            "Use the governed PDF path.",
+            100,
+        );
+        storage.seed_record(&existing);
+        let mut changed = existing.clone();
+        changed.usage_guidance = "Use the governed PDF path with OCR evidence.".to_string();
+        changed.created_at = 50;
+        changed.updated_at = 50;
+
+        let planned = planned_experience(
+            plan_agent_tool_experience_record(&storage, &changed)
+                .expect("plan changed experience")
+                .expect("semantic change needs an upsert"),
+        );
+        assert_eq!(planned.created_at, 100);
+        assert!(planned.updated_at > 100);
+        assert_eq!(planned.usage_guidance, changed.usage_guidance);
+    }
+
+    #[test]
+    fn malformed_or_mismatched_existing_record_is_replaced_without_time_inheritance() {
+        let candidate = AgentToolExperienceRecord::active(
+            "exp-repair",
+            "host-tools",
+            "pdf.extract",
+            "schema-pdf-v1",
+            "Use the governed PDF path.",
+            200,
+        );
+        let name = agent_tool_experience_storage_name(&candidate);
+
+        let malformed = TestSkillStorage::default();
+        malformed.seed_raw(name.clone(), b"not-json");
+        let repaired = planned_experience(
+            plan_agent_tool_experience_record(&malformed, &candidate)
+                .expect("plan malformed repair")
+                .expect("malformed record must not suppress repair"),
+        );
+        assert_eq!(repaired, candidate);
+
+        let mismatched = TestSkillStorage::default();
+        let mut other = candidate.clone();
+        other.experience_id = "exp-other".to_string();
+        mismatched.seed_raw(
+            name,
+            &serde_json::to_vec_pretty(&other).expect("serialize mismatched record"),
+        );
+        let repaired = planned_experience(
+            plan_agent_tool_experience_record(&mismatched, &candidate)
+                .expect("plan mismatched repair")
+                .expect("mismatched record must not suppress repair"),
+        );
+        assert_eq!(repaired, candidate);
     }
 
     #[test]

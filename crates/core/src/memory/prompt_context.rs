@@ -20,10 +20,11 @@ use super::{
     FeltSignificanceStore, InnerConflictStore, InnerLifeStore, LongTermMemoryReadStore,
     LongTermMemoryStore, MemoryStore, MemorySystemKind, MentalPrivacyStore, OuterVoiceStore,
     PrivateDocStore, PrivateGardenStore, PromptRecallIntent, PromptRecallRouterDecision,
-    RelationshipConstitutionStore, RelationshipPortfolioStore, RelationshipTopologyStore,
-    RemindAtStore, SelfAuthoredCoreStore, SelfContinuityStore, SelfModelStore, SessionMessage,
-    SessionStore, SessionSummaryStore, SubjectShell, SubjectShellCompileInput,
-    TemperamentContinuityStore, TurnContinuityEvidenceStore, TurnLedgerStore, WorldSenseStore,
+    RelationshipPortfolioStore, RelationshipTopologyStore, RemindAtStore, SelfAuthoredCoreStore,
+    SelfContinuityStore, SelfModelStore, SessionMessage, SessionStore, SessionSummaryStore,
+    SubjectShell, SubjectShellCompileInput, SubjectSoulRelationshipRuntimeInputV1,
+    SubjectSoulRelationshipRuntimeReadStore, TemperamentContinuityStore,
+    TurnContinuityEvidenceStore, TurnLedgerStore, WorldSenseStore,
 };
 
 pub struct PromptMemoryContext {
@@ -1561,6 +1562,8 @@ pub struct PromptMemoryContextParams<'a> {
     pub mounted_subject_id: &'a str,
     pub chat_id: &'a str,
     pub current_channel: &'a str,
+    /// Exact active relationship owner. `None` keeps the deterministic single-agent scope.
+    pub relationship_id: Option<&'a str>,
     pub user_query: &'a str,
     pub memory_system_kind: MemorySystemKind,
     pub system_max_len: usize,
@@ -1581,7 +1584,7 @@ pub struct PromptMemoryContextParams<'a> {
     pub task_learning_store: &'a dyn TaskLearningStore,
     pub self_model_store: &'a dyn SelfModelStore,
     pub self_authored_core_store: &'a dyn SelfAuthoredCoreStore,
-    pub relationship_constitution_store: &'a dyn RelationshipConstitutionStore,
+    pub relationship_constitution_store: &'a dyn SubjectSoulRelationshipRuntimeReadStore,
     pub relationship_portfolio_store: &'a dyn RelationshipPortfolioStore,
     pub relationship_topology_store: &'a dyn RelationshipTopologyStore,
     pub world_sense_store: &'a dyn WorldSenseStore,
@@ -2205,6 +2208,7 @@ mod tests {
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "继续",
             memory_system_kind: MemorySystemKind::LinuxFull,
             system_max_len: 4096,
@@ -2281,6 +2285,7 @@ mod tests {
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "继续",
             memory_system_kind: MemorySystemKind::LinuxFull,
             system_max_len: 4096,
@@ -2340,6 +2345,7 @@ mod tests {
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "继续",
             memory_system_kind: MemorySystemKind::LinuxFull,
             system_max_len: 4096,
@@ -2383,7 +2389,7 @@ mod tests {
         });
 
         assert!(context.recent_turn_observation_text.is_none());
-        assert!(context
+        assert!(!context
             .memory_health_issues
             .iter()
             .any(|issue| issue.contains("recent_persona_evidence")));
@@ -2495,6 +2501,7 @@ mod tests {
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "你还记得我的咖啡偏好吗",
             memory_system_kind: crate::memory::MemorySystemKind::EspCompact,
             system_max_len: 1024,
@@ -2557,6 +2564,7 @@ mod tests {
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "你还记得我的咖啡偏好吗",
             memory_system_kind: crate::memory::MemorySystemKind::EspCompact,
             system_max_len: 1024,
@@ -2603,7 +2611,98 @@ mod tests {
         let seed = crate::memory::prompt_context_stages::seed_prompt_context(&params, &mut health);
         assert!(seed.esp_compact_first_turn_graph);
         assert!(!seed.governed_memory_enabled);
-        assert!(!seed.reuse_stored_relationship_constitution);
+        assert!(seed.relationship_constitutional_input.is_none());
+        assert_eq!(
+            seed.relationship_id,
+            relationship_scope_id("agent:test", "chat_channel", "chat-1")
+        );
+    }
+
+    #[test]
+    fn prompt_seed_queries_exact_relationship_owner_without_alias_or_fallback() {
+        let legacy = StubRelationshipConstitutionStore {
+            value: Mutex::new(Some(RelationshipConstitution {
+                updated_at: 1,
+                ..RelationshipConstitution::default()
+            })),
+        };
+        let input = SubjectSoulRelationshipRuntimeReadStore::get(
+            &legacy,
+            "agent:test",
+            "relationship:custom",
+        )
+        .expect("typed fixture")
+        .expect("typed source");
+        let store = FixedRelationshipRuntimeReadStore {
+            input,
+            calls: Mutex::new(Vec::new()),
+        };
+        let mut params = PromptMemoryContextParams {
+            mounted_subject_id: "agent:test",
+            chat_id: "chat-1",
+            current_channel: "chat_channel",
+            relationship_id: Some("relationship:custom"),
+            user_query: "继续",
+            memory_system_kind: MemorySystemKind::LinuxFull,
+            system_max_len: 1024,
+            now_secs: 100,
+            participation_plan: PromptParticipationPlan::full(),
+            recent_messages_limit: 8,
+            load_long_term_memory: false,
+            include_private_runtime_projection: true,
+            include_private_garden_projection: false,
+            session_store: &StubSessionStore::default(),
+            memory_store: &StubMemoryStore::default(),
+            session_summary_store: &StubSessionSummaryStore::default(),
+            long_term_memory_store: &StubLongTermMemoryStore::default(),
+            execution_state_store: &StubExecutionStateStore::default(),
+            active_work_store: &StubActiveWorkStore::default(),
+            task_run_store: &StubTaskRunStore,
+            task_artifact_store: &StubTaskArtifactStore,
+            task_learning_store: &StubTaskLearningStore,
+            self_model_store: &StubSelfModelStore::default(),
+            self_authored_core_store: &StubSelfAuthoredCoreStore::default(),
+            relationship_constitution_store: &store,
+            relationship_portfolio_store: &StubRelationshipPortfolioStore::default(),
+            relationship_topology_store: &StubRelationshipTopologyStore::default(),
+            world_sense_store: &StubWorldSenseStore::default(),
+            autonomy_strategy_store: &StubAutonomyStrategyStore::default(),
+            outer_voice_store: &StubOuterVoiceStore::default(),
+            inner_life_store: &StubInnerLifeStore::default(),
+            self_continuity_store: &StubSelfContinuityStore::default(),
+            felt_significance_store: &StubFeltSignificanceStore::default(),
+            temperament_continuity_store: &StubTemperamentContinuityStore::default(),
+            inner_conflict_store: &StubInnerConflictStore::default(),
+            private_doc_store: &StubPrivateDocStore::default(),
+            private_garden_store: &StubPrivateGardenStore::default(),
+            mental_privacy_store: &StubMentalPrivacyStore::default(),
+            remind_store: &StubRemindAtStore,
+            task_store: &StubTaskStore,
+            turn_continuity_evidence_store: &StubTurnContinuityEvidenceStore,
+            turn_ledger_store: &StubTurnLedgerStore::default(),
+            skill_storage: &StubSkillStorage::default(),
+            continuity_capsule_store: &StubContinuityCapsuleStore::default(),
+        };
+        let mut health = crate::memory::prompt_context_stages::PromptContextLoadHealth::default();
+        let exact = crate::memory::prompt_context_stages::seed_prompt_context(&params, &mut health);
+        assert_eq!(exact.relationship_id, "relationship:custom");
+        assert!(exact.relationship_constitutional_input.is_some());
+
+        params.relationship_id = Some("relationship:wrong");
+        let wrong = crate::memory::prompt_context_stages::seed_prompt_context(&params, &mut health);
+        assert_eq!(wrong.relationship_id, "relationship:wrong");
+        assert!(wrong.relationship_constitutional_input.is_none());
+        assert_eq!(
+            store
+                .calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_slice(),
+            &[
+                ("agent:test".to_string(), "relationship:custom".to_string()),
+                ("agent:test".to_string(), "relationship:wrong".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -2641,6 +2740,7 @@ mod tests {
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "继续",
             memory_system_kind: crate::memory::MemorySystemKind::EspCompact,
             system_max_len: 1024,
@@ -2685,8 +2785,8 @@ mod tests {
 
         assert!(context.relationship_constitution_text.is_some());
         assert_eq!(relationship_topology_store.get_calls(), 0);
-        assert_eq!(outer_voice_store.get_calls(), 0);
-        assert_eq!(mental_privacy_store.get_calls(), 0);
+        assert!(outer_voice_store.get_calls() > 0);
+        assert!(mental_privacy_store.get_calls() > 0);
     }
 
     #[test]
@@ -2722,6 +2822,7 @@ mod tests {
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "继续",
             memory_system_kind: crate::memory::MemorySystemKind::EspCompact,
             system_max_len: 1024,
@@ -2788,6 +2889,7 @@ mod tests {
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "继续",
             memory_system_kind: crate::memory::MemorySystemKind::EspCompact,
             system_max_len: 1024,
@@ -2830,7 +2932,7 @@ mod tests {
             continuity_capsule_store: &StubContinuityCapsuleStore::default(),
         });
 
-        assert!(context.relationship_constitution_text.is_some());
+        assert!(context.relationship_constitution_text.is_none());
         assert_eq!(turn_ledger_store.list_recent_calls(), 0);
     }
 
@@ -2869,6 +2971,7 @@ mod tests {
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "继续",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -2918,7 +3021,7 @@ mod tests {
         });
 
         assert!(context.relationship_constitution_text.is_some());
-        assert!(relationship_topology_store.get_calls() > 0);
+        assert_eq!(relationship_topology_store.get_calls(), 0);
         assert!(outer_voice_store.get_calls() > 0);
         assert!(mental_privacy_store.get_calls() > 0);
     }
@@ -2956,6 +3059,7 @@ mod tests {
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "继续",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 4096,
@@ -3055,6 +3159,7 @@ mod tests {
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "继续",
             memory_system_kind: crate::memory::MemorySystemKind::EspCompact,
             system_max_len: 1024,
@@ -4117,6 +4222,99 @@ mod tests {
         }
     }
 
+    impl SubjectSoulRelationshipRuntimeReadStore for StubRelationshipConstitutionStore {
+        fn get(
+            &self,
+            mounted_subject_id: &str,
+            relationship_id: &str,
+        ) -> Result<Option<SubjectSoulRelationshipRuntimeInputV1>> {
+            let Some(legacy) = self.value.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+                return Ok(None);
+            };
+            let disclosure_ceiling = match legacy.disclosure_allowance {
+                crate::memory::RelationshipDisclosureAllowance::Closed => {
+                    crate::memory::RelationshipDisclosureCeilingV1::None
+                }
+                crate::memory::RelationshipDisclosureAllowance::ExplainedOnly => {
+                    crate::memory::RelationshipDisclosureCeilingV1::RefusalOnly
+                }
+                crate::memory::RelationshipDisclosureAllowance::SummaryOnly => {
+                    crate::memory::RelationshipDisclosureCeilingV1::GovernedSummary
+                }
+            };
+            let clauses = crate::memory::RelationshipSourceClausesV1 {
+                disclosure_ceiling,
+                access_constraints: vec![
+                    crate::memory::RelationshipAccessConstraintV1::GovernedDisclosureOnly,
+                ],
+                truth_commitments: vec!["legacy test truth floor".to_string()],
+                mutual_boundary_commitments: Vec::new(),
+                repair_commitments: Vec::new(),
+            };
+            let counterparty_subject_id = "human:test".to_string();
+            let mut contribution = crate::memory::RelationshipSourceContributionV1 {
+                contributor_subject_id: counterparty_subject_id.clone(),
+                clauses: clauses.clone(),
+                provenance: crate::memory::RelationshipSourceProvenanceV1 {
+                    source:
+                        crate::memory::RelationshipSourceAuthorityKindV1::HumanRelationshipCommitment,
+                    source_subject_id: counterparty_subject_id.clone(),
+                    source_asserted_at: Some(legacy.updated_at.max(1)),
+                    recorded_at: legacy.updated_at.max(1),
+                    evidence_digest:
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                            .to_string(),
+                },
+                contribution_digest: String::new(),
+            };
+            contribution
+                .refresh_digest()
+                .map_err(|error| Error::config("typed_relationship_test_fixture", error.reason))?;
+            let mut source = crate::memory::RelationshipSourceConstitutionV1 {
+                schema_version: 1,
+                memory_space_id: "space:test".to_string(),
+                relationship_id: relationship_id.to_string(),
+                mounted_subject_id: mounted_subject_id.to_string(),
+                counterparty_subject_ids: vec![counterparty_subject_id],
+                revision: 1,
+                supersedes_revision: None,
+                state: crate::memory::RelationshipSourceStateV1::Active,
+                clauses,
+                contributions: vec![contribution],
+                content_digest: String::new(),
+            };
+            source
+                .refresh_digest()
+                .map_err(|error| Error::config("typed_relationship_test_fixture", error.reason))?;
+            Ok(Some(SubjectSoulRelationshipRuntimeInputV1 {
+                source,
+                current_material: None,
+                stored_projection: None,
+            }))
+        }
+    }
+
+    struct FixedRelationshipRuntimeReadStore {
+        input: SubjectSoulRelationshipRuntimeInputV1,
+        calls: Mutex<Vec<(String, String)>>,
+    }
+
+    impl SubjectSoulRelationshipRuntimeReadStore for FixedRelationshipRuntimeReadStore {
+        fn get(
+            &self,
+            mounted_subject_id: &str,
+            relationship_id: &str,
+        ) -> Result<Option<SubjectSoulRelationshipRuntimeInputV1>> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push((mounted_subject_id.to_string(), relationship_id.to_string()));
+            Ok((self.input.source.mounted_subject_id == mounted_subject_id
+                && self.input.source.relationship_id == relationship_id)
+                .then(|| self.input.clone()))
+        }
+    }
+
     #[derive(Default)]
     struct StubRelationshipPortfolioStore {
         value: Mutex<Option<crate::memory::RelationshipPortfolio>>,
@@ -4816,6 +5014,7 @@ mod tests {
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "嗯?",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -5161,6 +5360,7 @@ mod tests {
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "嗯?",
             memory_system_kind: crate::memory::MemorySystemKind::EspCompact,
             system_max_len: 80,
@@ -5354,6 +5554,7 @@ mod tests {
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "继续",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -5484,6 +5685,7 @@ mod tests {
             mounted_subject_id: TEST_SUBJECT_ID,
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "说说你的私有花园",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -5596,6 +5798,7 @@ mod tests {
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "继续",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -5680,6 +5883,7 @@ mod tests {
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "继续",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -5821,6 +6025,7 @@ mod tests {
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "继续",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -5982,6 +6187,7 @@ mod tests {
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "继续",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -6127,6 +6333,7 @@ mod tests {
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "按之前的 release patch 流程继续",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -6242,6 +6449,7 @@ mod tests {
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "把那次 network outage 的原始记录翻出来",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -6511,6 +6719,7 @@ mod tests {
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "继续",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -6631,6 +6840,7 @@ mod tests {
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "按之前的 release patch 流程继续",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -6735,6 +6945,7 @@ mod tests {
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "把那次 network outage 的原始记录翻出来",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,
@@ -6839,6 +7050,7 @@ mod tests {
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
+            relationship_id: None,
             user_query: "[profile.owner timezone]",
             memory_system_kind: crate::memory::MemorySystemKind::LinuxFull,
             system_max_len: 1024,

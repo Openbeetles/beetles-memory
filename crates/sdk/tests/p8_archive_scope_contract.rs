@@ -1,9 +1,10 @@
 #[cfg(feature = "nonproduction-replay-harness")]
 use bm_sdk::{
-    GovernedRuntimeSkillWriteInput, LongTermMemoryQuery, MemoryLongTermControlView,
-    MemoryLongTermListRequest, MemoryLongTermMutation, MemoryLongTermMutationRequest,
-    MemoryLongTermTarget, MemoryPrivacyClass, MemoryWriteRequest, RuntimeSkillCreationRef,
-    RuntimeSkillOwningScope, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    primary_human_subject_id, GovernedRuntimeSkillWriteInput, LongTermMemoryQuery,
+    MemoryLongTermControlView, MemoryLongTermListRequest, MemoryLongTermMutation,
+    MemoryLongTermMutationRequest, MemoryLongTermTarget, MemoryPrivacyClass, MemoryWriteRequest,
+    RuntimeSkillCreationRef, RuntimeSkillOwningScope, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    SubjectSoulFoundingCharterSeedV1, SubjectSoulProvisionIntentV1, SubjectSoulReadSelectorV1,
 };
 use bm_sdk::{
     GovernedScopeArchiveEntry, GovernedScopeArchiveRootV1, MemoryArchiveScope, MemorySpaceArchive,
@@ -266,11 +267,59 @@ fn include_private_subject_archive_excludes_and_preserves_subject_global_soul_ow
         "felt_significance",
         "temperament_continuity",
         "inner_conflict",
+        "mental_privacy",
         "private_doc",
+        "private_garden",
+        "outer_voice",
+        "subject_soul_lifecycle_heads",
+        "subject_soul_revision_materials",
+        "subject_soul_scope_manifests",
+        "subject_soul_generation_tombstones",
+        "subject_soul_relationship_projections",
+        "subject_soul_operation_results",
     ];
+
+    fn provision(runtime: &bm_sdk::MemoryRuntime, operation_id: &str, identity_anchor: &str) {
+        runtime
+            .provision_subject_soul(SubjectSoulProvisionIntentV1::Founding {
+                operation_id: operation_id.to_string(),
+                human_actor_subject_id: primary_human_subject_id("owner-default"),
+                charter: Box::new(
+                    SubjectSoulFoundingCharterSeedV1 {
+                        identity_anchor: Some(identity_anchor.to_string()),
+                        character_tendencies: vec![
+                            "preserve governed archive ownership".to_string()
+                        ],
+                        priority_constitution: vec![
+                            "keep Soul outside generic archives".to_string()
+                        ],
+                        non_negotiables: vec![
+                            "never import Soul through a generic memory-space archive".to_string(),
+                        ],
+                        default_response_mode: None,
+                        default_initiative_posture: None,
+                        default_relationship_posture: None,
+                        boundary_doctrine: None,
+                        truth_seeking_commitment: None,
+                        self_preservation_doctrine: None,
+                        repair_doctrine: None,
+                        change_principle: None,
+                    }
+                    .canonicalize()
+                    .expect("canonical archive Soul seed"),
+                ),
+                source_asserted_at: Some(1_700_000_000),
+            })
+            .expect("provision typed Soul root");
+    }
 
     let profile = support::host_test_profile();
     let source_runtime = support::test_runtime(support::empty_store_platform(profile), profile);
+    provision(
+        &source_runtime,
+        "archive-source-soul",
+        "SOURCE-SOUL-MUST-NOT-ENTER-ARCHIVE",
+    );
     let scope = MemoryArchiveScope::subject(
         source_runtime.memory_space_id(),
         source_runtime.subject_id(),
@@ -290,21 +339,19 @@ fn include_private_subject_archive_excludes_and_preserves_subject_global_soul_ow
     }
 
     let target_platform = support::empty_store_platform(profile);
-    for namespace in SUBJECT_GLOBAL_SOUL_NAMESPACES {
-        target_platform
-            .replay_harness()
-            .tamper_json_document_for_nonproduction_harness(
-                namespace,
-                source_runtime.subject_id(),
-                json!({"namespace": namespace, "sentinel": "subject-global"}),
-            )
-            .expect("seed subject-global Soul sentinel");
-    }
+    let target_runtime = support::test_runtime(target_platform.clone(), profile);
+    provision(
+        &target_runtime,
+        "archive-target-soul",
+        "TARGET-SOUL-MUST-SURVIVE-IMPORT",
+    );
+    let target_soul_before = target_runtime
+        .export_subject_soul_operator_safe(SubjectSoulReadSelectorV1::Current)
+        .expect("target safe Soul before generic import");
     let before = target_platform
         .replay_harness()
         .export_store_snapshot()
         .expect("target before import");
-    let target_runtime = support::test_runtime(target_platform.clone(), profile);
     target_runtime
         .import_memory_space(MemorySpaceImportRequest {
             scope,
@@ -316,6 +363,13 @@ fn include_private_subject_archive_excludes_and_preserves_subject_global_soul_ow
         .replay_harness()
         .export_store_snapshot()
         .expect("target after import");
+    assert_eq!(
+        target_runtime
+            .export_subject_soul_operator_safe(SubjectSoulReadSelectorV1::Current)
+            .expect("target safe Soul after generic import"),
+        target_soul_before,
+        "generic Subject archive import must leave the verified Soul root unchanged"
+    );
     for namespace in SUBJECT_GLOBAL_SOUL_NAMESPACES {
         let before_docs = before
             .json_docs

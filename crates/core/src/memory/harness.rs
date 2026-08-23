@@ -445,6 +445,7 @@ impl HarnessStores {
             mounted_subject_id: "agent:test",
             chat_id: CHAT_ID,
             current_channel: CHANNEL,
+            relationship_id: None,
             user_query,
             memory_system_kind,
             system_max_len: 1024,
@@ -636,6 +637,16 @@ empty_scope_store!(
     RelationshipConstitutionStore,
     RelationshipConstitution
 );
+
+impl SubjectSoulRelationshipRuntimeReadStore for EmptyRelationshipConstitutionStore {
+    fn get(
+        &self,
+        _mounted_subject_id: &str,
+        _relationship_id: &str,
+    ) -> Result<Option<SubjectSoulRelationshipRuntimeInputV1>> {
+        Ok(None)
+    }
+}
 empty_scope_store!(
     EmptyRelationshipPortfolioStore,
     RelationshipPortfolioStore,

@@ -52,7 +52,7 @@ required_docs=(
   "docs/en/adapters.md"
   "docs/en/operator-guide.md"
   "docs/en/release-checklist.md"
-  "docs/en/release-notes-0.3.0.md"
+  "docs/en/release-notes-0.4.0.md"
   "docs/zh-CN/api.md"
   "docs/zh-CN/cli-usage.md"
   "docs/zh-CN/deployment.md"
@@ -64,7 +64,7 @@ required_docs=(
   "docs/zh-CN/adapters.md"
   "docs/zh-CN/operator-guide.md"
   "docs/zh-CN/release-checklist.md"
-  "docs/zh-CN/release-notes-0.3.0.md"
+  "docs/zh-CN/release-notes-0.4.0.md"
   "dev-docs/deployment-runtime-plan.md"
   "dev-docs/entry-runtime-plan.md"
   "dev-docs/archive/production-hardening-audit-plan.md"
@@ -72,6 +72,7 @@ required_docs=(
   "dev-docs/agent-tool-experience-registry-plan.md"
   "dev-docs/long-term-memory-control-surface-plan.md"
   "dev-docs/mutation-operation-receipt-plan.md"
+  "dev-docs/soul-and-subject-memory-boundary.md"
 )
 
 for doc in "${required_docs[@]}"; do
@@ -81,7 +82,7 @@ for doc in "${required_docs[@]}"; do
   fi
 done
 
-release_version="0.3.0"
+release_version="0.4.0"
 version_manifests=(
   "crates/core/Cargo.toml"
   "crates/store-contract-tests/Cargo.toml"
@@ -168,10 +169,10 @@ for desktop_identity in apps/desktop/package.json apps/desktop/package-lock.json
   }
 done
 
-for doc in docs/en/release-notes-0.3.0.md docs/zh-CN/release-notes-0.3.0.md; do
-  for marker in 'Store v9' 'material v5' 'Adapter V2' 'automatic migration' 'operation key'; do
+for doc in docs/en/release-notes-0.4.0.md docs/zh-CN/release-notes-0.4.0.md; do
+  for marker in 'Store v10' 'material v5' 'Adapter V2' 'automatic migration' 'operation key' 'SPV1'; do
     rg -F -q "$marker" "$doc" || {
-      echo "0.3.0 release notes omit required compatibility marker: doc=$doc marker=$marker" >&2
+      echo "0.4.0 release notes omit required compatibility marker: doc=$doc marker=$marker" >&2
       exit 1
     }
   done
@@ -465,6 +466,12 @@ cargo doc --locked --no-deps --no-default-features \
   -p bm-wss \
   -p bm-mcp \
   -p bm-a2a
+
+cargo test --locked -p bm-core --test subject_soul_provisioning_contract
+cargo test --locked -p bm-sdk --test subject_soul_public_contract \
+  --no-default-features --features sqlite-store
+cargo test --locked -p bm-store-contract-tests --test subject_soul_store_contract \
+  --features sqlite-store
 
 bash scripts/emit_platform_capability_snapshots.sh --check
 bash scripts/check_entry_runtime_contract.sh

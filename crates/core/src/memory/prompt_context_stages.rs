@@ -6,9 +6,10 @@ use std::collections::BTreeSet;
 
 use super::{
     build_archive_evidence_block, build_continuity_recall_query, build_self_state,
-    build_world_snapshot_from_commitments, collect_private_targets, decide_prompt_recall_route,
-    derive_relationship_constitution, inspect_continuity_capsule_recall,
-    load_recent_persona_evidence, load_world_snapshot_reminders, load_world_snapshot_tasks,
+    build_world_snapshot_from_commitments, collect_private_targets,
+    compile_relationship_constitutional_runtime_input_v1,
+    compile_subject_soul_relationship_runtime_view_v1, decide_prompt_recall_route,
+    inspect_continuity_capsule_recall, load_world_snapshot_reminders, load_world_snapshot_tasks,
     memory_capability_profile, memory_policy, parse_explicit_long_term_slot_query,
     recall_long_term_memory_block, relationship_scope_id, render_autonomy_strategy_block,
     render_continuity_capsule_block, render_exact_long_term_memory_block,
@@ -29,9 +30,8 @@ pub(crate) struct PromptContextSeed {
     pub subject_id: String,
     pub relationship_id: String,
     pub esp_compact_first_turn_graph: bool,
-    pub reuse_stored_relationship_constitution: bool,
     pub governed_memory_enabled: bool,
-    pub relationship_constitution_existing: Option<super::RelationshipConstitution>,
+    pub relationship_constitutional_input: Option<super::SubjectSoulRelationshipRuntimeInputV1>,
 }
 
 pub(crate) struct PromptSessionStage {
@@ -182,22 +182,6 @@ fn governed_recall_disabled_reason(params: &PromptMemoryContextParams<'_>) -> St
     }
 }
 
-fn should_load_recent_persona_evidence_for_prompt(
-    params: &PromptMemoryContextParams<'_>,
-    seed: &PromptContextSeed,
-) -> bool {
-    if matches!(
-        params.memory_system_kind,
-        super::MemorySystemKind::EspCompact
-    ) && seed.esp_compact_first_turn_graph
-    {
-        return false;
-    }
-    !seed.reuse_stored_relationship_constitution
-        || params.participation_plan.load_l2_background_governance
-        || params.participation_plan.load_l3_private_depth
-}
-
 fn should_load_p3_subjective_projection(params: &PromptMemoryContextParams<'_>) -> bool {
     if !params.include_private_runtime_projection {
         return false;
@@ -224,15 +208,36 @@ pub(crate) fn seed_prompt_context(
     health: &mut PromptContextLoadHealth,
 ) -> PromptContextSeed {
     let profile = params.memory_system_kind.memory_profile();
-    let relationship_id = relationship_scope_id(
-        params.mounted_subject_id,
-        params.current_channel,
-        params.chat_id,
-    );
-    let relationship_constitution_existing =
-        load_optional_with_health(health, "relationship_constitution_existing", || {
-            params.relationship_constitution_store.get(&relationship_id)
+    let relationship_id = params
+        .relationship_id
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            relationship_scope_id(
+                params.mounted_subject_id,
+                params.current_channel,
+                params.chat_id,
+            )
         });
+    let relationship_id_is_canonical = !relationship_id.is_empty()
+        && relationship_id.trim() == relationship_id
+        && relationship_id.len() <= 256
+        && !relationship_id.chars().any(char::is_control);
+    let relationship_constitutional_input = if relationship_id_is_canonical {
+        load_optional_with_health(health, "relationship_constitutional_view", || {
+            params
+                .relationship_constitution_store
+                .get(params.mounted_subject_id, &relationship_id)
+        })
+    } else {
+        health.record(
+            "relationship_constitutional_view",
+            &crate::error::Error::config(
+                "relationship_id",
+                "exact relationship_id must be non-empty canonical text",
+            ),
+        );
+        None
+    };
     let esp_compact_first_turn_graph = matches!(
         params.memory_system_kind,
         super::MemorySystemKind::EspCompact
@@ -240,8 +245,6 @@ pub(crate) fn seed_prompt_context(
         && params.participation_plan.load_l1_session
         && !params.participation_plan.load_l2_background_governance
         && !params.participation_plan.load_l3_private_depth;
-    let reuse_stored_relationship_constitution =
-        esp_compact_first_turn_graph && relationship_constitution_existing.is_some();
     let governed_memory_enabled = params.participation_plan.load_l2_governed_recall
         && params.load_long_term_memory
         && params.system_max_len >= memory_policy(profile).long_term_recall.block_min_len;
@@ -251,9 +254,8 @@ pub(crate) fn seed_prompt_context(
         subject_id: params.mounted_subject_id.to_string(),
         relationship_id,
         esp_compact_first_turn_graph,
-        reuse_stored_relationship_constitution,
         governed_memory_enabled,
-        relationship_constitution_existing,
+        relationship_constitutional_input,
     }
 }
 
@@ -396,17 +398,6 @@ pub(crate) fn load_constitutional_stage(
             })
         })
         .flatten();
-    let relationship_topology = ((params.participation_plan.load_l1_constitutional
-        && !seed.reuse_stored_relationship_constitution)
-        || params.participation_plan.load_l2_background_governance)
-        .then(|| {
-            load_optional_with_health(health, "relationship_topology", || {
-                params
-                    .relationship_topology_store
-                    .get(seed.subject_id.as_str())
-            })
-        })
-        .flatten();
     let self_model = load_private_background
         .then(|| {
             load_optional_with_health(health, "self_model", || {
@@ -462,8 +453,7 @@ pub(crate) fn load_constitutional_stage(
             .map(Box::new)
         })
         .flatten();
-    let outer_voice = ((params.participation_plan.load_l1_constitutional
-        && !seed.reuse_stored_relationship_constitution)
+    let outer_voice = (params.participation_plan.load_l1_constitutional
         || params.participation_plan.load_l2_background_governance)
         .then(|| {
             load_optional_with_health(health, "outer_voice", || {
@@ -499,25 +489,15 @@ pub(crate) fn load_constitutional_stage(
         } else {
             Vec::new()
         };
-    let mental_privacy_state = (params.include_private_runtime_projection
-        && (!seed.reuse_stored_relationship_constitution
-            || params.participation_plan.load_l2_background_governance
-            || params.participation_plan.load_l3_private_depth))
+    let mental_privacy_state = (seed.relationship_constitutional_input.is_some()
+        || (params.include_private_runtime_projection
+            && (params.participation_plan.load_l2_background_governance
+                || params.participation_plan.load_l3_private_depth)))
         .then(|| {
             load_optional_with_health(health, "mental_privacy_state", || {
                 params.mental_privacy_store.get(&seed.relationship_id)
             })
             .map(Box::new)
-        })
-        .flatten();
-    let recent_persona_evidence = should_load_recent_persona_evidence_for_prompt(params, seed)
-        .then(|| {
-            load_optional_with_health(health, "recent_persona_evidence", || {
-                load_recent_persona_evidence(
-                    params.turn_continuity_evidence_store,
-                    &seed.relationship_id,
-                )
-            })
         })
         .flatten();
     let recent_turn_ledger = params
@@ -545,25 +525,34 @@ pub(crate) fn load_constitutional_stage(
             420,
         )
     });
-    let relationship_constitution = if seed.reuse_stored_relationship_constitution {
-        seed.relationship_constitution_existing.clone()
-    } else {
-        derive_relationship_constitution(
-            seed.relationship_constitution_existing.as_ref(),
-            super::RelationshipConstitutionSyncInput {
-                scope_id: &seed.relationship_id,
-                channel: params.current_channel,
-                chat_id: params.chat_id,
-                now_secs: params.now_secs,
-                self_authored_core: self_authored_core.as_deref(),
-                relationship_portfolio: relationship_portfolio.as_ref(),
-                relationship_topology: relationship_topology.as_ref(),
-                mental_privacy_state: mental_privacy_state.as_deref(),
-                outer_voice: outer_voice.as_deref(),
-                recent_persona_evidence: recent_persona_evidence.as_ref(),
-            },
-        )
-    };
+    let relationship_constitution =
+        seed.relationship_constitutional_input
+            .as_ref()
+            .and_then(|input| {
+                match compile_subject_soul_relationship_runtime_view_v1(
+                    params.mounted_subject_id,
+                    input,
+                    mental_privacy_state.as_deref(),
+                ) {
+                    Ok(view) => Some(compile_relationship_constitutional_runtime_input_v1(
+                        &view,
+                        &seed.relationship_id,
+                        params.current_channel,
+                        params.chat_id,
+                        params.now_secs,
+                    )),
+                    Err(error) => {
+                        health.record(
+                            "relationship_constitutional_view",
+                            &crate::error::Error::config(
+                                "relationship_constitutional_view",
+                                error.reason,
+                            ),
+                        );
+                        None
+                    }
+                }
+            });
     let relationship_constitution_text = relationship_constitution
         .as_ref()
         .and_then(|constitution| render_relationship_constitution_block(constitution, 420));

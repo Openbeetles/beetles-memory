@@ -2,6 +2,11 @@
 
 mod support;
 
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+
 use bm_core::memory::{
     canonical_evidence_ref_from_source, governed_memory_recall_candidate_id,
     memory_facet_manifest_key, primary_human_subject_id, scoped_memory_facet_owner_storage_key,
@@ -21,7 +26,7 @@ use bm_sdk::{
     AgentToolRegistrySnapshot, AgentToolUsageFeedback, EvidenceBacklink, IngressKind,
     LongTermMemoryDraft, LongTermMemoryKind, LongTermMemoryProvenance, LongTermMemoryQuery,
     LongTermMemorySourceScope, MemoryCandidateContent, MemoryCandidateSemanticDecision,
-    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryEvidenceAuthority,
+    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryClock, MemoryEvidenceAuthority,
     MemoryGovernancePolicyMutation, MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration,
     MemoryGraphEdge, MemoryGraphEdgeKind, MemoryGraphNode, MemoryGraphNodeKind, MemoryIdentity,
     MemoryLongTermControlView, MemoryLongTermListRequest, MemoryLongTermMutation,
@@ -37,6 +42,28 @@ use bm_sdk::{
 };
 
 use support::{empty_store_platform, test_runtime_with_scope, StaticHttpClient, StaticLlmClient};
+
+struct AdjustableTransactionClock {
+    now_secs: AtomicU64,
+}
+
+impl AdjustableTransactionClock {
+    fn new(now_secs: u64) -> Self {
+        Self {
+            now_secs: AtomicU64::new(now_secs),
+        }
+    }
+
+    fn set(&self, now_secs: u64) {
+        self.now_secs.store(now_secs, Ordering::SeqCst);
+    }
+}
+
+impl MemoryClock for AdjustableTransactionClock {
+    fn now_secs(&self) -> u64 {
+        self.now_secs.load(Ordering::SeqCst)
+    }
+}
 
 #[test]
 fn maintenance_long_term_write_keeps_owner_and_facet_in_one_governed_path() {
@@ -232,6 +259,23 @@ fn runtime_with_registry_and_event_budget(
         .scope(MemoryScope::new("llm.gateway", "chat-a").expect("scope"))
         .store(platform.clone())
         .agent_tool_registry(registry)
+        .build()
+        .expect("runtime");
+    (platform, runtime)
+}
+
+fn runtime_with_registry_event_budget_and_clock(
+    registry: AgentToolRegistrySnapshot,
+    event_log_max_items: usize,
+    clock: Arc<dyn MemoryClock>,
+) -> (MemoryStoreHandle, bm_sdk::MemoryRuntime) {
+    let platform = store_with_event_budget(event_log_max_items);
+    let runtime = bm_sdk::MemoryRuntime::builder()
+        .identity(MemoryIdentity::new("transaction-agent", "owner-default").expect("identity"))
+        .scope(MemoryScope::new("llm.gateway", "chat-a").expect("scope"))
+        .store(platform.clone())
+        .agent_tool_registry(registry)
+        .clock(clock)
         .build()
         .expect("runtime");
     (platform, runtime)
@@ -1221,7 +1265,9 @@ fn operation_aware_procedural_write_replays_and_rejects_intent_collision() {
 #[test]
 fn operation_aware_public_write_variants_commit_noop_replay_and_reject_collisions() {
     let registry = registry();
-    let (platform, runtime) = runtime_with_registry_and_event_budget(registry.clone(), 256);
+    let clock = Arc::new(AdjustableTransactionClock::new(1_800_000_000));
+    let (platform, runtime) =
+        runtime_with_registry_event_budget_and_clock(registry.clone(), 256, clock.clone());
     let owning_scope = bm_sdk::RuntimeSkillOwningScope::Subject {
         mounted_subject_id: default_agent_subject_id("transaction-agent"),
     };
@@ -1364,6 +1410,7 @@ fn operation_aware_public_write_variants_commit_noop_replay_and_reject_collision
         )
         .expect_err("feedback intent collision");
     assert_eq!(collision.class(), Some(bm_sdk::ErrorClass::Conflict));
+    clock.set(1_800_000_001);
     let feedback_noop = runtime
         .write_operation("sdk-write-feedback-noop", feedback_request())
         .expect("operation-aware feedback noop");

@@ -101,7 +101,7 @@ for required in \
   "plan_long_term_control_mutation" \
   "plan_memory_governance_policy_mutation" \
   "plan_long_term_memory_refresh_transactional" \
-  "PlanningPrivateGardenStore" \
+  "PlanningSubjectSoulGenerationStores" \
   "runtime_skill_storage_mutations_to_store_mutations"; do
   if ! grep -q "${required}" <<<"${runtime_source}"; then
     echo "check_memory_write_transaction_contract: missing transactional runtime helper ${required}" >&2
@@ -233,6 +233,7 @@ if rg -n "commit_governed_(memory|graph_repair)_transaction" crates \
   --glob '!**/tests/**' \
   --glob '!crates/sdk/src/store_internal/platform.rs' \
   --glob '!crates/sdk/src/store_internal/post_turn_governance.rs' \
+  --glob '!crates/sdk/src/store_internal/subject_soul.rs' \
   --glob '!crates/sdk/src/runtime.rs'; then
   echo "check_memory_write_transaction_contract: only StorePlatform and SDK transactional kernels/runtime may own governed transaction commits" >&2
   exit 1

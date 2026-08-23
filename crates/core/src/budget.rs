@@ -143,6 +143,10 @@ pub struct GovernedStateRuntimeBudget {
     pub max_premises_per_skill: usize,
     pub max_premise_evidence_reads: usize,
     pub max_state_transitions_per_write: usize,
+    pub max_subject_soul_manifest_entries: usize,
+    pub max_subject_soul_revisions_per_generation: usize,
+    pub max_subject_soul_generation_tombstones: usize,
+    pub max_subject_soul_transaction_mutations: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1037,6 +1041,34 @@ pub fn compile_runtime_budget(input: RuntimeBudgetInput) -> RuntimeBudgetReport 
             source_scale,
         )
         .max(1),
+        max_subject_soul_manifest_entries: scale_usize(
+            ceiling
+                .governed_state_budget
+                .max_subject_soul_manifest_entries,
+            source_scale,
+        )
+        .max(8),
+        max_subject_soul_revisions_per_generation: scale_usize(
+            ceiling
+                .governed_state_budget
+                .max_subject_soul_revisions_per_generation,
+            source_scale,
+        )
+        .max(1),
+        max_subject_soul_generation_tombstones: scale_usize(
+            ceiling
+                .governed_state_budget
+                .max_subject_soul_generation_tombstones,
+            source_scale,
+        )
+        .max(1),
+        max_subject_soul_transaction_mutations: scale_usize(
+            ceiling
+                .governed_state_budget
+                .max_subject_soul_transaction_mutations,
+            source_scale,
+        )
+        .max(8),
     };
     let store_budget = StoreRuntimeBudget {
         metric_source_max_items: scale_usize(
@@ -2265,6 +2297,10 @@ const fn profile_budget(spec: ProfileBudgetSpec) -> ProfileBudgetCeiling {
             max_premises_per_skill: max_usize(spec.source_chars / 1024, 2),
             max_premise_evidence_reads: max_usize(spec.source_chars / 512, 2),
             max_state_transitions_per_write: if spec.records >= 4096 { 8 } else { 2 },
+            max_subject_soul_manifest_entries: max_usize(spec.records / 16, 16),
+            max_subject_soul_revisions_per_generation: spec.retained_long_term_revisions_per_owner,
+            max_subject_soul_generation_tombstones: if spec.records >= 4096 { 8 } else { 2 },
+            max_subject_soul_transaction_mutations: max_usize(spec.records / 128, 16),
         },
         store_budget: StoreRuntimeBudget {
             metric_source_max_items: spec.metric_source_max_items,
@@ -2635,6 +2671,54 @@ mod tests {
                 compiled.max_runtime_skill_lineage_depth <= expected_lineage,
                 "{profile:?} compiled runtime skill lineage cap exceeded its profile ceiling"
             );
+        }
+    }
+
+    #[test]
+    fn subject_soul_lifecycle_caps_are_positive_and_profile_owned() {
+        for profile in [
+            ProfileId::EspStandaloneMemory,
+            ProfileId::EspEmbeddedSdk,
+            ProfileId::LinuxDeviceStandaloneMemory,
+            ProfileId::DesktopMacosStandaloneMemory,
+            ProfileId::DesktopMacosEmbeddedSdk,
+            ProfileId::DesktopLinuxEmbeddedSdk,
+            ProfileId::DesktopMacosDevFull,
+            ProfileId::DesktopWindowsEmbeddedSdk,
+            ProfileId::DesktopWindowsDevFull,
+            ProfileId::ServerLinuxMemoryGateway,
+            ProfileId::ServerLinuxDevFull,
+        ] {
+            let ceiling = profile_budget_ceiling(profile).governed_state_budget;
+            let compiled = compile_runtime_budget(compiler_fixture(profile)).governed_state_budget;
+            for (name, value, maximum) in [
+                (
+                    "manifest_entries",
+                    compiled.max_subject_soul_manifest_entries,
+                    ceiling.max_subject_soul_manifest_entries,
+                ),
+                (
+                    "revisions_per_generation",
+                    compiled.max_subject_soul_revisions_per_generation,
+                    ceiling.max_subject_soul_revisions_per_generation,
+                ),
+                (
+                    "generation_tombstones",
+                    compiled.max_subject_soul_generation_tombstones,
+                    ceiling.max_subject_soul_generation_tombstones,
+                ),
+                (
+                    "transaction_mutations",
+                    compiled.max_subject_soul_transaction_mutations,
+                    ceiling.max_subject_soul_transaction_mutations,
+                ),
+            ] {
+                assert!(value > 0, "{profile:?} {name} must be positive");
+                assert!(
+                    value <= maximum,
+                    "{profile:?} {name} exceeded its profile ceiling"
+                );
+            }
         }
     }
 

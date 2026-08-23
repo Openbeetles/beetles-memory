@@ -166,7 +166,7 @@ dependencies = [
 
 [[package]]
 name = "bm-a2a"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bm-adapter",
  "bm-entry",
@@ -177,7 +177,7 @@ dependencies = [
 
 [[package]]
 name = "bm-adapter"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bm-sdk",
  "serde",
@@ -188,7 +188,7 @@ dependencies = [
 
 [[package]]
 name = "bm-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bm-adapter",
  "bm-entry",
@@ -199,7 +199,7 @@ dependencies = [
 
 [[package]]
 name = "bm-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "indexmap 2.14.0",
  "log",
@@ -212,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "bm-desktop"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bm-entry",
  "bm-http",
@@ -227,7 +227,7 @@ dependencies = [
 
 [[package]]
 name = "bm-entry"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bm-adapter",
  "bm-replay",
@@ -242,7 +242,7 @@ dependencies = [
 
 [[package]]
 name = "bm-evolve"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bm-core",
  "bm-sdk",
@@ -252,7 +252,7 @@ dependencies = [
 
 [[package]]
 name = "bm-http"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bm-adapter",
  "bm-entry",
@@ -264,7 +264,7 @@ dependencies = [
 
 [[package]]
 name = "bm-llm-gateway"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bm-adapter",
  "bm-entry",
@@ -279,7 +279,7 @@ dependencies = [
 
 [[package]]
 name = "bm-mcp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bm-adapter",
  "bm-entry",
@@ -290,7 +290,7 @@ dependencies = [
 
 [[package]]
 name = "bm-ollama-transparent"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "libc",
  "serde",
@@ -302,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "bm-replay"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bm-core",
  "bm-sdk",
@@ -315,7 +315,7 @@ dependencies = [
 
 [[package]]
 name = "bm-sdk"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bm-core",
  "rusqlite",
@@ -327,7 +327,7 @@ dependencies = [
 
 [[package]]
 name = "bm-store-contract-tests"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bm-core",
  "bm-sdk",
@@ -339,7 +339,7 @@ dependencies = [
 
 [[package]]
 name = "bm-wss"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bm-adapter",
  "bm-entry",

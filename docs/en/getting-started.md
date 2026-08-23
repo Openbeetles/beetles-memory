@@ -15,7 +15,7 @@ From an external repository, adjust the path or use the published version once t
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.3.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.4.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 Select exactly one desktop embedded feature for the host OS: `profile-desktop-macos-embedded-sdk`, `profile-desktop-windows-embedded-sdk`, or `profile-desktop-linux-embedded-sdk`. Linux desktop hosts must not use a server or dev-full profile.

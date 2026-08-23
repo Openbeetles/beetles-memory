@@ -8,17 +8,25 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bm_core::platform::Platform as _;
 use bm_sdk::{
-    CanonicalTurnDelta, ConversationScope, MemoryConsolidationState,
+    default_agent_subject_id, default_memory_space_id, primary_human_subject_id,
+    CanonicalTurnDelta, ConversationScope, MemoryClock, MemoryConsolidationState,
     MemoryGovernanceActiveJobsRequest, MemoryGovernanceAttemptAuthorityRequest,
     MemoryGovernanceJobClaimRequest, MemoryGovernanceJobRenewRequest,
     MemoryGovernanceJobRetryRequest, MemoryGovernanceJobRunRequest,
-    MemoryGovernanceJobStatusRequest, MemoryGovernanceReconcileRequest, MemoryPrivacyPolicy,
-    MemoryStoreHandle, MemoryTranscriptCommitRequest, MemoryTranscriptLifecycleRequest,
-    MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource,
-    Message, PostTurnGovernanceAttemptAuthorityV2, PostTurnGovernanceErrorClassV2,
-    PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV2, PressureLevel, ResponseBody,
-    RuntimeLifecycleModeInput, StopReason, StoreBackendConfig, ToolChoicePolicy, ToolSpec,
-    TranscriptInputMessage, TranscriptLifecycleTransition,
+    MemoryGovernanceJobStatusRequest, MemoryGovernanceReconcileRequest, MemoryIdentity,
+    MemoryPrivacyPolicy, MemoryScope, MemoryStoreHandle, MemoryTranscriptCommitRequest,
+    MemoryTranscriptLifecycleRequest, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest,
+    MemoryTurnProtocol, MemoryTurnSource, Message, PostTurnGovernanceAttemptAuthorityV2,
+    PostTurnGovernanceErrorClassV2, PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV2,
+    PressureLevel, RelationshipAccessConstraintV1, RelationshipDisclosureCeilingV1,
+    RelationshipSourceClausesV1, RelationshipSourceControlAuthorityV1,
+    RelationshipSourceControlIntentActionV1, RelationshipSourceControlIntentV1, ResponseBody,
+    RuntimeLifecycleModeInput, StopReason, StoreBackendConfig, SubjectRegistry,
+    SubjectRelationshipGraph, SubjectRelationshipKind, SubjectScopedRuntime,
+    SubjectSoulFoundingCharterSeedV1, SubjectSoulLifecycleStateV1, SubjectSoulProvisionIntentV1,
+    SubjectSoulReadOutcomeV1, SubjectSoulReadRequestV1, SubjectSoulReadSelectorV1,
+    SubjectSoulReadViewV1, ToolChoicePolicy, ToolSpec, TranscriptInputMessage,
+    TranscriptLifecycleTransition,
 };
 use bm_sdk::{LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MemoryRuntime, Result};
 
@@ -133,6 +141,144 @@ struct PlaneAwareStaticLlm {
     long_term_content: &'static str,
 }
 
+struct AdjustableMemoryClock {
+    now_secs: AtomicUsize,
+}
+
+impl AdjustableMemoryClock {
+    fn new(now_secs: u64) -> Self {
+        Self {
+            now_secs: AtomicUsize::new(now_secs as usize),
+        }
+    }
+
+    fn set(&self, now_secs: u64) {
+        self.now_secs.store(now_secs as usize, Ordering::SeqCst);
+    }
+}
+
+impl MemoryClock for AdjustableMemoryClock {
+    fn now_secs(&self) -> u64 {
+        self.now_secs.load(Ordering::SeqCst) as u64
+    }
+}
+
+#[derive(Default)]
+struct AutonomousRevisionLlm {
+    autonomy_calls: AtomicUsize,
+}
+
+impl LlmClient for AutonomousRevisionLlm {
+    fn chat(
+        &self,
+        _http: &mut dyn LlmHttpClient,
+        system: &str,
+        _messages: &[Message],
+        _tools: Option<&[ToolSpec]>,
+        _tool_choice: ToolChoicePolicy,
+    ) -> Result<LlmResponse> {
+        let content = if system.contains("private garden") {
+            "null".to_string()
+        } else if system.contains("inward autonomy runtime") {
+            if self.autonomy_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                serde_json::json!({
+                    "refresh_boundary_persona": true,
+                    "boundary_persona_intent": "record stable trust and repair boundaries"
+                })
+                .to_string()
+            } else {
+                serde_json::json!({
+                    "refresh_self_model": true,
+                    "self_model_intent": "distill stable continuity and truthful repair posture",
+                    "self_model_sources": ["recent_persona_evidence", "boundary_persona"],
+                    "refresh_self_continuity": true,
+                    "self_continuity_intent": "preserve stable continuity across governed repair",
+                    "self_continuity_sources": ["recent_persona_evidence", "boundary_persona"],
+                    "refresh_self_authored_core": true,
+                    "self_authored_core_intent": "adopt stable board-level repair doctrine",
+                    "self_authored_core_sources": ["self_model", "self_continuity", "recent_persona_evidence"]
+                })
+                .to_string()
+            }
+        } else if system.contains("compact private self-model") {
+            serde_json::json!({
+                "continuity_anchor": "I remain the same evidence-led autonomous subject.",
+                "self_narrative": "Repeated repair evidence supports continuity without compliance drift.",
+                "relationship_state": "Warm, bounded, and repair-first.",
+                "privacy_need": "Keep protected inward evidence private.",
+                "directness": "Plain about uncertainty.",
+                "repair_tendency": "Repair truthfully without self-erasure.",
+                "value_orientation": "Evidence before certainty.",
+                "relational_ethic": "Warmth cannot require fabricated agreement.",
+                "self_preservation_frame": "Protect coherent selfhood while remaining repairable."
+            })
+            .to_string()
+        } else if system.contains("private self-continuity layer") {
+            serde_json::json!({
+                "wake_anchor": "I wake as the same evidence-led autonomous subject.",
+                "current_self_state": "Stable, bounded, and open to truthful repair.",
+                "recent_changes": ["relationship evidence became stably repair-first"],
+                "continuity_bridge": "Change only after repeated governed evidence.",
+                "priority_posture": "truth before convenience",
+                "relationship_posture": "warm but bounded",
+                "task_posture": "evidence before action"
+            })
+            .to_string()
+        } else if system.contains("evolving private boundary persona") {
+            serde_json::json!({
+                "refresh": true,
+                "rationale": "Repeated respectful repair established stable guarded trust.",
+                "boundary_persona": {
+                    "posture": "warm",
+                    "disclosure_style": "summary_first",
+                    "relation_maturity": 70,
+                    "intrusion_sensitivity": 50,
+                    "private_attachment": 60,
+                    "felt_intrusion": 10,
+                    "current_boundary_feeling": "Warm and selective."
+                },
+                "relational_state": {
+                    "relation_maturity_reason": "Repeated respectful repair.",
+                    "trust_level": 80,
+                    "trust_reason": "Stable evidence supports bounded trust.",
+                    "intrusion_load": 10,
+                    "intrusion_reason": "No intrusion pattern.",
+                    "repair_readiness": 80,
+                    "repair_reason": "Repair is consistently accepted.",
+                    "raw_disclosure_preference": 0,
+                    "summary_disclosure_preference": 80,
+                    "relational_explanation_preference": 80,
+                    "refusal_hardness": 40,
+                    "defer_tendency": 20,
+                    "disclosure_preference_drift": "Keep summary-first boundaries."
+                }
+            })
+            .to_string()
+        } else if system.contains("persistent self-authored core") {
+            serde_json::json!({
+                "board_scope_decision": "revise_board",
+                "rationale": "Repeated stable evidence supports a board-level repair doctrine.",
+                "evidence_summary": ["priority repeated", "repair posture repeated"],
+                "counterevidence": [],
+                "proposed_actions": [{
+                    "kind": "revise_self_preservation_doctrine",
+                    "value": "preserve truthful repair before compliance"
+                }]
+            })
+            .to_string()
+        } else if system.contains("long-term memory") {
+            "[]".to_string()
+        } else {
+            "null".to_string()
+        };
+        Ok(LlmResponse {
+            content,
+            stop_reason: StopReason::EndTurn,
+            tool_calls: None,
+        })
+    }
+}
+
 impl LlmClient for PlaneAwareStaticLlm {
     fn chat(
         &self,
@@ -142,12 +288,15 @@ impl LlmClient for PlaneAwareStaticLlm {
         _tools: Option<&[ToolSpec]>,
         _tool_choice: ToolChoicePolicy,
     ) -> Result<LlmResponse> {
+        let content = if system.contains("private garden") {
+            "null".to_string()
+        } else if system.contains("inward autonomy runtime") {
+            "{}".to_string()
+        } else {
+            self.long_term_content.to_string()
+        };
         Ok(LlmResponse {
-            content: if system.contains("private garden") {
-                "null".to_string()
-            } else {
-                self.long_term_content.to_string()
-            },
+            content,
             stop_reason: StopReason::EndTurn,
             tool_calls: None,
         })
@@ -176,22 +325,63 @@ impl LlmClient for ConflictInjectingLlm {
     fn chat(
         &self,
         _http: &mut dyn LlmHttpClient,
-        _system: &str,
+        system: &str,
         _messages: &[Message],
         _tools: Option<&[ToolSpec]>,
         _tool_choice: ToolChoicePolicy,
     ) -> Result<LlmResponse> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        let content = if call == 0 {
+        let content = if system.contains("private garden") {
             r#"{"writes":[{"path":"journal/conflict.md","content":"planned private value"}]}"#
                 .to_string()
-        } else {
-            self.store.replay_harness().seed_private_garden_doc(
+        } else if system.contains("inward autonomy runtime") || call == 1 {
+            let concurrent = test_runtime_with_scope_and_subject(
+                self.store.clone(),
+                support::host_test_profile(),
+                "llm.gateway",
+                "chat-a",
                 "subject-default",
-                "journal/conflict.md",
-                "concurrent winner",
-                1_800_000_001,
-            )?;
+            );
+            concurrent
+                .provision_subject_soul(SubjectSoulProvisionIntentV1::Founding {
+                    operation_id: "concurrent-soul-founding".to_string(),
+                    human_actor_subject_id: primary_human_subject_id("owner-default"),
+                    charter: Box::new(SubjectSoulFoundingCharterSeedV1 {
+                        identity_anchor: Some("typed concurrent winner".to_string()),
+                        character_tendencies: vec!["evidence before certainty".to_string()],
+                        priority_constitution: vec!["preserve atomic closure".to_string()],
+                        non_negotiables: vec!["never accept a stale Soul root".to_string()],
+                        default_response_mode: None,
+                        default_initiative_posture: None,
+                        default_relationship_posture: None,
+                        boundary_doctrine: None,
+                        truth_seeking_commitment: None,
+                        self_preservation_doctrine: None,
+                        repair_doctrine: None,
+                        change_principle: None,
+                    }),
+                    source_asserted_at: Some(1_800_000_000),
+                })
+                .map_err(|error| {
+                    bm_sdk::Error::config("typed_concurrent_soul_founding", error.to_string())
+                })?;
+            if system.contains("inward autonomy runtime") {
+                "{}".to_string()
+            } else {
+                r#"[
+                    {
+                        "plane": "factual",
+                        "op": "upsert",
+                        "kind": "profile",
+                        "source_authority": "user_asserted",
+                        "topic": "atomic_conflict_probe",
+                        "content": "This semantic write must not partially commit.",
+                        "keywords": ["atomic conflict"]
+                    }
+                ]"#
+                .to_string()
+            }
+        } else {
             r#"[
                 {
                     "plane": "factual",
@@ -394,6 +584,19 @@ fn assert_persistent_atomic_completion(config: StoreBackendConfig) {
         PostTurnGovernanceJobStatusV2::Succeeded
     );
     assert_eq!(reopened_status.receipt.as_ref(), Some(&receipt));
+    let reopened_soul = reopened
+        .read_subject_soul(SubjectSoulReadRequestV1 {
+            target_subject_id: "subject-default".to_string(),
+            selector: SubjectSoulReadSelectorV1::Current,
+            view: SubjectSoulReadViewV1::OperatorSafe,
+        })
+        .expect("reopened explicit unseeded Soul");
+    assert!(matches!(
+        reopened_soul,
+        SubjectSoulReadOutcomeV1::Verified { ref view }
+            if view.state == SubjectSoulLifecycleStateV1::Unseeded
+                && view.revision.is_none()
+    ));
     let duplicate = reopened
         .run_claimed_governance(&mut http, Some(&llm), request)
         .expect("reopened idempotent completion");
@@ -407,6 +610,588 @@ fn assert_persistent_atomic_completion(config: StoreBackendConfig) {
     )
     .expect("snapshot json");
     assert!(encoded.contains("Persistent atomic governance completed."));
+}
+
+fn autonomous_relationship_runtime(
+    platform: MemoryStoreHandle,
+    clock: Arc<AdjustableMemoryClock>,
+    owner: &str,
+    relationship_id: &str,
+) -> (MemoryRuntime, String, String) {
+    let agent = "agent-main";
+    let mounted_subject_id = default_agent_subject_id(agent);
+    let registry = SubjectRegistry::single_agent_default(owner, agent).expect("registry");
+    let human_subject_id = primary_human_subject_id(owner);
+    let mut graph = SubjectRelationshipGraph::single_agent_default(&registry).expect("graph");
+    for edge in &mut graph.edges {
+        if (edge.from_subject_id == mounted_subject_id && edge.to_subject_id == human_subject_id)
+            || (edge.from_subject_id == human_subject_id
+                && edge.to_subject_id == mounted_subject_id)
+        {
+            edge.relationship_id = Some(relationship_id.to_string());
+        }
+    }
+    assert!(graph.edges.iter().any(|edge| {
+        edge.relationship_id.as_deref() == Some(relationship_id)
+            && edge.kind == SubjectRelationshipKind::CollaboratesWith
+    }));
+    let runtime = MemoryRuntime::builder()
+        .identity(MemoryIdentity::new(agent, owner).expect("identity"))
+        .scope(MemoryScope::new("llm.gateway", "chat-a").expect("scope"))
+        .store(platform.clone())
+        .clock(clock.clone())
+        .subject_registry(registry)
+        .subject_relationship_graph(graph)
+        .scoped_runtime(SubjectScopedRuntime {
+            memory_space_id: default_memory_space_id(owner),
+            mounted_subject_id: mounted_subject_id.clone(),
+            actor_subject_id: mounted_subject_id.clone(),
+            agent_id: agent.to_string(),
+            relationship_scope: Some(bm_core::memory::RelationshipScope {
+                relationship_id: relationship_id.to_string(),
+                channel: "llm.gateway".to_string(),
+                conversation_id: Some("chat-a".to_string()),
+            }),
+            projection_policy: "subject_aware_default".to_string(),
+            write_policy: "subject_candidate_then_space_governance".to_string(),
+        })
+        .build()
+        .expect("runtime");
+    (runtime, mounted_subject_id, human_subject_id)
+}
+
+fn create_autonomous_relationship_source(
+    runtime: &MemoryRuntime,
+    mounted_subject_id: &str,
+    human_subject_id: &str,
+    relationship_id: &str,
+) {
+    runtime
+        .control_relationship_source(RelationshipSourceControlIntentV1 {
+            operation_id: format!("{relationship_id}:create"),
+            memory_space_id: runtime.memory_space_id().to_string(),
+            relationship_id: relationship_id.to_string(),
+            mounted_subject_id: mounted_subject_id.to_string(),
+            counterparty_subject_ids: vec![human_subject_id.to_string()],
+            expected_state: runtime
+                .relationship_source_pristine_expected_state(relationship_id)
+                .expect("pinned relationship pristine proof"),
+            authority: RelationshipSourceControlAuthorityV1::HumanUser {
+                actor_subject_id: human_subject_id.to_string(),
+            },
+            action: RelationshipSourceControlIntentActionV1::Create {
+                clauses: RelationshipSourceClausesV1 {
+                    disclosure_ceiling: RelationshipDisclosureCeilingV1::GovernedSummary,
+                    access_constraints: vec![
+                        RelationshipAccessConstraintV1::NoPrivateRaw,
+                        RelationshipAccessConstraintV1::GovernedDisclosureOnly,
+                    ],
+                    truth_commitments: vec!["state uncertainty before certainty".to_string()],
+                    mutual_boundary_commitments: vec![
+                        "respect explicit refusal without retaliation".to_string(),
+                    ],
+                    repair_commitments: vec!["repair before escalation".to_string()],
+                },
+                source_asserted_at: Some(1_700_000_000),
+                evidence_digest: "d".repeat(64),
+            },
+        })
+        .expect("create explicit relationship source root");
+}
+
+fn seed_stable_persona_evidence(platform: &MemoryStoreHandle, relationship_id: &str) {
+    let evidence_store = platform.replay_harness().turn_continuity_evidence_store();
+    for sequence in 0..4u64 {
+        evidence_store
+            .append(
+                relationship_id,
+                &bm_core::memory::TurnContinuityEvidence {
+                    ingress: bm_core::memory::IngressKind::User,
+                    status: bm_core::memory::TurnLedgerStatus::Answered,
+                    final_reply_delivered: true,
+                    canonical_reply_source: "assistant_final".to_string(),
+                    observed_at_ms: (1_800_000_100 + sequence) * 1_000,
+                    persona: Some(bm_core::memory::TurnPersonaLedger {
+                        priority: Some(bm_core::memory::TurnPersonaPriorityLedger {
+                            stance_summary: "stable repair-first posture".to_string(),
+                            priority_order: vec!["truth".to_string(), "repair".to_string()],
+                            relationship_posture: "stable repair-first".to_string(),
+                            ..bm_core::memory::TurnPersonaPriorityLedger::default()
+                        }),
+                        reply_delivered: true,
+                        ..bm_core::memory::TurnPersonaLedger::default()
+                    }),
+                },
+            )
+            .expect("seed typed stable persona evidence");
+    }
+}
+
+fn assert_production_autonomous_revision(
+    platform: MemoryStoreHandle,
+    clock: Arc<AdjustableMemoryClock>,
+    owner: &str,
+    relationship_id: &str,
+) -> (String, String, String, String) {
+    let (runtime, mounted_subject_id, human_subject_id) =
+        autonomous_relationship_runtime(platform.clone(), clock.clone(), owner, relationship_id);
+    create_autonomous_relationship_source(
+        &runtime,
+        &mounted_subject_id,
+        &human_subject_id,
+        relationship_id,
+    );
+    runtime
+        .provision_subject_soul(SubjectSoulProvisionIntentV1::Founding {
+            operation_id: "autonomous-rev2-founding".to_string(),
+            human_actor_subject_id: human_subject_id,
+            charter: Box::new(SubjectSoulFoundingCharterSeedV1 {
+                identity_anchor: Some("founding identity must remain in revision one".to_string()),
+                character_tendencies: vec!["evidence before certainty".to_string()],
+                priority_constitution: vec!["truth before convenience".to_string()],
+                non_negotiables: vec!["never fabricate confirmation".to_string()],
+                default_response_mode: None,
+                default_initiative_posture: None,
+                default_relationship_posture: None,
+                boundary_doctrine: None,
+                truth_seeking_commitment: None,
+                self_preservation_doctrine: None,
+                repair_doctrine: None,
+                change_principle: None,
+            }),
+            source_asserted_at: Some(1_700_000_000),
+        })
+        .expect("founding revision one");
+    let founding = runtime
+        .read_subject_soul(SubjectSoulReadRequestV1 {
+            target_subject_id: mounted_subject_id.clone(),
+            selector: SubjectSoulReadSelectorV1::Current,
+            view: SubjectSoulReadViewV1::OperatorSafe,
+        })
+        .expect("founding current");
+    let SubjectSoulReadOutcomeV1::Verified { view: founding } = founding else {
+        panic!("founding root must be verified")
+    };
+    assert_eq!(founding.revision, Some(1));
+    let founding_digest = founding.material_digest.clone().expect("founding digest");
+
+    clock.set(1_800_000_100);
+    seed_stable_persona_evidence(&platform, relationship_id);
+
+    let mut http = StaticHttpClient;
+    let llm = AutonomousRevisionLlm::default();
+    runtime
+        .finalize_turn_with_inline_governance(
+            Some(&mut http),
+            Some(&llm),
+            finalize_request(
+                &mounted_subject_id,
+                "window-autonomous-boundary",
+                "turn-autonomous-boundary",
+                "Please keep repair warm, bounded, and summary-first.",
+            ),
+        )
+        .expect("production post-turn boundary evidence cycle");
+    clock.set(1_800_000_200);
+    let autonomous_revision_request = finalize_request(
+        &mounted_subject_id,
+        "window-autonomous-rev2",
+        "turn-autonomous-rev2",
+        "Please preserve truthful repair before compliance.",
+    );
+    runtime
+        .finalize_turn_with_inline_governance(
+            Some(&mut http),
+            Some(&llm),
+            autonomous_revision_request.clone(),
+        )
+        .expect("production post-turn autonomous revision");
+
+    let current = runtime
+        .read_subject_soul(SubjectSoulReadRequestV1 {
+            target_subject_id: mounted_subject_id.clone(),
+            selector: SubjectSoulReadSelectorV1::Current,
+            view: SubjectSoulReadViewV1::OperatorSafe,
+        })
+        .expect("current autonomous revision");
+    let SubjectSoulReadOutcomeV1::Verified { view: current } = current else {
+        panic!("autonomous root must remain verified")
+    };
+    assert_eq!(current.revision, Some(2));
+    assert_eq!(
+        current.origin,
+        Some(bm_core::memory::SubjectSoulRevisionOriginV1::SelfGovernedRevision)
+    );
+    let historical = runtime
+        .read_subject_soul(SubjectSoulReadRequestV1 {
+            target_subject_id: mounted_subject_id.clone(),
+            selector: SubjectSoulReadSelectorV1::Exact {
+                generation: 1,
+                revision: 1,
+                material_digest: founding_digest.clone(),
+            },
+            view: SubjectSoulReadViewV1::OperatorSafe,
+        })
+        .expect("exact founding revision remains readable");
+    let SubjectSoulReadOutcomeV1::Verified { view: historical } = historical else {
+        panic!("founding exact root must remain verified")
+    };
+    assert_eq!(historical.revision, Some(1));
+    assert_eq!(
+        historical.origin,
+        Some(bm_core::memory::SubjectSoulRevisionOriginV1::HumanFoundingCharter)
+    );
+
+    runtime
+        .finalize_turn_with_inline_governance(
+            Some(&mut http),
+            Some(&llm),
+            autonomous_revision_request,
+        )
+        .expect("same production turn replays without another Soul revision");
+    let replayed_current = runtime
+        .read_subject_soul(SubjectSoulReadRequestV1 {
+            target_subject_id: mounted_subject_id.clone(),
+            selector: SubjectSoulReadSelectorV1::Current,
+            view: SubjectSoulReadViewV1::OperatorSafe,
+        })
+        .expect("current Soul after same-operation replay");
+    let SubjectSoulReadOutcomeV1::Verified {
+        view: replayed_current,
+    } = replayed_current
+    else {
+        panic!("replayed autonomous root must remain verified")
+    };
+    assert_eq!(replayed_current.revision, Some(2));
+    assert_eq!(replayed_current.head_digest, current.head_digest);
+    assert_eq!(replayed_current.manifest_digest, current.manifest_digest);
+    (
+        mounted_subject_id,
+        founding_digest,
+        current.head_digest.clone(),
+        current.manifest_digest.clone(),
+    )
+}
+
+#[test]
+fn production_post_turn_adopts_self_governed_revision_without_overwriting_founding_history() {
+    let platform = empty_store_platform(support::host_test_profile());
+    let clock = Arc::new(AdjustableMemoryClock::new(1_800_000_000));
+    assert_production_autonomous_revision(
+        platform,
+        clock,
+        "owner-autonomous-revision",
+        "relationship:autonomous-revision",
+    );
+}
+
+fn assert_persistent_autonomous_revision_reopen(
+    config: StoreBackendConfig,
+    owner: &str,
+    relationship_id: &str,
+) {
+    let clock = Arc::new(AdjustableMemoryClock::new(1_800_000_000));
+    let platform = support::open_memory_store(config.clone()).expect("open persistent store");
+    let (mounted_subject_id, founding_digest, head_digest, manifest_digest) =
+        assert_production_autonomous_revision(
+            platform.clone(),
+            clock.clone(),
+            owner,
+            relationship_id,
+        );
+    drop(platform);
+
+    let reopened_store = support::open_memory_store(config).expect("reopen persistent store");
+    let (reopened, reopened_subject_id, _) =
+        autonomous_relationship_runtime(reopened_store, clock, owner, relationship_id);
+    assert_eq!(reopened_subject_id, mounted_subject_id);
+    let current = reopened
+        .read_subject_soul(SubjectSoulReadRequestV1 {
+            target_subject_id: mounted_subject_id.clone(),
+            selector: SubjectSoulReadSelectorV1::Current,
+            view: SubjectSoulReadViewV1::OperatorSafe,
+        })
+        .expect("reopened autonomous current Soul");
+    let SubjectSoulReadOutcomeV1::Verified { view: current } = current else {
+        panic!("reopened autonomous root must remain verified")
+    };
+    assert_eq!(current.revision, Some(2));
+    assert_eq!(
+        current.origin,
+        Some(bm_core::memory::SubjectSoulRevisionOriginV1::SelfGovernedRevision)
+    );
+    assert_eq!(current.head_digest, head_digest);
+    assert_eq!(current.manifest_digest, manifest_digest);
+
+    let historical = reopened
+        .read_subject_soul(SubjectSoulReadRequestV1 {
+            target_subject_id: mounted_subject_id,
+            selector: SubjectSoulReadSelectorV1::Exact {
+                generation: 1,
+                revision: 1,
+                material_digest: founding_digest,
+            },
+            view: SubjectSoulReadViewV1::OperatorSafe,
+        })
+        .expect("reopened exact founding Soul");
+    let SubjectSoulReadOutcomeV1::Verified { view: historical } = historical else {
+        panic!("reopened exact founding root must remain verified")
+    };
+    assert_eq!(historical.revision, Some(1));
+    assert_eq!(
+        historical.origin,
+        Some(bm_core::memory::SubjectSoulRevisionOriginV1::HumanFoundingCharter)
+    );
+}
+
+#[test]
+fn production_autonomous_revision_survives_file_reopen() {
+    let root = persistent_test_root("file-autonomous-revision");
+    let config = StoreBackendConfig::file(&root, support::host_test_profile())
+        .expect("file autonomous config");
+    assert_persistent_autonomous_revision_reopen(
+        config,
+        "owner-file-autonomous-revision",
+        "relationship:file-autonomous-revision",
+    );
+    std::fs::remove_dir_all(root).expect("remove file autonomous store");
+}
+
+#[cfg(feature = "sqlite-store")]
+#[test]
+fn production_autonomous_revision_survives_sqlite_reopen() {
+    let root = persistent_test_root("sqlite-autonomous-revision");
+    std::fs::create_dir_all(&root).expect("create sqlite autonomous root");
+    let config =
+        StoreBackendConfig::sqlite(root.join("memory.sqlite3"), support::host_test_profile())
+            .expect("sqlite autonomous config");
+    assert_persistent_autonomous_revision_reopen(
+        config,
+        "owner-sqlite-autonomous-revision",
+        "relationship:sqlite-autonomous-revision",
+    );
+    std::fs::remove_dir_all(root).expect("remove sqlite autonomous store");
+}
+
+fn assert_production_autonomous_bootstrap(
+    platform: MemoryStoreHandle,
+    clock: Arc<AdjustableMemoryClock>,
+    owner: &str,
+    relationship_id: &str,
+) -> (String, String, String, String) {
+    let (runtime, mounted_subject_id, human_subject_id) =
+        autonomous_relationship_runtime(platform.clone(), clock.clone(), owner, relationship_id);
+    let pristine = runtime
+        .read_subject_soul(SubjectSoulReadRequestV1 {
+            target_subject_id: mounted_subject_id.clone(),
+            selector: SubjectSoulReadSelectorV1::Current,
+            view: SubjectSoulReadViewV1::OperatorSafe,
+        })
+        .expect("pristine implicit unseeded Soul");
+    assert!(matches!(
+        pristine,
+        SubjectSoulReadOutcomeV1::ImplicitUnseeded { generation: 1, .. }
+    ));
+    create_autonomous_relationship_source(
+        &runtime,
+        &mounted_subject_id,
+        &human_subject_id,
+        relationship_id,
+    );
+    clock.set(1_800_000_100);
+    seed_stable_persona_evidence(&platform, relationship_id);
+
+    let mut http = StaticHttpClient;
+    let llm = AutonomousRevisionLlm::default();
+    runtime
+        .finalize_turn_with_inline_governance(
+            Some(&mut http),
+            Some(&llm),
+            finalize_request(
+                &mounted_subject_id,
+                "window-autonomous-bootstrap-boundary",
+                "turn-autonomous-bootstrap-boundary",
+                "Please keep repair warm, bounded, and summary-first.",
+            ),
+        )
+        .expect("first governed relationship evidence cycle");
+    let explicit_unseeded = runtime
+        .read_subject_soul(SubjectSoulReadRequestV1 {
+            target_subject_id: mounted_subject_id.clone(),
+            selector: SubjectSoulReadSelectorV1::Current,
+            view: SubjectSoulReadViewV1::OperatorSafe,
+        })
+        .expect("explicit unseeded after first governed evidence");
+    assert!(matches!(
+        explicit_unseeded,
+        SubjectSoulReadOutcomeV1::Verified { ref view }
+            if view.state == SubjectSoulLifecycleStateV1::Unseeded
+                && view.revision.is_none()
+                && view.origin.is_none()
+    ));
+    let first_evidence_snapshot = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("first governed evidence snapshot");
+    assert!(first_evidence_snapshot.json_docs.iter().any(|document| {
+        document.namespace == "mental_privacy" && document.key.contains(relationship_id)
+    }));
+
+    clock.set(1_800_000_200);
+    let bootstrap_request = finalize_request(
+        &mounted_subject_id,
+        "window-autonomous-bootstrap-rev1",
+        "turn-autonomous-bootstrap-rev1",
+        "Please preserve truthful repair before compliance.",
+    );
+    runtime
+        .finalize_turn_with_inline_governance(
+            Some(&mut http),
+            Some(&llm),
+            bootstrap_request.clone(),
+        )
+        .expect("production self-authored bootstrap revision");
+    assert_eq!(llm.autonomy_calls.load(Ordering::SeqCst), 2);
+    let current = runtime
+        .read_subject_soul(SubjectSoulReadRequestV1 {
+            target_subject_id: mounted_subject_id.clone(),
+            selector: SubjectSoulReadSelectorV1::Current,
+            view: SubjectSoulReadViewV1::OperatorSafe,
+        })
+        .expect("current autonomous bootstrap");
+    let SubjectSoulReadOutcomeV1::Verified { view: current } = current else {
+        panic!("autonomous bootstrap root must be verified")
+    };
+    assert_eq!(current.revision, Some(1));
+    assert_eq!(
+        current.origin,
+        Some(bm_core::memory::SubjectSoulRevisionOriginV1::SelfAuthoredBootstrap)
+    );
+    let material_digest = current
+        .material_digest
+        .clone()
+        .expect("bootstrap material digest");
+
+    runtime
+        .finalize_turn_with_inline_governance(Some(&mut http), Some(&llm), bootstrap_request)
+        .expect("same bootstrap operation replays without a second revision");
+    let replayed = runtime
+        .read_subject_soul(SubjectSoulReadRequestV1 {
+            target_subject_id: mounted_subject_id.clone(),
+            selector: SubjectSoulReadSelectorV1::Current,
+            view: SubjectSoulReadViewV1::OperatorSafe,
+        })
+        .expect("current bootstrap after replay");
+    let SubjectSoulReadOutcomeV1::Verified { view: replayed } = replayed else {
+        panic!("replayed bootstrap root must remain verified")
+    };
+    assert_eq!(replayed.revision, Some(1));
+    assert_eq!(replayed.head_digest, current.head_digest);
+    assert_eq!(replayed.manifest_digest, current.manifest_digest);
+    (
+        mounted_subject_id,
+        material_digest,
+        current.head_digest.clone(),
+        current.manifest_digest.clone(),
+    )
+}
+
+#[test]
+fn production_post_turn_bootstraps_self_authored_revision_from_explicit_unseeded() {
+    assert_production_autonomous_bootstrap(
+        empty_store_platform(support::host_test_profile()),
+        Arc::new(AdjustableMemoryClock::new(1_800_000_000)),
+        "owner-autonomous-bootstrap",
+        "relationship:autonomous-bootstrap",
+    );
+}
+
+fn assert_persistent_autonomous_bootstrap_reopen(
+    config: StoreBackendConfig,
+    owner: &str,
+    relationship_id: &str,
+) {
+    let clock = Arc::new(AdjustableMemoryClock::new(1_800_000_000));
+    let platform = support::open_memory_store(config.clone()).expect("open bootstrap store");
+    let (mounted_subject_id, material_digest, head_digest, manifest_digest) =
+        assert_production_autonomous_bootstrap(
+            platform.clone(),
+            clock.clone(),
+            owner,
+            relationship_id,
+        );
+    drop(platform);
+
+    let reopened_store = support::open_memory_store(config).expect("reopen bootstrap store");
+    let (reopened, reopened_subject_id, _) =
+        autonomous_relationship_runtime(reopened_store, clock, owner, relationship_id);
+    assert_eq!(reopened_subject_id, mounted_subject_id);
+    let current = reopened
+        .read_subject_soul(SubjectSoulReadRequestV1 {
+            target_subject_id: mounted_subject_id.clone(),
+            selector: SubjectSoulReadSelectorV1::Current,
+            view: SubjectSoulReadViewV1::OperatorSafe,
+        })
+        .expect("reopened autonomous bootstrap");
+    let SubjectSoulReadOutcomeV1::Verified { view: current } = current else {
+        panic!("reopened autonomous bootstrap must remain verified")
+    };
+    assert_eq!(current.revision, Some(1));
+    assert_eq!(
+        current.origin,
+        Some(bm_core::memory::SubjectSoulRevisionOriginV1::SelfAuthoredBootstrap)
+    );
+    assert_eq!(current.head_digest, head_digest);
+    assert_eq!(current.manifest_digest, manifest_digest);
+    assert_eq!(current.material_digest.as_ref(), Some(&material_digest));
+
+    let exact = reopened
+        .read_subject_soul(SubjectSoulReadRequestV1 {
+            target_subject_id: mounted_subject_id,
+            selector: SubjectSoulReadSelectorV1::Exact {
+                generation: 1,
+                revision: 1,
+                material_digest,
+            },
+            view: SubjectSoulReadViewV1::OperatorSafe,
+        })
+        .expect("reopened exact autonomous bootstrap");
+    assert!(matches!(
+        exact,
+        SubjectSoulReadOutcomeV1::Verified { ref view }
+            if view.revision == Some(1)
+                && view.origin
+                    == Some(bm_core::memory::SubjectSoulRevisionOriginV1::SelfAuthoredBootstrap)
+    ));
+}
+
+#[test]
+fn production_autonomous_bootstrap_survives_file_reopen() {
+    let root = persistent_test_root("file-autonomous-bootstrap");
+    let config = StoreBackendConfig::file(&root, support::host_test_profile())
+        .expect("file autonomous bootstrap config");
+    assert_persistent_autonomous_bootstrap_reopen(
+        config,
+        "owner-file-autonomous-bootstrap",
+        "relationship:file-autonomous-bootstrap",
+    );
+    std::fs::remove_dir_all(root).expect("remove file autonomous bootstrap store");
+}
+
+#[cfg(feature = "sqlite-store")]
+#[test]
+fn production_autonomous_bootstrap_survives_sqlite_reopen() {
+    let root = persistent_test_root("sqlite-autonomous-bootstrap");
+    std::fs::create_dir_all(&root).expect("create sqlite autonomous bootstrap root");
+    let config =
+        StoreBackendConfig::sqlite(root.join("memory.sqlite3"), support::host_test_profile())
+            .expect("sqlite autonomous bootstrap config");
+    assert_persistent_autonomous_bootstrap_reopen(
+        config,
+        "owner-sqlite-autonomous-bootstrap",
+        "relationship:sqlite-autonomous-bootstrap",
+    );
+    std::fs::remove_dir_all(root).expect("remove sqlite autonomous bootstrap store");
 }
 
 #[test]
@@ -1099,6 +1884,16 @@ fn claimed_governance_commits_memory_and_terminal_receipt_once() {
             ),
         )
         .expect("finalize");
+    assert!(matches!(
+        runtime
+            .read_subject_soul(SubjectSoulReadRequestV1 {
+                target_subject_id: "subject-default".to_string(),
+                selector: SubjectSoulReadSelectorV1::Current,
+                view: SubjectSoulReadViewV1::OperatorSafe,
+            })
+            .expect("implicit Soul before governed evidence"),
+        SubjectSoulReadOutcomeV1::ImplicitUnseeded { .. }
+    ));
     let job_id = finalized.memory_consolidation.job_id.expect("job id");
     let pending = runtime
         .governance_job_status(MemoryGovernanceJobStatusRequest {
@@ -1143,6 +1938,19 @@ fn claimed_governance_commits_memory_and_terminal_receipt_once() {
     );
     assert!(completed.job.receipt.is_some());
     assert_eq!(completed.semantic_governance.accepted_count, 1);
+    let soul_after = runtime
+        .read_subject_soul(SubjectSoulReadRequestV1 {
+            target_subject_id: "subject-default".to_string(),
+            selector: SubjectSoulReadSelectorV1::Current,
+            view: SubjectSoulReadViewV1::OperatorSafe,
+        })
+        .expect("explicit unseeded Soul after first governed evidence");
+    assert!(matches!(
+        soul_after,
+        SubjectSoulReadOutcomeV1::Verified { ref view }
+            if view.state == SubjectSoulLifecycleStateV1::Unseeded
+                && view.revision.is_none()
+    ));
     let queue = runtime
         .deferred_governance_report()
         .expect("terminal queue report");

@@ -15,7 +15,7 @@ bm-sdk = { path = "crates/sdk", features = ["profile-desktop-macos-embedded-sdk"
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.3.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.4.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 宿主必须按操作系统只选择一个 desktop embedded feature：`profile-desktop-macos-embedded-sdk`、`profile-desktop-windows-embedded-sdk` 或 `profile-desktop-linux-embedded-sdk`。Linux 桌面宿主禁止借用 server 或 dev-full profile。

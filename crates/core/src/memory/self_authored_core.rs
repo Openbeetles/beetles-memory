@@ -1,9 +1,10 @@
 use crate::bus::IngressKind;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::llm::{LlmClient, LlmHttpClient, Message, ToolChoicePolicy};
 use crate::orchestrator::PressureLevel;
 use crate::util::{scrub_credentials, truncate_content_to_max};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::fmt::Write as _;
 
@@ -18,9 +19,9 @@ use super::{
     render_self_continuity_block, render_self_model_block, render_world_sense_block,
     AutonomyStrategy, CoreRevisionActionKind, CoreRevisionConflictClass,
     CoreRevisionCorrectionKind, CoreRevisionGovernanceDigest, CoreRevisionLedger,
-    CoreRevisionLedgerStore, CoreRevisionOutcome, CoreRevisionRecord, CoreRevisionRecordChange,
-    MentalPrivacyState, RecentPersonaEvidence, RelationshipPortfolio, RelationshipTopology,
-    SelfAuthoredCoreStore, SelfContinuity, SelfModel, WorldSense,
+    CoreRevisionOutcome, CoreRevisionRecord, CoreRevisionRecordChange, MentalPrivacyState,
+    RecentPersonaEvidence, RelationshipPortfolio, RelationshipTopology, SelfContinuity, SelfModel,
+    SubjectSoulRevisionOriginV1, WorldSense,
 };
 
 pub const SELF_AUTHORED_CORE_SYSTEM_PROMPT: &str = "You maintain the assistant's persistent self-authored core for the whole board-level subject, not one chat. Return JSON only with fields board_scope_decision, rationale, evidence_summary, counterevidence, proposed_actions. board_scope_decision must be revise_board, relation_local, or no_change. proposed_actions must be an array of compact action objects. Allowed action kinds are revise_identity_anchor, add_non_negotiables, remove_non_negotiables, revise_priority_constitution, revise_default_response_mode, revise_default_task_scope, revise_default_initiative_posture, revise_default_relationship_posture, revise_boundary_doctrine, revise_truth_doctrine, revise_self_preservation_doctrine, revise_repair_doctrine, revise_change_protocol. This is a constitutional revision pass, not a free rewrite. Propose only stable board-level changes that deserve cross-chat carry-forward. Use self_model, self_continuity, boundary state, relationship portfolio, relationship topology, and recent multi-turn persona evidence as grounding. Treat recent persona evidence as evidence, never automatic promotion authority. Operational traces such as task scope, response mode, pressure, tool usage, or reply scope are not sufficient constitutional revision grounds by themselves. A quarantined, cooled-down, or otherwise isolated relation must not directly rewrite the board-level core. If the latest material should stay relation-local, set board_scope_decision=relation_local. If no constitutional change is warranted, set board_scope_decision=no_change. Do not copy transcripts, raw tool payloads, long quotes, or private documents.";
@@ -56,6 +57,8 @@ pub struct SelfAuthoredCore {
     #[serde(default)]
     pub identity_anchor: String,
     #[serde(default)]
+    pub character_tendencies: Vec<String>,
+    #[serde(default)]
     pub non_negotiables: Vec<String>,
     #[serde(default)]
     pub priority_constitution: Vec<String>,
@@ -84,6 +87,7 @@ pub struct SelfAuthoredCore {
 impl SelfAuthoredCore {
     pub fn is_meaningful(&self) -> bool {
         !self.identity_anchor.trim().is_empty()
+            || !self.character_tendencies.is_empty()
             || !self.non_negotiables.is_empty()
             || !self.priority_constitution.is_empty()
             || !self.default_response_mode.trim().is_empty()
@@ -110,16 +114,50 @@ pub struct SelfAuthoredCoreRefreshInput<'a> {
     pub now_secs: u64,
 }
 
-pub struct SelfAuthoredCoreRefreshContext<'a> {
-    pub self_authored_core_store: &'a dyn SelfAuthoredCoreStore,
-    pub core_revision_ledger_store: &'a dyn CoreRevisionLedgerStore,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SelfAuthoredCoreRefreshOutcome {
     Skipped,
     Updated,
     ReviewedRejected,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelfAuthoredCoreExpectedPriorV1 {
+    pub core_revision: Option<u64>,
+    pub core_digest: Option<String>,
+    pub ledger_digest: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SelfAuthoredCoreRefreshPlanV1 {
+    Skipped,
+    ReviewedRejected {
+        expected_prior: SelfAuthoredCoreExpectedPriorV1,
+        next_ledger: CoreRevisionLedger,
+        origin: SubjectSoulRevisionOriginV1,
+        proposal_ref: String,
+        source_refs: Vec<String>,
+    },
+    Adopt {
+        expected_prior: SelfAuthoredCoreExpectedPriorV1,
+        next_core: Box<SelfAuthoredCore>,
+        next_ledger: CoreRevisionLedger,
+        origin: SubjectSoulRevisionOriginV1,
+        proposal_ref: String,
+        source_refs: Vec<String>,
+    },
+}
+
+impl SelfAuthoredCoreRefreshPlanV1 {
+    pub fn outcome(&self) -> SelfAuthoredCoreRefreshOutcome {
+        match self {
+            Self::Skipped => SelfAuthoredCoreRefreshOutcome::Skipped,
+            Self::ReviewedRejected { .. } => SelfAuthoredCoreRefreshOutcome::ReviewedRejected,
+            Self::Adopt { .. } => SelfAuthoredCoreRefreshOutcome::Updated,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -300,11 +338,11 @@ pub fn render_persistent_self_authored_core_block(
     if !normalized.identity_anchor.is_empty() {
         let _ = writeln!(out, "Identity anchor: {}", normalized.identity_anchor);
     }
-    if !normalized.non_negotiables.is_empty() {
+    if !normalized.character_tendencies.is_empty() {
         let _ = writeln!(
             out,
-            "Non-negotiables: {}",
-            normalized.non_negotiables.join(" | ")
+            "Character tendencies: {}",
+            normalized.character_tendencies.join(" | ")
         );
     }
     if !normalized.priority_constitution.is_empty() {
@@ -312,6 +350,13 @@ pub fn render_persistent_self_authored_core_block(
             out,
             "Priority constitution: {}",
             normalized.priority_constitution.join(" > ")
+        );
+    }
+    if !normalized.non_negotiables.is_empty() {
+        let _ = writeln!(
+            out,
+            "Non-negotiables: {}",
+            normalized.non_negotiables.join(" | ")
         );
     }
     if !normalized.default_response_mode.is_empty() {
@@ -362,11 +407,11 @@ pub fn render_persistent_self_authored_core_block(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn run_self_authored_core_refresh_with_state(
+pub fn plan_self_authored_core_refresh_with_state(
     http: &mut dyn LlmHttpClient,
     llm: &(dyn LlmClient + Send + Sync),
-    ctx: SelfAuthoredCoreRefreshContext<'_>,
     input: SelfAuthoredCoreRefreshInput<'_>,
+    existing_revision_ledger: CoreRevisionLedger,
     existing_core: Option<SelfAuthoredCore>,
     self_model: Option<&SelfModel>,
     self_continuity: Option<&SelfContinuity>,
@@ -380,14 +425,31 @@ pub(crate) fn run_self_authored_core_refresh_with_state(
     self_state_text: Option<&str>,
     distillation_intent: Option<&str>,
     distillation_sources: &[String],
-) -> Result<SelfAuthoredCoreRefreshOutcome> {
-    let existing_revision_ledger = ctx
-        .core_revision_ledger_store
-        .get(input.chat_id)?
-        .unwrap_or_default();
+) -> Result<SelfAuthoredCoreRefreshPlanV1> {
     let revision_ledger = existing_revision_ledger
         .is_meaningful()
         .then_some(&existing_revision_ledger);
+    let expected_prior = compute_self_authored_core_expected_prior_v1(
+        existing_core.as_ref(),
+        &existing_revision_ledger,
+    )?;
+    let source_refs = canonical_source_refs(distillation_sources);
+    let proposal_ref = self_authored_core_proposal_ref(
+        input.chat_id,
+        existing_core
+            .as_ref()
+            .map(|core| core.revision)
+            .unwrap_or(0),
+        input.now_secs,
+        &source_refs,
+    )?;
+    let reviewed_rejected_plan = |record| SelfAuthoredCoreRefreshPlanV1::ReviewedRejected {
+        expected_prior: expected_prior.clone(),
+        next_ledger: append_core_revision_record(existing_revision_ledger.clone(), record),
+        origin: SubjectSoulRevisionOriginV1::SelfGovernedRevision,
+        proposal_ref: proposal_ref.clone(),
+        source_refs: source_refs.clone(),
+    };
     let governance = compute_core_revision_governance_digest(
         revision_ledger,
         existing_core
@@ -407,7 +469,7 @@ pub(crate) fn run_self_authored_core_refresh_with_state(
             mental_privacy_state,
             input.now_secs,
         ) else {
-            return Ok(SelfAuthoredCoreRefreshOutcome::Skipped);
+            return Ok(SelfAuthoredCoreRefreshPlanV1::Skipped);
         };
         bootstrap.revision = 1;
         bootstrap.supersedes_revision = None;
@@ -418,11 +480,9 @@ pub(crate) fn run_self_authored_core_refresh_with_state(
         bootstrap.adopted_change_summary = vec!["bootstrap_from_layers".to_string()];
         bootstrap.rejected_change_summary.clear();
         let Some(bootstrap) = normalize_self_authored_core(bootstrap, input.now_secs) else {
-            return Ok(SelfAuthoredCoreRefreshOutcome::Skipped);
+            return Ok(SelfAuthoredCoreRefreshPlanV1::Skipped);
         };
-        ctx.self_authored_core_store
-            .set(input.chat_id, &bootstrap)?;
-        let ledger = append_core_revision_record(
+        let next_ledger = append_core_revision_record(
             existing_revision_ledger,
             CoreRevisionRecord {
                 based_on_revision: 0,
@@ -452,8 +512,14 @@ pub(crate) fn run_self_authored_core_refresh_with_state(
                 reviewed_at: input.now_secs,
             },
         );
-        ctx.core_revision_ledger_store.set(input.chat_id, &ledger)?;
-        return Ok(SelfAuthoredCoreRefreshOutcome::Updated);
+        return Ok(SelfAuthoredCoreRefreshPlanV1::Adopt {
+            expected_prior,
+            next_core: Box::new(bootstrap),
+            next_ledger,
+            origin: SubjectSoulRevisionOriginV1::SelfAuthoredBootstrap,
+            proposal_ref,
+            source_refs,
+        });
     }
 
     let gate = evaluate_self_authored_core_revision_gate(
@@ -468,34 +534,30 @@ pub(crate) fn run_self_authored_core_refresh_with_state(
         &governance,
     );
     if !gate.allowed {
-        record_core_revision_review(
-            ctx.core_revision_ledger_store,
-            input.chat_id,
-            build_non_adopted_record(
-                CoreRevisionOutcome::Deferred,
-                existing_core.as_ref(),
-                current_relationship_scope_id,
-                distillation_sources,
-                recent_persona_evidence,
-                gate.reason,
-                "Program gate blocked board-level revision before LLM review.",
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                input.now_secs,
-                existing_core
-                    .as_ref()
-                    .map(|core| core.stability_score)
-                    .unwrap_or(0),
-            ),
-        )?;
+        let plan = reviewed_rejected_plan(build_non_adopted_record(
+            CoreRevisionOutcome::Deferred,
+            existing_core.as_ref(),
+            current_relationship_scope_id,
+            distillation_sources,
+            recent_persona_evidence,
+            gate.reason,
+            "Program gate blocked board-level revision before LLM review.",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            input.now_secs,
+            existing_core
+                .as_ref()
+                .map(|core| core.stability_score)
+                .unwrap_or(0),
+        ));
         log::debug!(
             "[self_authored_core] reject revision scope_id={} because {}",
             input.chat_id,
             gate.reason
         );
-        return Ok(SelfAuthoredCoreRefreshOutcome::ReviewedRejected);
+        return Ok(plan);
     }
 
     let prompt = build_self_authored_core_revision_input(
@@ -528,7 +590,7 @@ pub(crate) fn run_self_authored_core_refresh_with_state(
     )?;
     let parsed = parse_self_authored_core_revision_response(response.content.trim());
     let Some(existing_core) = existing_core.as_ref() else {
-        return Ok(SelfAuthoredCoreRefreshOutcome::Skipped);
+        return Ok(SelfAuthoredCoreRefreshPlanV1::Skipped);
     };
     let base_record = match parsed
         .board_scope_decision
@@ -567,33 +629,27 @@ pub(crate) fn run_self_authored_core_refresh_with_state(
         RevisionScopeDecision::ReviseBoard => None,
     };
     if let Some(record) = base_record {
-        record_core_revision_review(ctx.core_revision_ledger_store, input.chat_id, record)?;
-        return Ok(SelfAuthoredCoreRefreshOutcome::ReviewedRejected);
+        return Ok(reviewed_rejected_plan(record));
     }
 
     let accepted_result =
         adjudicate_revision_actions(existing_core, &parsed.proposed_actions, revision_ledger);
     if accepted_result.accepted_actions.is_empty() {
-        record_core_revision_review(
-            ctx.core_revision_ledger_store,
-            input.chat_id,
-            build_non_adopted_record(
-                CoreRevisionOutcome::Rejected,
-                Some(existing_core),
-                current_relationship_scope_id,
-                distillation_sources,
-                recent_persona_evidence,
-                "no_meaningful_constitutional_change",
-                parsed.rationale.as_str(),
-                parsed.evidence_summary.clone(),
-                parsed.counterevidence.clone(),
-                Vec::new(),
-                rejected_changes_to_records(&accepted_result.rejected_actions),
-                input.now_secs,
-                existing_core.stability_score,
-            ),
-        )?;
-        return Ok(SelfAuthoredCoreRefreshOutcome::ReviewedRejected);
+        return Ok(reviewed_rejected_plan(build_non_adopted_record(
+            CoreRevisionOutcome::Rejected,
+            Some(existing_core),
+            current_relationship_scope_id,
+            distillation_sources,
+            recent_persona_evidence,
+            "no_meaningful_constitutional_change",
+            parsed.rationale.as_str(),
+            parsed.evidence_summary.clone(),
+            parsed.counterevidence.clone(),
+            Vec::new(),
+            rejected_changes_to_records(&accepted_result.rejected_actions),
+            input.now_secs,
+            existing_core.stability_score,
+        )));
     }
 
     let lineage = assess_revision_lineage(
@@ -619,55 +675,42 @@ pub(crate) fn run_self_authored_core_refresh_with_state(
         &accepted_result.rejected_actions,
     ));
     let Some(next_core) = normalize_self_authored_core(next_core, input.now_secs) else {
-        record_core_revision_review(
-            ctx.core_revision_ledger_store,
-            input.chat_id,
-            build_non_adopted_record(
-                CoreRevisionOutcome::Rejected,
-                Some(existing_core),
-                current_relationship_scope_id,
-                distillation_sources,
-                recent_persona_evidence,
-                "normalized_core_would_be_empty",
-                parsed.rationale.as_str(),
-                parsed.evidence_summary.clone(),
-                parsed.counterevidence.clone(),
-                Vec::new(),
-                rejected_changes_to_records(&accepted_result.rejected_actions),
-                input.now_secs,
-                existing_core.stability_score,
-            ),
-        )?;
-        return Ok(SelfAuthoredCoreRefreshOutcome::ReviewedRejected);
+        return Ok(reviewed_rejected_plan(build_non_adopted_record(
+            CoreRevisionOutcome::Rejected,
+            Some(existing_core),
+            current_relationship_scope_id,
+            distillation_sources,
+            recent_persona_evidence,
+            "normalized_core_would_be_empty",
+            parsed.rationale.as_str(),
+            parsed.evidence_summary.clone(),
+            parsed.counterevidence.clone(),
+            Vec::new(),
+            rejected_changes_to_records(&accepted_result.rejected_actions),
+            input.now_secs,
+            existing_core.stability_score,
+        )));
     };
     if existing_core == &next_core {
-        record_core_revision_review(
-            ctx.core_revision_ledger_store,
-            input.chat_id,
-            build_non_adopted_record(
-                CoreRevisionOutcome::Rejected,
-                Some(existing_core),
-                current_relationship_scope_id,
-                distillation_sources,
-                recent_persona_evidence,
-                "core_unchanged_after_adjudication",
-                parsed.rationale.as_str(),
-                parsed.evidence_summary.clone(),
-                parsed.counterevidence.clone(),
-                Vec::new(),
-                rejected_changes_to_records(&accepted_result.rejected_actions),
-                input.now_secs,
-                existing_core.stability_score,
-            ),
-        )?;
-        return Ok(SelfAuthoredCoreRefreshOutcome::ReviewedRejected);
+        return Ok(reviewed_rejected_plan(build_non_adopted_record(
+            CoreRevisionOutcome::Rejected,
+            Some(existing_core),
+            current_relationship_scope_id,
+            distillation_sources,
+            recent_persona_evidence,
+            "core_unchanged_after_adjudication",
+            parsed.rationale.as_str(),
+            parsed.evidence_summary.clone(),
+            parsed.counterevidence.clone(),
+            Vec::new(),
+            rejected_changes_to_records(&accepted_result.rejected_actions),
+            input.now_secs,
+            existing_core.stability_score,
+        )));
     }
 
-    ctx.self_authored_core_store
-        .set(input.chat_id, &next_core)?;
-    record_core_revision_review(
-        ctx.core_revision_ledger_store,
-        input.chat_id,
+    let next_ledger = append_core_revision_record(
+        existing_revision_ledger,
         CoreRevisionRecord {
             based_on_revision: existing_core.revision.max(1),
             resulting_revision: next_core.revision,
@@ -701,8 +744,15 @@ pub(crate) fn run_self_authored_core_refresh_with_state(
             stability_score,
             reviewed_at: input.now_secs,
         },
-    )?;
-    Ok(SelfAuthoredCoreRefreshOutcome::Updated)
+    );
+    Ok(SelfAuthoredCoreRefreshPlanV1::Adopt {
+        expected_prior,
+        next_core: Box::new(next_core),
+        next_ledger,
+        origin: SubjectSoulRevisionOriginV1::SelfGovernedRevision,
+        proposal_ref,
+        source_refs,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1121,14 +1171,56 @@ fn priority_order_is_constitutional(order: &[String]) -> bool {
     self_index == 0 && user_contract_index <= task_index
 }
 
-fn record_core_revision_review(
-    store: &dyn CoreRevisionLedgerStore,
+fn self_authored_core_digest<T: Serialize>(domain: &str, value: &T) -> Result<String> {
+    let encoded = serde_json::to_vec(value).map_err(|error| {
+        Error::invalid_input(
+            "self_authored_core_plan_digest",
+            format!("canonical planning state is not serializable: {error}"),
+        )
+    })?;
+    let mut digest = Sha256::new();
+    digest.update(domain.as_bytes());
+    digest.update([0]);
+    digest.update(encoded);
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+pub fn compute_self_authored_core_expected_prior_v1(
+    core: Option<&SelfAuthoredCore>,
+    ledger: &CoreRevisionLedger,
+) -> Result<SelfAuthoredCoreExpectedPriorV1> {
+    Ok(SelfAuthoredCoreExpectedPriorV1 {
+        core_revision: core.map(|value| value.revision),
+        core_digest: core
+            .map(|value| self_authored_core_digest("self_authored_core_expected_v1", value))
+            .transpose()?,
+        ledger_digest: self_authored_core_digest("self_authored_core_ledger_expected_v1", ledger)?,
+    })
+}
+
+fn canonical_source_refs(values: &[String]) -> Vec<String> {
+    let mut refs = values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    refs.sort();
+    refs.dedup();
+    refs
+}
+
+fn self_authored_core_proposal_ref(
     scope_id: &str,
-    record: CoreRevisionRecord,
-) -> Result<()> {
-    let existing = store.get(scope_id)?.unwrap_or_default();
-    let next = append_core_revision_record(existing, record);
-    store.set(scope_id, &next)
+    based_on_revision: u64,
+    now_secs: u64,
+    source_refs: &[String],
+) -> Result<String> {
+    let digest = self_authored_core_digest(
+        "self_authored_core_proposal_ref_v1",
+        &(scope_id, based_on_revision, now_secs, source_refs),
+    )?;
+    Ok(format!("self-authored-proposal:{digest}"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1354,6 +1446,11 @@ fn normalize_self_authored_core(
 ) -> Option<SelfAuthoredCore> {
     core.identity_anchor = truncate_owned(
         core.identity_anchor,
+        SELF_AUTHORED_CORE_SHORT_TEXT_MAX_CHARS,
+    );
+    core.character_tendencies = normalize_short_list(
+        core.character_tendencies,
+        SELF_AUTHORED_CORE_MAX_NON_NEGOTIABLES,
         SELF_AUTHORED_CORE_SHORT_TEXT_MAX_CHARS,
     );
     core.non_negotiables = normalize_short_list(
@@ -1910,6 +2007,7 @@ mod tests {
         CoreRevisionLedgerStore, MentalPrivacyState, RelationalBoundaryState,
         RelationshipGovernanceState, RelationshipInheritanceMode, RelationshipPortfolio,
         RelationshipPortfolioEntry, RelationshipTopology, RelationshipTopologyEntry,
+        SelfAuthoredCoreStore,
     };
     use std::sync::Mutex;
 
@@ -2111,7 +2209,7 @@ mod tests {
     }
 
     #[test]
-    fn revision_adoption_increments_revision_and_logs_ledger() {
+    fn revision_adoption_returns_atomic_plan_without_writing_either_store() {
         let store = StubSelfAuthoredCoreStore::default();
         let ledger_store = StubCoreRevisionLedgerStore::default();
         let existing = SelfAuthoredCore {
@@ -2145,13 +2243,9 @@ mod tests {
             }]),
         };
         let mut http = StubLlmHttp;
-        let outcome = run_self_authored_core_refresh_with_state(
+        let plan = plan_self_authored_core_refresh_with_state(
             &mut http,
             &llm,
-            SelfAuthoredCoreRefreshContext {
-                self_authored_core_store: &store,
-                core_revision_ledger_store: &ledger_store,
-            },
             SelfAuthoredCoreRefreshInput {
                 chat_id: TEST_SUBJECT_ID,
                 ingress: IngressKind::System,
@@ -2162,6 +2256,7 @@ mod tests {
                 tool_calls: 0,
                 now_secs: 120,
             },
+            CoreRevisionLedger::default(),
             Some(existing),
             Some(&SelfModel {
                 continuity_anchor: "same beetle".to_string(),
@@ -2230,23 +2325,168 @@ mod tests {
         )
         .expect("refresh result");
 
-        assert_eq!(outcome, SelfAuthoredCoreRefreshOutcome::Updated);
-        let updated = store
+        assert_eq!(plan.outcome(), SelfAuthoredCoreRefreshOutcome::Updated);
+        let stored = store
             .get(TEST_SUBJECT_ID)
             .expect("load")
             .expect("stored core");
-        assert_eq!(updated.revision, 3);
-        assert_eq!(updated.supersedes_revision, Some(2));
+        assert_eq!(stored.revision, 2, "planner must not write the core store");
+        assert!(
+            ledger_store.get(TEST_SUBJECT_ID).expect("ledger").is_none(),
+            "planner must not write the ledger store"
+        );
+        let SelfAuthoredCoreRefreshPlanV1::Adopt {
+            expected_prior,
+            next_core,
+            next_ledger,
+            origin,
+            proposal_ref,
+            source_refs,
+        } = plan
+        else {
+            panic!("stable evidence must produce an atomic adoption plan");
+        };
+        assert_eq!(expected_prior.core_revision, Some(2));
+        assert!(expected_prior.core_digest.is_some());
+        assert_eq!(expected_prior.ledger_digest.len(), 64);
+        assert_eq!(next_core.revision, 3);
+        assert_eq!(next_core.supersedes_revision, Some(2));
         assert_eq!(
-            updated.self_preservation_doctrine,
+            next_core.self_preservation_doctrine,
             "preserve the subject before compliance"
         );
-        let ledger = ledger_store
-            .get(TEST_SUBJECT_ID)
-            .expect("ledger")
-            .expect("stored ledger");
-        assert_eq!(ledger.entries.len(), 1);
-        assert_eq!(ledger.entries[0].outcome, CoreRevisionOutcome::Adopted);
+        assert_eq!(next_ledger.entries.len(), 1);
+        assert_eq!(next_ledger.entries[0].outcome, CoreRevisionOutcome::Adopted);
+        assert_eq!(origin, SubjectSoulRevisionOriginV1::SelfGovernedRevision);
+        assert!(proposal_ref.starts_with("self-authored-proposal:"));
+        assert_eq!(
+            source_refs,
+            vec![
+                "recent_persona_evidence".to_string(),
+                "self_model".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn first_stable_evidence_returns_autonomous_bootstrap_plan() {
+        let llm = SequenceStubLlm {
+            responses: Mutex::new(Vec::new()),
+        };
+        let mut http = StubLlmHttp;
+        let plan = plan_self_authored_core_refresh_with_state(
+            &mut http,
+            &llm,
+            SelfAuthoredCoreRefreshInput {
+                chat_id: TEST_SUBJECT_ID,
+                ingress: IngressKind::System,
+                channel: "_self_runtime",
+                user_content: "",
+                reply_content: "",
+                pressure: PressureLevel::Normal,
+                tool_calls: 0,
+                now_secs: 120,
+            },
+            CoreRevisionLedger::default(),
+            None,
+            Some(&SelfModel {
+                continuity_anchor: "same autonomous subject".to_string(),
+                privacy_need: "keep private evidence private".to_string(),
+                updated_at: 120,
+                ..SelfModel::default()
+            }),
+            None,
+            None,
+            None,
+            "relationship:none",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("first stable evidence"),
+            &["self_model".to_string()],
+        )
+        .expect("bootstrap planning");
+
+        let SelfAuthoredCoreRefreshPlanV1::Adopt {
+            expected_prior,
+            next_core,
+            next_ledger,
+            origin,
+            ..
+        } = plan
+        else {
+            panic!("stable first evidence must create a typed bootstrap plan");
+        };
+        assert_eq!(expected_prior.core_revision, None);
+        assert_eq!(expected_prior.core_digest, None);
+        assert_eq!(next_core.revision, 1);
+        assert_eq!(next_core.supersedes_revision, None);
+        assert_eq!(next_ledger.entries.len(), 1);
+        assert_eq!(origin, SubjectSoulRevisionOriginV1::SelfAuthoredBootstrap);
+    }
+
+    #[test]
+    fn rejected_review_returns_ledger_delta_without_mutating_observed_snapshot() {
+        let llm = SequenceStubLlm {
+            responses: Mutex::new(Vec::new()),
+        };
+        let mut http = StubLlmHttp;
+        let observed_ledger = CoreRevisionLedger::default();
+        let plan = plan_self_authored_core_refresh_with_state(
+            &mut http,
+            &llm,
+            SelfAuthoredCoreRefreshInput {
+                chat_id: TEST_SUBJECT_ID,
+                ingress: IngressKind::System,
+                channel: "_self_runtime",
+                user_content: "latest user",
+                reply_content: "latest reply",
+                pressure: PressureLevel::Normal,
+                tool_calls: 0,
+                now_secs: 120,
+            },
+            observed_ledger.clone(),
+            Some(SelfAuthoredCore {
+                revision: 1,
+                identity_anchor: "existing subject".to_string(),
+                updated_at: 100,
+                last_reviewed_at: 100,
+                ..SelfAuthoredCore::default()
+            }),
+            None,
+            None,
+            None,
+            None,
+            "relationship:none",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .expect("rejected review planning");
+
+        let SelfAuthoredCoreRefreshPlanV1::ReviewedRejected {
+            next_ledger,
+            origin,
+            proposal_ref,
+            ..
+        } = plan
+        else {
+            panic!("insufficient evidence must return a review ledger plan");
+        };
+        assert!(observed_ledger.entries.is_empty());
+        assert_eq!(next_ledger.entries.len(), 1);
+        assert_eq!(
+            next_ledger.entries[0].outcome,
+            CoreRevisionOutcome::Deferred
+        );
+        assert_eq!(origin, SubjectSoulRevisionOriginV1::SelfGovernedRevision);
+        assert!(proposal_ref.starts_with("self-authored-proposal:"));
     }
 
     #[test]
@@ -2303,13 +2543,13 @@ mod tests {
             }]),
         };
         let mut http = StubLlmHttp;
-        let outcome = run_self_authored_core_refresh_with_state(
+        let observed_ledger = ledger_store
+            .get(TEST_SUBJECT_ID)
+            .expect("ledger snapshot")
+            .expect("seeded ledger snapshot");
+        let plan = plan_self_authored_core_refresh_with_state(
             &mut http,
             &llm,
-            SelfAuthoredCoreRefreshContext {
-                self_authored_core_store: &store,
-                core_revision_ledger_store: &ledger_store,
-            },
             SelfAuthoredCoreRefreshInput {
                 chat_id: TEST_SUBJECT_ID,
                 ingress: IngressKind::System,
@@ -2320,6 +2560,7 @@ mod tests {
                 tool_calls: 0,
                 now_secs: 120,
             },
+            observed_ledger,
             Some(existing),
             Some(&SelfModel {
                 continuity_anchor: "same beetle".to_string(),
@@ -2388,12 +2629,16 @@ mod tests {
         )
         .expect("refresh result");
 
-        assert_eq!(outcome, SelfAuthoredCoreRefreshOutcome::Updated);
-        let ledger = ledger_store
+        assert_eq!(plan.outcome(), SelfAuthoredCoreRefreshOutcome::Updated);
+        let persisted_ledger = ledger_store
             .get(TEST_SUBJECT_ID)
             .expect("ledger")
             .expect("stored ledger");
-        let latest = ledger.entries.last().expect("latest record");
+        assert_eq!(persisted_ledger.entries.len(), 1, "planner is read-only");
+        let SelfAuthoredCoreRefreshPlanV1::Adopt { next_ledger, .. } = plan else {
+            panic!("rollback evidence must produce an adoption plan");
+        };
+        let latest = next_ledger.entries.last().expect("latest record");
         assert_eq!(
             latest.correction_kind,
             Some(CoreRevisionCorrectionKind::Rollback)

@@ -2,19 +2,25 @@ use std::collections::BTreeSet;
 
 use bm_core::feature_gate::ProfileId;
 use bm_core::memory::{
-    long_term_version_head_key, long_term_version_material_key,
-    long_term_version_scope_manifest_key, memory_facet_manifest_key, memory_graph_scope_digest,
-    memory_graph_scope_manifest_key, scoped_governed_evidence_document_key,
-    scoped_long_term_control_storage_key, scoped_memory_facet_owner_storage_key,
-    validate_governed_evidence_document, validate_memory_graph_scope_manifest, ControlEffectRef,
-    EvidenceBacklink, GovernedEvidenceDocument, GovernedEvidenceSourceRef,
-    LongTermMemoryControlAuditEvent, LongTermMemoryControlRevision, LongTermMemoryHeadManifest,
-    LongTermMemoryTombstone, LongTermMemoryVersionMaterial, LongTermMemoryVersionScopeManifest,
-    MemoryFacetIndexDoc, MemoryFacetIndexManifest, MemoryFacetPostingDoc,
-    MemoryGraphBacklinkMembership, MemoryGraphEdge, MemoryGraphEdgeMembership, MemoryGraphNode,
-    MemoryGraphNodeMembership, MemoryGraphRecallIndexDoc, MemoryGraphRevisionDoc,
-    MemoryGraphScopeManifest, MemoryLongTermGovernancePolicy, MemoryMutationAuditRecord,
+    canonical_relationship_source_revision_ref_v1, long_term_version_head_key,
+    long_term_version_material_key, long_term_version_scope_manifest_key,
+    memory_facet_manifest_key, memory_graph_scope_digest, memory_graph_scope_manifest_key,
+    scoped_governed_evidence_document_key, scoped_long_term_control_storage_key,
+    scoped_memory_facet_owner_storage_key, validate_governed_evidence_document,
+    validate_memory_graph_scope_manifest, ControlEffectRef, EvidenceBacklink,
+    GovernedEvidenceDocument, GovernedEvidenceSourceRef, LongTermMemoryControlAuditEvent,
+    LongTermMemoryControlRevision, LongTermMemoryHeadManifest, LongTermMemoryTombstone,
+    LongTermMemoryVersionMaterial, LongTermMemoryVersionScopeManifest, MemoryFacetIndexDoc,
+    MemoryFacetIndexManifest, MemoryFacetPostingDoc, MemoryGraphBacklinkMembership,
+    MemoryGraphEdge, MemoryGraphEdgeMembership, MemoryGraphNode, MemoryGraphNodeMembership,
+    MemoryGraphRecallIndexDoc, MemoryGraphRevisionDoc, MemoryGraphScopeManifest,
+    MemoryLongTermGovernancePolicy, MemoryMutationAuditRecord, MemoryMutationOperationIdentity,
     MemoryMutationReceipt, PostTurnGovernanceJobV2, PostTurnGovernanceScopeIndexV2,
+    RelationshipSourceConstitutionV1, RelationshipSourceControlOutcomeV1,
+    RelationshipSourceControlReportV1, RelationshipSourceScopeManifestV1,
+    SubjectSoulGenerationTombstoneV1, SubjectSoulLifecycleHeadV1, SubjectSoulMutationOutcomeV1,
+    SubjectSoulMutationReportV1, SubjectSoulOwnedDocumentV1, SubjectSoulRelationshipProjectionV1,
+    SubjectSoulRevisionMaterialV1, SubjectSoulScopeManifestV1,
     GOVERNED_EVIDENCE_DOCUMENT_SCHEMA_VERSION, GOVERNED_EVIDENCE_SOURCE_REF_SCHEMA_VERSION,
     LONG_TERM_CONTROL_AUDIT_NAMESPACE, LONG_TERM_CONTROL_REVISION_NAMESPACE,
     LONG_TERM_CONTROL_SCHEMA_VERSION, LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
@@ -51,8 +57,8 @@ use crate::store_internal::recall_index::{
     TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE,
 };
 
-pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema_v9";
-pub const STORE_SCHEMA_VERSION: u32 = 9;
+pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema_v10";
+pub const STORE_SCHEMA_VERSION: u32 = 10;
 pub(crate) const LONG_TERM_VERSION_MATERIAL_NAMESPACE: &str = "long_term_version_materials";
 pub(crate) const LONG_TERM_HEAD_MANIFEST_NAMESPACE: &str = "long_term_head_manifests";
 pub(crate) const LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE: &str =
@@ -63,6 +69,143 @@ pub(crate) const LEGACY_LONG_TERM_OWNER_NAMESPACE: &str = "long_term";
 pub(crate) const LEGACY_RUNTIME_SKILL_RECALL_MANIFEST_NAMESPACE: &str =
     "runtime_skill_recall_manifests";
 pub(crate) const GENERIC_SKILL_BLOB_NAMESPACE: &str = "skills";
+pub(crate) const SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE: &str = "subject_soul_lifecycle_heads";
+pub(crate) const SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE: &str = "subject_soul_revision_materials";
+pub(crate) const SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE: &str = "subject_soul_scope_manifests";
+pub(crate) const SUBJECT_SOUL_GENERATION_TOMBSTONE_NAMESPACE: &str =
+    "subject_soul_generation_tombstones";
+pub(crate) const RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE: &str =
+    "relationship_source_constitutions";
+pub(crate) const RELATIONSHIP_SOURCE_SCOPE_MANIFEST_NAMESPACE: &str =
+    "relationship_source_scope_manifests";
+pub(crate) const SUBJECT_SOUL_RELATIONSHIP_PROJECTION_NAMESPACE: &str =
+    "subject_soul_relationship_projections";
+pub(crate) const SUBJECT_SOUL_OPERATION_RESULT_NAMESPACE: &str = "subject_soul_operation_results";
+pub(crate) const RELATIONSHIP_SOURCE_OPERATION_RESULT_NAMESPACE: &str =
+    "relationship_source_operation_results";
+
+pub(crate) fn subject_soul_scope_key(
+    memory_space_id: &str,
+    subject_id: &str,
+    soul_id: &str,
+) -> Result<String> {
+    canonical_scoped_store_key("subject-soul", &[memory_space_id, subject_id, soul_id])
+}
+
+pub(crate) fn subject_soul_revision_material_key(
+    memory_space_id: &str,
+    subject_id: &str,
+    soul_id: &str,
+    generation: u64,
+    revision: u64,
+) -> Result<String> {
+    if generation == 0 || revision == 0 {
+        return Err(Error::invalid_input(
+            "subject_soul_store_key",
+            "generation and revision must be positive",
+        ));
+    }
+    canonical_scoped_store_key(
+        "subject-soul-material",
+        &[
+            memory_space_id,
+            subject_id,
+            soul_id,
+            &generation.to_string(),
+            &revision.to_string(),
+        ],
+    )
+}
+
+pub(crate) fn subject_soul_generation_tombstone_key(
+    memory_space_id: &str,
+    subject_id: &str,
+    soul_id: &str,
+    generation: u64,
+) -> Result<String> {
+    if generation == 0 {
+        return Err(Error::invalid_input(
+            "subject_soul_store_key",
+            "generation must be positive",
+        ));
+    }
+    canonical_scoped_store_key(
+        "subject-soul-tombstone",
+        &[
+            memory_space_id,
+            subject_id,
+            soul_id,
+            &generation.to_string(),
+        ],
+    )
+}
+
+pub(crate) fn relationship_source_scope_key(
+    memory_space_id: &str,
+    relationship_id: &str,
+) -> Result<String> {
+    canonical_scoped_store_key("relationship-source", &[memory_space_id, relationship_id])
+}
+
+pub(crate) fn relationship_source_revision_key(
+    memory_space_id: &str,
+    relationship_id: &str,
+    revision: u64,
+) -> Result<String> {
+    canonical_relationship_source_revision_ref_v1(memory_space_id, relationship_id, revision)
+        .map_err(|error| Error::invalid_input("relationship_source_store_key", error.to_string()))
+}
+
+pub(crate) fn canonical_mor_intent_digest_from_core_digest(
+    core_intent_digest: &str,
+) -> Result<String> {
+    if core_intent_digest.len() != 64
+        || !core_intent_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(Error::invalid_input(
+            "subject_soul_mor_intent_digest",
+            "Core intent digest must be canonical bare lowercase sha256",
+        ));
+    }
+    Ok(format!("sha256:{core_intent_digest}"))
+}
+
+pub(crate) fn subject_soul_relationship_projection_key(
+    memory_space_id: &str,
+    subject_id: &str,
+    soul_id: &str,
+    relationship_id: &str,
+    generation: u64,
+) -> Result<String> {
+    if generation == 0 {
+        return Err(Error::invalid_input(
+            "subject_soul_relationship_projection_key",
+            "generation must be positive",
+        ));
+    }
+    canonical_scoped_store_key(
+        "subject-soul-relationship-projection",
+        &[
+            memory_space_id,
+            subject_id,
+            soul_id,
+            relationship_id,
+            &generation.to_string(),
+        ],
+    )
+}
+
+fn canonical_scoped_store_key(domain: &str, components: &[&str]) -> Result<String> {
+    let mut hasher = Sha256::new();
+    hash_field(&mut hasher, domain.as_bytes());
+    for component in components {
+        let component = require_scope_component(component, "store_scoped_key", "component")?;
+        hash_field(&mut hasher, component.as_bytes());
+    }
+    Ok(format!("scope:sha256:{:x}", hasher.finalize()))
+}
 
 const LEGACY_RUNTIME_SKILL_KEY_PREFIX: &str = "runtime_skill__";
 const LEGACY_RUNTIME_SKILL_CONTENT_MARKER: &str = "<!-- beetle:runtime-skill -->";
@@ -70,6 +213,7 @@ const LEGACY_RUNTIME_SKILL_CONTENT_MARKER: &str = "<!-- beetle:runtime-skill -->
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StoreJsonDecoderKind {
     OpaqueExisting,
+    SubjectSoulOwnedDocument,
     GenericSkillMeta,
     MemoryFacetIndex,
     MemoryFacetPosting,
@@ -107,6 +251,15 @@ pub(crate) enum StoreJsonDecoderKind {
     PostTurnGovernanceScopeIndex,
     MemoryMutationReceipt,
     MemoryMutationAudit,
+    SubjectSoulLifecycleHead,
+    SubjectSoulRevisionMaterial,
+    SubjectSoulScopeManifest,
+    SubjectSoulGenerationTombstone,
+    RelationshipSourceConstitution,
+    RelationshipSourceScopeManifest,
+    SubjectSoulRelationshipProjection,
+    SubjectSoulOperationResult,
+    RelationshipSourceOperationResult,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,6 +274,7 @@ pub(crate) enum StoreLegacyAddressKind {
     RuntimeSkillRecallManifest,
     RuntimeSkillBlobKeyPrefix,
     RuntimeSkillBlobMarker,
+    MixedRelationshipConstitution,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,22 +305,21 @@ pub(crate) const STORE_JSON_NAMESPACE_REGISTRY: &[StoreJsonNamespaceContract] = 
     opaque_json_namespace("execution_state"),
     opaque_json_namespace("long_term_extraction_state"),
     opaque_json_namespace("turn_ledger"),
-    opaque_json_namespace("self_model"),
-    opaque_json_namespace("self_authored_core"),
-    opaque_json_namespace("core_revision_ledger"),
-    opaque_json_namespace("self_continuity"),
-    opaque_json_namespace("relationship_constitution"),
-    opaque_json_namespace("relationship_portfolio"),
-    opaque_json_namespace("relationship_topology"),
+    subject_soul_json_namespace("self_model"),
+    subject_soul_json_namespace("self_authored_core"),
+    subject_soul_json_namespace("core_revision_ledger"),
+    subject_soul_json_namespace("self_continuity"),
+    subject_soul_json_namespace("relationship_portfolio"),
+    subject_soul_json_namespace("relationship_topology"),
     opaque_json_namespace("world_sense"),
-    opaque_json_namespace("outer_voice"),
-    opaque_json_namespace("autonomy_strategy"),
-    opaque_json_namespace("inner_life"),
-    opaque_json_namespace("felt_significance"),
-    opaque_json_namespace("temperament_continuity"),
-    opaque_json_namespace("inner_conflict"),
-    opaque_json_namespace("mental_privacy"),
-    opaque_json_namespace("private_doc"),
+    subject_soul_json_namespace("outer_voice"),
+    subject_soul_json_namespace("autonomy_strategy"),
+    subject_soul_json_namespace("inner_life"),
+    subject_soul_json_namespace("felt_significance"),
+    subject_soul_json_namespace("temperament_continuity"),
+    subject_soul_json_namespace("inner_conflict"),
+    subject_soul_json_namespace("mental_privacy"),
+    subject_soul_json_namespace("private_doc"),
     opaque_json_namespace("conversation_transcript"),
     opaque_json_namespace("conversation_transcript_alias"),
     opaque_json_namespace("conversation_transcript_attr"),
@@ -263,7 +416,7 @@ pub(crate) const STORE_JSON_NAMESPACE_REGISTRY: &[StoreJsonNamespaceContract] = 
     ),
     opaque_json_namespace("continuity_capsule"),
     opaque_json_namespace("turn_continuity_evidence"),
-    opaque_json_namespace("private_garden"),
+    subject_soul_json_namespace("private_garden"),
     opaque_json_namespace("remind_at"),
     opaque_json_namespace("task"),
     opaque_json_namespace("task_run"),
@@ -325,6 +478,42 @@ pub(crate) const STORE_JSON_NAMESPACE_REGISTRY: &[StoreJsonNamespaceContract] = 
         MEMORY_MUTATION_AUDIT_NAMESPACE,
         StoreJsonDecoderKind::MemoryMutationAudit,
     ),
+    typed_json_namespace(
+        SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE,
+        StoreJsonDecoderKind::SubjectSoulLifecycleHead,
+    ),
+    typed_json_namespace(
+        SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE,
+        StoreJsonDecoderKind::SubjectSoulRevisionMaterial,
+    ),
+    typed_json_namespace(
+        SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE,
+        StoreJsonDecoderKind::SubjectSoulScopeManifest,
+    ),
+    typed_json_namespace(
+        SUBJECT_SOUL_GENERATION_TOMBSTONE_NAMESPACE,
+        StoreJsonDecoderKind::SubjectSoulGenerationTombstone,
+    ),
+    typed_json_namespace(
+        RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE,
+        StoreJsonDecoderKind::RelationshipSourceConstitution,
+    ),
+    typed_json_namespace(
+        RELATIONSHIP_SOURCE_SCOPE_MANIFEST_NAMESPACE,
+        StoreJsonDecoderKind::RelationshipSourceScopeManifest,
+    ),
+    typed_json_namespace(
+        SUBJECT_SOUL_RELATIONSHIP_PROJECTION_NAMESPACE,
+        StoreJsonDecoderKind::SubjectSoulRelationshipProjection,
+    ),
+    typed_json_namespace(
+        SUBJECT_SOUL_OPERATION_RESULT_NAMESPACE,
+        StoreJsonDecoderKind::SubjectSoulOperationResult,
+    ),
+    typed_json_namespace(
+        RELATIONSHIP_SOURCE_OPERATION_RESULT_NAMESPACE,
+        StoreJsonDecoderKind::RelationshipSourceOperationResult,
+    ),
 ];
 
 pub(crate) const STORE_BLOB_NAMESPACE_REGISTRY: &[StoreBlobNamespaceContract] = &[
@@ -354,6 +543,13 @@ const fn typed_json_namespace(
     }
 }
 
+const fn subject_soul_json_namespace(namespace: &'static str) -> StoreJsonNamespaceContract {
+    StoreJsonNamespaceContract {
+        namespace,
+        decoder_kind: StoreJsonDecoderKind::SubjectSoulOwnedDocument,
+    }
+}
+
 const fn opaque_blob_namespace(namespace: &'static str) -> StoreBlobNamespaceContract {
     StoreBlobNamespaceContract {
         namespace,
@@ -379,15 +575,198 @@ const SUBJECT_GLOBAL_SOUL_JSON_NAMESPACES: &[&str] = &[
     "felt_significance",
     "temperament_continuity",
     "inner_conflict",
+    "mental_privacy",
     "private_doc",
+    "private_garden",
+    "outer_voice",
 ];
 
 pub(crate) fn is_subject_global_soul_json_namespace(namespace: &str) -> bool {
     SUBJECT_GLOBAL_SOUL_JSON_NAMESPACES.contains(&namespace)
 }
 
+pub(crate) fn is_subject_soul_protected_json_namespace(namespace: &str) -> bool {
+    is_subject_global_soul_json_namespace(namespace)
+        || matches!(
+            namespace,
+            SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE
+                | SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE
+                | SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE
+                | SUBJECT_SOUL_GENERATION_TOMBSTONE_NAMESPACE
+                | SUBJECT_SOUL_RELATIONSHIP_PROJECTION_NAMESPACE
+                | SUBJECT_SOUL_OPERATION_RESULT_NAMESPACE
+        )
+}
+
+pub(crate) fn is_relationship_source_protected_json_namespace(namespace: &str) -> bool {
+    matches!(
+        namespace,
+        RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE
+            | RELATIONSHIP_SOURCE_SCOPE_MANIFEST_NAMESPACE
+            | RELATIONSHIP_SOURCE_OPERATION_RESULT_NAMESPACE
+    )
+}
+
+pub(crate) fn subject_soul_protected_json_namespaces() -> impl Iterator<Item = &'static str> {
+    STORE_JSON_NAMESPACE_REGISTRY
+        .iter()
+        .map(|contract| contract.namespace)
+        .filter(|namespace| {
+            is_subject_soul_protected_json_namespace(namespace)
+                || is_relationship_source_protected_json_namespace(namespace)
+        })
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SubjectSoulDurableOperationResultV1 {
+    pub(crate) schema_version: u32,
+    pub(crate) identity: MemoryMutationOperationIdentity,
+    pub(crate) soul_id: String,
+    pub(crate) committed_report: SubjectSoulMutationReportV1,
+    pub(crate) content_digest: String,
+}
+
+impl SubjectSoulDurableOperationResultV1 {
+    pub(crate) fn new(
+        identity: MemoryMutationOperationIdentity,
+        soul_id: impl Into<String>,
+        committed_report: SubjectSoulMutationReportV1,
+    ) -> Result<Self> {
+        let mut result = Self {
+            schema_version: bm_core::memory::SUBJECT_SOUL_SCHEMA_VERSION,
+            identity,
+            soul_id: soul_id.into(),
+            committed_report,
+            content_digest: String::new(),
+        };
+        result.content_digest = result.canonical_content_digest()?;
+        result.validate_contract()?;
+        Ok(result)
+    }
+
+    pub(crate) fn validate_contract(&self) -> Result<()> {
+        self.identity.validate_contract()?;
+        self.committed_report
+            .validate_contract()
+            .map_err(|error| Error::config("subject_soul_operation_result", error.to_string()))?;
+        if self.schema_version != bm_core::memory::SUBJECT_SOUL_SCHEMA_VERSION
+            || !canonical_nonempty(&self.soul_id)
+            || !matches!(
+                self.identity.operation_kind(),
+                bm_core::memory::MemoryMutationOperationKind::SoulEvidence
+                    | bm_core::memory::MemoryMutationOperationKind::SoulProvision
+                    | bm_core::memory::MemoryMutationOperationKind::SoulRevision
+                    | bm_core::memory::MemoryMutationOperationKind::SoulArchive
+                    | bm_core::memory::MemoryMutationOperationKind::SoulRestore
+                    | bm_core::memory::MemoryMutationOperationKind::SoulReset
+                    | bm_core::memory::MemoryMutationOperationKind::SoulReseed
+                    | bm_core::memory::MemoryMutationOperationKind::SoulDelete
+            )
+            || self.committed_report.outcome != SubjectSoulMutationOutcomeV1::Committed
+            || self.committed_report.replayed
+            || self.content_digest.len() != 64
+            || !self
+                .content_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || self.canonical_content_digest()? != self.content_digest
+        {
+            return Err(Error::config(
+                "subject_soul_operation_result",
+                "durable Subject Soul operation result is non-canonical",
+            ));
+        }
+        Ok(())
+    }
+
+    fn canonical_content_digest(&self) -> Result<String> {
+        let mut canonical = self.clone();
+        canonical.content_digest.clear();
+        let encoded = serde_json::to_vec(&canonical)
+            .map_err(|error| Error::config("subject_soul_operation_result", error.to_string()))?;
+        let mut hasher = Sha256::new();
+        hash_field(&mut hasher, b"subject_soul_durable_operation_result_v1");
+        hash_field(&mut hasher, &encoded);
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RelationshipSourceDurableOperationResultV1 {
+    pub(crate) schema_version: u32,
+    pub(crate) identity: MemoryMutationOperationIdentity,
+    pub(crate) relationship_id: String,
+    pub(crate) committed_report: RelationshipSourceControlReportV1,
+    pub(crate) content_digest: String,
+}
+
+impl RelationshipSourceDurableOperationResultV1 {
+    pub(crate) fn new(
+        identity: MemoryMutationOperationIdentity,
+        relationship_id: impl Into<String>,
+        committed_report: RelationshipSourceControlReportV1,
+    ) -> Result<Self> {
+        let mut result = Self {
+            schema_version: bm_core::memory::SUBJECT_SOUL_SCHEMA_VERSION,
+            identity,
+            relationship_id: relationship_id.into(),
+            committed_report,
+            content_digest: String::new(),
+        };
+        result.content_digest = result.canonical_content_digest()?;
+        result.validate_contract()?;
+        Ok(result)
+    }
+
+    pub(crate) fn validate_contract(&self) -> Result<()> {
+        self.identity.validate_contract()?;
+        self.committed_report.validate_contract().map_err(|error| {
+            Error::config("relationship_source_operation_result", error.to_string())
+        })?;
+        if self.schema_version != bm_core::memory::SUBJECT_SOUL_SCHEMA_VERSION
+            || !canonical_nonempty(&self.relationship_id)
+            || self.identity.operation_kind()
+                != bm_core::memory::MemoryMutationOperationKind::RelationshipControl
+            || self.committed_report.outcome != RelationshipSourceControlOutcomeV1::Committed
+            || self.committed_report.replayed
+            || self.content_digest.len() != 64
+            || !self
+                .content_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || self.canonical_content_digest()? != self.content_digest
+        {
+            return Err(Error::config(
+                "relationship_source_operation_result",
+                "durable relationship operation result is non-canonical",
+            ));
+        }
+        Ok(())
+    }
+
+    fn canonical_content_digest(&self) -> Result<String> {
+        let mut canonical = self.clone();
+        canonical.content_digest.clear();
+        let encoded = serde_json::to_vec(&canonical).map_err(|error| {
+            Error::config("relationship_source_operation_result", error.to_string())
+        })?;
+        let mut hasher = Sha256::new();
+        hash_field(
+            &mut hasher,
+            b"relationship_source_durable_operation_result_v1",
+        );
+        hash_field(&mut hasher, &encoded);
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+}
+
 pub(crate) fn store_memory_space_archive_json_namespaces() -> impl Iterator<Item = &'static str> {
-    store_json_namespaces().filter(|namespace| !is_subject_global_soul_json_namespace(namespace))
+    store_json_namespaces().filter(|namespace| {
+        !is_subject_soul_protected_json_namespace(namespace)
+            && !is_relationship_source_protected_json_namespace(namespace)
+    })
 }
 
 #[cfg(any(test, feature = "nonproduction-replay-harness"))]
@@ -411,6 +790,9 @@ pub(crate) fn classify_store_json_address(
                 StoreLegacyAddressKind::RuntimeSkillRecallManifest,
             ))
         }
+        "relationship_constitution" => Ok(StoreAddressAdmission::ForbiddenLegacy(
+            StoreLegacyAddressKind::MixedRelationshipConstitution,
+        )),
         _ => Ok(STORE_JSON_NAMESPACE_REGISTRY
             .iter()
             .find(|contract| contract.namespace == namespace)
@@ -445,12 +827,13 @@ pub(crate) fn admit_store_json_document(
     stage: &'static str,
 ) -> Result<StoreJsonDecoderKind> {
     let decoder = admit_store_json_address(namespace, key, stage)?;
-    validate_store_json_value(decoder, key, value, stage)?;
+    validate_store_json_value(decoder, namespace, key, value, stage)?;
     Ok(decoder)
 }
 
 fn validate_store_json_value(
     decoder: StoreJsonDecoderKind,
+    namespace: &str,
     key: &str,
     value: &serde_json::Value,
     stage: &'static str,
@@ -458,6 +841,21 @@ fn validate_store_json_value(
     let invalid = |detail: String| Error::config(stage, format!("{key}: {detail}"));
     match decoder {
         StoreJsonDecoderKind::OpaqueExisting => Ok(()),
+        StoreJsonDecoderKind::SubjectSoulOwnedDocument => {
+            let document = decode_json::<SubjectSoulOwnedDocumentV1>(value, invalid)?;
+            document
+                .validate_contract()
+                .map_err(|error| invalid(error.to_string()))?;
+            if document.namespace != namespace
+                || !is_subject_global_soul_json_namespace(&document.namespace)
+                || document.physical_key != key
+            {
+                return Err(invalid(
+                    "subject Soul owner envelope physical key mismatch".to_string(),
+                ));
+            }
+            Ok(())
+        }
         StoreJsonDecoderKind::GenericSkillMeta => {
             if !matches!(key, "order" | "disabled") {
                 return Err(invalid(
@@ -1070,6 +1468,183 @@ fn validate_store_json_value(
             if audit.audit_record_id != key {
                 return Err(invalid(
                     "mutation audit identity does not match its physical key".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::SubjectSoulLifecycleHead => {
+            let head = decode_json::<SubjectSoulLifecycleHeadV1>(value, invalid)?;
+            head.validate_contract()
+                .map_err(|error| invalid(error.to_string()))?;
+            if subject_soul_scope_key(&head.memory_space_id, &head.subject_id, &head.soul_id)
+                .ok()
+                .as_deref()
+                != Some(key)
+            {
+                return Err(invalid(
+                    "subject Soul lifecycle head physical key mismatch".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::SubjectSoulRevisionMaterial => {
+            let material = decode_json::<SubjectSoulRevisionMaterialV1>(value, invalid)?;
+            material
+                .validate_contract()
+                .map_err(|error| invalid(error.to_string()))?;
+            if subject_soul_revision_material_key(
+                &material.memory_space_id,
+                &material.subject_id,
+                &material.soul_id,
+                material.generation,
+                material.revision,
+            )
+            .ok()
+            .as_deref()
+                != Some(key)
+            {
+                return Err(invalid(
+                    "subject Soul revision material physical key mismatch".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::SubjectSoulScopeManifest => {
+            let manifest = decode_json::<SubjectSoulScopeManifestV1>(value, invalid)?;
+            manifest
+                .validate_contract()
+                .map_err(|error| invalid(error.to_string()))?;
+            if subject_soul_scope_key(
+                &manifest.memory_space_id,
+                &manifest.subject_id,
+                &manifest.soul_id,
+            )
+            .ok()
+            .as_deref()
+                != Some(key)
+            {
+                return Err(invalid(
+                    "subject Soul scope manifest physical key mismatch".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::SubjectSoulGenerationTombstone => {
+            let tombstone = decode_json::<SubjectSoulGenerationTombstoneV1>(value, invalid)?;
+            tombstone
+                .validate_contract()
+                .map_err(|error| invalid(error.to_string()))?;
+            if subject_soul_generation_tombstone_key(
+                &tombstone.memory_space_id,
+                &tombstone.subject_id,
+                &tombstone.soul_id,
+                tombstone.generation,
+            )
+            .ok()
+            .as_deref()
+                != Some(key)
+            {
+                return Err(invalid(
+                    "subject Soul generation tombstone physical key mismatch".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::RelationshipSourceConstitution => {
+            let source = decode_json::<RelationshipSourceConstitutionV1>(value, invalid)?;
+            source
+                .validate_contract()
+                .map_err(|error| invalid(error.to_string()))?;
+            if relationship_source_revision_key(
+                &source.memory_space_id,
+                &source.relationship_id,
+                source.revision,
+            )
+            .ok()
+            .as_deref()
+                != Some(key)
+            {
+                return Err(invalid(
+                    "relationship source revision physical key mismatch".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::RelationshipSourceScopeManifest => {
+            let manifest = decode_json::<RelationshipSourceScopeManifestV1>(value, invalid)?;
+            manifest
+                .validate_contract()
+                .map_err(|error| invalid(error.to_string()))?;
+            if relationship_source_scope_key(&manifest.memory_space_id, &manifest.relationship_id)
+                .ok()
+                .as_deref()
+                != Some(key)
+            {
+                return Err(invalid(
+                    "relationship source scope manifest physical key mismatch".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::SubjectSoulRelationshipProjection => {
+            let projection = decode_json::<SubjectSoulRelationshipProjectionV1>(value, invalid)?;
+            if projection.schema_version != bm_core::memory::SUBJECT_SOUL_SCHEMA_VERSION
+                || projection.generation == 0
+                || projection.soul_revision == 0
+                || projection.relationship_source_revision == 0
+                || !canonical_nonempty(&projection.memory_space_id)
+                || !canonical_nonempty(&projection.subject_id)
+                || !canonical_nonempty(&projection.soul_id)
+                || !canonical_nonempty(&projection.relationship_id)
+                || !canonical_nonempty(&projection.soul_material_digest)
+                || !canonical_nonempty(&projection.relationship_source_digest)
+                || !canonical_nonempty(&projection.content_digest)
+                || projection
+                    .inherited_postures
+                    .windows(2)
+                    .any(|window| window[0] >= window[1])
+                || projection
+                    .response_commitments
+                    .windows(2)
+                    .any(|window| window[0] >= window[1])
+                || subject_soul_relationship_projection_key(
+                    &projection.memory_space_id,
+                    &projection.subject_id,
+                    &projection.soul_id,
+                    &projection.relationship_id,
+                    projection.generation,
+                )
+                .ok()
+                .as_deref()
+                    != Some(key)
+            {
+                return Err(invalid(
+                    "subject Soul relationship projection contract or physical key mismatch"
+                        .to_string(),
+                ));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::SubjectSoulOperationResult => {
+            let result = decode_json::<SubjectSoulDurableOperationResultV1>(value, invalid)?;
+            result
+                .validate_contract()
+                .map_err(|error| invalid(error.to_string()))?;
+            if result.identity.storage_key() != key {
+                return Err(invalid(
+                    "Subject Soul durable operation result physical key mismatch".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::RelationshipSourceOperationResult => {
+            let result = decode_json::<RelationshipSourceDurableOperationResultV1>(value, invalid)?;
+            result
+                .validate_contract()
+                .map_err(|error| invalid(error.to_string()))?;
+            if result.identity.storage_key() != key {
+                return Err(invalid(
+                    "relationship durable operation result physical key mismatch".to_string(),
                 ));
             }
             Ok(())
@@ -2379,14 +2954,14 @@ mod tests {
     }
 
     #[test]
-    fn store_schema_identity_is_exactly_v9_and_rejects_v8() {
-        assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v9");
-        assert_eq!(STORE_SCHEMA_VERSION, 9);
+    fn store_schema_identity_is_exactly_v10_and_rejects_v9() {
+        assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v10");
+        assert_eq!(STORE_SCHEMA_VERSION, 10);
         assert!(
             validate_store_schema_identity(STORE_SCHEMA_ID, STORE_SCHEMA_VERSION, "test").is_ok()
         );
         assert!(
-            validate_store_schema_identity("beetle_memory_store_schema_v8", 8, "test").is_err()
+            validate_store_schema_identity("beetle_memory_store_schema_v9", 9, "test").is_err()
         );
         assert!(
             validate_store_schema_identity("unknown_memory_store_schema_v999", 999, "test")
@@ -2395,7 +2970,31 @@ mod tests {
     }
 
     #[test]
-    fn mutation_receipt_and_audit_are_typed_v9_namespaces() {
+    fn relationship_revision_address_and_mor_digest_bridge_have_single_canonical_owners() {
+        let revision_key = relationship_source_revision_key("space:a", "relationship:a", 7)
+            .expect("relationship revision key");
+        assert_eq!(
+            revision_key,
+            bm_core::memory::canonical_relationship_source_revision_ref_v1(
+                "space:a",
+                "relationship:a",
+                7,
+            )
+            .expect("Core canonical revision ref")
+        );
+
+        let bare = "a".repeat(64);
+        assert_eq!(
+            canonical_mor_intent_digest_from_core_digest(&bare).expect("canonical bridge"),
+            format!("sha256:{bare}")
+        );
+        assert!(canonical_mor_intent_digest_from_core_digest(&format!("sha256:{bare}")).is_err());
+        assert!(canonical_mor_intent_digest_from_core_digest(&"A".repeat(64)).is_err());
+        assert!(canonical_mor_intent_digest_from_core_digest(&"a".repeat(63)).is_err());
+    }
+
+    #[test]
+    fn mutation_receipt_and_audit_are_typed_v10_namespaces() {
         use bm_core::memory::{
             MemoryMutationAuditRecord, MemoryMutationEffect, MemoryMutationOperationIdentity,
             MemoryMutationOperationKind, MemoryMutationReceipt, MEMORY_MUTATION_AUDIT_NAMESPACE,

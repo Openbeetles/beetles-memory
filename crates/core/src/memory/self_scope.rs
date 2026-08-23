@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::{Error, Result};
+
 pub type MemorySpaceId = String;
 pub type SubjectId = String;
 pub type RelationshipId = String;
@@ -39,6 +41,34 @@ pub fn relationship_scope_id(mounted_subject_id: &str, channel: &str, chat_id: &
     let channel = encode_scope_component(channel);
     let chat = encode_scope_component(chat_id);
     format!("rel:{subject}:{channel}:{chat}")
+}
+
+/// Resolves the one relationship owner used by relationship-local Core surfaces.
+///
+/// A governed multi-subject host passes the exact typed relationship id. The deterministic
+/// channel/chat form remains only the explicit single-agent convenience path; callers never
+/// probe both identities.
+pub fn resolve_relationship_id(
+    mounted_subject_id: &str,
+    exact_relationship_id: Option<&str>,
+    channel: &str,
+    chat_id: &str,
+) -> Result<RelationshipId> {
+    match exact_relationship_id {
+        Some(relationship_id)
+            if !relationship_id.is_empty()
+                && relationship_id.trim() == relationship_id
+                && relationship_id.len() <= 256
+                && !relationship_id.chars().any(char::is_control) =>
+        {
+            Ok(relationship_id.to_string())
+        }
+        Some(_) => Err(Error::config(
+            "relationship_id",
+            "exact relationship_id must be non-empty canonical text",
+        )),
+        None => Ok(relationship_scope_id(mounted_subject_id, channel, chat_id)),
+    }
 }
 
 pub fn relationship_scope(
@@ -84,7 +114,7 @@ fn push_hex_escape(out: &mut String, byte: u8) {
 
 #[cfg(test)]
 mod tests {
-    use super::relationship_scope_id;
+    use super::{relationship_scope_id, resolve_relationship_id};
 
     #[test]
     fn relationship_scope_id_binds_subject_channel_and_chat() {
@@ -95,6 +125,31 @@ mod tests {
         assert_ne!(
             relationship_scope_id("agent:alpha", "chat/channel", "user:1"),
             relationship_scope_id("agent:beta", "chat/channel", "user:1")
+        );
+    }
+
+    #[test]
+    fn exact_relationship_id_never_aliases_or_falls_back() {
+        assert_eq!(
+            resolve_relationship_id(
+                "agent:alpha",
+                Some("relationship:custom"),
+                "chat/channel",
+                "user:1",
+            )
+            .unwrap(),
+            "relationship:custom"
+        );
+        assert!(resolve_relationship_id(
+            "agent:alpha",
+            Some(" relationship:custom "),
+            "chat/channel",
+            "user:1",
+        )
+        .is_err());
+        assert_eq!(
+            resolve_relationship_id("agent:alpha", None, "chat/channel", "user:1").unwrap(),
+            relationship_scope_id("agent:alpha", "chat/channel", "user:1")
         );
     }
 }

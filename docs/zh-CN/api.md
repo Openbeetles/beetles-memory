@@ -38,6 +38,28 @@ SDK API 是主要入口。宿主项目应通过 `bm-sdk` 进入，或通过 `bm-
 | Memory-Space Export / Import | `MemoryRuntime::export_memory_space` / `MemoryRuntime::import_memory_space` | 在显式 private-material policy 下导出 opaque archive，并原子替换完全相同的 `MemoryArchiveScope`。 |
 | Recover / Close | `MemoryRuntime::recover` / `MemoryRuntime::close` | 控制 runtime lifecycle 并产生 lifecycle report。 |
 
+## Subject Soul Provisioning
+
+`bm-sdk` 0.4.0 提供宿主无关的 Subject Soul 建档与生命周期公共合同。宿主只能提交 typed intent；Soul revision、generation、material、manifest、ledger、审计、事件和 durable operation receipt 由 Core、SDK 与 Store 在同一事务中拥有。Adapter、HTTP、MCP、Console 或宿主数据库不得维护第二套 Soul 状态，也不得先写默认人格再覆盖。
+
+| 操作 | SDK surface | 合同 |
+| --- | --- | --- |
+| 可选首次建档 | `MemoryRuntime::provision_subject_soul` + `SubjectSoulProvisionIntentV1` | `Unseeded` 是零 mutation 的合法状态；`Founding` 只接受同一 MemorySpace 中 active `HumanUser` 的 canonical partial charter，并原子创建 generation 1 / revision 1。 |
+| 安全读取 | `MemoryRuntime::read_subject_soul` + `SubjectSoulReadRequestV1` | 公共读取只允许 `OperatorSafe` metadata；`Current` 与 `Exact` selector 由 immutable closure 验证，terminated generation 只返回 tombstone metadata。 |
+| 安全导出 | `MemoryRuntime::export_subject_soul_operator_safe` | 仅返回 state、generation、revision、digest、origin 和安全 tombstone；不返回 founding charter、SelfAuthoredCore、Private Garden、Inner Life、private docs 或关系私密正文。 |
+| 受治理披露 | `MemoryRuntime::disclose_subject_soul_governed` | 只消费 Store-verified Soul/relationship closure，并按 MentalPrivacy 与 Relationship Source 的有效 disclosure ceiling 返回受治理摘要、改写或拒绝；宿主不能传入自称安全的摘要。 |
+| 生命周期 | `MemoryRuntime::archive_subject_soul_self_governed` / `restore_subject_soul_self_governed` / `mutate_subject_soul` | self-governed archive/restore 的 capability 由 SDK 内部注入，不向 caller 暴露；maintenance archive/restore 使用 typed `SystemGovernor`；reset/reseed/delete 必须同时绑定 `SystemGovernor` 与同空间 active `HumanUser` confirmation、exact generation/head/manifest。 |
+| 关系来源 | `MemoryRuntime::control_relationship_source` / `read_relationship_source` | 公共 contribution 只接受 exact relationship member `HumanUser`；Agent self-boundary 与 SystemGovernor floor 由 SDK 内部 capability owner 执行。Relationship Source Constitution 的 source root 与 manifest root 使用独立双 root / 四 CAS，Soul lifecycle 不能代替关系治理。 |
+| 受治理投影 | `MemoryRuntime::project_with_subject_soul_selector` | current projection 读取 verified current Soul；historical projection 必须显式提供 exact Soul selector，不能把当前 Soul 错套到历史 memory projection。 |
+
+Founding charter 是可选、可部分提供的主体宪章，不是 raw 人物画像。它只承载 identity anchor、character tendencies、priority/non-negotiable constitution、默认回应/主动性/关系姿态，以及边界、求真、自保、修复和变更原则。Display name、用户称呼、外貌背景、任务角色、工具习惯和宿主 presentation 仍由宿主相应 owner 管理，不能借建档晋升为 Soul。
+
+建档成功后，任何人格变化都必须进入既有 self-authored revision proposal/governance；宿主不能每轮重复 provision。reset/reseed/delete 是独立破坏性生命周期：旧 generation 的 raw material 与派生私域数据必须在同一事务中清除，旧 exact selector 只能得到安全 tombstone。SPV1 不定义 raw Soul import、Portable Vault、加密 wire 或密钥生命周期；这些继续由 EAP2 拥有。
+
+所有失败都通过 `SubjectSoulSdkError { operation, key, disposition }` 返回 typed 结果。调用方应对 `ExpectedStateConflict` 重读 verified state 后重试；`RepairRequired`、`AuthorityRejected`、`CapacityRejected` 或 `StoreCommitRejected` 不得降级为直接写 Store。
+
+Generation-owned Soul layer envelope、自治 capability、Core revision plan 和 Store post-image 都不是公共宿主写入面。SDK 自己从持久 governance job、verified Soul snapshot 与 typed evidence 运行自治裁决，并在一个 operation-aware Store batch 内提交；宿主不能提交 `origin`、`revision`、`next_core`、ledger 或 raw private-layer JSON 来声称“自主演化”。
+
 ## Memory Evidence System
 
 Conversation Transcript Substrate 发布面是当前已落地的基础证据合同，用于 governed transcript commit、redacted replay、lifecycle review 和 archive-ready evidence handling。它不是宿主任务系统，也不替代 Soul Governance、Subject Projection、Program Memory、procedural memory 或已接受的长期记忆平面。

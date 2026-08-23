@@ -10,10 +10,16 @@ use bm_core::{Error, Result};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    MemoryStoreEventKind, RuntimeBudgetReport, StoreEventScope, StoreJsonPrecondition,
-    StoreMutation, StoreMutationBatch,
+    MemoryStoreEventKind, RuntimeBudgetReport, StoreBlobPrecondition, StoreEventScope,
+    StoreJsonPrecondition, StoreMutation, StoreMutationBatch,
 };
 
+use super::schema::{
+    is_relationship_source_protected_json_namespace, is_subject_soul_protected_json_namespace,
+};
+use super::subject_soul::{
+    SubjectSoulStoreFailure, SubjectSoulStoreMutationOutcome, SubjectSoulStoreMutationPlan,
+};
 use super::StorePlatform;
 
 const GOVERNANCE_RETRY_BASE_SECS: u64 = 5;
@@ -1041,17 +1047,16 @@ pub(crate) fn cancel_governance_job(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn complete_governance_job_with_memory_plan(
+fn plan_governance_job_completion(
     platform: &StorePlatform,
     scope: StoreEventScope,
-    runtime_budget: &RuntimeBudgetReport,
     job_id: &str,
     lease_owner: &str,
     lease_epoch: u64,
     mut memory_mutations: Vec<StoreMutation>,
     mut memory_preconditions: Vec<StoreJsonPrecondition>,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV2> {
+) -> Result<GovernanceCompletionPlan> {
     if job_id.trim().is_empty() || lease_owner.trim().is_empty() || lease_epoch == 0 {
         return Err(Error::invalid_input(
             "post_turn_governance_complete",
@@ -1098,7 +1103,11 @@ pub(crate) fn complete_governance_job_with_memory_plan(
         Error::not_found("post_turn_governance_complete", "governance job not found")
     })?;
     if before_job.status == PostTurnGovernanceJobStatusV2::Succeeded {
-        return completed_job_if_same_receipt(before_job, &expected_receipt);
+        let job = completed_job_if_same_receipt(before_job, &expected_receipt)?;
+        return Ok(GovernanceCompletionPlan::AlreadyCompleted {
+            job: Box::new(job),
+            transaction_id,
+        });
     }
     if before_job.status != PostTurnGovernanceJobStatusV2::Leased
         || before_job.lease_owner.as_deref() != Some(lease_owner)
@@ -1202,17 +1211,79 @@ pub(crate) fn complete_governance_job_with_memory_plan(
             .map_err(|error| Error::config("post_turn_governance_complete", error.to_string()))?,
     ));
 
-    let commit = platform.commit_governed_memory_transaction_with_runtime_budget_at(
-        StoreMutationBatch {
-            transaction_id,
-            operation: "post_turn.governance.complete".to_string(),
-            scope,
-            mutations: memory_mutations,
+    Ok(GovernanceCompletionPlan::Pending(Box::new(
+        GovernanceCompletionPending {
+            expected_receipt,
+            after_job,
+            batch: StoreMutationBatch {
+                transaction_id,
+                operation: "post_turn.governance.complete".to_string(),
+                scope,
+                mutations: memory_mutations,
+            },
+            preconditions: memory_preconditions,
         },
-        &memory_preconditions,
-        runtime_budget,
+    )))
+}
+
+enum GovernanceCompletionPlan {
+    AlreadyCompleted {
+        job: Box<PostTurnGovernanceJobV2>,
+        transaction_id: String,
+    },
+    Pending(Box<GovernanceCompletionPending>),
+}
+
+struct GovernanceCompletionPending {
+    expected_receipt: PostTurnGovernanceReceiptV2,
+    after_job: PostTurnGovernanceJobV2,
+    batch: StoreMutationBatch,
+    preconditions: Vec<StoreJsonPrecondition>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn complete_governance_job_with_memory_plan(
+    platform: &StorePlatform,
+    scope: StoreEventScope,
+    runtime_budget: &RuntimeBudgetReport,
+    job_id: &str,
+    lease_owner: &str,
+    lease_epoch: u64,
+    memory_mutations: Vec<StoreMutation>,
+    memory_preconditions: Vec<StoreJsonPrecondition>,
+    memory_blob_preconditions: Vec<StoreBlobPrecondition>,
+    now_secs: u64,
+) -> Result<PostTurnGovernanceJobV2> {
+    let plan = plan_governance_job_completion(
+        platform,
+        scope,
+        job_id,
+        lease_owner,
+        lease_epoch,
+        memory_mutations,
+        memory_preconditions,
         now_secs,
-    );
+    )?;
+    let (expected_receipt, after_job, batch, preconditions) = match plan {
+        GovernanceCompletionPlan::AlreadyCompleted { job, .. } => return Ok(*job),
+        GovernanceCompletionPlan::Pending(pending) => {
+            let GovernanceCompletionPending {
+                expected_receipt,
+                after_job,
+                batch,
+                preconditions,
+            } = *pending;
+            (expected_receipt, after_job, batch, preconditions)
+        }
+    };
+    let commit = platform
+        .commit_governed_memory_transaction_with_blob_preconditions_and_runtime_budget_at(
+            batch,
+            &preconditions,
+            &memory_blob_preconditions,
+            runtime_budget,
+            now_secs,
+        );
     match commit {
         Ok(_) => Ok(after_job),
         Err(error) => {
@@ -1224,6 +1295,142 @@ pub(crate) fn complete_governance_job_with_memory_plan(
             Err(error)
         }
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct SubjectSoulGovernanceCompletionOutcome {
+    pub(crate) job: PostTurnGovernanceJobV2,
+    pub(crate) soul: SubjectSoulStoreMutationOutcome,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn complete_governance_job_with_subject_soul_plan(
+    platform: &StorePlatform,
+    scope: StoreEventScope,
+    runtime_budget: &RuntimeBudgetReport,
+    job_id: &str,
+    lease_owner: &str,
+    lease_epoch: u64,
+    soul_plan: SubjectSoulStoreMutationPlan,
+    additional_mutations: Vec<StoreMutation>,
+    additional_preconditions: Vec<StoreJsonPrecondition>,
+    additional_blob_preconditions: Vec<StoreBlobPrecondition>,
+    now_secs: u64,
+) -> Result<SubjectSoulGovernanceCompletionOutcome> {
+    let additional_touches_protected = additional_mutations.iter().any(|mutation| {
+        matches!(mutation,
+            StoreMutation::PutJson { namespace, .. }
+                | StoreMutation::DeleteJson { namespace, .. }
+                if is_subject_soul_protected_json_namespace(namespace)
+                    || is_relationship_source_protected_json_namespace(namespace))
+    }) || additional_preconditions.iter().any(|precondition| {
+        let namespace = match precondition {
+            StoreJsonPrecondition::Absent { namespace, .. }
+            | StoreJsonPrecondition::Exact { namespace, .. } => namespace,
+        };
+        is_subject_soul_protected_json_namespace(namespace)
+            || is_relationship_source_protected_json_namespace(namespace)
+    });
+    if additional_touches_protected {
+        return Err(Error::invalid_input(
+            "post_turn_governance_subject_soul_complete",
+            "additional governance memory plan must not contain protected Soul/Relationship addresses",
+        ));
+    }
+    if soul_plan.batch().scope != scope {
+        return Err(Error::invalid_input(
+            "post_turn_governance_subject_soul_complete",
+            "governance completion scope differs from the typed Subject Soul owner",
+        ));
+    }
+
+    let transaction_id = governance_completion_transaction_id(job_id, lease_epoch)?;
+    let mut rebound_batch = soul_plan.batch().clone();
+    rebound_batch.transaction_id = transaction_id;
+    rebound_batch.operation = "post_turn.governance.complete.subject_soul".to_string();
+    let soul_preconditions = soul_plan.preconditions().to_vec();
+    let soul_plan = soul_plan
+        .bind_governance_completion(rebound_batch, soul_preconditions)
+        .map_err(SubjectSoulStoreFailure::into_store_error)?;
+    let mut combined_mutations = soul_plan.batch().mutations.clone();
+    combined_mutations.extend(additional_mutations);
+    let mut combined_preconditions = soul_plan.preconditions().to_vec();
+    merge_completion_preconditions(&mut combined_preconditions, additional_preconditions)?;
+    let replay_batch = StoreMutationBatch {
+        transaction_id: soul_plan.batch().transaction_id.clone(),
+        operation: "post_turn.governance.complete.subject_soul".to_string(),
+        scope: scope.clone(),
+        mutations: combined_mutations.clone(),
+    };
+    let replay_preconditions = combined_preconditions.clone();
+    let completion = plan_governance_job_completion(
+        platform,
+        scope,
+        job_id,
+        lease_owner,
+        lease_epoch,
+        combined_mutations,
+        combined_preconditions,
+        now_secs,
+    )?;
+    let (expected_receipt, expected_job, final_batch, final_preconditions) = match completion {
+        GovernanceCompletionPlan::AlreadyCompleted {
+            job,
+            transaction_id,
+        } => {
+            if transaction_id != replay_batch.transaction_id {
+                return Err(Error::conflict(
+                    "post_turn_governance_subject_soul_complete",
+                    "completed governance transaction differs from the typed replay",
+                ));
+            }
+            (
+                job.receipt.clone(),
+                *job,
+                replay_batch,
+                replay_preconditions,
+            )
+        }
+        GovernanceCompletionPlan::Pending(pending) => {
+            let GovernanceCompletionPending {
+                expected_receipt,
+                after_job,
+                mut batch,
+                preconditions,
+            } = *pending;
+            batch.operation = "post_turn.governance.complete.subject_soul".to_string();
+            (Some(expected_receipt), after_job, batch, preconditions)
+        }
+    };
+    let soul_plan = soul_plan
+        .bind_governance_completion(final_batch, final_preconditions)
+        .map_err(SubjectSoulStoreFailure::into_store_error)?;
+    let soul_plan = soul_plan
+        .append_governance_blob_preconditions(additional_blob_preconditions)
+        .map_err(SubjectSoulStoreFailure::into_store_error)?;
+    let soul = platform
+        .commit_subject_soul_mutation_with_runtime_budget(soul_plan, runtime_budget)
+        .map_err(SubjectSoulStoreFailure::into_store_error)?;
+    let job = read_job(platform, job_id)?.ok_or_else(|| {
+        Error::config(
+            "post_turn_governance_subject_soul_complete",
+            "atomic Subject Soul commit is missing its governance job post-image",
+        )
+    })?;
+    let expected_receipt = expected_receipt.ok_or_else(|| {
+        Error::config(
+            "post_turn_governance_subject_soul_complete",
+            "completed governance job is missing its receipt",
+        )
+    })?;
+    let job = completed_job_if_same_receipt(job, &expected_receipt)?;
+    if job != expected_job {
+        return Err(Error::conflict(
+            "post_turn_governance_subject_soul_complete",
+            "persisted governance post-image differs from the planned atomic completion",
+        ));
+    }
+    Ok(SubjectSoulGovernanceCompletionOutcome { job, soul })
 }
 
 fn completed_job_if_same_receipt(
@@ -1274,7 +1481,7 @@ pub(crate) fn governance_completion_transaction_id(
         &serde_json::to_vec(&(job_id, lease_epoch))
             .map_err(|error| Error::config("post_turn_governance_complete", error.to_string()))?,
     );
-    Ok(format!("ptgc2:{}", digest.trim_start_matches("sha256:")))
+    Ok(digest)
 }
 
 fn merge_completion_preconditions(
@@ -1484,21 +1691,23 @@ fn put_json(namespace: &str, key: &str, value: serde_json::Value) -> StoreMutati
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "nonproduction-replay-harness"))]
 mod tests {
-    use crate::store_internal::{StoreBackendConfig, StorePlatform};
-    use crate::{
-        MemoryStoreEventKind, ProfileId, StoreEventScope, StoreJsonPrecondition, StoreMutation,
-    };
+    use crate::store_internal::subject_soul::tests::unseeded_plan_for_scope;
+    use crate::store_internal::subject_soul::SubjectSoulStoreMutationOutcome;
+    use crate::store_internal::{StoreBackendConfig, StoreCapacityBudget, StorePlatform};
+    use crate::{MemoryStoreEventKind, ProfileId, StoreEventScope, StoreMutation};
     use bm_core::memory::{
         PostTurnGovernanceAttemptAuthorityV2, PostTurnGovernanceIdentityV2,
-        PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV2,
+        PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV2, SubjectSoulReadOutcomeV1,
+        SubjectSoulReadRequestV1, SubjectSoulReadSelectorV1, SubjectSoulReadViewV1,
         POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
     };
 
     use super::{
-        claim_governance_job, complete_governance_job_with_memory_plan, ensure_governance_intent,
-        read_job, read_scope_index,
+        claim_governance_job, complete_governance_job_with_memory_plan,
+        complete_governance_job_with_subject_soul_plan, ensure_governance_intent, read_job,
+        read_scope_index,
     };
 
     fn now_secs() -> u64 {
@@ -1579,24 +1788,18 @@ mod tests {
             now_secs,
         )
         .expect("claim");
-        let private_key = "subject:atomic::self/notes.md";
-        let mutations = vec![StoreMutation::PutJson {
-            namespace: "private_garden".to_string(),
-            key: private_key.to_string(),
-            value: serde_json::json!({
-                "path": "self/notes.md",
-                "content": "atomic post image",
-                "updated_at": now_secs,
-                "revision": 1
-            }),
-            event_kind: MemoryStoreEventKind::MemoryWrite,
-            plane: "private_garden".to_string(),
-            record_key: private_key.to_string(),
+        let memory_event = crate::MemoryStoreEvent::new(
+            "governance-memory-event:atomic",
+            MemoryStoreEventKind::MemoryWrite,
+            scope(),
+            now_secs + 1,
+        )
+        .with_plane("post_turn_memory")
+        .with_record_key("atomic-memory-plan");
+        let mutations = vec![StoreMutation::AppendEvent {
+            event: Box::new(memory_event.clone()),
         }];
-        let preconditions = vec![StoreJsonPrecondition::Absent {
-            namespace: "private_garden".to_string(),
-            key: private_key.to_string(),
-        }];
+        let preconditions = Vec::new();
 
         let completed = complete_governance_job_with_memory_plan(
             &platform,
@@ -1607,6 +1810,7 @@ mod tests {
             leased.lease_epoch,
             mutations.clone(),
             preconditions.clone(),
+            Vec::new(),
             now_secs + 1,
         )
         .expect("atomic complete");
@@ -1622,10 +1826,11 @@ mod tests {
             .expect("read index")
             .expect("index");
         assert!(index.active_jobs.is_empty());
-        let private_docs = platform
-            .read_json_docs_by_keys("private_garden", &[private_key.to_string()])
-            .expect("private post image");
-        assert_eq!(private_docs.len(), 1);
+        assert!(platform
+            .read_events()
+            .expect("memory events")
+            .iter()
+            .any(|event| event.event_id == memory_event.event_id));
 
         let duplicate = complete_governance_job_with_memory_plan(
             &platform,
@@ -1636,6 +1841,7 @@ mod tests {
             leased.lease_epoch,
             mutations,
             preconditions,
+            Vec::new(),
             now_secs + 2,
         )
         .expect("idempotent complete");
@@ -1649,6 +1855,247 @@ mod tests {
                 .expect("index doc")
                 .len()
                 == 1
+        );
+    }
+
+    #[test]
+    fn typed_soul_completion_commits_and_replays_one_governance_transaction() {
+        let platform = StorePlatform::open(
+            StoreBackendConfig::in_memory(ProfileId::DesktopMacosEmbeddedSdk)
+                .expect("store config"),
+        )
+        .expect("store");
+        let now_secs = now_secs();
+        let budget = platform.current_runtime_budget(now_secs);
+        let pending = pending_job(now_secs);
+        ensure_governance_intent(&platform, scope(), &budget, &pending, now_secs)
+            .expect("ensure intent");
+        let leased = claim_governance_job(
+            &platform,
+            scope(),
+            &budget,
+            &pending.job_id,
+            "worker:atomic-soul",
+            now_secs + 60,
+            authority(),
+            now_secs,
+        )
+        .expect("claim");
+        let soul_plan = unseeded_plan_for_scope(
+            &platform,
+            "governance-soul-operation",
+            "space:atomic",
+            "subject:atomic",
+            "soul:atomic",
+            now_secs + 1,
+            scope(),
+        );
+        let replay_plan = soul_plan.clone();
+        let additional_event = crate::MemoryStoreEvent::new(
+            "governance-additional-memory:atomic-soul",
+            MemoryStoreEventKind::MemoryWrite,
+            scope(),
+            now_secs + 1,
+        )
+        .with_plane("post_turn_memory")
+        .with_record_key("additional-memory");
+        let committed = complete_governance_job_with_subject_soul_plan(
+            &platform,
+            scope(),
+            &budget,
+            &leased.job_id,
+            "worker:atomic-soul",
+            leased.lease_epoch,
+            soul_plan,
+            vec![StoreMutation::AppendEvent {
+                event: Box::new(additional_event.clone()),
+            }],
+            Vec::new(),
+            Vec::new(),
+            now_secs + 1,
+        )
+        .expect("atomic typed Soul governance completion");
+        assert_eq!(
+            committed.job.status,
+            PostTurnGovernanceJobStatusV2::Succeeded
+        );
+        assert!(matches!(
+            committed.soul,
+            SubjectSoulStoreMutationOutcome::Committed { .. }
+        ));
+        let read = platform
+            .read_verified_subject_soul(
+                "space:atomic",
+                "soul:atomic",
+                &SubjectSoulReadRequestV1 {
+                    target_subject_id: "subject:atomic".to_string(),
+                    selector: SubjectSoulReadSelectorV1::Current,
+                    view: SubjectSoulReadViewV1::OperatorSafe,
+                },
+                &budget,
+            )
+            .expect("read atomic explicit unseeded Soul");
+        assert!(matches!(
+            read.outcome,
+            SubjectSoulReadOutcomeV1::Verified { .. }
+        ));
+        let before_replay = platform
+            .export_store_snapshot()
+            .expect("snapshot before response-loss replay");
+        let replayed = complete_governance_job_with_subject_soul_plan(
+            &platform,
+            scope(),
+            &budget,
+            &leased.job_id,
+            "worker:atomic-soul",
+            leased.lease_epoch,
+            replay_plan,
+            vec![StoreMutation::AppendEvent {
+                event: Box::new(additional_event),
+            }],
+            Vec::new(),
+            Vec::new(),
+            now_secs + 1,
+        )
+        .expect("response-loss replay");
+        assert!(matches!(
+            replayed.soul,
+            SubjectSoulStoreMutationOutcome::Replayed { .. }
+        ));
+        assert_eq!(replayed.job, committed.job);
+        assert_eq!(
+            platform
+                .export_store_snapshot()
+                .expect("snapshot after response-loss replay"),
+            before_replay,
+            "replay must not duplicate Soul roots, revisions, receipts, audits, events, or job completion"
+        );
+    }
+
+    #[test]
+    fn typed_soul_completion_budget_failure_changes_nothing() {
+        let mut capacity = StoreCapacityBudget::full();
+        capacity.event_log_max_items = 8;
+        let config = StoreBackendConfig::in_memory(ProfileId::DesktopMacosEmbeddedSdk)
+            .expect("store config")
+            .try_with_nonproduction_store_budget_limit(capacity.into_runtime_budget())
+            .expect("constrained Store budget");
+        let platform = StorePlatform::open(config).expect("store");
+        let now_secs = now_secs();
+        let budget = platform.current_runtime_budget(now_secs);
+        let pending = pending_job(now_secs);
+        ensure_governance_intent(&platform, scope(), &budget, &pending, now_secs)
+            .expect("ensure intent");
+        let leased = claim_governance_job(
+            &platform,
+            scope(),
+            &budget,
+            &pending.job_id,
+            "worker:atomic-soul-budget",
+            now_secs + 60,
+            authority(),
+            now_secs,
+        )
+        .expect("claim");
+        let soul_plan = unseeded_plan_for_scope(
+            &platform,
+            "governance-soul-budget-operation",
+            "space:atomic",
+            "subject:atomic",
+            "soul:atomic",
+            now_secs + 1,
+            scope(),
+        );
+        let before = platform
+            .export_store_snapshot()
+            .expect("snapshot before composite budget rejection");
+        let error = complete_governance_job_with_subject_soul_plan(
+            &platform,
+            scope(),
+            &budget,
+            &leased.job_id,
+            "worker:atomic-soul-budget",
+            leased.lease_epoch,
+            soul_plan,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            now_secs + 1,
+        )
+        .expect_err("composite must exceed constrained event capacity");
+        assert_eq!(error.stage(), "subject_soul_store_capacity");
+        assert_eq!(
+            platform
+                .export_store_snapshot()
+                .expect("snapshot after composite budget rejection"),
+            before,
+            "failed composite must leave Soul roots/result/MOR/audit/events and governance job/index unchanged"
+        );
+    }
+
+    #[test]
+    fn typed_soul_completion_rejects_additional_protected_writes_without_changes() {
+        let platform = StorePlatform::open(
+            StoreBackendConfig::in_memory(ProfileId::DesktopMacosEmbeddedSdk)
+                .expect("store config"),
+        )
+        .expect("store");
+        let now_secs = now_secs();
+        let budget = platform.current_runtime_budget(now_secs);
+        let pending = pending_job(now_secs);
+        ensure_governance_intent(&platform, scope(), &budget, &pending, now_secs)
+            .expect("ensure intent");
+        let leased = claim_governance_job(
+            &platform,
+            scope(),
+            &budget,
+            &pending.job_id,
+            "worker:atomic-soul-protected",
+            now_secs + 60,
+            authority(),
+            now_secs,
+        )
+        .expect("claim");
+        let soul_plan = unseeded_plan_for_scope(
+            &platform,
+            "governance-soul-protected-operation",
+            "space:atomic",
+            "subject:atomic",
+            "soul:atomic",
+            now_secs + 1,
+            scope(),
+        );
+        let before = platform
+            .export_store_snapshot()
+            .expect("snapshot before protected additional write rejection");
+        let error = complete_governance_job_with_subject_soul_plan(
+            &platform,
+            scope(),
+            &budget,
+            &leased.job_id,
+            "worker:atomic-soul-protected",
+            leased.lease_epoch,
+            soul_plan,
+            vec![StoreMutation::PutJson {
+                namespace: "private_garden".to_string(),
+                key: "forbidden-bypass".to_string(),
+                value: serde_json::json!({"raw": "must-not-commit"}),
+                event_kind: MemoryStoreEventKind::MemoryWrite,
+                plane: "private_garden".to_string(),
+                record_key: "forbidden-bypass".to_string(),
+            }],
+            Vec::new(),
+            Vec::new(),
+            now_secs + 1,
+        )
+        .expect_err("additional protected writes must not bypass typed Soul closure");
+        assert_eq!(error.stage(), "post_turn_governance_subject_soul_complete");
+        assert_eq!(
+            platform
+                .export_store_snapshot()
+                .expect("snapshot after protected additional write rejection"),
+            before,
+            "rejected additional protected write must not mutate Soul, MOR, audit, events, or governance job/index"
         );
     }
 }

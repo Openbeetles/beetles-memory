@@ -27,6 +27,20 @@ pub enum StoreJsonPrecondition {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StoreBlobPrecondition {
+    Absent {
+        namespace: String,
+        key: String,
+    },
+    ExactDigest {
+        namespace: String,
+        key: String,
+        content_digest: String,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StoreMutation {
     PutJson {
         namespace: String,

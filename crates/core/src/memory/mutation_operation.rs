@@ -93,6 +93,15 @@ impl MemoryMutationOperationIdentity {
 pub enum MemoryMutationOperationKind {
     Write,
     LongTermControl { operation: LongTermControlOperation },
+    SoulEvidence,
+    SoulProvision,
+    SoulRevision,
+    SoulArchive,
+    SoulRestore,
+    SoulReset,
+    SoulReseed,
+    SoulDelete,
+    RelationshipControl,
 }
 
 impl MemoryMutationOperationKind {
@@ -102,6 +111,15 @@ impl MemoryMutationOperationKind {
             Self::LongTermControl { operation } => {
                 format!("long_term_control:{}", operation.as_str())
             }
+            Self::SoulEvidence => "soul_evidence".to_string(),
+            Self::SoulProvision => "soul_provision".to_string(),
+            Self::SoulRevision => "soul_revision".to_string(),
+            Self::SoulArchive => "soul_archive".to_string(),
+            Self::SoulRestore => "soul_restore".to_string(),
+            Self::SoulReset => "soul_reset".to_string(),
+            Self::SoulReseed => "soul_reseed".to_string(),
+            Self::SoulDelete => "soul_delete".to_string(),
+            Self::RelationshipControl => "relationship_control".to_string(),
         }
     }
 }

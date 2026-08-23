@@ -2056,11 +2056,20 @@ impl StoreEngine for SqliteStoreEngine {
         };
         let scoped_json =
             read_scoped_json_exact(&tx, &projection_request, admission.operation_capacity())?;
-        let deleted_addresses = scoped_json
+        let mut deleted_addresses = scoped_json
             .documents
             .keys()
             .cloned()
             .collect::<BTreeSet<_>>();
+        if request.preserve_protected_owner_state {
+            for (address, value) in &scoped_json.documents {
+                if crate::store_internal::engine::json_document_is_protected_owner(
+                    &address.0, value,
+                )? {
+                    deleted_addresses.remove(address);
+                }
+            }
+        }
         for doc in &request.json_docs {
             let address = (doc.namespace.clone(), doc.key.clone());
             let exists = tx
@@ -2099,28 +2108,61 @@ impl StoreEngine for SqliteStoreEngine {
             )
             .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
         }
-        let deleted_events = tx
-            .execute(
-                r#"DELETE FROM bm_event_log
-                   WHERE json_extract(event_json, '$.scope.memory_space_id') = ?1
-                     AND json_extract(event_json, '$.scope.physical_owning_scope.kind') = ?2
-                     AND (
-                       ?2 = 'shared_program'
-                       OR (
-                         json_extract(event_json, '$.scope.physical_owning_scope.mounted_subject_id') = ?3
-                         AND json_extract(event_json, '$.scope.subject_id') = ?3
-                       )
-                     )"#,
-                params![
-                    &request.scope.memory_space_id,
-                    match &request.scope.physical_owning_scope {
-                        crate::StorePhysicalOwningScope::Subject { .. } => "subject",
-                        crate::StorePhysicalOwningScope::SharedProgram => "shared_program",
-                    },
-                    request.scope.mounted_subject_id(),
-                ],
+        let scoped_events = {
+            let mut statement = tx
+                .prepare(
+                    r#"SELECT event_id, event_json FROM bm_event_log
+                       WHERE json_extract(event_json, '$.scope.memory_space_id') = ?1
+                         AND json_extract(event_json, '$.scope.physical_owning_scope.kind') = ?2
+                         AND (
+                           ?2 = 'shared_program'
+                           OR (
+                             json_extract(event_json, '$.scope.physical_owning_scope.mounted_subject_id') = ?3
+                             AND json_extract(event_json, '$.scope.subject_id') = ?3
+                           )
+                         )"#,
+                )
+                .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+            let rows = statement
+                .query_map(
+                    params![
+                        &request.scope.memory_space_id,
+                        match &request.scope.physical_owning_scope {
+                            crate::StorePhysicalOwningScope::Subject { .. } => "subject",
+                            crate::StorePhysicalOwningScope::SharedProgram => "shared_program",
+                        },
+                        request.scope.mounted_subject_id(),
+                    ],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|error| map_transaction_error("store_scoped_projection", error))?
+        };
+        let deleted_event_ids = scoped_events
+            .into_iter()
+            .map(|(event_id, raw)| {
+                let event = serde_json::from_str::<MemoryStoreEvent>(&raw)
+                    .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?;
+                Ok((event_id, event))
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|(_, event)| {
+                crate::store_internal::engine::event_is_replaced_by_scoped_projection(
+                    event, request,
+                )
+            })
+            .map(|(event_id, _)| event_id)
+            .collect::<Vec<_>>();
+        for event_id in &deleted_event_ids {
+            tx.execute(
+                "DELETE FROM bm_event_log WHERE event_id = ?1",
+                params![event_id],
             )
             .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+        }
+        let deleted_events = deleted_event_ids.len();
         for event in &request.events {
             let raw = serialize_event(event)?;
             tx.execute(

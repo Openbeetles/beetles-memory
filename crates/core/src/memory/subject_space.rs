@@ -71,31 +71,33 @@ impl SubjectSoulSurface {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubjectSoulBinding {
     pub soul_id: String,
     pub owner_subject_id: SubjectId,
     pub surfaces: Vec<SubjectSoulSurface>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub revision_refs: Vec<String>,
 }
 
 impl SubjectSoulBinding {
+    pub fn canonical_surfaces() -> Vec<SubjectSoulSurface> {
+        vec![
+            SubjectSoulSurface::SelfAuthoredCore,
+            SubjectSoulSurface::SelfContinuity,
+            SubjectSoulSurface::PrivateGarden,
+            SubjectSoulSurface::InnerLife,
+            SubjectSoulSurface::RelationshipExperience,
+            SubjectSoulSurface::ProceduralTraces,
+            SubjectSoulSurface::SoulFeedback,
+            SubjectSoulSurface::GrowthRevisionLedger,
+        ]
+    }
+
     pub fn agent_persona(subject_id: impl Into<SubjectId>) -> Self {
         let subject_id = subject_id.into();
         Self {
             soul_id: format!("soul:{}", encode_subject_id_for_suffix(&subject_id)),
             owner_subject_id: subject_id,
-            surfaces: vec![
-                SubjectSoulSurface::SelfAuthoredCore,
-                SubjectSoulSurface::SelfContinuity,
-                SubjectSoulSurface::PrivateGarden,
-                SubjectSoulSurface::InnerLife,
-                SubjectSoulSurface::RelationshipExperience,
-                SubjectSoulSurface::ProceduralTraces,
-                SubjectSoulSurface::SoulFeedback,
-                SubjectSoulSurface::GrowthRevisionLedger,
-            ],
-            revision_refs: Vec::new(),
+            surfaces: Self::canonical_surfaces(),
         }
     }
 }
@@ -358,11 +360,14 @@ impl SubjectRegistry {
                     if soul.soul_id.trim().is_empty() {
                         return SubjectContractValidation::rejected("soul_id_empty");
                     }
+                    if soul.soul_id != soul.soul_id.trim() {
+                        return SubjectContractValidation::rejected("soul_id_non_canonical");
+                    }
                     if !soul_owner_ids.insert(soul.soul_id.clone()) {
                         return SubjectContractValidation::rejected("agent_persona_soul_shared");
                     }
-                    if soul.surfaces.is_empty() {
-                        return SubjectContractValidation::rejected("soul_surfaces_empty");
+                    if soul.surfaces != SubjectSoulBinding::canonical_surfaces() {
+                        return SubjectContractValidation::rejected("soul_surfaces_not_exact");
                     }
                 }
                 SubjectKind::HumanUser => {}

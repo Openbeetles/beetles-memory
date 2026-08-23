@@ -5,17 +5,21 @@ use std::path::Path;
 use std::sync::Arc;
 
 use bm_core::feature_gate::ProfileId;
+use bm_core::memory::{
+    MemoryMutationAuditRecord, MemoryMutationOperationKind, MemoryMutationReceipt,
+};
 use bm_core::skills::RuntimeSkillOwnerRecord;
 use bm_sdk::nonproduction_replay_harness::{
     export_memory_space, import_memory_space, StorePhysicalOwningScope, StoreSnapshot,
 };
 use bm_sdk::{
-    GovernedRuntimeSkillWriteInput, GovernedScopeArchiveRootV1, MemoryArchiveScope,
-    MemoryCapabilityPolicy, MemoryClock, MemoryIdentity, MemoryPrivacyClass, MemoryPrivacyPolicy,
-    MemoryRuntime, MemoryScope, MemorySpaceExportRequest, MemorySpaceImportRequest,
-    MemorySpacePrivateMaterialPolicy, MemoryStoreHandle, MemoryWriteRequest, NoopMemoryAuditSink,
-    RuntimeSkillCreationRef, RuntimeSkillOwningScope, RuntimeSkillWrite, RuntimeSkillWriteSource,
-    StoreBackendConfig,
+    primary_human_subject_id, GovernedRuntimeSkillWriteInput, GovernedScopeArchiveRootV1,
+    MemoryArchiveScope, MemoryCapabilityPolicy, MemoryClock, MemoryIdentity, MemoryPrivacyClass,
+    MemoryPrivacyPolicy, MemoryRuntime, MemoryScope, MemorySpaceExportRequest,
+    MemorySpaceImportRequest, MemorySpacePrivateMaterialPolicy, MemoryStoreHandle,
+    MemoryWriteRequest, NoopMemoryAuditSink, RuntimeSkillCreationRef, RuntimeSkillOwningScope,
+    RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
+    SubjectSoulFoundingCharterSeedV1, SubjectSoulMutationOutcomeV1, SubjectSoulProvisionIntentV1,
 };
 use sha2::{Digest, Sha256};
 
@@ -23,6 +27,12 @@ const MEMORY_SPACE_ID: &str = "space:archive-owner";
 const SUBJECT_A: &str = "subject:archive-a";
 const SUBJECT_B: &str = "subject:archive-b";
 const SUBJECT_GLOBAL_SOUL_NAMESPACES: &[&str] = &[
+    "subject_soul_lifecycle_heads",
+    "subject_soul_revision_materials",
+    "subject_soul_scope_manifests",
+    "subject_soul_generation_tombstones",
+    "subject_soul_relationship_projections",
+    "subject_soul_operation_results",
     "self_model",
     "self_authored_core",
     "core_revision_ledger",
@@ -100,6 +110,34 @@ fn seed_runtime_skill(runtime: &MemoryRuntime, owning_scope: RuntimeSkillOwningS
     assert_eq!(report.changed, 1, "fixture write count for {label}");
 }
 
+fn seed_subject_soul(runtime: &MemoryRuntime, label: &str) {
+    let charter = SubjectSoulFoundingCharterSeedV1 {
+        identity_anchor: Some(format!("typed scoped archive Soul {label}")),
+        character_tendencies: vec!["preserve exact owner boundaries".to_string()],
+        priority_constitution: vec!["truth before fluency".to_string()],
+        non_negotiables: vec!["never cross archive scope".to_string()],
+        default_response_mode: None,
+        default_initiative_posture: None,
+        default_relationship_posture: None,
+        boundary_doctrine: None,
+        truth_seeking_commitment: None,
+        self_preservation_doctrine: None,
+        repair_doctrine: None,
+        change_principle: None,
+    }
+    .canonicalize()
+    .expect("canonical archive Soul seed");
+    let report = runtime
+        .provision_subject_soul(SubjectSoulProvisionIntentV1::Founding {
+            operation_id: format!("scoped-archive-soul:{label}"),
+            human_actor_subject_id: primary_human_subject_id("archive-owner"),
+            charter: Box::new(charter),
+            source_asserted_at: Some(1_000),
+        })
+        .unwrap_or_else(|error| panic!("seed typed Subject Soul {label}: {error}"));
+    assert_eq!(report.outcome, SubjectSoulMutationOutcomeV1::Committed);
+}
+
 fn full_snapshot(handle: &MemoryStoreHandle) -> StoreSnapshot {
     handle
         .replay_harness()
@@ -139,6 +177,47 @@ fn scoped_event_ids(
         .collect()
 }
 
+fn scoped_non_soul_event_ids(
+    snapshot: &StoreSnapshot,
+    physical_scope: &StorePhysicalOwningScope,
+) -> BTreeSet<String> {
+    scoped_event_ids(snapshot, physical_scope)
+        .into_iter()
+        .filter(|event_id| {
+            snapshot
+                .events
+                .iter()
+                .find(|event| &event.event_id == event_id)
+                .is_some_and(|event| !is_subject_soul_event(event))
+        })
+        .collect()
+}
+
+fn scoped_soul_event_ids(
+    snapshot: &StoreSnapshot,
+    physical_scope: &StorePhysicalOwningScope,
+) -> BTreeSet<String> {
+    scoped_event_ids(snapshot, physical_scope)
+        .into_iter()
+        .filter(|event_id| {
+            snapshot
+                .events
+                .iter()
+                .find(|event| &event.event_id == event_id)
+                .is_some_and(is_subject_soul_event)
+        })
+        .collect()
+}
+
+fn is_subject_soul_event(event: &bm_sdk::nonproduction_replay_harness::MemoryStoreEvent) -> bool {
+    event.event_id.starts_with("subject-soul-event:")
+        || SUBJECT_GLOBAL_SOUL_NAMESPACES.contains(&event.plane.as_str())
+        || event
+            .payload
+            .get("operation")
+            .is_some_and(|operation| operation.starts_with("subject_soul."))
+}
+
 fn subject_global_soul_docs(
     snapshot: &StoreSnapshot,
 ) -> BTreeMap<(String, String), serde_json::Value> {
@@ -146,6 +225,44 @@ fn subject_global_soul_docs(
         .json_docs
         .iter()
         .filter(|doc| SUBJECT_GLOBAL_SOUL_NAMESPACES.contains(&doc.namespace.as_str()))
+        .map(|doc| ((doc.namespace.clone(), doc.key.clone()), doc.value.clone()))
+        .collect()
+}
+
+fn subject_soul_mor_docs(
+    snapshot: &StoreSnapshot,
+) -> BTreeMap<(String, String), serde_json::Value> {
+    snapshot
+        .json_docs
+        .iter()
+        .filter(|doc| {
+            let operation_kind = match doc.namespace.as_str() {
+                "memory_mutation_receipts" => {
+                    serde_json::from_value::<MemoryMutationReceipt>(doc.value.clone())
+                        .ok()
+                        .map(|receipt| receipt.identity.operation_kind())
+                }
+                "memory_mutation_audits" => {
+                    serde_json::from_value::<MemoryMutationAuditRecord>(doc.value.clone())
+                        .ok()
+                        .map(|audit| audit.identity.operation_kind())
+                }
+                _ => None,
+            };
+            operation_kind.is_some_and(|kind| {
+                matches!(
+                    kind,
+                    MemoryMutationOperationKind::SoulEvidence
+                        | MemoryMutationOperationKind::SoulProvision
+                        | MemoryMutationOperationKind::SoulRevision
+                        | MemoryMutationOperationKind::SoulArchive
+                        | MemoryMutationOperationKind::SoulRestore
+                        | MemoryMutationOperationKind::SoulReset
+                        | MemoryMutationOperationKind::SoulReseed
+                        | MemoryMutationOperationKind::SoulDelete
+                )
+            })
+        })
         .map(|doc| ((doc.namespace.clone(), doc.key.clone()), doc.value.clone()))
         .collect()
 }
@@ -226,24 +343,8 @@ fn assert_backend_scoped_archive_restore(backend: &str, root: &Path) {
         "target-old-shared",
     );
     seed_runtime_skill(&target_b, subject_scope(SUBJECT_B), "target-sibling-b");
-    for namespace in SUBJECT_GLOBAL_SOUL_NAMESPACES {
-        source
-            .replay_harness()
-            .tamper_json_document_for_nonproduction_harness(
-                namespace,
-                SUBJECT_A,
-                serde_json::json!({"backend": backend, "owner": "source", "namespace": namespace}),
-            )
-            .unwrap_or_else(|error| panic!("seed {backend} source Soul {namespace}: {error}"));
-        target
-            .replay_harness()
-            .tamper_json_document_for_nonproduction_harness(
-                namespace,
-                SUBJECT_A,
-                serde_json::json!({"backend": backend, "owner": "target", "namespace": namespace}),
-            )
-            .unwrap_or_else(|error| panic!("seed {backend} target Soul {namespace}: {error}"));
-    }
+    seed_subject_soul(&source_a, &format!("{backend}:source"));
+    seed_subject_soul(&target_a, &format!("{backend}:target"));
 
     let source_snapshot = full_snapshot(&source);
     let target_before = full_snapshot(&target);
@@ -285,9 +386,14 @@ fn assert_backend_scoped_archive_restore(backend: &str, root: &Path) {
         "{backend}: Subject replace must preserve sibling Subject"
     );
     assert_eq!(
-        scoped_event_ids(&after_subject, &subject_event_scope(SUBJECT_A)),
-        scoped_event_ids(&source_snapshot, &subject_event_scope(SUBJECT_A)),
-        "{backend}: Subject events"
+        scoped_non_soul_event_ids(&after_subject, &subject_event_scope(SUBJECT_A)),
+        scoped_non_soul_event_ids(&source_snapshot, &subject_event_scope(SUBJECT_A)),
+        "{backend}: Subject archive-owned events"
+    );
+    assert_eq!(
+        scoped_soul_event_ids(&after_subject, &subject_event_scope(SUBJECT_A)),
+        scoped_soul_event_ids(&target_before, &subject_event_scope(SUBJECT_A)),
+        "{backend}: Subject replace must preserve target Soul lifecycle events"
     );
     assert_eq!(
         scoped_event_ids(&after_subject, &StorePhysicalOwningScope::SharedProgram),
@@ -298,6 +404,11 @@ fn assert_backend_scoped_archive_restore(backend: &str, root: &Path) {
         subject_global_soul_docs(&after_subject),
         subject_global_soul_docs(&target_before),
         "{backend}: Subject replace must preserve every subject-global Soul/private owner"
+    );
+    assert_eq!(
+        subject_soul_mor_docs(&after_subject),
+        subject_soul_mor_docs(&target_before),
+        "{backend}: Subject replace must preserve target Soul operation receipts and audits"
     );
 
     import_memory_space(

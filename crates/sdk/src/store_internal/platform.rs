@@ -58,6 +58,10 @@ use crate::store_internal::schema::{
 use crate::store_internal::schema::{store_blob_namespaces, store_json_namespaces};
 #[cfg(feature = "sqlite-store")]
 use crate::store_internal::sqlite::SqliteStoreEngine;
+use crate::store_internal::subject_soul::{
+    build_subject_soul_open_certificate, validate_subject_soul_open_snapshot,
+    StoreOpenClosureCertificate, SubjectSoulStoreMutationAuthority,
+};
 use crate::store_internal::transaction::{
     read_governed_evidence_exact_in_session, BackendTransactionState,
     ConditionalDeleteEventTemplate, GraphRepairAuthority, StoreAdmissionAuthority,
@@ -75,9 +79,9 @@ use crate::{
     enforce_event_key_budget, enforce_logical_key_budget, store_budget_error,
     store_internal::embedded::EmbeddedStoreEngine, store_internal::file::FileStoreEngine,
     InMemoryStoreEngine, MemoryStoreEvent, MemoryStoreEventKind, StoreBackendConfig,
-    StoreBackendKind, StoreCapacityBudget, StoreEngine, StoreEngineMutation, StoreEventLog,
-    StoreEventScope, StoreJsonPrecondition, StoreMetricEventSourceRead, StoreMutation,
-    StoreMutationBatch, StoreMutationBatchReport, StoreOpenReport, StoreReadReceipt,
+    StoreBackendKind, StoreBlobPrecondition, StoreCapacityBudget, StoreEngine, StoreEngineMutation,
+    StoreEventLog, StoreEventScope, StoreJsonPrecondition, StoreMetricEventSourceRead,
+    StoreMutation, StoreMutationBatch, StoreMutationBatchReport, StoreOpenReport, StoreReadReceipt,
     StoreRepairReport, StoreSchemaManifest, StoreScopedProjectionReplaceReport,
     StoreScopedProjectionReplaceRequest, StoreScopedProjectionRequest, StoreScopedProjectionScope,
     StoreSnapshot, StoreSnapshotJsonDoc, StoreTransactionAdmission, StoreTransactionRequest,
@@ -95,6 +99,143 @@ type RecallIndexMutationPlan = (
     Option<serde_json::Value>,
 );
 
+/// SDK-private physical owner plan assembled before one governed Store commit.
+///
+/// Core self-runtime effects are deliberately not accepted here: SDK runtime owns
+/// the effect-to-owner routing, while Store owns physical addresses, recall-index
+/// post-images, and optimistic preconditions.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct StoreOwnerMutationPlan {
+    pub(crate) mutations: Vec<StoreMutation>,
+    pub(crate) preconditions: Vec<StoreJsonPrecondition>,
+    pub(crate) blob_preconditions: Vec<StoreBlobPrecondition>,
+}
+
+impl StoreOwnerMutationPlan {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Vec<StoreMutation>,
+        Vec<StoreJsonPrecondition>,
+        Vec<StoreBlobPrecondition>,
+    ) {
+        (self.mutations, self.preconditions, self.blob_preconditions)
+    }
+}
+
+pub(crate) fn canonical_subject_soul_full_intent_digest(
+    core_intent_digest: &str,
+    additional_mutations: &[StoreMutation],
+    additional_preconditions: &[StoreJsonPrecondition],
+    additional_blob_preconditions: &[StoreBlobPrecondition],
+) -> Result<String> {
+    let canonical_core = core_intent_digest.len() == 64
+        && core_intent_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    if !canonical_core {
+        return Err(Error::invalid_input(
+            "subject_soul_full_intent_digest",
+            "Core intent digest must be canonical lowercase hex without a prefix",
+        ));
+    }
+    if additional_mutations.is_empty()
+        && additional_preconditions.is_empty()
+        && additional_blob_preconditions.is_empty()
+    {
+        return Ok(core_intent_digest.to_string());
+    }
+    fn canonical_parts<T: Serialize>(values: &[T]) -> Result<Vec<Vec<u8>>> {
+        let mut parts = values
+            .iter()
+            .map(|value| {
+                serde_json::to_vec(value).map_err(|error| {
+                    Error::config("subject_soul_full_intent_digest", error.to_string())
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        parts.sort();
+        Ok(parts)
+    }
+    let mut hasher = Sha256::new();
+    for part in [
+        b"beetle_memory_subject_soul_full_intent_v1".as_slice(),
+        core_intent_digest.as_bytes(),
+    ] {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part);
+    }
+    for group in [
+        canonical_parts(additional_mutations)?,
+        canonical_parts(additional_preconditions)?,
+        canonical_parts(additional_blob_preconditions)?,
+    ] {
+        hasher.update((group.len() as u64).to_be_bytes());
+        for part in group {
+            hasher.update((part.len() as u64).to_be_bytes());
+            hasher.update(part);
+        }
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn push_exact_json_precondition(
+    preconditions: &mut Vec<StoreJsonPrecondition>,
+    namespace: &str,
+    key: &str,
+    before: Option<serde_json::Value>,
+) -> Result<()> {
+    let next = match before {
+        Some(value) => StoreJsonPrecondition::Exact {
+            namespace: namespace.to_string(),
+            key: key.to_string(),
+            value,
+        },
+        None => StoreJsonPrecondition::Absent {
+            namespace: namespace.to_string(),
+            key: key.to_string(),
+        },
+    };
+    if let Some(existing) = preconditions
+        .iter()
+        .find(|precondition| match precondition {
+            StoreJsonPrecondition::Absent {
+                namespace: candidate_namespace,
+                key: candidate_key,
+            }
+            | StoreJsonPrecondition::Exact {
+                namespace: candidate_namespace,
+                key: candidate_key,
+                ..
+            } => candidate_namespace == namespace && candidate_key == key,
+        })
+    {
+        if existing != &next {
+            return Err(Error::conflict(
+                "store_owner_mutation_plan",
+                format!("conflicting owner preconditions for {namespace}/{key}"),
+            ));
+        }
+        return Ok(());
+    }
+    preconditions.push(next);
+    Ok(())
+}
+
+fn blob_precondition(namespace: &str, key: &str, before: Option<&[u8]>) -> StoreBlobPrecondition {
+    match before {
+        Some(value) => StoreBlobPrecondition::ExactDigest {
+            namespace: namespace.to_string(),
+            key: key.to_string(),
+            content_digest: format!("sha256:{:x}", Sha256::digest(value)),
+        },
+        None => StoreBlobPrecondition::Absent {
+            namespace: namespace.to_string(),
+            key: key.to_string(),
+        },
+    }
+}
+
 pub(crate) const GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE: &str = "governed_evidence_documents";
 pub(crate) const GOVERNED_EVIDENCE_SOURCE_REF_NAMESPACE: &str = "governed_evidence_source_refs";
 
@@ -107,6 +248,7 @@ pub(crate) struct StoreMutationOperationPlan {
     actor_subject_id: String,
     committed_at_unix_secs: u64,
     transaction_id: String,
+    subject_soul_authorized: bool,
 }
 
 impl StoreMutationOperationPlan {
@@ -151,11 +293,42 @@ impl StoreMutationOperationPlan {
             actor_subject_id,
             committed_at_unix_secs,
             transaction_id,
+            subject_soul_authorized: false,
         })
     }
 
     pub(crate) fn transaction_id(&self) -> &str {
         &self.transaction_id
+    }
+
+    pub(crate) fn identity(&self) -> &MemoryMutationOperationIdentity {
+        &self.identity
+    }
+
+    pub(crate) fn intent_digest(&self) -> &str {
+        &self.intent_digest
+    }
+
+    pub(crate) fn authorize_subject_soul(
+        mut self,
+        _authority: SubjectSoulStoreMutationAuthority,
+    ) -> Self {
+        self.subject_soul_authorized = true;
+        self
+    }
+
+    pub(super) fn bind_subject_soul_transaction(
+        mut self,
+        transaction_id: impl Into<String>,
+        _authority: SubjectSoulStoreMutationAuthority,
+    ) -> Self {
+        self.transaction_id = transaction_id.into();
+        self.subject_soul_authorized = true;
+        self
+    }
+
+    fn subject_soul_authorized(&self) -> bool {
+        self.subject_soul_authorized
     }
 }
 
@@ -245,6 +418,7 @@ impl StoreOpenPreflight {
         let mut post_open = snapshot.clone();
         post_open.events.push(self.required_open_event.clone());
         validate_snapshot_import_contract(snapshot, &self.governed_state_budget, self.capacity)
+            .and_then(|_| validate_subject_soul_open_snapshot(snapshot).map(|_| ()))
             .and_then(|_| enforce_snapshot_logical_budget(self.capacity, &post_open))
             .map_err(|error| Error::config(stage, error.to_string()))
     }
@@ -259,6 +433,7 @@ pub struct StorePlatform {
     schema_manifest: StoreSchemaManifest,
     open_report: StoreOpenReport,
     runtime_budget_authority: Arc<RuntimeBudgetAuthority>,
+    subject_soul_open_closure_certificate: Arc<StoreOpenClosureCertificate>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -275,6 +450,18 @@ struct StoreBatchEventContext<'a> {
     kind: MemoryStoreEventKind,
     plane: &'a str,
     record_key: &'a str,
+}
+
+#[derive(Clone, Copy)]
+struct StoreCommitPreconditions<'a> {
+    json: &'a [StoreJsonPrecondition],
+    blobs: &'a [StoreBlobPrecondition],
+}
+
+impl<'a> StoreCommitPreconditions<'a> {
+    const fn new(json: &'a [StoreJsonPrecondition], blobs: &'a [StoreBlobPrecondition]) -> Self {
+        Self { json, blobs }
+    }
 }
 
 pub(crate) struct StorePlatformPreparation {
@@ -678,6 +865,11 @@ impl StorePlatform {
             schema_id: STORE_SCHEMA_ID.to_string(),
             repair,
         };
+        let subject_soul_open_closure_certificate = Arc::new(
+            build_subject_soul_open_certificate(engine.as_ref(), capacity).map_err(|error| {
+                Error::config("store_subject_soul_open_closure", error.to_string())
+            })?,
+        );
         let platform = Self {
             config,
             capacity,
@@ -686,6 +878,7 @@ impl StorePlatform {
             schema_manifest,
             open_report: report.clone(),
             runtime_budget_authority,
+            subject_soul_open_closure_certificate,
         };
         platform.append_validated_event(open_event)?;
         Ok((platform, report))
@@ -755,7 +948,10 @@ impl StorePlatform {
                 "immutable session-open count overflow",
             )
         })?;
-        let mut context = RecallImmutableReadContext::new(session);
+        let mut context = RecallImmutableReadContext::new(session)
+            .with_subject_soul_open_closure_certificate(
+                self.subject_soul_open_closure_certificate().clone(),
+            );
         let output = read(&mut context)?;
         let mut receipt_count = 0u64;
         let (receipt, read_set) = context.finish()?;
@@ -814,6 +1010,14 @@ impl StorePlatform {
         self.runtime_budget_authority.clone()
     }
 
+    pub(crate) fn engine_for_subject_soul(&self) -> &dyn StoreEngine {
+        self.engine.as_ref()
+    }
+
+    pub(crate) fn subject_soul_open_closure_certificate(&self) -> &StoreOpenClosureCertificate {
+        self.subject_soul_open_closure_certificate.as_ref()
+    }
+
     pub fn open_report(&self) -> &StoreOpenReport {
         &self.open_report
     }
@@ -842,7 +1046,7 @@ impl StorePlatform {
     ) -> Result<StoreMutationBatchReport> {
         self.commit_governed_memory_transaction_authorized(
             batch,
-            preconditions,
+            StoreCommitPreconditions::new(preconditions, &[]),
             None,
             None,
             None,
@@ -850,15 +1054,16 @@ impl StorePlatform {
         )
     }
 
-    pub(crate) fn commit_governed_memory_transaction_with_runtime_budget(
+    pub(crate) fn commit_governed_memory_transaction_with_blob_preconditions_and_runtime_budget(
         &self,
         batch: StoreMutationBatch,
         preconditions: &[StoreJsonPrecondition],
+        blob_preconditions: &[StoreBlobPrecondition],
         runtime_budget: &RuntimeBudgetReport,
     ) -> Result<StoreMutationBatchReport> {
         self.commit_governed_memory_transaction_authorized(
             batch,
-            preconditions,
+            StoreCommitPreconditions::new(preconditions, blob_preconditions),
             None,
             Some(runtime_budget),
             None,
@@ -875,7 +1080,25 @@ impl StorePlatform {
     ) -> Result<StoreMutationBatchReport> {
         self.commit_governed_memory_transaction_authorized(
             batch,
-            preconditions,
+            StoreCommitPreconditions::new(preconditions, &[]),
+            None,
+            Some(runtime_budget),
+            Some(runtime_timestamp_unix_secs),
+            None,
+        )
+    }
+
+    pub(crate) fn commit_governed_memory_transaction_with_blob_preconditions_and_runtime_budget_at(
+        &self,
+        batch: StoreMutationBatch,
+        preconditions: &[StoreJsonPrecondition],
+        blob_preconditions: &[StoreBlobPrecondition],
+        runtime_budget: &RuntimeBudgetReport,
+        runtime_timestamp_unix_secs: u64,
+    ) -> Result<StoreMutationBatchReport> {
+        self.commit_governed_memory_transaction_authorized(
+            batch,
+            StoreCommitPreconditions::new(preconditions, blob_preconditions),
             None,
             Some(runtime_budget),
             Some(runtime_timestamp_unix_secs),
@@ -892,7 +1115,7 @@ impl StorePlatform {
     ) -> Result<StoreMutationBatchReport> {
         self.commit_governed_memory_transaction_authorized(
             batch,
-            preconditions,
+            StoreCommitPreconditions::new(preconditions, &[]),
             Some(authority),
             Some(runtime_budget),
             None,
@@ -904,6 +1127,23 @@ impl StorePlatform {
         &self,
         batch: StoreMutationBatch,
         preconditions: &[StoreJsonPrecondition],
+        operation: StoreMutationOperationPlan,
+        runtime_budget: &RuntimeBudgetReport,
+    ) -> Result<StoreMutationOperationOutcome> {
+        self.commit_memory_mutation_operation_with_blob_preconditions_and_runtime_budget(
+            batch,
+            preconditions,
+            &[],
+            operation,
+            runtime_budget,
+        )
+    }
+
+    pub(crate) fn commit_memory_mutation_operation_with_blob_preconditions_and_runtime_budget(
+        &self,
+        batch: StoreMutationBatch,
+        preconditions: &[StoreJsonPrecondition],
+        blob_preconditions: &[StoreBlobPrecondition],
         operation: StoreMutationOperationPlan,
         runtime_budget: &RuntimeBudgetReport,
     ) -> Result<StoreMutationOperationOutcome> {
@@ -922,7 +1162,7 @@ impl StorePlatform {
         }
         let commit = self.commit_governed_memory_transaction_authorized(
             batch,
-            preconditions,
+            StoreCommitPreconditions::new(preconditions, blob_preconditions),
             None,
             Some(runtime_budget),
             Some(operation.committed_at_unix_secs),
@@ -1044,13 +1284,14 @@ impl StorePlatform {
     fn commit_governed_memory_transaction_authorized(
         &self,
         mut batch: StoreMutationBatch,
-        preconditions: &[StoreJsonPrecondition],
+        commit_preconditions: StoreCommitPreconditions<'_>,
         graph_repair_authority: Option<GraphRepairAuthority>,
         pinned_runtime_budget: Option<&RuntimeBudgetReport>,
         runtime_timestamp_unix_secs: Option<u64>,
         mutation_operation: Option<&StoreMutationOperationPlan>,
     ) -> Result<StoreMutationBatchReport> {
-        let mut preconditions = preconditions.to_vec();
+        let mut preconditions = commit_preconditions.json.to_vec();
+        let blob_preconditions = commit_preconditions.blobs;
         let transaction_timestamp =
             canonical_transaction_timestamp(&batch, runtime_timestamp_unix_secs)?;
         self.append_conversation_derived_ref_recall_index_closure(
@@ -1098,7 +1339,13 @@ impl StorePlatform {
         validate_batch_mutation_namespaces(&batch, &preconditions, |namespace, key| {
             self.engine.get_blob(namespace, key)
         })?;
-        validate_protected_json_mutation_preconditions(&batch, &preconditions)?;
+        let subject_soul_authorized =
+            mutation_operation.is_some_and(StoreMutationOperationPlan::subject_soul_authorized);
+        validate_protected_json_mutation_preconditions(
+            &batch,
+            &preconditions,
+            subject_soul_authorized,
+        )?;
         validate_mutation_operation_closure(&batch, &preconditions, mutation_operation)?;
         validate_recall_index_mutation_closure(
             &batch,
@@ -1143,7 +1390,12 @@ impl StorePlatform {
                         key,
                         "memory_write_transaction",
                     )
-                    .map_err(memory_write_transaction_preflight_error)?;
+                    .map_err(|error| {
+                        memory_write_transaction_preflight_error_for_authority(
+                            error,
+                            subject_soul_authorized,
+                        )
+                    })?;
                     let event_scope =
                         graph_effect_event_scope(&batch.scope, namespace, key, &graph_scopes);
                     let event = self.build_batch_event_in_scope(
@@ -1155,15 +1407,24 @@ impl StorePlatform {
                             plane,
                             record_key,
                         },
-                        stable_hash_json(value)
-                            .map_err(memory_write_transaction_preflight_error)?,
+                        stable_hash_json(value).map_err(|error| {
+                            memory_write_transaction_preflight_error_for_authority(
+                                error,
+                                subject_soul_authorized,
+                            )
+                        })?,
                     );
                     enforce_event_key_budget(
                         operation_capacity,
                         &event,
                         "memory_write_transaction",
                     )
-                    .map_err(memory_write_transaction_preflight_error)?;
+                    .map_err(|error| {
+                        memory_write_transaction_preflight_error_for_authority(
+                            error,
+                            subject_soul_authorized,
+                        )
+                    })?;
                     engine_mutations.push(StoreEngineMutation::PutJson {
                         namespace: namespace.clone(),
                         key: key.clone(),
@@ -1187,7 +1448,12 @@ impl StorePlatform {
                         key,
                         "memory_write_transaction",
                     )
-                    .map_err(memory_write_transaction_preflight_error)?;
+                    .map_err(|error| {
+                        memory_write_transaction_preflight_error_for_authority(
+                            error,
+                            subject_soul_authorized,
+                        )
+                    })?;
                     let event_scope =
                         graph_effect_event_scope(&batch.scope, namespace, key, &graph_scopes);
                     let event_template =
@@ -1220,7 +1486,12 @@ impl StorePlatform {
                         key,
                         "memory_write_transaction",
                     )
-                    .map_err(memory_write_transaction_preflight_error)?;
+                    .map_err(|error| {
+                        memory_write_transaction_preflight_error_for_authority(
+                            error,
+                            subject_soul_authorized,
+                        )
+                    })?;
                     let event = self.build_batch_event(
                         &batch,
                         transaction_timestamp,
@@ -1234,7 +1505,12 @@ impl StorePlatform {
                         &event,
                         "memory_write_transaction",
                     )
-                    .map_err(memory_write_transaction_preflight_error)?;
+                    .map_err(|error| {
+                        memory_write_transaction_preflight_error_for_authority(
+                            error,
+                            subject_soul_authorized,
+                        )
+                    })?;
                     engine_mutations.push(StoreEngineMutation::PutBlob {
                         namespace: namespace.clone(),
                         key: key.clone(),
@@ -1262,7 +1538,12 @@ impl StorePlatform {
                         key,
                         "memory_write_transaction",
                     )
-                    .map_err(memory_write_transaction_preflight_error)?;
+                    .map_err(|error| {
+                        memory_write_transaction_preflight_error_for_authority(
+                            error,
+                            subject_soul_authorized,
+                        )
+                    })?;
                     let event_template = self.build_batch_event_template(
                         &batch,
                         transaction_timestamp,
@@ -1278,7 +1559,12 @@ impl StorePlatform {
                 }
                 StoreMutation::AppendEvent { event } => {
                     enforce_event_key_budget(operation_capacity, event, "memory_write_transaction")
-                        .map_err(memory_write_transaction_preflight_error)?;
+                        .map_err(|error| {
+                            memory_write_transaction_preflight_error_for_authority(
+                                error,
+                                subject_soul_authorized,
+                            )
+                        })?;
                     engine_mutations.push(StoreEngineMutation::AppendEvent {
                         event: event.clone(),
                     });
@@ -1294,6 +1580,7 @@ impl StorePlatform {
             engine_mutations,
             Some(Box::new(batch.clone())),
         )
+        .with_blob_preconditions(blob_preconditions.to_vec())
         .with_governed_long_term_retention_limit(
             runtime_budget
                 .governed_state_budget
@@ -1332,7 +1619,9 @@ impl StorePlatform {
         let engine_report = self
             .engine
             .commit_transaction_admitted(&request, &admission)
-            .map_err(memory_write_transaction_commit_error)?;
+            .map_err(|error| {
+                memory_write_transaction_commit_error(error, subject_soul_authorized)
+            })?;
 
         Ok(StoreMutationBatchReport {
             transaction_id: batch.transaction_id,
@@ -1881,12 +2170,25 @@ impl StorePlatform {
             },
             operation_capacity,
         )?;
-        let snapshot = StoreSnapshot::new(
-            self.schema_manifest.clone(),
-            projection.json_docs,
-            Vec::new(),
-            projection.events,
-        );
+        let json_docs = projection
+            .json_docs
+            .into_iter()
+            .filter_map(|document| {
+                crate::store_internal::engine::json_document_is_protected_owner(
+                    &document.namespace,
+                    &document.value,
+                )
+                .map(|protected| (!protected).then_some(document))
+                .transpose()
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let events = projection
+            .events
+            .into_iter()
+            .filter(|event| !crate::store_internal::engine::event_is_protected_owner(event))
+            .collect();
+        let snapshot =
+            StoreSnapshot::new(self.schema_manifest.clone(), json_docs, Vec::new(), events);
         self.enforce_snapshot_budget(
             &snapshot,
             self.capacity.snapshot_max_bytes,
@@ -1931,6 +2233,27 @@ impl StorePlatform {
                 "typed memory-space archive must not contain unowned blobs",
             ));
         }
+        for document in &snapshot.json_docs {
+            if crate::store_internal::engine::json_document_is_protected_owner(
+                &document.namespace,
+                &document.value,
+            )? {
+                return Err(Error::config(
+                    "memory_space_import",
+                    "typed memory-space archive must not contain protected Soul/Relationship state",
+                ));
+            }
+        }
+        if snapshot
+            .events
+            .iter()
+            .any(crate::store_internal::engine::event_is_protected_owner)
+        {
+            return Err(Error::config(
+                "memory_space_import",
+                "typed memory-space archive must not contain protected Soul/Relationship events",
+            ));
+        }
         let admission = self.store_transaction_admission_for_report(runtime_budget)?;
         let replace = self.engine.replace_scoped_projection(
             &StoreScopedProjectionReplaceRequest {
@@ -1940,6 +2263,7 @@ impl StorePlatform {
                     .collect(),
                 json_docs: snapshot.json_docs.clone(),
                 events: snapshot.events.clone(),
+                preserve_protected_owner_state: true,
             },
             &admission,
         )?;
@@ -2066,12 +2390,524 @@ impl StorePlatform {
                 scope,
                 mutations: owner_mutations,
             },
-            &preconditions,
+            StoreCommitPreconditions::new(&preconditions, &[]),
             None,
             None,
             runtime_timestamp_unix_secs,
             None,
         )
+    }
+
+    pub(crate) fn plan_world_sense_set(
+        &self,
+        scope_id: &str,
+        value: &WorldSense,
+    ) -> Result<StoreOwnerMutationPlan> {
+        self.plan_typed_json_owner_put("world_sense", scope_id, value)
+    }
+
+    pub(crate) fn plan_world_sense_clear(&self, scope_id: &str) -> Result<StoreOwnerMutationPlan> {
+        self.plan_json_owner_delete("world_sense", scope_id)
+    }
+
+    pub(crate) fn plan_continuity_capsule_upserts(
+        &self,
+        drafts: &[ContinuityCapsuleDraft],
+        now_secs: u64,
+    ) -> Result<StoreOwnerMutationPlan> {
+        let mut plan = StoreOwnerMutationPlan::default();
+        let mut staged_indexes = BTreeMap::<
+            String,
+            (
+                Option<serde_json::Value>,
+                Option<ContinuityCapsuleScopeIndex>,
+            ),
+        >::new();
+        for draft in drafts {
+            let capsule_id = stable_hash_id(
+                "cc",
+                &(
+                    draft.kind.label(),
+                    draft.scope_kind.label(),
+                    &draft.scope_id,
+                    &draft.topic,
+                ),
+            );
+            let capsule = ContinuityCapsule {
+                capsule_id: capsule_id.clone(),
+                kind: draft.kind,
+                scope_kind: draft.scope_kind,
+                scope_id: draft.scope_id.clone(),
+                source_chat_id: draft.source_chat_id.clone(),
+                source_channel: draft.source_channel.clone(),
+                run_id: draft.run_id.clone(),
+                topic: draft.topic.clone(),
+                summary: draft.summary.clone(),
+                outcome: draft.outcome.clone(),
+                decisions: draft.decisions.clone(),
+                next_step: draft.next_step.clone(),
+                unresolved: draft.unresolved.clone(),
+                artifact_refs: draft.artifact_refs.clone(),
+                provenance_refs: draft.provenance_refs.clone(),
+                source: draft.source,
+                status: draft.status,
+                supersedes: Vec::new(),
+                observed_at: if draft.observed_at > 0 {
+                    draft.observed_at
+                } else {
+                    now_secs
+                },
+                updated_at: now_secs,
+            };
+            if !capsule.is_meaningful() {
+                continue;
+            }
+            let owner_before = self
+                .engine
+                .get_json_value("continuity_capsule", &capsule_id)?;
+            push_exact_json_precondition(
+                &mut plan.preconditions,
+                "continuity_capsule",
+                &capsule_id,
+                owner_before.clone(),
+            )?;
+            let scope_kind = capsule.scope_kind.label();
+            let manifest_key = ContinuityCapsuleScopeIndex::build(
+                1,
+                &self.config.event_scope.memory_space_id,
+                scope_kind,
+                &capsule.scope_id,
+                std::iter::empty(),
+            )?
+            .physical_key;
+            if !staged_indexes.contains_key(&manifest_key) {
+                let before = self
+                    .engine
+                    .get_json_value(ContinuityCapsuleScopeIndex::NAMESPACE, &manifest_key)?;
+                let current = before
+                    .clone()
+                    .map(|value| {
+                        decode_typed_recall_index::<ContinuityCapsuleScopeIndex>(
+                            &manifest_key,
+                            value,
+                        )
+                    })
+                    .transpose()?;
+                if owner_before.is_some() && current.is_none() {
+                    return Err(Error::config(
+                        "continuity_capsule_scope_index",
+                        "capsule exists without its required scope index",
+                    ));
+                }
+                staged_indexes.insert(manifest_key.clone(), (before, current));
+            }
+            let (_, current) = staged_indexes
+                .get_mut(&manifest_key)
+                .expect("staged continuity index exists");
+            let previous_entries = current
+                .as_ref()
+                .map(|index| index.entries.as_slice())
+                .unwrap_or(&[]);
+            let value = serde_json::to_value(&capsule).map_err(|error| {
+                Error::config("continuity_capsule_scope_index", error.to_string())
+            })?;
+            let address = RecallIndexAddress::json(
+                "continuity_capsule",
+                &capsule_id,
+                next_entry_revision(
+                    previous_entries,
+                    RecallIndexAddressKind::Json,
+                    "continuity_capsule",
+                    &capsule_id,
+                ),
+                capsule.updated_at,
+                &value,
+            )?;
+            *current = Some(ContinuityCapsuleScopeIndex::build(
+                current
+                    .as_ref()
+                    .map(|index| index.revision.saturating_add(1))
+                    .unwrap_or(1),
+                &self.config.event_scope.memory_space_id,
+                scope_kind,
+                &capsule.scope_id,
+                replace_recall_index_address(previous_entries, address),
+            )?);
+            plan.mutations.push(StoreMutation::PutJson {
+                namespace: "continuity_capsule".to_string(),
+                key: capsule_id.clone(),
+                value,
+                event_kind: MemoryStoreEventKind::MemoryWrite,
+                plane: "continuity_capsule".to_string(),
+                record_key: capsule_id,
+            });
+        }
+        for (key, (before, current)) in staged_indexes {
+            push_exact_json_precondition(
+                &mut plan.preconditions,
+                ContinuityCapsuleScopeIndex::NAMESPACE,
+                &key,
+                before,
+            )?;
+            let value = serde_json::to_value(current.expect("staged index has a post-image"))
+                .map_err(|error| {
+                    Error::config("continuity_capsule_scope_index", error.to_string())
+                })?;
+            plan.mutations.push(StoreMutation::PutJson {
+                namespace: ContinuityCapsuleScopeIndex::NAMESPACE.to_string(),
+                key: key.clone(),
+                value,
+                event_kind: MemoryStoreEventKind::MemoryWrite,
+                plane: ContinuityCapsuleScopeIndex::NAMESPACE.to_string(),
+                record_key: key,
+            });
+        }
+        Ok(plan)
+    }
+
+    pub(crate) fn plan_task_learning_upsert(
+        &self,
+        record: &TaskLearningRecord,
+    ) -> Result<StoreOwnerMutationPlan> {
+        let owner_key = record.learning_id.clone();
+        let previous_value = self.engine.get_json_value("task_learning", &owner_key)?;
+        let previous_record = previous_value
+            .clone()
+            .map(serde_json::from_value::<TaskLearningRecord>)
+            .transpose()
+            .map_err(|error| Error::config("task_learning_by_chat_index", error.to_string()))?;
+        let value = serde_json::to_value(record)
+            .map_err(|error| Error::config("task_learning_by_chat_index", error.to_string()))?;
+        let mut plan = StoreOwnerMutationPlan::default();
+        push_exact_json_precondition(
+            &mut plan.preconditions,
+            "task_learning",
+            &owner_key,
+            previous_value,
+        )?;
+        let mut indexes =
+            BTreeMap::<String, (Option<serde_json::Value>, Option<TaskLearningByChatIndex>)>::new();
+        if let Some(previous) = previous_record.as_ref().filter(|previous| {
+            previous.source_channel != record.source_channel
+                || previous.source_chat_id != record.source_chat_id
+        }) {
+            let key = TaskLearningByChatIndex::build(
+                1,
+                &self.config.event_scope.memory_space_id,
+                &previous.source_channel,
+                &previous.source_chat_id,
+                std::iter::empty(),
+            )?
+            .physical_key;
+            let before = self
+                .engine
+                .get_json_value(TaskLearningByChatIndex::NAMESPACE, &key)?;
+            let current = before
+                .clone()
+                .map(|value| decode_typed_recall_index::<TaskLearningByChatIndex>(&key, value))
+                .transpose()?
+                .ok_or_else(|| {
+                    Error::config(
+                        "task_learning_by_chat_index",
+                        "task learning exists without its prior chat index",
+                    )
+                })?;
+            let next = TaskLearningByChatIndex::build(
+                current.revision.saturating_add(1),
+                &self.config.event_scope.memory_space_id,
+                &previous.source_channel,
+                &previous.source_chat_id,
+                remove_recall_index_address(
+                    &current.entries,
+                    RecallIndexAddressKind::Json,
+                    "task_learning",
+                    &owner_key,
+                ),
+            )?;
+            indexes.insert(key, (before, Some(next)));
+        }
+        let new_key = TaskLearningByChatIndex::build(
+            1,
+            &self.config.event_scope.memory_space_id,
+            &record.source_channel,
+            &record.source_chat_id,
+            std::iter::empty(),
+        )?
+        .physical_key;
+        let (before, current) = if let Some(staged) = indexes.remove(&new_key) {
+            staged
+        } else {
+            let before = self
+                .engine
+                .get_json_value(TaskLearningByChatIndex::NAMESPACE, &new_key)?;
+            let current = before
+                .clone()
+                .map(|value| decode_typed_recall_index::<TaskLearningByChatIndex>(&new_key, value))
+                .transpose()?;
+            (before, current)
+        };
+        if previous_record.is_some() && current.is_none() {
+            return Err(Error::config(
+                "task_learning_by_chat_index",
+                "task learning exists without its required chat index",
+            ));
+        }
+        let previous_entries = current
+            .as_ref()
+            .map(|index| index.entries.as_slice())
+            .unwrap_or(&[]);
+        let address = RecallIndexAddress::json(
+            "task_learning",
+            &owner_key,
+            next_entry_revision(
+                previous_entries,
+                RecallIndexAddressKind::Json,
+                "task_learning",
+                &owner_key,
+            ),
+            record.observed_at,
+            &value,
+        )?;
+        let next = TaskLearningByChatIndex::build(
+            current
+                .as_ref()
+                .map(|index| index.revision.saturating_add(1))
+                .unwrap_or(1),
+            &self.config.event_scope.memory_space_id,
+            &record.source_channel,
+            &record.source_chat_id,
+            replace_recall_index_address(previous_entries, address),
+        )?;
+        indexes.insert(new_key, (before, Some(next)));
+        for (key, (before, next)) in indexes {
+            push_exact_json_precondition(
+                &mut plan.preconditions,
+                TaskLearningByChatIndex::NAMESPACE,
+                &key,
+                before,
+            )?;
+            plan.mutations.push(StoreMutation::PutJson {
+                namespace: TaskLearningByChatIndex::NAMESPACE.to_string(),
+                key: key.clone(),
+                value: serde_json::to_value(next.expect("staged task-learning index exists"))
+                    .map_err(|error| {
+                        Error::config("task_learning_by_chat_index", error.to_string())
+                    })?,
+                event_kind: MemoryStoreEventKind::MemoryWrite,
+                plane: TaskLearningByChatIndex::NAMESPACE.to_string(),
+                record_key: key,
+            });
+        }
+        plan.mutations.push(StoreMutation::PutJson {
+            namespace: "task_learning".to_string(),
+            key: owner_key.clone(),
+            value,
+            event_kind: MemoryStoreEventKind::MemoryWrite,
+            plane: "task_learning".to_string(),
+            record_key: owner_key,
+        });
+        Ok(plan)
+    }
+
+    pub(crate) fn plan_task_artifact_put(
+        &self,
+        record: &TaskArtifactRecord,
+    ) -> Result<StoreOwnerMutationPlan> {
+        self.plan_typed_json_owner_put(
+            "task_artifact",
+            &triple_key("", &record.artifact.run_id, &record.artifact.artifact_id),
+            record,
+        )
+    }
+
+    pub(crate) fn plan_task_artifact_delete(
+        &self,
+        run_id: &str,
+        artifact_id: &str,
+    ) -> Result<StoreOwnerMutationPlan> {
+        self.plan_json_owner_delete("task_artifact", &triple_key("", run_id, artifact_id))
+    }
+
+    pub(crate) fn plan_runtime_skill_write(
+        &self,
+        name: &str,
+        content: &[u8],
+    ) -> Result<StoreOwnerMutationPlan> {
+        let before = self.engine.get_blob("skills", name)?;
+        Ok(StoreOwnerMutationPlan {
+            mutations: vec![StoreMutation::PutBlob {
+                namespace: "skills".to_string(),
+                key: name.to_string(),
+                value: content.to_vec(),
+                event_kind: MemoryStoreEventKind::MemoryWrite,
+                plane: "skills".to_string(),
+                record_key: name.to_string(),
+            }],
+            preconditions: Vec::new(),
+            blob_preconditions: vec![blob_precondition("skills", name, before.as_deref())],
+        })
+    }
+
+    pub(crate) fn plan_runtime_skill_remove(&self, name: &str) -> Result<StoreOwnerMutationPlan> {
+        let before = self.engine.get_blob("skills", name)?;
+        Ok(StoreOwnerMutationPlan {
+            mutations: before
+                .as_ref()
+                .map(|_| StoreMutation::DeleteBlob {
+                    namespace: "skills".to_string(),
+                    key: name.to_string(),
+                    event_kind: MemoryStoreEventKind::MemoryDelete,
+                    plane: "skills".to_string(),
+                    record_key: name.to_string(),
+                })
+                .into_iter()
+                .collect(),
+            preconditions: Vec::new(),
+            blob_preconditions: vec![blob_precondition("skills", name, before.as_deref())],
+        })
+    }
+
+    pub(crate) fn plan_legacy_memory_set(
+        &self,
+        content: &str,
+        now_secs: u64,
+    ) -> Result<StoreOwnerMutationPlan> {
+        self.plan_archive_blob_put("memory", "MEMORY.md", content.as_bytes(), now_secs)
+    }
+
+    pub(crate) fn plan_daily_note_write(
+        &self,
+        name: &str,
+        content: &str,
+        now_secs: u64,
+    ) -> Result<StoreOwnerMutationPlan> {
+        self.plan_archive_blob_put("daily", name, content.as_bytes(), now_secs)
+    }
+
+    fn plan_typed_json_owner_put<T: Serialize>(
+        &self,
+        namespace: &str,
+        key: &str,
+        value: &T,
+    ) -> Result<StoreOwnerMutationPlan> {
+        let value = serde_json::to_value(value)
+            .map_err(|error| Error::config("store_owner_mutation_plan", error.to_string()))?;
+        let before = self.engine.get_json_value(namespace, key)?;
+        let mut preconditions = Vec::new();
+        push_exact_json_precondition(&mut preconditions, namespace, key, before)?;
+        Ok(StoreOwnerMutationPlan {
+            mutations: vec![StoreMutation::PutJson {
+                namespace: namespace.to_string(),
+                key: key.to_string(),
+                value,
+                event_kind: MemoryStoreEventKind::MemoryWrite,
+                plane: namespace.to_string(),
+                record_key: key.to_string(),
+            }],
+            preconditions,
+            blob_preconditions: Vec::new(),
+        })
+    }
+
+    fn plan_json_owner_delete(&self, namespace: &str, key: &str) -> Result<StoreOwnerMutationPlan> {
+        let before = self.engine.get_json_value(namespace, key)?;
+        let mut preconditions = Vec::new();
+        push_exact_json_precondition(&mut preconditions, namespace, key, before.clone())?;
+        Ok(StoreOwnerMutationPlan {
+            mutations: before
+                .map(|_| StoreMutation::DeleteJson {
+                    namespace: namespace.to_string(),
+                    key: key.to_string(),
+                    event_kind: MemoryStoreEventKind::MemoryDelete,
+                    plane: namespace.to_string(),
+                    record_key: key.to_string(),
+                })
+                .into_iter()
+                .collect(),
+            preconditions,
+            blob_preconditions: Vec::new(),
+        })
+    }
+
+    fn plan_archive_blob_put(
+        &self,
+        namespace: &str,
+        key: &str,
+        value: &[u8],
+        now_secs: u64,
+    ) -> Result<StoreOwnerMutationPlan> {
+        let manifest_key = ArchiveRecallManifest::build(
+            1,
+            &self.config.event_scope.memory_space_id,
+            &self.config.event_scope.subject_id,
+            std::iter::empty(),
+        )?
+        .physical_key;
+        let (previous, before) =
+            self.load_typed_recall_index::<ArchiveRecallManifest>(&manifest_key)?;
+        let before_blob = self.engine.get_blob(namespace, key)?;
+        if before_blob.is_some() && previous.is_none() {
+            return Err(Error::config(
+                "archive_recall_manifest",
+                "archive blob exists without its required recall manifest",
+            ));
+        }
+        let previous_entries = previous
+            .as_ref()
+            .map(|index| index.entries.as_slice())
+            .unwrap_or(&[]);
+        let address = RecallIndexAddress::blob(
+            namespace,
+            key,
+            next_entry_revision(
+                previous_entries,
+                RecallIndexAddressKind::Blob,
+                namespace,
+                key,
+            ),
+            now_secs,
+            value,
+        )?;
+        let next = ArchiveRecallManifest::build(
+            previous
+                .as_ref()
+                .map(|index| index.revision.saturating_add(1))
+                .unwrap_or(1),
+            &self.config.event_scope.memory_space_id,
+            &self.config.event_scope.subject_id,
+            replace_recall_index_address(previous_entries, address),
+        )?;
+        let mut preconditions = Vec::new();
+        push_exact_json_precondition(
+            &mut preconditions,
+            ArchiveRecallManifest::NAMESPACE,
+            &manifest_key,
+            before,
+        )?;
+        Ok(StoreOwnerMutationPlan {
+            mutations: vec![
+                StoreMutation::PutBlob {
+                    namespace: namespace.to_string(),
+                    key: key.to_string(),
+                    value: value.to_vec(),
+                    event_kind: MemoryStoreEventKind::MemoryWrite,
+                    plane: namespace.to_string(),
+                    record_key: key.to_string(),
+                },
+                StoreMutation::PutJson {
+                    namespace: ArchiveRecallManifest::NAMESPACE.to_string(),
+                    key: manifest_key.clone(),
+                    value: serde_json::to_value(next).map_err(|error| {
+                        Error::config("archive_recall_manifest", error.to_string())
+                    })?,
+                    event_kind: MemoryStoreEventKind::MemoryWrite,
+                    plane: ArchiveRecallManifest::NAMESPACE.to_string(),
+                    record_key: manifest_key,
+                },
+            ],
+            preconditions,
+            blob_preconditions: vec![blob_precondition(namespace, key, before_blob.as_deref())],
+        })
     }
 
     fn recall_scope(&self) -> StoreEventScope {
@@ -3266,6 +4102,7 @@ fn validate_mutation_operation_closure(
 fn validate_protected_json_mutation_preconditions(
     batch: &StoreMutationBatch,
     preconditions: &[StoreJsonPrecondition],
+    operation_authorized: bool,
 ) -> Result<()> {
     const PROTECTED_NAMESPACES: &[&str] = &[
         crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
@@ -3294,6 +4131,15 @@ fn validate_protected_json_mutation_preconditions(
         POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
         MEMORY_MUTATION_RECEIPT_NAMESPACE,
         MEMORY_MUTATION_AUDIT_NAMESPACE,
+        crate::store_internal::schema::SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE,
+        crate::store_internal::schema::SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE,
+        crate::store_internal::schema::SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE,
+        crate::store_internal::schema::SUBJECT_SOUL_GENERATION_TOMBSTONE_NAMESPACE,
+        crate::store_internal::schema::RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE,
+        crate::store_internal::schema::RELATIONSHIP_SOURCE_SCOPE_MANIFEST_NAMESPACE,
+        crate::store_internal::schema::RELATIONSHIP_SOURCE_OPERATION_RESULT_NAMESPACE,
+        crate::store_internal::schema::SUBJECT_SOUL_RELATIONSHIP_PROJECTION_NAMESPACE,
+        crate::store_internal::schema::SUBJECT_SOUL_OPERATION_RESULT_NAMESPACE,
     ];
     let mut by_address = BTreeMap::<(String, String), &StoreJsonPrecondition>::new();
     for precondition in preconditions {
@@ -3329,6 +4175,265 @@ fn validate_protected_json_mutation_preconditions(
                 format!(
                     "protected JSON mutation requires a read-set precondition for namespace {namespace}, key {key}"
                 ),
+            ));
+        }
+    }
+    validate_subject_soul_mutation_root_preconditions(batch, preconditions, operation_authorized)
+}
+
+fn validate_subject_soul_mutation_root_preconditions(
+    batch: &StoreMutationBatch,
+    preconditions: &[StoreJsonPrecondition],
+    operation_authorized: bool,
+) -> Result<()> {
+    use crate::store_internal::schema::{
+        is_relationship_source_protected_json_namespace, is_subject_soul_protected_json_namespace,
+        RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE, RELATIONSHIP_SOURCE_SCOPE_MANIFEST_NAMESPACE,
+        SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE, SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE,
+    };
+
+    let json_mutations = batch
+        .mutations
+        .iter()
+        .filter_map(|mutation| match mutation {
+            StoreMutation::PutJson { namespace, key, .. }
+            | StoreMutation::DeleteJson { namespace, key, .. } => {
+                Some((namespace.as_str(), key.as_str()))
+            }
+            _ => None,
+        });
+    let addresses = json_mutations.collect::<Vec<_>>();
+    let soul_mutated = addresses
+        .iter()
+        .any(|(namespace, _)| is_subject_soul_protected_json_namespace(namespace));
+    if soul_mutated {
+        if !operation_authorized {
+            return Err(Error::config(
+                "memory_write_transaction_subject_soul_authority_missing",
+                "subject Soul protected namespace requires typed lifecycle closure authority",
+            ));
+        }
+        let head_keys = addresses
+            .iter()
+            .filter_map(|(namespace, key)| {
+                (*namespace == SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE).then_some(*key)
+            })
+            .collect::<BTreeSet<_>>();
+        let manifest_keys = addresses
+            .iter()
+            .filter_map(|(namespace, key)| {
+                (*namespace == SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE).then_some(*key)
+            })
+            .collect::<BTreeSet<_>>();
+        if head_keys.len() != 1 || head_keys != manifest_keys {
+            return Err(Error::config(
+                "memory_write_transaction_subject_soul_closure_missing",
+                "subject Soul protected namespace requires one exact lifecycle head and matching scope manifest mutation",
+            ));
+        }
+    }
+
+    let relationship_mutated = addresses
+        .iter()
+        .any(|(namespace, _)| is_relationship_source_protected_json_namespace(namespace));
+    if relationship_mutated {
+        if !operation_authorized {
+            return Err(Error::config(
+                "memory_write_transaction_relationship_source_authority_missing",
+                "relationship source protected namespace requires typed operation authority",
+            ));
+        }
+        let source_mutated = addresses
+            .iter()
+            .any(|(namespace, _)| *namespace == RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE);
+        let manifest_mutated = addresses
+            .iter()
+            .any(|(namespace, _)| *namespace == RELATIONSHIP_SOURCE_SCOPE_MANIFEST_NAMESPACE);
+        if !source_mutated || !manifest_mutated {
+            return Err(Error::config(
+                "memory_write_transaction_relationship_source_closure_missing",
+                "relationship source mutation requires its exact protected root and scope manifest",
+            ));
+        }
+    }
+
+    let root_mode = |namespace: &str, key: &str| {
+        preconditions
+            .iter()
+            .find_map(|precondition| match precondition {
+                StoreJsonPrecondition::Absent {
+                    namespace: candidate_namespace,
+                    key: candidate_key,
+                } if candidate_namespace == namespace && candidate_key == key => Some(false),
+                StoreJsonPrecondition::Exact {
+                    namespace: candidate_namespace,
+                    key: candidate_key,
+                    ..
+                } if candidate_namespace == namespace && candidate_key == key => Some(true),
+                _ => None,
+            })
+    };
+    for key in addresses.iter().filter_map(|(namespace, key)| {
+        (*namespace == SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE).then_some(*key)
+    }) {
+        if root_mode(SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE, key)
+            != root_mode(SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE, key)
+        {
+            return Err(Error::config(
+                "memory_write_transaction_subject_soul_root_cas_mismatch",
+                "lifecycle head and scope manifest require paired Absent or Exact CAS",
+            ));
+        }
+    }
+
+    for mutation in &batch.mutations {
+        let (projection_key, projection_value) = match mutation {
+            StoreMutation::PutJson {
+                namespace,
+                key,
+                value,
+                ..
+            } if namespace
+                == crate::store_internal::schema::SUBJECT_SOUL_RELATIONSHIP_PROJECTION_NAMESPACE =>
+            {
+                (key, value)
+            }
+            StoreMutation::DeleteJson { namespace, key, .. }
+                if namespace
+                    == crate::store_internal::schema::SUBJECT_SOUL_RELATIONSHIP_PROJECTION_NAMESPACE =>
+            {
+                let Some(StoreJsonPrecondition::Exact { value, .. }) = preconditions.iter().find(
+                    |precondition| match precondition {
+                        StoreJsonPrecondition::Exact {
+                            namespace: candidate_namespace,
+                            key: candidate_key,
+                            ..
+                        } => candidate_namespace == namespace && candidate_key == key,
+                        _ => false,
+                    },
+                ) else {
+                    return Err(Error::config(
+                        "memory_write_transaction_relationship_projection_four_cas_missing",
+                        "relationship projection delete requires its exact prior value",
+                    ));
+                };
+                (key, value)
+            }
+            _ => continue,
+        };
+        let projection =
+            serde_json::from_value::<SubjectSoulRelationshipProjectionV1>(projection_value.clone())
+                .map_err(|error| {
+                    Error::config(
+                        "memory_write_transaction_relationship_projection_four_cas_invalid",
+                        error.to_string(),
+                    )
+                })?;
+        let soul_root_key = crate::store_internal::schema::subject_soul_scope_key(
+            &projection.memory_space_id,
+            &projection.subject_id,
+            &projection.soul_id,
+        )?;
+        let relationship_manifest_key =
+            crate::store_internal::schema::relationship_source_scope_key(
+                &projection.memory_space_id,
+                &projection.relationship_id,
+            )?;
+        let find_cas = |namespace: &str, key: &str| {
+            preconditions
+                .iter()
+                .find(|precondition| match precondition {
+                    StoreJsonPrecondition::Absent {
+                        namespace: candidate_namespace,
+                        key: candidate_key,
+                    }
+                    | StoreJsonPrecondition::Exact {
+                        namespace: candidate_namespace,
+                        key: candidate_key,
+                        ..
+                    } => candidate_namespace == namespace && candidate_key == key,
+                })
+        };
+        let soul_is_exact = [
+            SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE,
+            SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE,
+        ]
+        .iter()
+        .all(|namespace| {
+            matches!(
+                find_cas(namespace, &soul_root_key),
+                Some(StoreJsonPrecondition::Exact { .. })
+            )
+        });
+        let relationship_is_cas_bound = match find_cas(
+            RELATIONSHIP_SOURCE_SCOPE_MANIFEST_NAMESPACE,
+            &relationship_manifest_key,
+        ) {
+            Some(StoreJsonPrecondition::Exact { value, .. }) => {
+                let prior_manifest = serde_json::from_value::<
+                    bm_core::memory::RelationshipSourceScopeManifestV1,
+                >(value.clone())
+                .map_err(|error| {
+                    Error::config(
+                        "memory_write_transaction_relationship_projection_four_cas_invalid",
+                        error.to_string(),
+                    )
+                })?;
+                let prior_source_key =
+                    crate::store_internal::schema::relationship_source_revision_key(
+                        &projection.memory_space_id,
+                        &projection.relationship_id,
+                        prior_manifest.current_revision,
+                    )?;
+                matches!(
+                    find_cas(
+                        RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE,
+                        &prior_source_key
+                    ),
+                    Some(StoreJsonPrecondition::Exact { .. })
+                )
+            }
+            Some(StoreJsonPrecondition::Absent { .. }) => {
+                let post_source_key =
+                    crate::store_internal::schema::relationship_source_revision_key(
+                        &projection.memory_space_id,
+                        &projection.relationship_id,
+                        projection.relationship_source_revision,
+                    )?;
+                matches!(
+                    find_cas(RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE, &post_source_key),
+                    Some(StoreJsonPrecondition::Absent { .. })
+                )
+            }
+            None => false,
+        };
+        if !soul_is_exact || !relationship_is_cas_bound {
+            return Err(Error::config(
+                "memory_write_transaction_relationship_projection_four_cas_missing",
+                format!(
+                    "relationship projection {projection_key} requires exact Soul head/manifest plus exact-current or pristine-absent relationship source/manifest four-CAS"
+                ),
+            ));
+        }
+    }
+
+    let precondition_addresses = preconditions
+        .iter()
+        .map(|precondition| match precondition {
+            StoreJsonPrecondition::Absent { namespace, key }
+            | StoreJsonPrecondition::Exact { namespace, key, .. } => {
+                (namespace.as_str(), key.as_str())
+            }
+        })
+        .collect::<BTreeSet<_>>();
+    for (namespace, key) in addresses {
+        if (is_subject_soul_protected_json_namespace(namespace)
+            || is_relationship_source_protected_json_namespace(namespace))
+            && !precondition_addresses.contains(&(namespace, key))
+        {
+            return Err(Error::config(
+                "memory_write_transaction_typed_precondition_missing",
+                format!("protected owner mutation requires Absent or Exact precondition for {namespace}:{key}"),
             ));
         }
     }
@@ -4260,6 +5365,12 @@ pub(crate) fn validate_governed_transaction_post_image(
         after,
         governed_runtime_skill_owner_limit,
     )?;
+    crate::store_internal::subject_soul::validate_subject_soul_transaction_post_image(
+        batch,
+        before,
+        after,
+        operation_capacity,
+    )?;
     validate_facet_post_image(batch, before, after)?;
     validate_graph_post_image(batch, before, after, graph_repair_authorized)?;
     validate_control_post_image(batch, before, after)
@@ -5026,6 +6137,110 @@ fn governed_transaction_dependency_json_reads(
                     ),
                     tombstone.last_owner_revision,
                 )?);
+            }
+            crate::store_internal::schema::SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE => {
+                let manifest = decode_transaction_dependency::<SubjectSoulScopeManifestV1>(
+                    value,
+                    "Subject Soul scope manifest",
+                )?;
+                reads.extend(
+                    manifest
+                        .entries
+                        .into_iter()
+                        .map(|entry| (entry.namespace, entry.physical_key)),
+                );
+            }
+            crate::store_internal::schema::SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE => {
+                let head = decode_transaction_dependency::<SubjectSoulLifecycleHeadV1>(
+                    value,
+                    "Subject Soul lifecycle head",
+                )?;
+                reads.extend(head.retained_revision_refs.into_iter().map(|key| {
+                    (
+                        crate::store_internal::schema::SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE
+                            .to_string(),
+                        key,
+                    )
+                }));
+                reads.extend(head.retained_tombstone_refs.into_iter().map(|key| {
+                    (
+                        crate::store_internal::schema::SUBJECT_SOUL_GENERATION_TOMBSTONE_NAMESPACE
+                            .to_string(),
+                        key,
+                    )
+                }));
+            }
+            crate::store_internal::schema::RELATIONSHIP_SOURCE_SCOPE_MANIFEST_NAMESPACE => {
+                let manifest = decode_transaction_dependency::<RelationshipSourceScopeManifestV1>(
+                    value,
+                    "Relationship Source scope manifest",
+                )?;
+                reads.insert((
+                    crate::store_internal::schema::RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE
+                        .to_string(),
+                    crate::store_internal::schema::relationship_source_revision_key(
+                        &manifest.memory_space_id,
+                        &manifest.relationship_id,
+                        manifest.current_revision,
+                    )?,
+                ));
+                reads.extend(manifest.retained_revision_refs.into_iter().map(|key| {
+                    (
+                        crate::store_internal::schema::RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE
+                            .to_string(),
+                        key,
+                    )
+                }));
+            }
+            crate::store_internal::schema::SUBJECT_SOUL_RELATIONSHIP_PROJECTION_NAMESPACE => {
+                let projection = decode_transaction_dependency::<
+                    SubjectSoulRelationshipProjectionV1,
+                >(value, "Subject Soul relationship projection")?;
+                let soul_scope_key = crate::store_internal::schema::subject_soul_scope_key(
+                    &projection.memory_space_id,
+                    &projection.subject_id,
+                    &projection.soul_id,
+                )?;
+                reads.extend([
+                    (
+                        crate::store_internal::schema::SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE
+                            .to_string(),
+                        soul_scope_key.clone(),
+                    ),
+                    (
+                        crate::store_internal::schema::SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE
+                            .to_string(),
+                        soul_scope_key,
+                    ),
+                    (
+                        crate::store_internal::schema::SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE
+                            .to_string(),
+                        crate::store_internal::schema::subject_soul_revision_material_key(
+                            &projection.memory_space_id,
+                            &projection.subject_id,
+                            &projection.soul_id,
+                            projection.generation,
+                            projection.soul_revision,
+                        )?,
+                    ),
+                    (
+                        crate::store_internal::schema::RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE
+                            .to_string(),
+                        crate::store_internal::schema::relationship_source_revision_key(
+                            &projection.memory_space_id,
+                            &projection.relationship_id,
+                            projection.relationship_source_revision,
+                        )?,
+                    ),
+                    (
+                        crate::store_internal::schema::RELATIONSHIP_SOURCE_SCOPE_MANIFEST_NAMESPACE
+                            .to_string(),
+                        crate::store_internal::schema::relationship_source_scope_key(
+                            &projection.memory_space_id,
+                            &projection.relationship_id,
+                        )?,
+                    ),
+                ]);
             }
             _ => {}
         }
@@ -7044,6 +8259,15 @@ fn validate_typed_json_mutation(
             | StoreJsonDecoderKind::RuntimeSkillScopeManifest
             | StoreJsonDecoderKind::MemoryMutationReceipt
             | StoreJsonDecoderKind::MemoryMutationAudit
+            | StoreJsonDecoderKind::SubjectSoulLifecycleHead
+            | StoreJsonDecoderKind::SubjectSoulRevisionMaterial
+            | StoreJsonDecoderKind::SubjectSoulScopeManifest
+            | StoreJsonDecoderKind::SubjectSoulGenerationTombstone
+            | StoreJsonDecoderKind::RelationshipSourceConstitution
+            | StoreJsonDecoderKind::RelationshipSourceScopeManifest
+            | StoreJsonDecoderKind::SubjectSoulRelationshipProjection
+            | StoreJsonDecoderKind::SubjectSoulOperationResult
+            | StoreJsonDecoderKind::RelationshipSourceOperationResult
     ) {
         return Ok(());
     }
@@ -7074,6 +8298,17 @@ fn validate_typed_json_mutation(
             "mutation receipt and audit records are append-only and require Absent preconditions",
         ));
     }
+    if matches!(
+        decoder,
+        StoreJsonDecoderKind::SubjectSoulOperationResult
+            | StoreJsonDecoderKind::RelationshipSourceOperationResult
+    ) && (deleting || !matches!(precondition, Some(StoreJsonPrecondition::Absent { .. })))
+    {
+        return Err(Error::config(
+            "memory_write_transaction_typed_precondition_invalid",
+            "Subject Soul durable operation results are append-only and require Absent preconditions",
+        ));
+    }
     if deleting && prior_value.is_none() {
         return Err(Error::config(
             "memory_write_transaction_typed_precondition_missing",
@@ -7093,6 +8328,19 @@ fn validate_typed_json_mutation(
         return Err(Error::config(
             "memory_write_transaction_typed_precondition_invalid",
             "immutable long-term material put requires Absent precondition",
+        ));
+    }
+    if matches!(
+        decoder,
+        StoreJsonDecoderKind::SubjectSoulRevisionMaterial
+            | StoreJsonDecoderKind::SubjectSoulGenerationTombstone
+            | StoreJsonDecoderKind::RelationshipSourceConstitution
+    ) && put_value.is_some()
+        && !matches!(precondition, Some(StoreJsonPrecondition::Absent { .. }))
+    {
+        return Err(Error::config(
+            "memory_write_transaction_typed_precondition_invalid",
+            "immutable Soul/relationship material put requires Absent precondition",
         ));
     }
     if let Some(value) = prior_value {
@@ -7312,7 +8560,25 @@ fn memory_write_transaction_preflight_error(error: Error) -> Error {
     }
 }
 
-fn memory_write_transaction_commit_error(error: Error) -> Error {
+fn memory_write_transaction_preflight_error_for_authority(
+    error: Error,
+    subject_soul_authorized: bool,
+) -> Error {
+    if subject_soul_authorized
+        && (error.stage().contains("budget") || error.stage().contains("capacity"))
+    {
+        Error::config("subject_soul_store_capacity", error.to_string())
+    } else {
+        memory_write_transaction_preflight_error(error)
+    }
+}
+
+fn memory_write_transaction_commit_error(error: Error, subject_soul_authorized: bool) -> Error {
+    if subject_soul_authorized
+        && matches!(error.stage(), "store_budget_exceeded" | "store_event_log")
+    {
+        return Error::config("subject_soul_store_capacity", error.to_string());
+    }
     match error.stage() {
         "store_budget_exceeded" | "store_event_log" | "store_snapshot_import" => {
             memory_write_transaction_preflight_error(error)
@@ -8940,7 +10206,7 @@ impl ConversationTranscriptStore for StorePlatform {
                     record_key,
                 }],
             },
-            &[],
+            StoreCommitPreconditions::new(&[], &[]),
             None,
             None,
             Some(derived.created_at),
@@ -11293,6 +12559,122 @@ mod transaction_error_contract_tests {
 
     #[cfg(feature = "nonproduction-replay-harness")]
     #[test]
+    fn runtime_skill_owner_plan_uses_blob_cas_and_stale_commit_changes_nothing() {
+        let platform = StorePlatform::open(
+            StoreBackendConfig::in_memory(native_production_profile()).expect("store config"),
+        )
+        .expect("store platform");
+        let stale = platform
+            .plan_runtime_skill_write("owner.md", b"stale")
+            .expect("stale owner plan");
+        let concurrent = platform
+            .plan_runtime_skill_write("owner.md", b"concurrent")
+            .expect("concurrent owner plan");
+        let authority = platform.runtime_budget_authority();
+        let lease = crate::RuntimeBudgetLease::issue(Arc::clone(&authority)).expect("budget lease");
+        let (mutations, preconditions, blob_preconditions) = concurrent.into_parts();
+        lease
+            .execute(&authority, || {
+                platform
+                    .commit_governed_memory_transaction_with_blob_preconditions_and_runtime_budget(
+                        StoreMutationBatch {
+                            transaction_id: "skill-cas-concurrent".to_string(),
+                            operation: "skill.write".to_string(),
+                            scope: platform.recall_scope(),
+                            mutations,
+                        },
+                        &preconditions,
+                        &blob_preconditions,
+                        lease.report(),
+                    )
+            })
+            .expect("concurrent owner commit");
+        let before_events = platform.read_events().expect("events before stale");
+        let (mutations, preconditions, blob_preconditions) = stale.into_parts();
+        let stale_lease =
+            crate::RuntimeBudgetLease::issue(Arc::clone(&authority)).expect("stale budget lease");
+        let error = stale_lease
+            .execute(&authority, || {
+                platform
+                    .commit_governed_memory_transaction_with_blob_preconditions_and_runtime_budget(
+                        StoreMutationBatch {
+                            transaction_id: "skill-cas-stale".to_string(),
+                            operation: "skill.write".to_string(),
+                            scope: platform.recall_scope(),
+                            mutations,
+                        },
+                        &preconditions,
+                        &blob_preconditions,
+                        stale_lease.report(),
+                    )
+            })
+            .expect_err("stale owner plan must fail");
+
+        assert_eq!(
+            error.stage(),
+            "memory_write_transaction_precondition_failed"
+        );
+        assert_eq!(
+            platform
+                .engine
+                .get_blob("skills", "owner.md")
+                .expect("skill"),
+            Some(b"concurrent".to_vec())
+        );
+        assert_eq!(
+            platform.read_events().expect("events after stale"),
+            before_events
+        );
+    }
+
+    #[test]
+    fn subject_soul_full_intent_digest_binds_non_soul_owner_effects() {
+        let core = "a".repeat(64);
+        let first = canonical_subject_soul_full_intent_digest(
+            &core,
+            &[StoreMutation::PutBlob {
+                namespace: "skills".to_string(),
+                key: "owner.md".to_string(),
+                value: b"first".to_vec(),
+                event_kind: MemoryStoreEventKind::MemoryWrite,
+                plane: "skills".to_string(),
+                record_key: "owner.md".to_string(),
+            }],
+            &[],
+            &[StoreBlobPrecondition::Absent {
+                namespace: "skills".to_string(),
+                key: "owner.md".to_string(),
+            }],
+        )
+        .expect("first full intent");
+        let second = canonical_subject_soul_full_intent_digest(
+            &core,
+            &[StoreMutation::PutBlob {
+                namespace: "skills".to_string(),
+                key: "owner.md".to_string(),
+                value: b"second".to_vec(),
+                event_kind: MemoryStoreEventKind::MemoryWrite,
+                plane: "skills".to_string(),
+                record_key: "owner.md".to_string(),
+            }],
+            &[],
+            &[StoreBlobPrecondition::Absent {
+                namespace: "skills".to_string(),
+                key: "owner.md".to_string(),
+            }],
+        )
+        .expect("second full intent");
+
+        assert_ne!(first, second);
+        assert_eq!(
+            canonical_subject_soul_full_intent_digest(&core, &[], &[], &[])
+                .expect("Soul-only intent"),
+            core
+        );
+    }
+
+    #[cfg(feature = "nonproduction-replay-harness")]
+    #[test]
     fn direct_and_transaction_lifecycle_materialization_share_typed_completion_fields() {
         let profile = ProfileId::native_dev_full().expect("native dev-full profile");
         let admission = bm_core::runtime::RuntimeLifecycleEngine.admit(
@@ -11383,9 +12765,62 @@ mod transaction_error_contract_tests {
             "store_transaction_busy",
             "memory_write_transaction_repair_required",
         ] {
-            let mapped = memory_write_transaction_commit_error(Error::config(stage, "proof"));
+            let mapped =
+                memory_write_transaction_commit_error(Error::config(stage, "proof"), false);
             assert_eq!(mapped.stage(), stage);
         }
+    }
+
+    #[test]
+    fn subject_soul_capacity_stage_survives_the_production_coordinator() {
+        for stage in ["store_budget_exceeded", "store_event_log"] {
+            let mapped = memory_write_transaction_commit_error(Error::config(stage, "proof"), true);
+            assert_eq!(mapped.stage(), "subject_soul_store_capacity");
+            let generic =
+                memory_write_transaction_commit_error(Error::config(stage, "proof"), false);
+            assert_eq!(generic.stage(), "memory_write_transaction_preflight_failed");
+        }
+    }
+
+    #[test]
+    fn pristine_subject_soul_read_reuses_the_recall_immutable_session_and_receipt() {
+        let platform = StorePlatform::open(
+            StoreBackendConfig::in_memory(ProfileId::DesktopMacosEmbeddedSdk)
+                .expect("store config"),
+        )
+        .expect("store");
+        let authority = platform.runtime_budget_authority();
+        let lease = crate::RuntimeBudgetLease::issue(Arc::clone(&authority)).expect("lease");
+        let budget = lease.report().clone();
+        let outcome = lease
+            .execute(&authority, || {
+                platform.with_recall_immutable_read_session(&budget, |context| {
+                    context
+                        .read_verified_subject_soul(
+                            "space:recall-soul",
+                            "soul:recall-soul",
+                            &bm_core::memory::SubjectSoulReadRequestV1 {
+                                target_subject_id: "subject:recall-soul".to_string(),
+                                selector: bm_core::memory::SubjectSoulReadSelectorV1::Current,
+                                view: bm_core::memory::SubjectSoulReadViewV1::RuntimePrivate,
+                            },
+                            &budget,
+                        )
+                        .map_err(
+                            crate::store_internal::subject_soul::SubjectSoulStoreFailure::into_store_error,
+                        )
+                })
+            })
+            .expect("one immutable recall session");
+        assert_eq!(outcome.session_open_count, 1);
+        assert_eq!(outcome.receipt_count, 1);
+        assert_eq!(outcome.receipt, outcome.output.receipt);
+        assert_eq!(outcome.receipt.entry_count, 2);
+        assert_eq!(outcome.receipt.json_doc_count, 0);
+        assert!(matches!(
+            outcome.output.outcome,
+            bm_core::memory::SubjectSoulReadOutcomeV1::ImplicitUnseeded { .. }
+        ));
     }
 
     #[test]
@@ -12230,6 +13665,7 @@ mod transaction_error_contract_tests {
             json_namespaces: Vec::new(),
             json_docs: Vec::new(),
             events: Vec::new(),
+            preserve_protected_owner_state: false,
         }
     }
 

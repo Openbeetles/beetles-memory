@@ -30,7 +30,7 @@ After the crates are published:
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.3.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.4.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 Use exactly one profile feature for a build. Linux desktop, Linux device, and Linux server are distinct deployment targets; do not substitute one for another.
