@@ -4,13 +4,23 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+pub use crate::budget::{
+    MAX_TRANSCRIPT_ACTIVITY_BUCKETS, MAX_TRANSCRIPT_QUERY_CURSOR_BYTES,
+    MAX_TRANSCRIPT_SEARCH_EXCERPT_CHARS, MAX_TRANSCRIPT_SEARCH_QUERY_BYTES,
+    MAX_TRANSCRIPT_SEARCH_QUERY_CHARS, MAX_TRANSCRIPT_SEARCH_TERMS,
+};
 use crate::error::{Error, Result};
 
 use super::{
     synthesize_session_message_id, CanonicalTurnDelta, CommittedSessionMessage,
     MemoryEvidenceAuthority, MemoryTurnDeliveryStatus, MemoryTurnSource, SessionTurnCommitReport,
-    SubjectId, ToolObservationDigest, TranscriptInputMessage,
+    SubjectId, ToolObservationDigest, TranscriptInputMessage, MAX_SESSION_MESSAGE_LEN,
 };
+use crate::util::{collect_retrieval_terms, is_cjk, normalize_retrieval_text};
+
+/// Indexing allows a full admitted session message. For the 2/3-gram algorithm,
+/// the number of emitted unique terms is bounded by twice the UTF-8 byte budget.
+pub const MAX_TRANSCRIPT_INDEX_TERMS_PER_MESSAGE: usize = 2 * MAX_SESSION_MESSAGE_LEN;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationKey {
@@ -165,6 +175,27 @@ impl TranscriptConversationAlias {
             return Err(Error::config(
                 "conversation_transcript_alias",
                 "chat_id must not be empty",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_for_transcript_owner(
+        &self,
+        key: &ConversationKey,
+        mounted_subject_id: &str,
+    ) -> Result<()> {
+        self.validate()?;
+        key.validate()?;
+        require_canonical_transcript_query_component(mounted_subject_id, "mounted_subject_id")?;
+        if self.memory_space_id != key.memory_space_id
+            || self.mounted_subject_id != mounted_subject_id
+            || self.channel_id != key.channel_id
+            || self.conversation_id != key.conversation_id
+        {
+            return Err(Error::config(
+                "conversation_transcript_append",
+                "conversation_alias_must_match_transcript_owner",
             ));
         }
         Ok(())
@@ -556,6 +587,23 @@ pub struct TranscriptMessageRecord {
     pub actor: ActorAttribution,
 }
 
+/// Returns whether a transcript message may contribute to host-presentable
+/// search and activity indexes.
+///
+/// Query indexes are derived presentation material, not an authority boundary.
+/// They therefore admit only dialogue roles and must never contain private
+/// garden, Soul-governance, or operator-diagnostic content. Runtime disclosure
+/// is still applied again after candidate hydration.
+pub fn transcript_message_is_query_index_eligible(message: &TranscriptMessageRecord) -> bool {
+    (message.role.eq_ignore_ascii_case("user") || message.role.eq_ignore_ascii_case("assistant"))
+        && !matches!(
+            message.authority,
+            MemoryEvidenceAuthority::PrivateGardenInternal
+                | MemoryEvidenceAuthority::SoulGovernance
+                | MemoryEvidenceAuthority::OperatorDiagnostic
+        )
+}
+
 struct TranscriptMessageInput<'a> {
     key: &'a ConversationKey,
     turn_id: &'a str,
@@ -818,6 +866,17 @@ impl TranscriptTurnRecord {
         }
         self.updated_at = updated_at;
     }
+
+    pub fn is_searchable_for_presentation(&self) -> bool {
+        matches!(
+            self.lifecycle_state,
+            TranscriptLifecycleState::Active | TranscriptLifecycleState::Archived
+        ) && self.redaction_state == TranscriptRedactionState::RawAvailable
+    }
+
+    pub fn contributes_to_presentation_activity(&self) -> bool {
+        self.is_searchable_for_presentation()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1054,6 +1113,1166 @@ pub struct TranscriptTurnPage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
     pub has_more: bool,
+}
+
+const TRANSCRIPT_QUERY_STAGE: &str = "conversation_transcript_query";
+const TRANSCRIPT_QUERY_CURSOR_PREFIX: &str = "btq1:";
+
+/// Opaque continuation value. Runtime/Store owns claims, authentication and issuance.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct TranscriptQueryCursor(String);
+
+impl std::fmt::Debug for TranscriptQueryCursor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("TranscriptQueryCursor([REDACTED])")
+    }
+}
+
+pub const TRANSCRIPT_CURSOR_DISCLOSURE_POLICY_SCHEMA_V1: u32 = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptCursorOperationKind {
+    Catalog,
+    Timeline,
+    Search,
+}
+
+impl TranscriptCursorOperationKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Catalog => "catalog",
+            Self::Timeline => "timeline",
+            Self::Search => "search",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptCursorDisclosurePolicyV1 {
+    pub schema_version: u32,
+    pub capability_context_digest: String,
+}
+
+impl TranscriptCursorDisclosurePolicyV1 {
+    pub fn new(schema_version: u32, capability_context_digest: impl Into<String>) -> Result<Self> {
+        let policy = Self {
+            schema_version,
+            capability_context_digest: capability_context_digest.into(),
+        };
+        policy.validate()?;
+        Ok(policy)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != TRANSCRIPT_CURSOR_DISCLOSURE_POLICY_SCHEMA_V1
+            || !canonical_sha256_digest(&self.capability_context_digest)
+        {
+            return Err(Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "cursor_disclosure_policy_invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub fn transcript_cursor_governance_context_digest(
+    operation: TranscriptCursorOperationKind,
+    view: TranscriptReplayView,
+    policy: &TranscriptCursorDisclosurePolicyV1,
+) -> Result<String> {
+    policy.validate()?;
+    let view = match view {
+        TranscriptReplayView::RawOwnerOnly => "raw_owner_only",
+        TranscriptReplayView::ModelContext => "model_context",
+        TranscriptReplayView::HostUi => "host_ui",
+        TranscriptReplayView::OperatorAudit => "operator_audit",
+        TranscriptReplayView::Export => "export",
+    };
+    let mut hasher = Sha256::new();
+    for component in [
+        "beetle.transcript.cursor.governance-context.v1",
+        operation.label(),
+        view,
+        &policy.schema_version.to_string(),
+        &policy.capability_context_digest,
+    ] {
+        hasher.update(component.len().to_be_bytes());
+        hasher.update(component.as_bytes());
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+impl Serialize for TranscriptQueryCursor {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for TranscriptQueryCursor {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::try_from_encoded(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl TranscriptQueryCursor {
+    pub fn try_from_encoded(encoded: impl Into<String>) -> Result<Self> {
+        let encoded = encoded.into();
+        if encoded.len() > MAX_TRANSCRIPT_QUERY_CURSOR_BYTES
+            || encoded.len() <= TRANSCRIPT_QUERY_CURSOR_PREFIX.len()
+            || !encoded.starts_with(TRANSCRIPT_QUERY_CURSOR_PREFIX)
+            || !encoded.is_ascii()
+            || encoded
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+        {
+            return Err(Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "cursor_shape_invalid",
+            ));
+        }
+        Ok(Self(encoded))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_encoded(self) -> String {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptUtcRange {
+    pub start_inclusive: u64,
+    pub end_exclusive: u64,
+}
+
+impl TranscriptUtcRange {
+    pub fn new(start_inclusive: u64, end_exclusive: u64) -> Result<Self> {
+        let range = Self {
+            start_inclusive,
+            end_exclusive,
+        };
+        range.validate()?;
+        Ok(range)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.start_inclusive >= self.end_exclusive {
+            return Err(Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "utc_range_must_be_nonempty_and_half_open",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn contains(&self, timestamp: u64) -> bool {
+        timestamp >= self.start_inclusive && timestamp < self.end_exclusive
+    }
+
+    pub fn validate_sorted_non_overlapping(ranges: &[Self]) -> Result<()> {
+        if ranges.len() > MAX_TRANSCRIPT_ACTIVITY_BUCKETS {
+            return Err(Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "activity_bucket_limit_exceeded",
+            ));
+        }
+        let mut previous_end = None;
+        for range in ranges {
+            range.validate()?;
+            if previous_end.is_some_and(|end| range.start_inclusive < end) {
+                return Err(Error::config(
+                    TRANSCRIPT_QUERY_STAGE,
+                    "utc_ranges_must_be_sorted_and_non_overlapping",
+                ));
+            }
+            previous_end = Some(range.end_exclusive);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptLocator {
+    pub key: ConversationKey,
+    pub mounted_subject_id: SubjectId,
+    pub turn_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    pub turn_sequence: u64,
+    pub observed_at: u64,
+}
+
+impl TranscriptLocator {
+    pub fn new(
+        key: ConversationKey,
+        mounted_subject_id: impl Into<String>,
+        turn_id: impl Into<String>,
+        message_id: Option<String>,
+        turn_sequence: u64,
+        observed_at: u64,
+    ) -> Result<Self> {
+        let locator = Self {
+            key,
+            mounted_subject_id: mounted_subject_id.into(),
+            turn_id: turn_id.into(),
+            message_id,
+            turn_sequence,
+            observed_at,
+        };
+        locator.validate()?;
+        Ok(locator)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.key.validate()?;
+        require_canonical_transcript_query_component(
+            &self.mounted_subject_id,
+            "mounted_subject_id",
+        )?;
+        require_canonical_transcript_query_component(&self.turn_id, "turn_id")?;
+        if let Some(message_id) = self.message_id.as_deref() {
+            require_canonical_transcript_query_component(message_id, "message_id")?;
+        }
+        if self.turn_sequence == 0 || self.observed_at == 0 {
+            return Err(Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "locator_sequence_and_observed_at_must_be_positive",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptAnchor {
+    pub locator: TranscriptLocator,
+    pub head_revision: u64,
+    pub head_digest: String,
+}
+
+impl TranscriptAnchor {
+    pub fn new(
+        locator: TranscriptLocator,
+        head_revision: u64,
+        head_digest: impl Into<String>,
+    ) -> Result<Self> {
+        let anchor = Self {
+            locator,
+            head_revision,
+            head_digest: head_digest.into(),
+        };
+        anchor.validate()?;
+        Ok(anchor)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.locator.validate()?;
+        if self.head_revision == 0 || !canonical_digest(&self.head_digest) {
+            return Err(Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "anchor_head_identity_invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationCatalogHead {
+    pub key: ConversationKey,
+    pub mounted_subject_id: SubjectId,
+    pub revision: u64,
+    pub head_digest: String,
+    pub turn_count: u64,
+    pub message_count: u64,
+    pub lifecycle: TranscriptLifecycleAggregate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_sequence: Option<u64>,
+    pub content_generation: u64,
+    pub index_generation: u64,
+    pub updated_at: u64,
+}
+
+impl ConversationCatalogHead {
+    pub fn validate(&self) -> Result<()> {
+        self.key.validate()?;
+        require_canonical_transcript_query_component(
+            &self.mounted_subject_id,
+            "mounted_subject_id",
+        )?;
+        if self.revision == 0
+            || !canonical_digest(&self.head_digest)
+            || self.updated_at == 0
+            || self.content_generation == 0
+            || self.content_generation != self.index_generation
+        {
+            return Err(Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "catalog_head_identity_invalid",
+            ));
+        }
+        let positions = [self.first_sequence, self.last_sequence];
+        self.lifecycle
+            .validate(self.turn_count, self.message_count)?;
+        if self.turn_count == 0 {
+            if self.message_count != 0 {
+                return Err(Error::config(
+                    TRANSCRIPT_QUERY_STAGE,
+                    "empty_catalog_head_must_not_claim_messages",
+                ));
+            }
+            if positions.into_iter().flatten().next().is_some() {
+                return Err(Error::config(
+                    TRANSCRIPT_QUERY_STAGE,
+                    "empty_catalog_head_must_not_claim_sequence_bounds",
+                ));
+            }
+        } else {
+            let (Some(first_sequence), Some(last_sequence)) =
+                (self.first_sequence, self.last_sequence)
+            else {
+                return Err(Error::config(
+                    TRANSCRIPT_QUERY_STAGE,
+                    "nonempty_catalog_head_requires_sequence_bounds",
+                ));
+            };
+            if first_sequence == 0 || first_sequence > last_sequence {
+                return Err(Error::config(
+                    TRANSCRIPT_QUERY_STAGE,
+                    "catalog_head_bounds_invalid",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptLifecycleStats {
+    pub turn_count: u64,
+    pub message_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_observed_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_observed_at: Option<u64>,
+}
+
+impl TranscriptLifecycleStats {
+    pub fn validate(&self) -> Result<()> {
+        if self.turn_count == 0 && self.message_count != 0 {
+            return Err(Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "empty_lifecycle_stats_must_not_claim_messages",
+            ));
+        }
+        if self.message_count == 0 {
+            if self.first_observed_at.is_some() || self.last_observed_at.is_some() {
+                return Err(Error::config(
+                    TRANSCRIPT_QUERY_STAGE,
+                    "message_empty_lifecycle_stats_must_not_claim_time_bounds",
+                ));
+            }
+            return Ok(());
+        }
+        let (Some(first), Some(last)) = (self.first_observed_at, self.last_observed_at) else {
+            return Err(Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "nonempty_lifecycle_stats_require_time_bounds",
+            ));
+        };
+        if first == 0 || first > last {
+            return Err(Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "lifecycle_stats_time_bounds_invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptLifecycleAggregate {
+    pub active: TranscriptLifecycleStats,
+    pub archived: TranscriptLifecycleStats,
+    pub masked: TranscriptLifecycleStats,
+    pub raw_deleted: TranscriptLifecycleStats,
+}
+
+impl TranscriptLifecycleAggregate {
+    pub fn validate(&self, turn_count: u64, message_count: u64) -> Result<()> {
+        let stats = [self.active, self.archived, self.masked, self.raw_deleted];
+        for item in stats {
+            item.validate()?;
+        }
+        let aggregate_turn_count = stats.iter().try_fold(0_u64, |total, item| {
+            total
+                .checked_add(item.turn_count)
+                .ok_or_else(|| Error::config(TRANSCRIPT_QUERY_STAGE, "catalog_turn_count_overflow"))
+        })?;
+        let aggregate_message_count = stats.iter().try_fold(0_u64, |total, item| {
+            total.checked_add(item.message_count).ok_or_else(|| {
+                Error::config(TRANSCRIPT_QUERY_STAGE, "catalog_message_count_overflow")
+            })
+        })?;
+        if aggregate_turn_count != turn_count || aggregate_message_count != message_count {
+            return Err(Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "catalog_lifecycle_aggregate_mismatch",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptCatalogLifecycle {
+    ActiveOnly,
+    ActiveAndArchived,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptCatalogQuery {
+    pub memory_space_id: String,
+    pub governance_context_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+    pub lifecycle: TranscriptCatalogLifecycle,
+    pub limit: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<TranscriptQueryCursor>,
+}
+
+impl TranscriptCatalogQuery {
+    pub fn validate(&self) -> Result<()> {
+        require_canonical_transcript_query_component(&self.memory_space_id, "memory_space_id")?;
+        require_canonical_governance_context_digest(&self.governance_context_digest)?;
+        if let Some(channel_id) = self.channel_id.as_deref() {
+            require_canonical_transcript_query_component(channel_id, "channel_id")?;
+        }
+        validate_transcript_query_limit(self.limit)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationCatalogPage {
+    pub conversations: Vec<ConversationCatalogEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<TranscriptQueryCursor>,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationCatalogEntry {
+    pub key: ConversationKey,
+    pub visible_turn_count: u64,
+    pub visible_message_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_visible_observed_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_visible_observed_at: Option<u64>,
+    pub archived: bool,
+    pub head_revision: u64,
+    pub head_digest: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationCatalogCandidatePage {
+    pub heads: Vec<ConversationCatalogHead>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<TranscriptQueryCursor>,
+    pub has_more: bool,
+}
+
+impl ConversationCatalogCandidatePage {
+    pub fn validate_for_query(
+        &self,
+        mounted_subject_id: &str,
+        query: &TranscriptCatalogQuery,
+    ) -> Result<()> {
+        query.validate()?;
+        require_canonical_transcript_query_component(mounted_subject_id, "mounted_subject_id")?;
+        for head in &self.heads {
+            head.validate()?;
+            if head.mounted_subject_id != mounted_subject_id
+                || head.key.memory_space_id != query.memory_space_id
+                || query
+                    .channel_id
+                    .as_ref()
+                    .is_some_and(|channel| head.key.channel_id != *channel)
+            {
+                return Err(Error::config(
+                    TRANSCRIPT_QUERY_STAGE,
+                    "catalog_candidate_outside_query_scope",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptTimelineAnchor {
+    Latest,
+    Before(TranscriptAnchor),
+    After(TranscriptAnchor),
+    Around(TranscriptAnchor),
+    AroundSequence(u64),
+    FirstVisibleInRange(TranscriptUtcRange),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptTimelineQuery {
+    pub key: ConversationKey,
+    pub governance_context_digest: String,
+    pub anchor: TranscriptTimelineAnchor,
+    pub limit: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<TranscriptQueryCursor>,
+}
+
+impl TranscriptTimelineQuery {
+    pub fn validate(&self) -> Result<()> {
+        self.key.validate()?;
+        require_canonical_governance_context_digest(&self.governance_context_digest)?;
+        validate_transcript_query_limit(self.limit)?;
+        match &self.anchor {
+            TranscriptTimelineAnchor::Latest => Ok(()),
+            TranscriptTimelineAnchor::Before(anchor)
+            | TranscriptTimelineAnchor::After(anchor)
+            | TranscriptTimelineAnchor::Around(anchor) => {
+                anchor.validate()?;
+                if anchor.locator.key != self.key {
+                    return Err(Error::config(
+                        TRANSCRIPT_QUERY_STAGE,
+                        "timeline_anchor_conversation_mismatch",
+                    ));
+                }
+                Ok(())
+            }
+            TranscriptTimelineAnchor::AroundSequence(sequence) => {
+                if *sequence == 0 {
+                    return Err(Error::config(
+                        TRANSCRIPT_QUERY_STAGE,
+                        "timeline_sequence_must_be_positive",
+                    ));
+                }
+                Ok(())
+            }
+            TranscriptTimelineAnchor::FirstVisibleInRange(range) => range.validate(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptTimelineCandidatePage {
+    pub head: ConversationCatalogHead,
+    pub turns: Vec<TranscriptTurnRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub older_cursor: Option<TranscriptQueryCursor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub newer_cursor: Option<TranscriptQueryCursor>,
+    pub has_older: bool,
+    pub has_newer: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptTimelinePage {
+    pub key: ConversationKey,
+    pub head_revision: u64,
+    pub head_digest: String,
+    pub turns: Vec<RedactedTranscriptTurn>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub older_cursor: Option<TranscriptQueryCursor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub newer_cursor: Option<TranscriptQueryCursor>,
+    pub has_older: bool,
+    pub has_newer: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NormalizedTranscriptSearchQueryV1 {
+    pub schema_version: u32,
+    pub normalized: String,
+    pub terms: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptSearchSort {
+    RelevanceThenObservedAt,
+    ObservedAtDescending,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptSearchLifecycle {
+    ActiveOnly,
+    ActiveAndArchived,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptSearchScope {
+    MountedSubject {
+        memory_space_id: String,
+        channel_id: Option<String>,
+    },
+    ExactConversation {
+        key: ConversationKey,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptSearchQuery {
+    pub scope: TranscriptSearchScope,
+    pub governance_context_digest: String,
+    pub query: NormalizedTranscriptSearchQueryV1,
+    pub sort: TranscriptSearchSort,
+    pub lifecycle: TranscriptSearchLifecycle,
+    pub limit: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<TranscriptQueryCursor>,
+}
+
+impl TranscriptSearchQuery {
+    pub fn validate(&self) -> Result<()> {
+        validate_transcript_query_limit(self.limit)?;
+        require_canonical_governance_context_digest(&self.governance_context_digest)?;
+        if self.query.schema_version != 1
+            || self.query.normalized.is_empty()
+            || self.query.terms.is_empty()
+            || self.query.normalized.len() > MAX_TRANSCRIPT_SEARCH_QUERY_BYTES
+            || self.query.normalized.chars().count() > MAX_TRANSCRIPT_SEARCH_QUERY_CHARS
+            || self.query.terms.len() > MAX_TRANSCRIPT_SEARCH_TERMS
+            || self
+                .query
+                .terms
+                .iter()
+                .any(|term| term.is_empty() || normalize_retrieval_text(term) != *term)
+        {
+            return Err(Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "normalized_search_query_invalid",
+            ));
+        }
+        match &self.scope {
+            TranscriptSearchScope::MountedSubject {
+                memory_space_id,
+                channel_id,
+            } => {
+                require_canonical_transcript_query_component(memory_space_id, "memory_space_id")?;
+                if let Some(channel_id) = channel_id.as_deref() {
+                    require_canonical_transcript_query_component(channel_id, "channel_id")?;
+                }
+            }
+            TranscriptSearchScope::ExactConversation { key } => key.validate()?,
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptTextHighlight {
+    pub start_char: usize,
+    pub end_char: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptSearchExcerpt {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub highlights: Vec<TranscriptTextHighlight>,
+    pub truncated_before: bool,
+    pub truncated_after: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptSearchHit {
+    pub locator: TranscriptLocator,
+    pub role: String,
+    pub actor: ActorAttribution,
+    pub excerpt: TranscriptSearchExcerpt,
+    pub score: u32,
+    pub anchor: TranscriptAnchor,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptSearchCandidate {
+    pub record: TranscriptTurnRecord,
+    pub message_id: String,
+    pub score: u32,
+    pub head_revision: u64,
+    pub head_digest: String,
+}
+
+impl TranscriptSearchCandidate {
+    pub fn validate(&self) -> Result<()> {
+        self.record.key.validate()?;
+        require_canonical_transcript_query_component(&self.message_id, "message_id")?;
+        if self.record.sequence == 0
+            || self.head_revision == 0
+            || !canonical_digest(&self.head_digest)
+        {
+            return Err(Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "search_candidate_head_identity_invalid",
+            ));
+        }
+        let matches = self
+            .record
+            .input_messages
+            .iter()
+            .chain(self.record.assistant_message.iter())
+            .any(|message| message.message_id == self.message_id);
+        if !matches {
+            return Err(Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "search_candidate_message_not_in_turn",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_for_scope(
+        &self,
+        mounted_subject_id: &str,
+        scope: &TranscriptSearchScope,
+    ) -> Result<()> {
+        self.validate()?;
+        require_canonical_transcript_query_component(mounted_subject_id, "mounted_subject_id")?;
+        if self.record.subject != mounted_subject_id {
+            return Err(Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "search_candidate_subject_mismatch",
+            ));
+        }
+        let in_scope = match scope {
+            TranscriptSearchScope::MountedSubject {
+                memory_space_id,
+                channel_id,
+            } => {
+                self.record.key.memory_space_id == *memory_space_id
+                    && channel_id
+                        .as_ref()
+                        .is_none_or(|channel| self.record.key.channel_id == *channel)
+            }
+            TranscriptSearchScope::ExactConversation { key } => self.record.key == *key,
+        };
+        if !in_scope {
+            return Err(Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "search_candidate_outside_query_scope",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptSearchCandidatePage {
+    pub candidates: Vec<TranscriptSearchCandidate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<TranscriptQueryCursor>,
+    pub has_more: bool,
+    pub budget_applied: bool,
+}
+
+impl TranscriptSearchCandidatePage {
+    pub fn validate_for_query(
+        &self,
+        mounted_subject_id: &str,
+        query: &TranscriptSearchQuery,
+    ) -> Result<()> {
+        query.validate()?;
+        for candidate in &self.candidates {
+            candidate.validate_for_scope(mounted_subject_id, &query.scope)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptSearchPage {
+    pub hits: Vec<TranscriptSearchHit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<TranscriptQueryCursor>,
+    pub has_more: bool,
+    pub budget_applied: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptActivityQuery {
+    pub key: ConversationKey,
+    pub ranges: Vec<TranscriptUtcRange>,
+    pub lifecycle: TranscriptSearchLifecycle,
+}
+
+impl TranscriptActivityQuery {
+    pub fn validate(&self) -> Result<()> {
+        self.key.validate()?;
+        if self.ranges.is_empty() {
+            return Err(Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "activity_ranges_must_not_be_empty",
+            ));
+        }
+        TranscriptUtcRange::validate_sorted_non_overlapping(&self.ranges)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptActivityBucket {
+    pub range: TranscriptUtcRange,
+    pub visible_message_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_visible_anchor: Option<TranscriptAnchor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_visible_anchor: Option<TranscriptAnchor>,
+}
+
+impl TranscriptActivityBucket {
+    pub fn validate(&self) -> Result<()> {
+        self.range.validate()?;
+        if self.visible_message_count == 0 {
+            if self.first_visible_anchor.is_some() || self.last_visible_anchor.is_some() {
+                return Err(Error::config(
+                    TRANSCRIPT_QUERY_STAGE,
+                    "empty_activity_bucket_must_not_claim_anchors",
+                ));
+            }
+            return Ok(());
+        }
+        let (Some(first), Some(last)) = (
+            self.first_visible_anchor.as_ref(),
+            self.last_visible_anchor.as_ref(),
+        ) else {
+            return Err(Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "nonempty_activity_bucket_requires_anchors",
+            ));
+        };
+        first.validate()?;
+        last.validate()?;
+        if first.locator.key != last.locator.key
+            || first.locator.mounted_subject_id != last.locator.mounted_subject_id
+            || !self.range.contains(first.locator.observed_at)
+            || !self.range.contains(last.locator.observed_at)
+            || (first.locator.observed_at, first.locator.turn_sequence)
+                > (last.locator.observed_at, last.locator.turn_sequence)
+        {
+            return Err(Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "activity_bucket_anchor_mismatch",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptActivityReport {
+    pub key: ConversationKey,
+    pub head_revision: u64,
+    pub head_digest: String,
+    pub buckets: Vec<TranscriptActivityBucket>,
+    pub budget_applied: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptActivityCandidate {
+    pub record: TranscriptTurnRecord,
+    pub message_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptActivityCandidateBucket {
+    pub range: TranscriptUtcRange,
+    pub candidates: Vec<TranscriptActivityCandidate>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptActivityCandidateReport {
+    pub head: ConversationCatalogHead,
+    pub buckets: Vec<TranscriptActivityCandidateBucket>,
+    pub budget_applied: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptAppendIntent {
+    pub record: TranscriptTurnRecord,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_alias: Option<TranscriptConversationAlias>,
+}
+
+impl TranscriptAppendIntent {
+    pub fn validate(&self) -> Result<()> {
+        self.record.key.validate()?;
+        require_canonical_transcript_query_component(&self.record.subject, "record.subject")?;
+        if self
+            .record
+            .input_messages
+            .iter()
+            .chain(self.record.assistant_message.iter())
+            .any(|message| message.content.len() > MAX_SESSION_MESSAGE_LEN)
+        {
+            return Err(Error::config(
+                "conversation_transcript_append",
+                "transcript_message_content_budget_exceeded",
+            ));
+        }
+        if let Some(alias) = self.conversation_alias.as_ref() {
+            alias.validate_for_transcript_owner(&self.record.key, &self.record.subject)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TranscriptSearchNormalizerV1;
+
+impl TranscriptSearchNormalizerV1 {
+    pub fn normalize(query: &str) -> Result<NormalizedTranscriptSearchQueryV1> {
+        if query.len() > MAX_TRANSCRIPT_SEARCH_QUERY_BYTES
+            || query.chars().count() > MAX_TRANSCRIPT_SEARCH_QUERY_CHARS
+            || query.chars().any(char::is_control)
+        {
+            return Err(Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "search_query_limit_or_control_character_invalid",
+            ));
+        }
+        let normalized = normalize_retrieval_text(query);
+        let terms = collect_retrieval_terms(query, 2, MAX_TRANSCRIPT_SEARCH_TERMS, &[2, 3]);
+        if normalized.is_empty() || terms.is_empty() {
+            return Err(Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "search_query_has_no_canonical_terms",
+            ));
+        }
+        Ok(NormalizedTranscriptSearchQueryV1 {
+            schema_version: 1,
+            normalized,
+            terms,
+        })
+    }
+
+    pub fn index_terms(content: &str, max_terms: usize) -> Result<Vec<String>> {
+        if max_terms == 0 || max_terms > MAX_TRANSCRIPT_INDEX_TERMS_PER_MESSAGE {
+            return Err(Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "transcript_document_index_term_budget_invalid",
+            ));
+        }
+        let detection_limit = max_terms.checked_add(1).ok_or_else(|| {
+            Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "transcript_document_index_term_budget_overflow",
+            )
+        })?;
+        let terms = collect_retrieval_terms(content, 2, detection_limit, &[2, 3]);
+        if terms.len() > max_terms {
+            return Err(Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "transcript_document_index_term_limit_exceeded",
+            ));
+        }
+        // A valid transcript message need not contain searchable lexical terms
+        // (for example a single CJK character, emoji, or punctuation). Index
+        // eligibility must not become transcript admission authority.
+        Ok(terms)
+    }
+
+    pub fn excerpt(
+        content: &str,
+        query: &NormalizedTranscriptSearchQueryV1,
+        max_chars: usize,
+    ) -> Result<TranscriptSearchExcerpt> {
+        if query.schema_version != 1
+            || query.normalized.is_empty()
+            || query.terms.is_empty()
+            || max_chars == 0
+            || max_chars > MAX_TRANSCRIPT_SEARCH_EXCERPT_CHARS
+        {
+            return Err(Error::config(
+                TRANSCRIPT_QUERY_STAGE,
+                "search_excerpt_input_invalid",
+            ));
+        }
+        let content_chars = content.chars().collect::<Vec<_>>();
+        let (normalized_chars, normalized_to_original) =
+            normalize_transcript_text_with_char_map(content);
+        let mut needles = Vec::with_capacity(query.terms.len().saturating_add(1));
+        needles.push(query.normalized.chars().collect::<Vec<_>>());
+        for term in &query.terms {
+            let chars = term.chars().collect::<Vec<_>>();
+            if !chars.is_empty() && !needles.iter().any(|existing| existing == &chars) {
+                needles.push(chars);
+            }
+        }
+        needles.sort_by_key(|needle| std::cmp::Reverse(needle.len()));
+        let mut raw_ranges = Vec::<(usize, usize)>::new();
+        for needle in needles {
+            if needle.is_empty() || normalized_chars.len() < needle.len() {
+                continue;
+            }
+            for start in 0..=normalized_chars.len().saturating_sub(needle.len()) {
+                if normalized_chars[start..start + needle.len()] == needle[..] {
+                    let original_start = normalized_to_original[start];
+                    let original_end = normalized_to_original[start + needle.len() - 1] + 1;
+                    raw_ranges.push((original_start, original_end));
+                }
+            }
+        }
+        raw_ranges.sort_unstable();
+        raw_ranges.dedup();
+        let focus = raw_ranges.first().copied().unwrap_or((0, 0));
+        let start = if content_chars.len() <= max_chars {
+            0
+        } else {
+            focus
+                .0
+                .saturating_sub(max_chars.saturating_sub(focus.1.saturating_sub(focus.0)) / 2)
+                .min(content_chars.len().saturating_sub(max_chars))
+        };
+        let end = start.saturating_add(max_chars).min(content_chars.len());
+        let text = content_chars[start..end].iter().collect::<String>();
+        let mut highlights = raw_ranges
+            .into_iter()
+            .filter_map(|(range_start, range_end)| {
+                let clipped_start = range_start.max(start);
+                let clipped_end = range_end.min(end);
+                (clipped_start < clipped_end).then_some(TranscriptTextHighlight {
+                    start_char: clipped_start - start,
+                    end_char: clipped_end - start,
+                })
+            })
+            .collect::<Vec<_>>();
+        highlights.sort_by_key(|range| (range.start_char, range.end_char));
+        highlights.dedup();
+        Ok(TranscriptSearchExcerpt {
+            text,
+            highlights,
+            truncated_before: start > 0,
+            truncated_after: end < content_chars.len(),
+        })
+    }
+}
+
+fn normalize_transcript_text_with_char_map(input: &str) -> (Vec<char>, Vec<usize>) {
+    let mut normalized = Vec::with_capacity(input.chars().count());
+    let mut mapping = Vec::with_capacity(input.chars().count());
+    let mut pending_space_at = None;
+    for (original_index, ch) in input.chars().enumerate() {
+        if ch.is_alphanumeric() || is_cjk(ch) {
+            if !normalized.is_empty() {
+                if let Some(space_at) = pending_space_at.take() {
+                    normalized.push(' ');
+                    mapping.push(space_at);
+                }
+            } else {
+                pending_space_at = None;
+            }
+            for lower in ch.to_lowercase() {
+                normalized.push(lower);
+                mapping.push(original_index);
+            }
+        } else if pending_space_at.is_none() {
+            pending_space_at = Some(original_index);
+        }
+    }
+    (normalized, mapping)
+}
+
+fn require_canonical_transcript_query_component(value: &str, field: &str) -> Result<()> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.chars().any(char::is_control)
+        || value.len() > 512
+    {
+        return Err(Error::config(
+            TRANSCRIPT_QUERY_STAGE,
+            format!("{field}_must_be_canonical"),
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_digest(value: &str) -> bool {
+    value.trim() == value && value.starts_with("sha256:") && value.len() > "sha256:".len()
+}
+
+fn canonical_sha256_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
+}
+
+fn require_canonical_governance_context_digest(value: &str) -> Result<()> {
+    if !canonical_sha256_digest(value) {
+        return Err(Error::config(
+            TRANSCRIPT_QUERY_STAGE,
+            "governance_context_digest_must_be_canonical_sha256",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_transcript_query_limit(limit: usize) -> Result<()> {
+    if limit == 0 {
+        return Err(Error::config(
+            TRANSCRIPT_QUERY_STAGE,
+            "query_limit_must_be_positive",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1310,7 +2529,14 @@ impl RedactedTranscriptSlice {
 }
 
 pub trait ConversationTranscriptStore: Send + Sync {
-    fn append_turn(&self, record: &TranscriptTurnRecord) -> Result<TranscriptCommitReport>;
+    fn append_turn_intent(&self, intent: &TranscriptAppendIntent)
+        -> Result<TranscriptCommitReport>;
+    fn append_turn(&self, record: &TranscriptTurnRecord) -> Result<TranscriptCommitReport> {
+        self.append_turn_intent(&TranscriptAppendIntent {
+            record: record.clone(),
+            conversation_alias: None,
+        })
+    }
     fn remember_conversation_alias(&self, alias: &TranscriptConversationAlias) -> Result<()>;
     fn resolve_conversation_alias(
         &self,
@@ -1331,19 +2557,34 @@ pub trait ConversationTranscriptStore: Send + Sync {
         mounted_subject_id: &str,
         limit: usize,
     ) -> Result<Vec<TranscriptTurnRecord>>;
-    fn turn_count(&self, key: &ConversationKey, mounted_subject_id: &str) -> Result<usize> {
-        Ok(self.list_turns(key, mounted_subject_id, usize::MAX)?.len())
-    }
+    fn list_conversation_catalog(
+        &self,
+        mounted_subject_id: &str,
+        query: &TranscriptCatalogQuery,
+    ) -> Result<ConversationCatalogCandidatePage>;
+    fn query_transcript_timeline(
+        &self,
+        mounted_subject_id: &str,
+        query: &TranscriptTimelineQuery,
+    ) -> Result<TranscriptTimelineCandidatePage>;
+    fn search_transcript(
+        &self,
+        mounted_subject_id: &str,
+        query: &TranscriptSearchQuery,
+    ) -> Result<TranscriptSearchCandidatePage>;
+    fn query_transcript_activity(
+        &self,
+        mounted_subject_id: &str,
+        query: &TranscriptActivityQuery,
+    ) -> Result<TranscriptActivityCandidateReport>;
+    fn turn_count(&self, key: &ConversationKey, mounted_subject_id: &str) -> Result<usize>;
     fn list_turns_page(
         &self,
         key: &ConversationKey,
         mounted_subject_id: &str,
         cursor: Option<&str>,
         limit: usize,
-    ) -> Result<TranscriptTurnPage> {
-        let records = self.list_turns(key, mounted_subject_id, usize::MAX)?;
-        TranscriptTurnPage::from_records(key.clone(), &records, cursor, limit)
-    }
+    ) -> Result<TranscriptTurnPage>;
     fn upsert_transcript_attrs(
         &self,
         _key: &ConversationKey,

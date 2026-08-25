@@ -57,8 +57,8 @@ use crate::store_internal::recall_index::{
     TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE,
 };
 
-pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema_v10";
-pub const STORE_SCHEMA_VERSION: u32 = 10;
+pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema_v11";
+pub const STORE_SCHEMA_VERSION: u32 = 11;
 pub(crate) const LONG_TERM_VERSION_MATERIAL_NAMESPACE: &str = "long_term_version_materials";
 pub(crate) const LONG_TERM_HEAD_MANIFEST_NAMESPACE: &str = "long_term_head_manifests";
 pub(crate) const LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE: &str =
@@ -324,6 +324,28 @@ pub(crate) const STORE_JSON_NAMESPACE_REGISTRY: &[StoreJsonNamespaceContract] = 
     opaque_json_namespace("conversation_transcript_alias"),
     opaque_json_namespace("conversation_transcript_attr"),
     opaque_json_namespace("conversation_transcript_derived_ref"),
+    opaque_json_namespace(
+        crate::store_internal::transcript_query::TRANSCRIPT_CATALOG_PAGE_NAMESPACE,
+    ),
+    opaque_json_namespace(
+        crate::store_internal::transcript_query::TRANSCRIPT_CATALOG_ROOT_NAMESPACE,
+    ),
+    opaque_json_namespace(
+        crate::store_internal::transcript_query::TRANSCRIPT_TIME_POSTING_NAMESPACE,
+    ),
+    opaque_json_namespace(crate::store_internal::transcript_query::TRANSCRIPT_TIME_ROOT_NAMESPACE),
+    opaque_json_namespace(
+        crate::store_internal::transcript_query::TRANSCRIPT_SEARCH_POSTING_NAMESPACE,
+    ),
+    opaque_json_namespace(
+        crate::store_internal::transcript_query::TRANSCRIPT_SEARCH_ROOT_NAMESPACE,
+    ),
+    opaque_json_namespace(
+        crate::store_internal::transcript_query::TRANSCRIPT_SEARCH_MESSAGE_MANIFEST_NAMESPACE,
+    ),
+    opaque_json_namespace(
+        crate::store_internal::transcript_query::TRANSCRIPT_QUERY_KEYRING_NAMESPACE,
+    ),
     typed_json_namespace(
         MEMORY_GRAPH_NODE_NAMESPACE,
         StoreJsonDecoderKind::MemoryGraphNode,
@@ -2954,14 +2976,14 @@ mod tests {
     }
 
     #[test]
-    fn store_schema_identity_is_exactly_v10_and_rejects_v9() {
-        assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v10");
-        assert_eq!(STORE_SCHEMA_VERSION, 10);
+    fn store_schema_identity_is_exactly_v11_and_rejects_v10() {
+        assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v11");
+        assert_eq!(STORE_SCHEMA_VERSION, 11);
         assert!(
             validate_store_schema_identity(STORE_SCHEMA_ID, STORE_SCHEMA_VERSION, "test").is_ok()
         );
         assert!(
-            validate_store_schema_identity("beetle_memory_store_schema_v9", 9, "test").is_err()
+            validate_store_schema_identity("beetle_memory_store_schema_v10", 10, "test").is_err()
         );
         assert!(
             validate_store_schema_identity("unknown_memory_store_schema_v999", 999, "test")

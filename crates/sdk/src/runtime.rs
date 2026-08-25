@@ -85,12 +85,12 @@ use bm_core::memory::{
     scoped_long_term_memory_storage_key, scoped_memory_facet_owner_storage_key,
     score_recall_delivery_texts, select_long_term_current_recall_query_time,
     select_long_term_historical_recall_query_time, subject_soul_lifecycle_intent_digest_v1,
-    subject_soul_provision_intent_digest_v1, validate_governed_evidence_document,
-    validate_governed_evidence_source_ref, validate_memory_facet_manifest,
-    validate_memory_facet_posting, validate_memory_facet_read_chain,
-    validate_memory_graph_read_chain, validate_memory_graph_revision_doc,
-    validate_memory_graph_scope_manifest, AutonomyStrategy, AutonomyStrategyStore,
-    CanonicalTurnDelta, CompactMemoryGraph, ContinuitySnapshotImportContext,
+    subject_soul_provision_intent_digest_v1, transcript_cursor_governance_context_digest,
+    validate_governed_evidence_document, validate_governed_evidence_source_ref,
+    validate_memory_facet_manifest, validate_memory_facet_posting,
+    validate_memory_facet_read_chain, validate_memory_graph_read_chain,
+    validate_memory_graph_revision_doc, validate_memory_graph_scope_manifest, AutonomyStrategy,
+    AutonomyStrategyStore, CanonicalTurnDelta, CompactMemoryGraph, ContinuitySnapshotImportContext,
     ContinuitySnapshotImportPlan, ConversationKey, ConversationTranscriptStore, CoreRevisionLedger,
     CoreRevisionLedgerStore, DeferredGovernanceQueueReport, DerivedMemoryPlane, DerivedMemoryRef,
     DroppedProjectionCandidate, DynamicStateResolutionReport, EvidenceBacklink,
@@ -172,16 +172,18 @@ use bm_core::memory::{
     SubjectSoulVerifiedSnapshotV1, TemperamentContinuity, TemperamentContinuityStore,
     TemporalMemoryGraphBuildReport, TemporalMemoryGraphGateReport, TranscriptAttrEnvelope,
     TranscriptAttrWriteRejection, TranscriptAttrWriteReport, TranscriptConversationAlias,
-    TranscriptEvidenceRef, TranscriptInputMessage,
-    TranscriptLifecycleReport as CoreTranscriptLifecycleReport,
+    TranscriptCursorDisclosurePolicyV1, TranscriptCursorOperationKind, TranscriptEvidenceRef,
+    TranscriptInputMessage, TranscriptLifecycleReport as CoreTranscriptLifecycleReport,
     TranscriptLifecycleRequest as CoreTranscriptLifecycleRequest, TranscriptLifecycleState,
     TranscriptLifecycleTransition, TranscriptRedactionReason, TranscriptRedactionReportItem,
     TranscriptRedactionState, TranscriptRepairReport as CoreTranscriptRepairReport,
-    TranscriptReplayView, TranscriptTurnCursor, TranscriptTurnRecord, WorkingRecallInspectionInput,
-    LONG_TERM_CONTROL_AUDIT_NAMESPACE, LONG_TERM_CONTROL_REVISION_NAMESPACE,
-    LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE, LONG_TERM_GOVERNANCE_POLICY_NAMESPACE,
-    MAX_LONG_TERM_MEMORY_ITEMS, MEMORY_FACET_INDEX_NAMESPACE, MEMORY_FACET_POSTING_NAMESPACE,
-    PRIVATE_GARDEN_MAX_DOC_BYTES,
+    TranscriptReplayView, TranscriptSearchNormalizerV1, TranscriptSearchQuery,
+    TranscriptSearchScope, TranscriptTimelineAnchor, TranscriptTurnCursor, TranscriptTurnRecord,
+    WorkingRecallInspectionInput, LONG_TERM_CONTROL_AUDIT_NAMESPACE,
+    LONG_TERM_CONTROL_REVISION_NAMESPACE, LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+    LONG_TERM_GOVERNANCE_POLICY_NAMESPACE, MAX_LONG_TERM_MEMORY_ITEMS,
+    MEMORY_FACET_INDEX_NAMESPACE, MEMORY_FACET_POSTING_NAMESPACE, PRIVATE_GARDEN_MAX_DOC_BYTES,
+    TRANSCRIPT_CURSOR_DISCLOSURE_POLICY_SCHEMA_V1,
 };
 use bm_core::metrics::{
     OperatorReadinessReport, RuntimeMetricEvent, RuntimeMetricEventKind, RuntimeMetricsQuery,
@@ -248,8 +250,9 @@ use crate::store_internal::post_turn_governance::{
 use crate::{
     Error, GovernedRuntimeSkillWriteInput, LlmClient, MemoryArchiveScope, MemoryCapabilityCatalog,
     MemoryCapabilityPolicy, MemoryCloseReport, MemoryCloseRequest, MemoryConsolidationReport,
-    MemoryConsolidationState, MemoryEvalEvidenceApplicability, MemoryEvalQuestionEvaluation,
-    MemoryEvalRecallAtK, MemoryEvalRecallBenchmarkContext, MemoryEvalRecallCandidate,
+    MemoryConsolidationState, MemoryConversationListReport, MemoryConversationListRequest,
+    MemoryEvalEvidenceApplicability, MemoryEvalQuestionEvaluation, MemoryEvalRecallAtK,
+    MemoryEvalRecallBenchmarkContext, MemoryEvalRecallCandidate,
     MemoryEvalRecallCandidateRenderLoss, MemoryEvalRecallCandidateSelectionLoss,
     MemoryEvalRecallEvidenceGroupCoverage, MemoryEvalRecallEvidenceRefIndexEntry,
     MemoryEvalRecallFacetStageDiagnostics, MemoryEvalRecallGoldRank,
@@ -287,15 +290,18 @@ use crate::{
     MemoryRenderedEvidenceCapsule, MemoryReplayReport, MemoryReplayRequest,
     MemoryRetentionCompactionReport, MemoryRetentionCompactionRequest, MemoryRuntimeSystemKind,
     MemorySpaceExportReport, MemorySpaceExportRequest, MemorySpaceImportReport,
-    MemorySpaceImportRequest, MemoryStoreHandle, MemoryTranscriptAttrWriteReport,
+    MemorySpaceImportRequest, MemoryStoreHandle, MemoryTranscriptActivityReport,
+    MemoryTranscriptActivityRequest, MemoryTranscriptAttrWriteReport,
     MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitReport, MemoryTranscriptCommitRequest,
     MemoryTranscriptExportReport, MemoryTranscriptExportRequest, MemoryTranscriptLifecycleReport,
     MemoryTranscriptLifecycleRequest, MemoryTranscriptRepairReport, MemoryTranscriptRepairRequest,
-    MemoryTranscriptReplayReport, MemoryTranscriptReplayRequest, MemoryTurnFinalizeReport,
-    MemoryTurnFinalizeRequest, MemoryWriteReport, MemoryWriteRequest, MemoryWriteTransactionReport,
-    PressureLevel, PrivateDisclosureIntegrityReport, PrivateDisclosureSurfaceReport,
-    ProceduralMemoryDeliveryView, ProviderProjectionMaintenanceCarry, ProviderProjectionPayload,
-    Result, RuntimeDisclosureProtocolReport, RuntimeOperatorAction, RuntimeOperatorActionReport,
+    MemoryTranscriptReplayReport, MemoryTranscriptReplayRequest, MemoryTranscriptSearchReport,
+    MemoryTranscriptSearchRequest, MemoryTranscriptSearchScope, MemoryTranscriptTimelineReport,
+    MemoryTranscriptTimelineRequest, MemoryTurnFinalizeReport, MemoryTurnFinalizeRequest,
+    MemoryWriteReport, MemoryWriteRequest, MemoryWriteTransactionReport, PressureLevel,
+    PrivateDisclosureIntegrityReport, PrivateDisclosureSurfaceReport, ProceduralMemoryDeliveryView,
+    ProviderProjectionMaintenanceCarry, ProviderProjectionPayload, Result,
+    RuntimeDisclosureProtocolReport, RuntimeOperatorAction, RuntimeOperatorActionReport,
     RuntimeSkillDetailReport, RuntimeSkillDetailRequest, RuntimeSkillEditRequest,
     RuntimeSkillListReport, RuntimeSkillListRequest, RuntimeSkillMutationReport,
     RuntimeSkillRetireRequest, RuntimeSkillReuseOutcome, RuntimeSkillSetEnabledRequest,
@@ -7690,7 +7696,10 @@ impl MemoryRuntime {
         self.runtime_budget().retention_quota_report()
     }
 
-    fn remember_conversation_id_from_delta(&self, turn: &CanonicalTurnDelta) -> Result<()> {
+    fn conversation_alias_from_delta(
+        &self,
+        turn: &CanonicalTurnDelta,
+    ) -> Result<Option<TranscriptConversationAlias>> {
         let conversation_id = turn
             .conversation
             .conversation_id
@@ -7698,7 +7707,7 @@ impl MemoryRuntime {
             .unwrap_or(turn.conversation.chat_id.as_str())
             .trim();
         if conversation_id.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let alias = TranscriptConversationAlias::new(
             self.config.memory_space_id.clone(),
@@ -7708,15 +7717,14 @@ impl MemoryRuntime {
             conversation_id.to_string(),
             self.config.clock.now_secs(),
         )?;
-        self.config
-            .platform
-            .conversation_transcript_store()
-            .remember_conversation_alias(&alias)?;
+        Ok(Some(alias))
+    }
+
+    fn remember_committed_conversation_id(&self, conversation_id: &str) {
         *self
             .last_conversation_id
             .lock()
             .expect("last conversation id state poisoned") = Some(conversation_id.to_string());
-        Ok(())
     }
 
     fn active_transcript_key(
@@ -17632,7 +17640,7 @@ impl MemoryRuntime {
     ) -> Result<MemoryTurnFinalizeReport> {
         self.ensure_visible("write.turn", self.capabilities.write)?;
         validate_turn_scope(&self.config.scope, &self.config.subject_id, &request.turn)?;
-        self.remember_conversation_id_from_delta(&request.turn)?;
+        let conversation_alias = self.conversation_alias_from_delta(&request.turn)?;
         let platform = self.config.platform.as_ref();
         let session_store = platform.session_store();
         let transcript_store = platform.conversation_transcript_store();
@@ -17642,6 +17650,7 @@ impl MemoryRuntime {
             &self.config.memory_space_id,
             &request.turn,
             Vec::new(),
+            conversation_alias.clone(),
             self.config.clock.now_secs(),
         )?;
         let transcript_commit = core_report.transcript_commit;
@@ -17649,6 +17658,11 @@ impl MemoryRuntime {
             .as_ref()
             .is_some_and(|report| report.committed);
         let session_commit = core_report.session_commit;
+        if transcript_commit.is_some() {
+            if let Some(alias) = conversation_alias.as_ref() {
+                self.remember_committed_conversation_id(&alias.conversation_id);
+            }
+        }
 
         if !session_commit.committed && !transcript_committed {
             let memory_consolidation = if transcript_commit.is_some() {
@@ -19792,7 +19806,7 @@ impl MemoryRuntime {
     ) -> Result<MemoryTranscriptCommitReport> {
         self.ensure_visible("write.transcript", self.capabilities.write)?;
         validate_turn_scope(&self.config.scope, &self.config.subject_id, &request.turn)?;
-        self.remember_conversation_id_from_delta(&request.turn)?;
+        let conversation_alias = self.conversation_alias_from_delta(&request.turn)?;
         let lifecycle = self.start_lifecycle(
             RuntimeLifecycleOperation::Maintain,
             RuntimeLifecycleTrigger::SdkCall,
@@ -19808,6 +19822,7 @@ impl MemoryRuntime {
             &self.config.memory_space_id,
             &request.turn,
             request.host_refs,
+            conversation_alias.clone(),
             self.config.clock.now_secs(),
         )?;
         let changed = core_report.session_commit.committed
@@ -19815,6 +19830,11 @@ impl MemoryRuntime {
                 .transcript_commit
                 .as_ref()
                 .is_some_and(|report| report.committed);
+        if core_report.transcript_commit.is_some() {
+            if let Some(alias) = conversation_alias.as_ref() {
+                self.remember_committed_conversation_id(&alias.conversation_id);
+            }
+        }
         self.audit("write.transcript", true, "transcript_commit_completed");
         Ok(MemoryTranscriptCommitReport {
             key,
@@ -19874,6 +19894,512 @@ impl MemoryRuntime {
                 RuntimeLifecycleEffect::RunReplayInspection,
                 false,
                 "transcript_replay_completed",
+            )?,
+        })
+    }
+
+    pub fn list_conversations(
+        &self,
+        request: MemoryConversationListRequest,
+    ) -> Result<MemoryConversationListReport> {
+        self.ensure_transcript_query_visible(
+            "query.transcript.catalog",
+            self.capabilities.transcript_replay,
+            request.view,
+        )?;
+        let lifecycle = self.start_lifecycle(
+            RuntimeLifecycleOperation::Replay,
+            RuntimeLifecycleTrigger::ReplayInspection,
+            RuntimeLifecycleModeInput::default(),
+        );
+        let runtime_budget = self.runtime_budget();
+        let query_budget = runtime_budget.transcript_governance_budget.query_budget();
+        let governance_context_digest = self.transcript_query_governance_context_digest(
+            TranscriptCursorOperationKind::Catalog,
+            self.capabilities.transcript_replay,
+            request.view,
+        )?;
+        let query = bm_core::memory::TranscriptCatalogQuery {
+            memory_space_id: self.config.memory_space_id.clone(),
+            governance_context_digest,
+            channel_id: request.channel_id,
+            lifecycle: request.lifecycle,
+            limit: request.limit.max(1).min(query_budget.result_page_size),
+            cursor: request.cursor,
+        };
+        query.validate()?;
+        let mounted_subject_id = &self.config.scoped_runtime.mounted_subject_id;
+        let candidates = self
+            .config
+            .platform
+            .conversation_transcript_store()
+            .list_conversation_catalog(mounted_subject_id, &query)?;
+        candidates.validate_for_query(mounted_subject_id, &query)?;
+        let mut conversations = Vec::with_capacity(candidates.heads.len());
+        for head in candidates.heads {
+            let include_archived = matches!(
+                query.lifecycle,
+                bm_core::memory::TranscriptCatalogLifecycle::ActiveAndArchived
+            );
+            let visible_turn_count =
+                head.lifecycle
+                    .active
+                    .turn_count
+                    .saturating_add(if include_archived {
+                        head.lifecycle.archived.turn_count
+                    } else {
+                        0
+                    });
+            if visible_turn_count == 0 {
+                continue;
+            }
+            let visible_message_count =
+                head.lifecycle
+                    .active
+                    .message_count
+                    .saturating_add(if include_archived {
+                        head.lifecycle.archived.message_count
+                    } else {
+                        0
+                    });
+            let visible_time_bounds = [
+                Some(head.lifecycle.active),
+                include_archived.then_some(head.lifecycle.archived),
+            ]
+            .into_iter()
+            .flatten()
+            .filter(|stats| stats.turn_count > 0);
+            let first_visible_observed_at = visible_time_bounds
+                .clone()
+                .filter_map(|stats| stats.first_observed_at)
+                .min();
+            let last_visible_observed_at = visible_time_bounds
+                .filter_map(|stats| stats.last_observed_at)
+                .max();
+            conversations.push(bm_core::memory::ConversationCatalogEntry {
+                key: head.key,
+                visible_turn_count,
+                visible_message_count,
+                first_visible_observed_at,
+                last_visible_observed_at,
+                archived: head.lifecycle.active.turn_count == 0
+                    && head.lifecycle.archived.turn_count > 0,
+                head_revision: head.revision,
+                head_digest: head.head_digest,
+            });
+        }
+        self.audit(
+            "query.transcript.catalog",
+            true,
+            "transcript_catalog_query_completed",
+        );
+        Ok(MemoryConversationListReport {
+            page: bm_core::memory::ConversationCatalogPage {
+                conversations,
+                next_cursor: candidates.next_cursor,
+                has_more: candidates.has_more,
+            },
+            lifecycle_report: self.finish_lifecycle_success(
+                lifecycle,
+                RuntimeLifecycleEventKind::RuntimeLifecycle,
+                RuntimeLifecycleEffect::RunReplayInspection,
+                false,
+                "transcript_catalog_query_completed",
+            )?,
+        })
+    }
+
+    pub fn query_transcript_timeline(
+        &self,
+        request: MemoryTranscriptTimelineRequest,
+    ) -> Result<MemoryTranscriptTimelineReport> {
+        self.ensure_transcript_query_visible(
+            "query.transcript.timeline",
+            self.capabilities.transcript_replay,
+            request.view,
+        )?;
+        let mounted_subject_id = &self.config.scoped_runtime.mounted_subject_id;
+        validate_timeline_anchor_subject(&request.anchor, mounted_subject_id)?;
+        let lifecycle = self.start_lifecycle(
+            RuntimeLifecycleOperation::Replay,
+            RuntimeLifecycleTrigger::ReplayInspection,
+            RuntimeLifecycleModeInput::default(),
+        );
+        let runtime_budget = self.runtime_budget();
+        let query_budget = runtime_budget.transcript_governance_budget.query_budget();
+        let governance_context_digest = self.transcript_query_governance_context_digest(
+            TranscriptCursorOperationKind::Timeline,
+            self.capabilities.transcript_replay,
+            request.view,
+        )?;
+        let query = bm_core::memory::TranscriptTimelineQuery {
+            key: ConversationKey::new(
+                self.config.memory_space_id.clone(),
+                request.channel_id,
+                request.conversation_id,
+            )?,
+            governance_context_digest,
+            anchor: request.anchor,
+            limit: request.limit.max(1).min(query_budget.result_page_size),
+            cursor: request.cursor,
+        };
+        query.validate()?;
+        let transcript_store = self.config.platform.conversation_transcript_store();
+        let candidates = transcript_store.query_transcript_timeline(mounted_subject_id, &query)?;
+        validate_transcript_candidate_head(
+            &candidates.head,
+            &query.key.memory_space_id,
+            mounted_subject_id,
+            Some(&query.key),
+            "query.transcript.timeline",
+        )?;
+        validate_transcript_candidate_records(
+            &candidates.turns,
+            &query.key,
+            mounted_subject_id,
+            "query.transcript.timeline",
+        )?;
+        let mut slice = redacted_transcript_candidate_slice(
+            transcript_store.as_ref(),
+            &query.key,
+            mounted_subject_id,
+            &candidates.turns,
+            request.view,
+        )?;
+        apply_transcript_governance_budget_to_slice(
+            &mut slice,
+            runtime_budget.transcript_governance_budget,
+        );
+        self.audit(
+            "query.transcript.timeline",
+            true,
+            "transcript_timeline_query_completed",
+        );
+        Ok(MemoryTranscriptTimelineReport {
+            page: bm_core::memory::TranscriptTimelinePage {
+                key: query.key,
+                head_revision: candidates.head.revision,
+                head_digest: candidates.head.head_digest,
+                turns: slice.turns,
+                older_cursor: candidates.older_cursor,
+                newer_cursor: candidates.newer_cursor,
+                has_older: candidates.has_older,
+                has_newer: candidates.has_newer,
+            },
+            lifecycle_report: self.finish_lifecycle_success(
+                lifecycle,
+                RuntimeLifecycleEventKind::RuntimeLifecycle,
+                RuntimeLifecycleEffect::RunReplayInspection,
+                false,
+                "transcript_timeline_query_completed",
+            )?,
+        })
+    }
+
+    pub fn search_transcripts(
+        &self,
+        request: MemoryTranscriptSearchRequest,
+    ) -> Result<MemoryTranscriptSearchReport> {
+        self.ensure_transcript_query_visible(
+            "query.transcript.search",
+            self.capabilities.transcript_search,
+            request.view,
+        )?;
+        let lifecycle = self.start_lifecycle(
+            RuntimeLifecycleOperation::Replay,
+            RuntimeLifecycleTrigger::ReplayInspection,
+            RuntimeLifecycleModeInput::default(),
+        );
+        let runtime_budget = self.runtime_budget();
+        let query_budget = runtime_budget.transcript_governance_budget.query_budget();
+        let governance_context_digest = self.transcript_query_governance_context_digest(
+            TranscriptCursorOperationKind::Search,
+            self.capabilities.transcript_search,
+            request.view,
+        )?;
+        if request.query_text.len() > query_budget.query_max_bytes
+            || request.query_text.chars().count() > query_budget.query_max_chars
+        {
+            return Err(Error::config(
+                "query.transcript.search",
+                "search_query_exceeds_runtime_budget",
+            ));
+        }
+        let normalized = TranscriptSearchNormalizerV1::normalize(&request.query_text)?;
+        if normalized.terms.len() > query_budget.query_max_terms {
+            return Err(Error::config(
+                "query.transcript.search",
+                "search_query_exceeds_runtime_term_budget",
+            ));
+        }
+        let scope = match request.scope {
+            MemoryTranscriptSearchScope::MountedSubject { channel_id } => {
+                TranscriptSearchScope::MountedSubject {
+                    memory_space_id: self.config.memory_space_id.clone(),
+                    channel_id,
+                }
+            }
+            MemoryTranscriptSearchScope::ExactConversation {
+                channel_id,
+                conversation_id,
+            } => TranscriptSearchScope::ExactConversation {
+                key: ConversationKey::new(
+                    self.config.memory_space_id.clone(),
+                    channel_id,
+                    conversation_id,
+                )?,
+            },
+        };
+        let query = TranscriptSearchQuery {
+            scope,
+            governance_context_digest,
+            query: normalized,
+            sort: request.sort,
+            lifecycle: request.lifecycle,
+            limit: request.limit.max(1).min(query_budget.result_page_size),
+            cursor: request.cursor,
+        };
+        query.validate()?;
+        let mounted_subject_id = &self.config.scoped_runtime.mounted_subject_id;
+        let transcript_store = self.config.platform.conversation_transcript_store();
+        let candidates = transcript_store.search_transcript(mounted_subject_id, &query)?;
+        candidates.validate_for_query(mounted_subject_id, &query)?;
+        if candidates.candidates.len() > query_budget.candidate_hydration_limit {
+            return Err(Error::config(
+                "query.transcript.search",
+                "search_candidate_hydration_budget_exceeded",
+            ));
+        }
+        let mut hits = Vec::with_capacity(candidates.candidates.len());
+        for candidate in candidates.candidates {
+            if !transcript_record_matches_search_lifecycle(&candidate.record, query.lifecycle)
+                || !candidate.record.is_searchable_for_presentation()
+            {
+                continue;
+            }
+            let raw_message = transcript_message_by_id(&candidate.record, &candidate.message_id)
+                .ok_or_else(|| {
+                    Error::config(
+                        "query.transcript.search",
+                        "search_candidate_message_not_in_turn",
+                    )
+                })?;
+            let redacted = redacted_transcript_candidate_slice(
+                transcript_store.as_ref(),
+                &candidate.record.key,
+                mounted_subject_id,
+                std::slice::from_ref(&candidate.record),
+                request.view,
+            )?;
+            let Some(redacted_message) =
+                redacted_transcript_message_by_id(&redacted, &candidate.message_id)
+            else {
+                continue;
+            };
+            let Some(content) = redacted_message
+                .content
+                .as_deref()
+                .filter(|_| !redacted_message.redacted)
+            else {
+                continue;
+            };
+            let excerpt = TranscriptSearchNormalizerV1::excerpt(
+                content,
+                &query.query,
+                query_budget.excerpt_max_chars,
+            )?;
+            if excerpt.highlights.is_empty() {
+                continue;
+            }
+            let locator = bm_core::memory::TranscriptLocator::new(
+                candidate.record.key.clone(),
+                mounted_subject_id.clone(),
+                candidate.record.turn_id.clone(),
+                Some(candidate.message_id),
+                candidate.record.sequence,
+                raw_message.observed_at,
+            )?;
+            let anchor = bm_core::memory::TranscriptAnchor::new(
+                locator.clone(),
+                candidate.head_revision,
+                candidate.head_digest,
+            )?;
+            hits.push(bm_core::memory::TranscriptSearchHit {
+                locator,
+                role: redacted_message.role.clone(),
+                actor: redacted_message.actor.clone(),
+                excerpt,
+                score: candidate.score,
+                anchor,
+            });
+        }
+        self.audit(
+            "query.transcript.search",
+            true,
+            "transcript_search_completed",
+        );
+        Ok(MemoryTranscriptSearchReport {
+            page: bm_core::memory::TranscriptSearchPage {
+                hits,
+                next_cursor: candidates.next_cursor,
+                has_more: candidates.has_more,
+                budget_applied: candidates.budget_applied,
+            },
+            lifecycle_report: self.finish_lifecycle_success(
+                lifecycle,
+                RuntimeLifecycleEventKind::RuntimeLifecycle,
+                RuntimeLifecycleEffect::RunReplayInspection,
+                false,
+                "transcript_search_completed",
+            )?,
+        })
+    }
+
+    pub fn query_transcript_activity(
+        &self,
+        request: MemoryTranscriptActivityRequest,
+    ) -> Result<MemoryTranscriptActivityReport> {
+        self.ensure_transcript_query_visible(
+            "query.transcript.activity",
+            self.capabilities.transcript_activity,
+            request.view,
+        )?;
+        let lifecycle = self.start_lifecycle(
+            RuntimeLifecycleOperation::Replay,
+            RuntimeLifecycleTrigger::ReplayInspection,
+            RuntimeLifecycleModeInput::default(),
+        );
+        let runtime_budget = self.runtime_budget();
+        let query_budget = runtime_budget.transcript_governance_budget.query_budget();
+        let query = bm_core::memory::TranscriptActivityQuery {
+            key: ConversationKey::new(
+                self.config.memory_space_id.clone(),
+                request.channel_id,
+                request.conversation_id,
+            )?,
+            ranges: request.ranges,
+            lifecycle: request.lifecycle,
+        };
+        query.validate()?;
+        let activity_total_span = query.ranges.iter().try_fold(0_u64, |total, range| {
+            total.checked_add(range.end_exclusive.saturating_sub(range.start_inclusive))
+        });
+        if query.ranges.len() > query_budget.activity_bucket_limit
+            || activity_total_span
+                .is_none_or(|span| span > query_budget.activity_total_span_max_secs)
+        {
+            return Err(Error::config(
+                "query.transcript.activity",
+                "activity_query_exceeds_runtime_budget",
+            ));
+        }
+        let mounted_subject_id = &self.config.scoped_runtime.mounted_subject_id;
+        let transcript_store = self.config.platform.conversation_transcript_store();
+        let candidates = transcript_store.query_transcript_activity(mounted_subject_id, &query)?;
+        validate_transcript_candidate_head(
+            &candidates.head,
+            &query.key.memory_space_id,
+            mounted_subject_id,
+            Some(&query.key),
+            "query.transcript.activity",
+        )?;
+        if candidates.buckets.len() != query.ranges.len()
+            || candidates
+                .buckets
+                .iter()
+                .zip(&query.ranges)
+                .any(|(bucket, requested)| bucket.range != *requested)
+        {
+            return Err(Error::config(
+                "query.transcript.activity",
+                "activity_candidate_bucket_shape_mismatch",
+            ));
+        }
+        let mut buckets = Vec::with_capacity(candidates.buckets.len());
+        for bucket in candidates.buckets {
+            let mut anchors = Vec::new();
+            for candidate in bucket.candidates {
+                if candidate.record.key != query.key
+                    || candidate.record.subject != *mounted_subject_id
+                    || !transcript_record_matches_search_lifecycle(
+                        &candidate.record,
+                        query.lifecycle,
+                    )
+                    || !candidate.record.contributes_to_presentation_activity()
+                {
+                    continue;
+                }
+                let message = transcript_message_by_id(&candidate.record, &candidate.message_id)
+                    .ok_or_else(|| {
+                        Error::config(
+                            "query.transcript.activity",
+                            "activity_candidate_message_not_in_turn",
+                        )
+                    })?;
+                if !bucket.range.contains(message.observed_at) {
+                    return Err(Error::config(
+                        "query.transcript.activity",
+                        "activity_candidate_outside_requested_range",
+                    ));
+                }
+                if !transcript_message_is_visible(
+                    transcript_store.as_ref(),
+                    &candidate.record,
+                    &candidate.message_id,
+                    request.view,
+                )? {
+                    continue;
+                }
+                let locator = bm_core::memory::TranscriptLocator::new(
+                    candidate.record.key.clone(),
+                    mounted_subject_id.clone(),
+                    candidate.record.turn_id.clone(),
+                    Some(candidate.message_id),
+                    candidate.record.sequence,
+                    message.observed_at,
+                )?;
+                anchors.push(bm_core::memory::TranscriptAnchor::new(
+                    locator,
+                    candidates.head.revision,
+                    candidates.head.head_digest.clone(),
+                )?);
+            }
+            anchors.sort_by_key(|anchor| {
+                (
+                    anchor.locator.observed_at,
+                    anchor.locator.turn_sequence,
+                    anchor.locator.message_id.clone(),
+                )
+            });
+            let visible_message_count = u64::try_from(anchors.len()).unwrap_or(u64::MAX);
+            let activity_bucket = bm_core::memory::TranscriptActivityBucket {
+                range: bucket.range,
+                visible_message_count,
+                first_visible_anchor: anchors.first().cloned(),
+                last_visible_anchor: anchors.last().cloned(),
+            };
+            activity_bucket.validate()?;
+            buckets.push(activity_bucket);
+        }
+        self.audit(
+            "query.transcript.activity",
+            true,
+            "transcript_activity_query_completed",
+        );
+        Ok(MemoryTranscriptActivityReport {
+            activity: bm_core::memory::TranscriptActivityReport {
+                key: query.key,
+                head_revision: candidates.head.revision,
+                head_digest: candidates.head.head_digest,
+                buckets,
+                budget_applied: candidates.budget_applied,
+            },
+            lifecycle_report: self.finish_lifecycle_success(
+                lifecycle,
+                RuntimeLifecycleEventKind::RuntimeLifecycle,
+                RuntimeLifecycleEffect::RunReplayInspection,
+                false,
+                "transcript_activity_query_completed",
             )?,
         })
     }
@@ -20614,6 +21140,39 @@ impl MemoryRuntime {
                 self.capabilities.export
             }
         }
+    }
+
+    fn ensure_transcript_query_visible(
+        &self,
+        operation: &'static str,
+        query_visibility: MemoryOperationVisibility,
+        view: TranscriptReplayView,
+    ) -> Result<()> {
+        self.ensure_visible(operation, query_visibility)?;
+        self.ensure_visible(operation, self.transcript_replay_visibility(view))
+    }
+
+    fn transcript_query_governance_context_digest(
+        &self,
+        operation: TranscriptCursorOperationKind,
+        query_visibility: MemoryOperationVisibility,
+        view: TranscriptReplayView,
+    ) -> Result<String> {
+        let view_visibility = self.transcript_replay_visibility(view);
+        let query_bits = memory_operation_visibility_bits(query_visibility);
+        let view_bits = memory_operation_visibility_bits(view_visibility);
+        let capability_context_digest = sha256_field_digest(&[
+            b"beetle.transcript.cursor.sdk-capability-context.v1",
+            crate::PLATFORM_CAPABILITY_SNAPSHOT_SCHEMA.as_bytes(),
+            self.capabilities.profile.as_str().as_bytes(),
+            &query_bits,
+            &view_bits,
+        ]);
+        let policy = TranscriptCursorDisclosurePolicyV1::new(
+            TRANSCRIPT_CURSOR_DISCLOSURE_POLICY_SCHEMA_V1,
+            capability_context_digest,
+        )?;
+        transcript_cursor_governance_context_digest(operation, view, &policy)
     }
 
     fn long_term_mutation_visibility(
@@ -26766,6 +27325,17 @@ fn sha256_field_digest(fields: &[&[u8]]) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
+fn memory_operation_visibility_bits(visibility: MemoryOperationVisibility) -> [u8; 6] {
+    [
+        u8::from(visibility.profile_allowed),
+        u8::from(visibility.compiled),
+        u8::from(visibility.config_enabled),
+        u8::from(visibility.permission_allowed),
+        u8::from(visibility.privacy_allowed),
+        u8::from(visibility.visible),
+    ]
+}
+
 fn long_term_control_operation(
     mutation: &MemoryLongTermMutation,
 ) -> bm_core::memory::LongTermControlOperation {
@@ -26819,6 +27389,155 @@ fn transcript_replay_limit(runtime_budget: &RuntimeBudgetReport, requested_limit
             .transcript_page_size
             .max(1),
     )
+}
+
+fn validate_timeline_anchor_subject(
+    anchor: &TranscriptTimelineAnchor,
+    mounted_subject_id: &str,
+) -> Result<()> {
+    let anchor = match anchor {
+        TranscriptTimelineAnchor::Before(anchor)
+        | TranscriptTimelineAnchor::After(anchor)
+        | TranscriptTimelineAnchor::Around(anchor) => Some(anchor),
+        TranscriptTimelineAnchor::Latest
+        | TranscriptTimelineAnchor::AroundSequence(_)
+        | TranscriptTimelineAnchor::FirstVisibleInRange(_) => None,
+    };
+    if anchor.is_some_and(|anchor| anchor.locator.mounted_subject_id != mounted_subject_id) {
+        return Err(Error::config(
+            "query.transcript.timeline",
+            "timeline_anchor_subject_scope_mismatch",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_transcript_candidate_head(
+    head: &bm_core::memory::ConversationCatalogHead,
+    memory_space_id: &str,
+    mounted_subject_id: &str,
+    expected_key: Option<&ConversationKey>,
+    stage: &'static str,
+) -> Result<()> {
+    head.validate()?;
+    if head.key.memory_space_id != memory_space_id
+        || head.mounted_subject_id != mounted_subject_id
+        || expected_key.is_some_and(|key| head.key != *key)
+    {
+        return Err(Error::config(
+            stage,
+            "transcript_candidate_head_scope_mismatch",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_transcript_candidate_records(
+    records: &[TranscriptTurnRecord],
+    key: &ConversationKey,
+    mounted_subject_id: &str,
+    stage: &'static str,
+) -> Result<()> {
+    if records
+        .iter()
+        .any(|record| record.key != *key || record.subject != mounted_subject_id)
+    {
+        return Err(Error::config(
+            stage,
+            "transcript_candidate_record_scope_mismatch",
+        ));
+    }
+    Ok(())
+}
+
+fn redacted_transcript_candidate_slice(
+    transcript_store: &dyn ConversationTranscriptStore,
+    key: &ConversationKey,
+    mounted_subject_id: &str,
+    records: &[TranscriptTurnRecord],
+    view: TranscriptReplayView,
+) -> Result<RedactedTranscriptSlice> {
+    validate_transcript_candidate_records(
+        records,
+        key,
+        mounted_subject_id,
+        "query.transcript.redaction",
+    )?;
+    let mut attrs = Vec::new();
+    for record in records {
+        attrs.extend(transcript_store.list_transcript_attrs(
+            key,
+            mounted_subject_id,
+            Some(&record.turn_id),
+        )?);
+    }
+    Ok(RedactedTranscriptSlice::from_records_with_attrs(
+        key.clone(),
+        view,
+        records,
+        &attrs,
+    ))
+}
+
+fn transcript_message_by_id<'a>(
+    record: &'a TranscriptTurnRecord,
+    message_id: &str,
+) -> Option<&'a bm_core::memory::TranscriptMessageRecord> {
+    record
+        .input_messages
+        .iter()
+        .chain(record.assistant_message.iter())
+        .find(|message| message.message_id == message_id)
+}
+
+fn redacted_transcript_message_by_id<'a>(
+    slice: &'a RedactedTranscriptSlice,
+    message_id: &str,
+) -> Option<&'a bm_core::memory::RedactedTranscriptMessage> {
+    slice.turns.iter().find_map(|turn| {
+        turn.input_messages
+            .iter()
+            .chain(turn.assistant_message.iter())
+            .find(|message| message.message_id == message_id)
+    })
+}
+
+fn transcript_record_matches_search_lifecycle(
+    record: &TranscriptTurnRecord,
+    lifecycle: bm_core::memory::TranscriptSearchLifecycle,
+) -> bool {
+    match lifecycle {
+        bm_core::memory::TranscriptSearchLifecycle::ActiveOnly => {
+            record.lifecycle_state == TranscriptLifecycleState::Active
+        }
+        bm_core::memory::TranscriptSearchLifecycle::ActiveAndArchived => matches!(
+            record.lifecycle_state,
+            TranscriptLifecycleState::Active | TranscriptLifecycleState::Archived
+        ),
+    }
+}
+
+fn transcript_message_is_visible(
+    transcript_store: &dyn ConversationTranscriptStore,
+    record: &TranscriptTurnRecord,
+    message_id: &str,
+    view: TranscriptReplayView,
+) -> Result<bool> {
+    let slice = redacted_transcript_candidate_slice(
+        transcript_store,
+        &record.key,
+        &record.subject,
+        std::slice::from_ref(record),
+        view,
+    )?;
+    Ok(slice.turns.first().is_some_and(|turn| {
+        turn.input_messages
+            .iter()
+            .chain(turn.assistant_message.iter())
+            .any(|message| {
+                message.message_id == message_id && !message.redacted && message.content.is_some()
+            })
+    }))
 }
 
 fn validate_transcript_attr_write_request(

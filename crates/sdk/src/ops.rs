@@ -1,8 +1,8 @@
 use crate::store_internal::{StoreMutationBudgetReport, STORE_SCHEMA_ID, STORE_SCHEMA_VERSION};
 use bm_core::memory::IngressKind;
 use bm_core::memory::{
-    CanonicalTurnDelta, ConversationKey, DeferredGovernanceQueueReport, DerivedMemoryRef,
-    GovernedEvidenceDocumentChunk, GovernedEvidenceDocumentDraft,
+    CanonicalTurnDelta, ConversationCatalogPage, ConversationKey, DeferredGovernanceQueueReport,
+    DerivedMemoryRef, GovernedEvidenceDocumentChunk, GovernedEvidenceDocumentDraft,
     GovernedEvidenceDocumentSourceKind, GovernedMemoryOwnerRef, HostOpaqueRef, LongTermMemoryQuery,
     MemoryEvidenceAuthority, MemoryGovernancePolicyMutation,
     MemoryGovernancePolicyMutationReport as CoreMemoryGovernancePolicyMutationReport,
@@ -19,9 +19,12 @@ use bm_core::memory::{
     RelationshipDisclosureCeilingV1, RelationshipSourceControlErrorKeyV1,
     RelationshipSourceStateV1, SessionMessage, SessionTurnCommitReport, SkillEvolutionReport,
     SubjectScopedRuntime, SubjectSoulLifecycleErrorKey, SubjectSoulReadSelectorV1,
-    TranscriptAttrEnvelope, TranscriptAttrWriteRejection, TranscriptCommitReport,
-    TranscriptEvidenceRef, TranscriptLifecycleReport, TranscriptLifecycleTransition,
+    TranscriptActivityReport, TranscriptAttrEnvelope, TranscriptAttrWriteRejection,
+    TranscriptCatalogLifecycle, TranscriptCommitReport, TranscriptEvidenceRef,
+    TranscriptLifecycleReport, TranscriptLifecycleTransition, TranscriptQueryCursor,
     TranscriptRedactionReportItem, TranscriptRepairReport, TranscriptReplayView,
+    TranscriptSearchLifecycle, TranscriptSearchPage, TranscriptSearchSort,
+    TranscriptTimelineAnchor, TranscriptTimelinePage, TranscriptUtcRange,
 };
 use bm_core::memory::{
     CompactMemoryGraph, EvidenceBacklink, FacetCoverageSelectionReport, FacetRankFusionReport,
@@ -1759,6 +1762,80 @@ pub struct MemoryTranscriptReplayReport {
     pub slice: RedactedTranscriptSlice,
     pub next_cursor: Option<String>,
     pub has_more: bool,
+    pub lifecycle_report: RuntimeLifecycleReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryConversationListRequest {
+    pub channel_id: Option<String>,
+    pub lifecycle: TranscriptCatalogLifecycle,
+    pub limit: usize,
+    pub cursor: Option<TranscriptQueryCursor>,
+    pub view: TranscriptReplayView,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryConversationListReport {
+    pub page: ConversationCatalogPage,
+    pub lifecycle_report: RuntimeLifecycleReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryTranscriptTimelineRequest {
+    pub channel_id: String,
+    pub conversation_id: String,
+    pub anchor: TranscriptTimelineAnchor,
+    pub limit: usize,
+    pub cursor: Option<TranscriptQueryCursor>,
+    pub view: TranscriptReplayView,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryTranscriptTimelineReport {
+    pub page: TranscriptTimelinePage,
+    pub lifecycle_report: RuntimeLifecycleReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MemoryTranscriptSearchScope {
+    MountedSubject {
+        channel_id: Option<String>,
+    },
+    ExactConversation {
+        channel_id: String,
+        conversation_id: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryTranscriptSearchRequest {
+    pub scope: MemoryTranscriptSearchScope,
+    pub query_text: String,
+    pub sort: TranscriptSearchSort,
+    pub lifecycle: TranscriptSearchLifecycle,
+    pub limit: usize,
+    pub cursor: Option<TranscriptQueryCursor>,
+    pub view: TranscriptReplayView,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryTranscriptSearchReport {
+    pub page: TranscriptSearchPage,
+    pub lifecycle_report: RuntimeLifecycleReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryTranscriptActivityRequest {
+    pub channel_id: String,
+    pub conversation_id: String,
+    pub ranges: Vec<TranscriptUtcRange>,
+    pub lifecycle: TranscriptSearchLifecycle,
+    pub view: TranscriptReplayView,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryTranscriptActivityReport {
+    pub activity: TranscriptActivityReport,
     pub lifecycle_report: RuntimeLifecycleReport,
 }
 

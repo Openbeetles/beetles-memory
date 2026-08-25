@@ -8,7 +8,8 @@ use super::{
     default_session_speaker_for_role, synthesize_session_message_id, ActorAttribution,
     CanonicalTurnTranscriptCommitReport, ConversationKey, ConversationTranscriptStore,
     HostOpaqueRef, SessionMessage, SessionMessageRecord, SessionStore, SubjectId,
-    TranscriptCommitReport, TranscriptTurnRecord, MAX_SESSION_ENTRIES,
+    TranscriptAppendIntent, TranscriptCommitReport, TranscriptConversationAlias,
+    TranscriptTurnRecord, MAX_SESSION_ENTRIES,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -272,9 +273,19 @@ pub fn commit_canonical_turn_delta_with_transcript(
     memory_space_id: &str,
     delta: &CanonicalTurnDelta,
     host_refs: Vec<HostOpaqueRef>,
+    conversation_alias: Option<TranscriptConversationAlias>,
     now_secs: u64,
 ) -> Result<CanonicalTurnTranscriptCommitReport> {
     let key = ConversationKey::from_delta(memory_space_id, delta)?;
+    if let Some(alias) = conversation_alias.as_ref() {
+        alias.validate_for_transcript_owner(&key, &delta.subject)?;
+        if alias.chat_id != delta.conversation.chat_id {
+            return Err(crate::error::Error::config(
+                "turn_transcript_commit",
+                "conversation_alias_chat_id_must_match_turn_delta",
+            ));
+        }
+    }
     let before_count = session_store.message_count(&delta.conversation.chat_id)?;
     if let Some(existing) = transcript_store.get_turn(&key, &delta.subject, &delta.turn_id)? {
         let session_commit = SessionTurnCommitReport {
@@ -332,7 +343,12 @@ pub fn commit_canonical_turn_delta_with_transcript(
                     host_refs,
                     now_secs,
                 )?;
-                let transcript_commit = transcript_store.append_turn(&record)?;
+                let intent = TranscriptAppendIntent {
+                    record,
+                    conversation_alias: conversation_alias.clone(),
+                };
+                intent.validate()?;
+                let transcript_commit = transcript_store.append_turn_intent(&intent)?;
                 return Ok(CanonicalTurnTranscriptCommitReport {
                     session_commit,
                     transcript_commit: Some(transcript_commit),
@@ -359,7 +375,12 @@ pub fn commit_canonical_turn_delta_with_transcript(
         host_refs,
         now_secs,
     )?;
-    let transcript_commit = transcript_store.append_turn(&record)?;
+    let intent = TranscriptAppendIntent {
+        record,
+        conversation_alias,
+    };
+    intent.validate()?;
+    let transcript_commit = transcript_store.append_turn_intent(&intent)?;
     Ok(CanonicalTurnTranscriptCommitReport {
         session_commit,
         transcript_commit: Some(transcript_commit),

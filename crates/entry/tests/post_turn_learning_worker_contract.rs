@@ -109,6 +109,23 @@ fn wait_for_job(runtime: &EntryRuntime, job_id: &str, expected: PostTurnGovernan
     }
 }
 
+fn wait_for_completed_job_reports(runtimes: &[&EntryRuntime], expected: u64) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let completed = runtimes.iter().fold(0_u64, |total, runtime| {
+            total.saturating_add(runtime.governance_coordinator_report().completed_jobs)
+        });
+        if completed >= expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "durable success was not reflected by the coordinator report"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 struct FakeOpenAiServer {
     address: String,
     calls: Arc<AtomicUsize>,
@@ -364,6 +381,7 @@ fn coordinator_blocks_without_config_then_recovers_and_completes_the_same_job() 
     configure_model(&runtime, &fake);
 
     wait_for_job(&runtime, &job_id, PostTurnGovernanceJobStatusV2::Succeeded);
+    wait_for_completed_job_reports(&[&runtime], 1);
     let report = runtime.governance_coordinator_report();
     assert_eq!(report.completed_jobs, 1);
     assert_eq!(report.last_job_id.as_deref(), Some(job_id.as_str()));
@@ -448,6 +466,7 @@ fn two_entry_coordinators_share_one_backend_claim_and_one_terminal_receipt() {
     let job_id = finalized.memory_consolidation.job_id.expect("job id");
 
     wait_for_job(&first, &job_id, PostTurnGovernanceJobStatusV2::Succeeded);
+    wait_for_completed_job_reports(&[&first, &second], 1);
     assert_eq!(
         first
             .governance_coordinator_report()

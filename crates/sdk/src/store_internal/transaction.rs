@@ -11,7 +11,8 @@ use bm_core::memory::{
     GovernedEvidenceDocument, GovernedEvidenceSourceRef, GovernedMemoryOwnerPlane,
     LongTermMemoryHeadManifest, LongTermMemoryVersionMaterial, LongTermMemoryVersionScopeManifest,
     MemoryFacetIndexDoc, MemoryFacetIndexManifest, MemoryGraphScopeManifest, RelationshipPortfolio,
-    RelationshipTopology, MEMORY_FACET_POSTING_NAMESPACE,
+    RelationshipTopology, TranscriptSearchNormalizerV1, TranscriptTurnRecord,
+    MAX_TRANSCRIPT_INDEX_TERMS_PER_MESSAGE, MEMORY_FACET_POSTING_NAMESPACE,
 };
 use bm_core::skills::{
     canonical_runtime_skill_owner_key, runtime_skill_scope_manifest_key, RuntimeSkillOwnerRecord,
@@ -36,6 +37,17 @@ use crate::store_internal::schema::{
     LONG_TERM_HEAD_MANIFEST_NAMESPACE, LONG_TERM_VERSION_MATERIAL_NAMESPACE,
     LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE, RECALL_OWNER_SCOPE_BINDING_NAMESPACE,
     RUNTIME_SKILL_RECORD_NAMESPACE, RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE,
+};
+use crate::store_internal::transcript_query::{
+    catalog_page_key, catalog_root_key, keyring_key, message_locators, search_message_manifest_key,
+    search_posting_key, search_root_key, term_digest, time_posting_key, time_root_key,
+    TranscriptCatalogPageV1, TranscriptCatalogRootV1, TranscriptMessageSearchManifestV1,
+    TranscriptQueryKeyringV1, TranscriptSearchPostingPageV1, TranscriptSearchPostingRootV1,
+    TranscriptTimePostingPageV1, TranscriptTimePostingRootV1, TRANSCRIPT_CATALOG_PAGE_NAMESPACE,
+    TRANSCRIPT_CATALOG_ROOT_NAMESPACE, TRANSCRIPT_QUERY_KEYRING_NAMESPACE,
+    TRANSCRIPT_SEARCH_MESSAGE_MANIFEST_NAMESPACE, TRANSCRIPT_SEARCH_POSTING_NAMESPACE,
+    TRANSCRIPT_SEARCH_ROOT_NAMESPACE, TRANSCRIPT_TIME_POSTING_NAMESPACE,
+    TRANSCRIPT_TIME_ROOT_NAMESPACE,
 };
 use crate::store_internal::{
     GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE, GOVERNED_EVIDENCE_SOURCE_REF_NAMESPACE,
@@ -1626,6 +1638,94 @@ pub(crate) fn json_document_matches_scoped_projection(
                 == Some(scope.memory_space_id.as_str())
                 && value.get("subject").and_then(Value::as_str) == Some(mounted_subject_id)
         }
+        TRANSCRIPT_CATALOG_PAGE_NAMESPACE => {
+            serde_json::from_value::<TranscriptCatalogPageV1>(value.clone()).is_ok_and(|page| {
+                page.validate().is_ok()
+                    && page.memory_space_id == scope.memory_space_id
+                    && page.mounted_subject_id == mounted_subject_id
+                    && catalog_page_key(
+                        &page.memory_space_id,
+                        &page.mounted_subject_id,
+                        page.channel_id.as_deref(),
+                        page.page_id,
+                    ) == key
+            })
+        }
+        TRANSCRIPT_CATALOG_ROOT_NAMESPACE => {
+            serde_json::from_value::<TranscriptCatalogRootV1>(value.clone()).is_ok_and(|root| {
+                root.memory_space_id == scope.memory_space_id
+                    && root.mounted_subject_id == mounted_subject_id
+                    && catalog_root_key(
+                        &root.memory_space_id,
+                        &root.mounted_subject_id,
+                        root.channel_id.as_deref(),
+                    ) == key
+            })
+        }
+        TRANSCRIPT_TIME_POSTING_NAMESPACE => {
+            serde_json::from_value::<TranscriptTimePostingPageV1>(value.clone()).is_ok_and(|page| {
+                page.key.memory_space_id == scope.memory_space_id
+                    && page.mounted_subject_id == mounted_subject_id
+                    && time_posting_key(
+                        &page.key,
+                        &page.mounted_subject_id,
+                        page.utc_day,
+                        page.page_id,
+                    ) == key
+            })
+        }
+        TRANSCRIPT_TIME_ROOT_NAMESPACE => {
+            serde_json::from_value::<TranscriptTimePostingRootV1>(value.clone()).is_ok_and(|root| {
+                root.validate().is_ok()
+                    && root.key.memory_space_id == scope.memory_space_id
+                    && root.mounted_subject_id == mounted_subject_id
+                    && time_root_key(&root.key, &root.mounted_subject_id, root.utc_day) == key
+            })
+        }
+        TRANSCRIPT_SEARCH_POSTING_NAMESPACE => serde_json::from_value::<
+            TranscriptSearchPostingPageV1,
+        >(value.clone())
+        .is_ok_and(|page| {
+            page.memory_space_id == scope.memory_space_id
+                && page.mounted_subject_id == mounted_subject_id
+                && search_posting_key(
+                    &page.memory_space_id,
+                    &page.mounted_subject_id,
+                    &page.term_digest,
+                    page.page_id,
+                ) == key
+        }),
+        TRANSCRIPT_SEARCH_ROOT_NAMESPACE => {
+            serde_json::from_value::<TranscriptSearchPostingRootV1>(value.clone()).is_ok_and(
+                |root| {
+                    root.validate().is_ok()
+                        && root.memory_space_id == scope.memory_space_id
+                        && root.mounted_subject_id == mounted_subject_id
+                        && search_root_key(
+                            &root.memory_space_id,
+                            &root.mounted_subject_id,
+                            &root.term_digest,
+                        ) == key
+                },
+            )
+        }
+        TRANSCRIPT_SEARCH_MESSAGE_MANIFEST_NAMESPACE => serde_json::from_value::<
+            TranscriptMessageSearchManifestV1,
+        >(value.clone())
+        .is_ok_and(|manifest| {
+            manifest.validate().is_ok()
+                && manifest.locator.key.memory_space_id == scope.memory_space_id
+                && manifest.locator.mounted_subject_id == mounted_subject_id
+                && search_message_manifest_key(&manifest.locator) == key
+        }),
+        TRANSCRIPT_QUERY_KEYRING_NAMESPACE => {
+            serde_json::from_value::<TranscriptQueryKeyringV1>(value.clone()).is_ok_and(|keyring| {
+                keyring
+                    .validate_for_memory_space(&scope.memory_space_id)
+                    .is_ok()
+                    && keyring_key(&keyring.memory_space_id) == key
+            })
+        }
         ARCHIVE_RECALL_MANIFEST_NAMESPACE
         | CONVERSATION_RECALL_MANIFEST_NAMESPACE
         | CONVERSATION_TRANSCRIPT_PAGE_NAMESPACE
@@ -1870,6 +1970,209 @@ pub(crate) fn scoped_projection_dependency_addresses(
         scope,
     )?);
     addresses.extend(scoped_graph_dependency_addresses(scoped_json, &namespaces)?);
+    addresses.extend(scoped_transcript_query_dependency_addresses(
+        scoped_json,
+        &namespaces,
+        scope,
+    )?);
+    Ok(addresses.into_iter().collect())
+}
+
+fn scoped_transcript_query_dependency_addresses(
+    scoped_json: &BTreeMap<(String, String), Value>,
+    namespaces: &BTreeSet<&str>,
+    scope: &crate::StoreScopedProjectionScope,
+) -> Result<Vec<(String, String)>> {
+    let Some(mounted_subject_id) = scope.mounted_subject_id() else {
+        return Ok(Vec::new());
+    };
+    let mut addresses = BTreeSet::new();
+    for ((namespace, _), value) in scoped_json {
+        match namespace.as_str() {
+            TRANSCRIPT_CATALOG_ROOT_NAMESPACE => {
+                let root = serde_json::from_value::<TranscriptCatalogRootV1>(value.clone())
+                    .map_err(|error| {
+                        Error::config("store_scoped_projection", format!("catalog root: {error}"))
+                    })?;
+                if root.memory_space_id != scope.memory_space_id
+                    || root.mounted_subject_id != mounted_subject_id
+                {
+                    return Err(Error::config(
+                        "store_scoped_projection",
+                        "transcript catalog root is outside projection scope",
+                    ));
+                }
+                if namespaces.contains(TRANSCRIPT_CATALOG_PAGE_NAMESPACE) {
+                    addresses.extend((0..root.page_count).map(|page_id| {
+                        (
+                            TRANSCRIPT_CATALOG_PAGE_NAMESPACE.to_string(),
+                            catalog_page_key(
+                                &root.memory_space_id,
+                                &root.mounted_subject_id,
+                                root.channel_id.as_deref(),
+                                page_id,
+                            ),
+                        )
+                    }));
+                }
+            }
+            TRANSCRIPT_CATALOG_PAGE_NAMESPACE => {
+                let page = serde_json::from_value::<TranscriptCatalogPageV1>(value.clone())
+                    .map_err(|error| {
+                        Error::config("store_scoped_projection", format!("catalog page: {error}"))
+                    })?;
+                page.validate()?;
+                for head in page.heads {
+                    if namespaces.contains(TRANSCRIPT_CATALOG_ROOT_NAMESPACE) {
+                        addresses.insert((
+                            TRANSCRIPT_CATALOG_ROOT_NAMESPACE.to_string(),
+                            catalog_root_key(
+                                &head.key.memory_space_id,
+                                &head.mounted_subject_id,
+                                Some(&head.key.channel_id),
+                            ),
+                        ));
+                    }
+                    if namespaces.contains(CONVERSATION_RECALL_MANIFEST_NAMESPACE) {
+                        addresses.insert((
+                            CONVERSATION_RECALL_MANIFEST_NAMESPACE.to_string(),
+                            ConversationRecallManifest::build(
+                                1,
+                                &head.key.memory_space_id,
+                                &head.mounted_subject_id,
+                                &head.key.channel_id,
+                                &head.key.conversation_id,
+                                0,
+                                0,
+                            )?
+                            .physical_key,
+                        ));
+                    }
+                }
+            }
+            CONVERSATION_RECALL_MANIFEST_NAMESPACE => {
+                let manifest = serde_json::from_value::<ConversationRecallManifest>(value.clone())
+                    .map_err(|error| {
+                        Error::config(
+                            "store_scoped_projection",
+                            format!("conversation head: {error}"),
+                        )
+                    })?;
+                if namespaces.contains(CONVERSATION_TRANSCRIPT_PAGE_NAMESPACE) {
+                    for page_id in 0..manifest.page_count {
+                        addresses.insert((
+                            CONVERSATION_TRANSCRIPT_PAGE_NAMESPACE.to_string(),
+                            ConversationTranscriptPageIndex::build(
+                                1,
+                                &manifest.memory_space_id,
+                                &manifest.mounted_subject_id,
+                                &manifest.channel_id,
+                                &manifest.conversation_id,
+                                &format!("{page_id:020}"),
+                                std::iter::empty(),
+                            )?
+                            .physical_key,
+                        ));
+                    }
+                }
+            }
+            "conversation_transcript" => {
+                let record = serde_json::from_value::<TranscriptTurnRecord>(value.clone())
+                    .map_err(|error| {
+                        Error::config("store_scoped_projection", format!("transcript: {error}"))
+                    })?;
+                if namespaces.contains(CONVERSATION_TRANSCRIPT_AUX_MANIFEST_NAMESPACE) {
+                    addresses.insert((
+                        CONVERSATION_TRANSCRIPT_AUX_MANIFEST_NAMESPACE.to_string(),
+                        ConversationTranscriptAuxManifest::build(
+                            1,
+                            &record.key.memory_space_id,
+                            &record.subject,
+                            &record.key.channel_id,
+                            &record.key.conversation_id,
+                            &record.turn_id,
+                            std::iter::empty(),
+                        )?
+                        .physical_key,
+                    ));
+                }
+                for (locator, content) in message_locators(&record) {
+                    if namespaces.contains(TRANSCRIPT_SEARCH_MESSAGE_MANIFEST_NAMESPACE) {
+                        addresses.insert((
+                            TRANSCRIPT_SEARCH_MESSAGE_MANIFEST_NAMESPACE.to_string(),
+                            search_message_manifest_key(&locator),
+                        ));
+                    }
+                    if namespaces.contains(TRANSCRIPT_TIME_ROOT_NAMESPACE) {
+                        addresses.insert((
+                            TRANSCRIPT_TIME_ROOT_NAMESPACE.to_string(),
+                            time_root_key(
+                                &record.key,
+                                &record.subject,
+                                locator.observed_at / 86_400,
+                            ),
+                        ));
+                    }
+                    if record.is_searchable_for_presentation()
+                        && namespaces.contains(TRANSCRIPT_SEARCH_ROOT_NAMESPACE)
+                    {
+                        for term in TranscriptSearchNormalizerV1::index_terms(
+                            content,
+                            MAX_TRANSCRIPT_INDEX_TERMS_PER_MESSAGE,
+                        )? {
+                            addresses.insert((
+                                TRANSCRIPT_SEARCH_ROOT_NAMESPACE.to_string(),
+                                search_root_key(
+                                    &record.key.memory_space_id,
+                                    &record.subject,
+                                    &term_digest(&term),
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+            TRANSCRIPT_TIME_ROOT_NAMESPACE => {
+                let root = serde_json::from_value::<TranscriptTimePostingRootV1>(value.clone())
+                    .map_err(|error| {
+                        Error::config("store_scoped_projection", format!("time root: {error}"))
+                    })?;
+                if namespaces.contains(TRANSCRIPT_TIME_POSTING_NAMESPACE) {
+                    addresses.extend((0..root.page_count).map(|page_id| {
+                        (
+                            TRANSCRIPT_TIME_POSTING_NAMESPACE.to_string(),
+                            time_posting_key(
+                                &root.key,
+                                &root.mounted_subject_id,
+                                root.utc_day,
+                                page_id,
+                            ),
+                        )
+                    }));
+                }
+            }
+            TRANSCRIPT_SEARCH_ROOT_NAMESPACE => {
+                let root = serde_json::from_value::<TranscriptSearchPostingRootV1>(value.clone())
+                    .map_err(|error| {
+                    Error::config("store_scoped_projection", format!("search root: {error}"))
+                })?;
+                if namespaces.contains(TRANSCRIPT_SEARCH_POSTING_NAMESPACE) {
+                    addresses.extend((0..root.page_count).map(|page_id| {
+                        (
+                            TRANSCRIPT_SEARCH_POSTING_NAMESPACE.to_string(),
+                            search_posting_key(
+                                &root.memory_space_id,
+                                &root.mounted_subject_id,
+                                &root.term_digest,
+                                page_id,
+                            ),
+                        )
+                    }));
+                }
+            }
+            _ => {}
+        }
+    }
     Ok(addresses.into_iter().collect())
 }
 
@@ -2258,6 +2561,28 @@ pub(crate) fn scoped_projection_root_addresses(
         addresses.insert((
             CONTROL_PLANE_SCOPE_MANIFEST_NAMESPACE.to_string(),
             control_plane_scope_manifest_key(&scope.memory_space_id, long_term_owner_id)?,
+        ));
+    }
+    let transcript_query_selected = [
+        TRANSCRIPT_CATALOG_PAGE_NAMESPACE,
+        TRANSCRIPT_CATALOG_ROOT_NAMESPACE,
+        TRANSCRIPT_TIME_POSTING_NAMESPACE,
+        TRANSCRIPT_TIME_ROOT_NAMESPACE,
+        TRANSCRIPT_SEARCH_POSTING_NAMESPACE,
+        TRANSCRIPT_SEARCH_ROOT_NAMESPACE,
+        TRANSCRIPT_SEARCH_MESSAGE_MANIFEST_NAMESPACE,
+        TRANSCRIPT_QUERY_KEYRING_NAMESPACE,
+    ]
+    .into_iter()
+    .any(|namespace| namespaces.contains(namespace));
+    if transcript_query_selected {
+        addresses.insert((
+            TRANSCRIPT_CATALOG_ROOT_NAMESPACE.to_string(),
+            catalog_root_key(&scope.memory_space_id, mounted_subject_id, None),
+        ));
+        addresses.insert((
+            TRANSCRIPT_QUERY_KEYRING_NAMESPACE.to_string(),
+            keyring_key(&scope.memory_space_id),
         ));
     }
     Ok(addresses.into_iter().collect())

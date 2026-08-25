@@ -1,5 +1,5 @@
 {
-  "schema": "beetle-memory.platform.capability.v3",
+  "schema": "beetle-memory.platform.capability.v4",
   "profile": "profile-esp-standalone-memory",
   "target": "target-esp",
   "role": "role-standalone-memory",
@@ -25,6 +25,8 @@
     "maintenance": true,
     "inspection": true,
     "transcript_replay": true,
+    "transcript_search": false,
+    "transcript_activity": false,
     "transcript_export": true,
     "replay": false,
     "export": true,

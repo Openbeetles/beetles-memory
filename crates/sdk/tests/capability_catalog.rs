@@ -240,6 +240,59 @@ fn desktop_profiles_allow_safe_transcript_replay_without_debug_replay() {
 }
 
 #[test]
+fn indexed_transcript_search_and_activity_are_explicit_profile_capabilities() {
+    let policy = MemoryCapabilityPolicy::strict_profile();
+    let privacy = MemoryPrivacyPolicy::standard_private_boundary();
+
+    for profile in [
+        ProfileId::DesktopMacosStandaloneMemory,
+        ProfileId::DesktopMacosEmbeddedSdk,
+        ProfileId::DesktopLinuxEmbeddedSdk,
+        ProfileId::DesktopWindowsEmbeddedSdk,
+        ProfileId::DesktopMacosDevFull,
+        ProfileId::DesktopWindowsDevFull,
+        ProfileId::ServerLinuxMemoryGateway,
+        ProfileId::ServerLinuxDevFull,
+    ] {
+        let catalog = resolve_memory_capabilities(profile, &policy, &privacy).expect("catalog");
+        assert!(catalog.transcript_search.visible, "{}", profile.as_str());
+        assert!(catalog.transcript_activity.visible, "{}", profile.as_str());
+    }
+
+    for profile in [
+        ProfileId::EspStandaloneMemory,
+        ProfileId::EspEmbeddedSdk,
+        ProfileId::LinuxDeviceStandaloneMemory,
+    ] {
+        let catalog = resolve_memory_capabilities(profile, &policy, &privacy).expect("catalog");
+        assert!(!catalog.transcript_search.visible, "{}", profile.as_str());
+        assert!(!catalog.transcript_activity.visible, "{}", profile.as_str());
+    }
+
+    let mut search_disabled = policy.clone();
+    search_disabled.transcript_search_enabled = false;
+    let catalog = resolve_memory_capabilities(
+        ProfileId::DesktopMacosEmbeddedSdk,
+        &search_disabled,
+        &privacy,
+    )
+    .expect("catalog");
+    assert!(!catalog.transcript_search.visible);
+    assert!(catalog.transcript_activity.visible);
+
+    let mut activity_disabled = policy;
+    activity_disabled.transcript_activity_enabled = false;
+    let catalog = resolve_memory_capabilities(
+        ProfileId::DesktopMacosEmbeddedSdk,
+        &activity_disabled,
+        &privacy,
+    )
+    .expect("catalog");
+    assert!(catalog.transcript_search.visible);
+    assert!(!catalog.transcript_activity.visible);
+}
+
+#[test]
 fn desktop_embedded_profiles_expose_host_triggered_maintenance_and_transcript_export_only() {
     let policy = MemoryCapabilityPolicy::strict_profile();
     let privacy = MemoryPrivacyPolicy::standard_private_boundary();

@@ -58,6 +58,7 @@ require_fixed "TranscriptRedactionReportItem" docs/en/api.md docs/zh-CN/api.md c
 require_fixed "TranscriptEvidenceRef" docs/en/api.md docs/zh-CN/api.md crates/core/src/memory/transcript.rs crates/sdk/src/lib.rs
 require_fixed "DerivedMemoryRef" docs/en/api.md docs/zh-CN/api.md crates/core/src/memory/transcript.rs crates/sdk/src/lib.rs
 require_fixed "TranscriptTurnPage" dev-docs/conversation-transcript-governance-hardening-plan.md docs/en/api.md docs/zh-CN/api.md crates/core/src/memory/transcript.rs crates/sdk/src/lib.rs
+require_fixed "TranscriptQueryCursor" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md crates/core/src/memory/transcript.rs crates/sdk/src/lib.rs
 require_fixed "TranscriptRepairReport" dev-docs/conversation-transcript-governance-hardening-plan.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md crates/core/src/memory/transcript.rs crates/sdk/src/lib.rs
 require_fixed "HostRefLabel" dev-docs/conversation-transcript-governance-hardening-plan.md docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md crates/core/src/memory/transcript.rs crates/core/tests/conversation_transcript_contract.rs
 require_fixed "MissingSourceMessage" dev-docs/conversation-transcript-governance-hardening-plan.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md crates/core/src/memory/transcript.rs crates/store-contract-tests/tests/conversation_transcript_store_contract.rs
@@ -77,6 +78,20 @@ require_fixed "transcript_commit" crates/sdk/src/ops.rs crates/sdk/src/runtime.r
 require_fixed "TranscriptLifecycleRequest" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md
 require_fixed "MemoryTranscriptCommitRequest" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md
 require_fixed "MemoryTranscriptReplayRequest" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md
+require_fixed "MemoryConversationListRequest" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/sdk/src/lib.rs
+require_fixed "list_conversations" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md crates/sdk/src/runtime.rs
+require_fixed "MemoryTranscriptTimelineRequest" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/sdk/src/lib.rs
+require_fixed "query_transcript_timeline" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md crates/sdk/src/runtime.rs
+require_fixed "MemoryTranscriptSearchRequest" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/sdk/src/lib.rs
+require_fixed "search_transcripts" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md crates/sdk/src/runtime.rs
+require_fixed "MemoryTranscriptActivityRequest" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/sdk/src/lib.rs
+require_fixed "query_transcript_activity" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md crates/sdk/src/runtime.rs
+require_fixed "TranscriptTimelineAnchor" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md crates/core/src/memory/transcript.rs crates/sdk/src/lib.rs
+require_fixed "TranscriptUtcRange" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md crates/core/src/memory/transcript.rs crates/sdk/src/lib.rs
+require_fixed "beetle-memory.platform.capability.v4" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md crates/sdk/src/capability_snapshot.rs
+require_fixed "transcript_search" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md crates/sdk/src/capability.rs crates/sdk/src/capability_snapshot.rs
+require_fixed "transcript_activity" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md crates/sdk/src/capability.rs crates/sdk/src/capability_snapshot.rs
+require_fixed "beetle_memory_store_schema_v11" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md crates/sdk/src/store_internal/schema.rs
 require_fixed "MemoryTranscriptLifecycleRequest" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md
 require_fixed "MemoryTranscriptExportRequest" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md
 require_fixed "MemoryTranscriptRepairRequest" docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/sdk/src/lib.rs

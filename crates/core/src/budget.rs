@@ -245,6 +245,41 @@ pub struct TranscriptGovernanceBudget {
     pub repair_issues_per_report: usize,
 }
 
+pub const MAX_TRANSCRIPT_QUERY_CURSOR_BYTES: usize = 4 * 1024;
+pub const MAX_TRANSCRIPT_SEARCH_QUERY_BYTES: usize = 1024;
+pub const MAX_TRANSCRIPT_SEARCH_QUERY_CHARS: usize = 512;
+pub const MAX_TRANSCRIPT_SEARCH_TERMS: usize = 24;
+pub const MAX_TRANSCRIPT_SEARCH_EXCERPT_CHARS: usize = 220;
+pub const MAX_TRANSCRIPT_ACTIVITY_BUCKETS: usize = 42;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptQueryBudget {
+    pub result_page_size: usize,
+    pub query_max_bytes: usize,
+    pub query_max_chars: usize,
+    pub query_max_terms: usize,
+    pub candidate_hydration_limit: usize,
+    pub excerpt_max_chars: usize,
+    pub activity_bucket_limit: usize,
+    pub activity_total_span_max_secs: u64,
+}
+
+impl TranscriptGovernanceBudget {
+    pub fn query_budget(self) -> TranscriptQueryBudget {
+        TranscriptQueryBudget {
+            result_page_size: self.transcript_page_size.max(1),
+            query_max_bytes: MAX_TRANSCRIPT_SEARCH_QUERY_BYTES,
+            query_max_chars: MAX_TRANSCRIPT_SEARCH_QUERY_CHARS,
+            query_max_terms: MAX_TRANSCRIPT_SEARCH_TERMS,
+            candidate_hydration_limit: self.transcript_page_size.saturating_mul(32).max(32),
+            excerpt_max_chars: MAX_TRANSCRIPT_SEARCH_EXCERPT_CHARS,
+            activity_bucket_limit: MAX_TRANSCRIPT_ACTIVITY_BUCKETS,
+            activity_total_span_max_secs: 32 * 86_400,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 // runtime-budget-public-surface: authority-only-report

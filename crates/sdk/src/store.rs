@@ -17,7 +17,7 @@ use crate::store_internal::MemoryStoreEvent;
 use crate::store_internal::StorePlatformPreparation;
 pub use crate::store_internal::{
     profile_memory_system_kind, StoreBackendConfig, StoreBackendKind, StoreCapacityBudget,
-    StoreOpenReport, StorePathBudget, StoreRepairPolicy, StoreRepairReport,
+    StoreMigrationReport, StoreOpenReport, StorePathBudget, StoreRepairPolicy, StoreRepairReport,
 };
 
 /// Opaque host capability for a Beetle Memory store.
@@ -97,6 +97,14 @@ impl ReplayStoreHarness<'_> {
 }
 
 impl MemoryStoreHandle {
+    /// Explicitly migrates an offline exact-v10 persistent Store to v11.
+    ///
+    /// Normal [`Self::open`] never performs this breaking migration. Callers
+    /// must close every handle to the target Store before invoking this method.
+    pub fn migrate_v10_to_v11(config: StoreBackendConfig) -> Result<StoreMigrationReport> {
+        StorePlatform::migrate_v10_to_v11(config)
+    }
+
     pub fn open(config: StoreBackendConfig) -> Result<Self> {
         Ok(Self {
             inner: StorePlatform::open(config)?,

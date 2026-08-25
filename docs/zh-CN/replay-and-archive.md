@@ -70,6 +70,16 @@ pub struct ConversationKey {
 
 SDK transcript replay/export request 通过 `cursor`、`next_cursor` 和 `has_more` 支持有界分页。Host ref visibility 会按 view 执行，host ref 的 `label` 只在 owner 允许视图中保留，其他视图会做字段级脱敏，并在 redaction report 中记录 `HostRefLabel`。
 
+Conversation discovery 与 navigation 统一使用四个 host-neutral SDK surface：`MemoryRuntime::list_conversations`、`query_transcript_timeline`、`search_transcripts` 和 `query_transcript_activity`。Catalog 只列 Memory-owned、已经包含 governed evidence 的 conversation；宿主空白 draft 不是 transcript conversation。Timeline 接受 `TranscriptTimelineAnchor::{Latest, Before, After, Around, AroundSequence, FirstVisibleInRange}` 并保持页内 turn 按 sequence 正序。Search 返回受治理 excerpt 与 durable `TranscriptAnchor`，宿主可把它交给 `Around` 回到同一 evidence location。日历跳转必须把明确的 canonical UTC 半开区间交给 `FirstVisibleInRange`；Memory 不猜测“最近时间”窗口。Activity 计算 bounded UTC ranges，并返回可见 count 与首末 anchor 进入同一 timeline。
+
+CTQ1 continuation value 统一为 Store-owned opaque `TranscriptQueryCursor`。宿主不得解码、铸造、签名或注入 cursor secret authority。Runtime validation 绑定 operation、exact MemorySpace、mounted subject、filters、view、query digest、方向/anchor、Store incarnation 与 owner/index generation；每一页都重新校验 current capability、lifecycle、privacy 和 disclosure。篡改、跨主体/conversation/query 复用、过期、Store replacement 或 stale owner/index generation 均 fail closed。现有 forward replay/export cursor 保持当前 bounded surface，但不能代替 conversation catalog 或 timeline。
+
+`HostUi` 只是 host-presentable redacted disclosure view，不是聊天面板、history manager、分页方向、index owner 或 authorization capability。Catalog/timeline 受 `transcript_replay` 控制；indexed search/activity 分别受 `transcript_search` 与 `transcript_activity` 控制。Platform capability snapshot 以 `beetle-memory.platform.capability.v4` 暴露它们。
+
+日期导航由宿主按用户 IANA timezone 把本地日期转换成 UTC `[start_inclusive, end_exclusive)`。Memory 只接受 canonical range，不猜测或持久化宿主时区。DST 本地日可能为 23 或 25 小时，宿主不能固定增加 86400 秒。Search/activity hydrate canonical turn 后重新执行请求 view；masked/raw-deleted material 的可见结果必须 exact-zero，也不能 fallback legacy archive search 或宿主自建 index。
+
+本地 0.5.0 source candidate 的 CTQ1 engineering 已完成。InMemory/File/SQLite 原子 head/catalog/time/search closure、持久 reopen、显式合成 v10->v11 migration、repair/archive closure、private authority exact-zero 与严格回归证据均为 GREEN。该结论不表示 Git tag、crates.io/托管 Release、真实数据迁移或运行时/UAT 已执行。
+
 Transcript attrs 会跟随 target turn/message 一起 replay。`TranscriptAttrEnvelope` 只用于模型用量、latency、retry status、附件摘要、provenance 标签等轻量 metadata；它不替代宿主拥有的 task、capability call、artifact、human gate、file workspace 或 governance command/report 本体。`HostUi` 只看到 HostUi-visible attrs，`ModelContext` 只看到 model-context attrs，`Export` 只看到 export-visible 且 `export_allowed=true` 的 attrs。Profile budget 可以裁剪每 turn/message 可见 attrs，并在 `TranscriptRedactionReportItem` 中用 `AttrValueBudget`、`attr_id`、`attr_key` 记录；当裁剪来自 profile ceiling 时，replay audit 也会记录 `ProfileBudget`。
 
 `HostUi` transcript replay 由 SDK `transcript_replay` capability 控制。桌面和 embedded SDK 宿主可以提交 transcript turn 后，把同一个 conversation 读回给 UI 展示；这不要求打开 `MemoryRuntime::replay`、仅开发验收的 `nonproduction-replay-harness`、raw owner replay 或 deep inspection。

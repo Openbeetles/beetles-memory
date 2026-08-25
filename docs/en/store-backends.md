@@ -38,11 +38,11 @@ let config = StoreBackendConfig::file("/var/lib/beetle-memory", profile)?
     .with_fsync(true);
 ```
 
-## 0.4.0 Schema Admission
+## 0.5.0 Source Candidate Schema Admission
 
-Beetle Memory 0.4.0 accepts Store v10 and immutable long-term material v5 only. Store v9 and older stores are not automatically migrated, opened, or rewritten. Subject Soul records without exact lifecycle roots, manifests, owner/generation envelopes, and bounded closure fail closed before normal reads or writes proceed.
+The 0.5.0 source candidate accepts Store v11 and immutable long-term material v5 only. Normal `MemoryStoreHandle::open` never rewrites an exact-v10 Store: it fails closed with `store_migration_required`. Store v9 and older, partial v11 query state, and foreign schemas are not opened, guessed, or rewritten.
 
-Back up the exact Store outside its data path before a 0.4.0 binary can open it. Rollback requires the previous binary and its matching Store backup; archive export/import is not a schema migration. See the [0.4.0 release notes](release-notes-0.4.0.md) for the complete compatibility and verification boundary.
+After closing every handle and backing up the exact Store outside its data path, an operator can call `MemoryStoreHandle::migrate_v10_to_v11(config)`. Only persistent File and SQLite backends are admitted. File migration builds and verifies a sibling v11 Store before an atomic directory swap; SQLite migration commits schema, transcript query closure, and migration event in one database transaction. Success returns `StoreMigrationReport`; any rejected or failed migration preserves the exact v10 source. Archive export/import is not schema migration, and this synthetic contract evidence is not proof that real user Stores were migrated.
 
 ## File Path Budget
 

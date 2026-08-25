@@ -14,25 +14,29 @@ use bm_sdk::{
     DerivedMemoryRef, GovernedStateMemoryCapability, GraphRecallExpansionBudget,
     GraphRecallExpansionBudgetReport, HostOpaqueRef, HostRefRelation, HostRefVisibility,
     MemoryAutopilotInput, MemoryCapabilityCatalog, MemoryCapabilityPolicy,
-    MemoryGovernancePolicyMutation, MemoryGovernancePolicyMutationReport, MemoryGovernanceSelector,
+    MemoryConversationListRequest, MemoryGovernancePolicyMutation,
+    MemoryGovernancePolicyMutationReport, MemoryGovernanceSelector,
     MemoryGovernanceSuppressionDuration, MemoryGraphEvidence, MemoryGraphNodeKind, MemoryIdentity,
     MemoryLongTermControlView, MemoryLongTermDetailReport, MemoryLongTermDetailRequest,
     MemoryLongTermGovernancePolicy, MemoryLongTermListReport, MemoryLongTermListRequest,
     MemoryLongTermMutation, MemoryLongTermMutationReport, MemoryLongTermMutationRequest,
     MemoryLongTermPolicyRequest, MemoryLongTermSelector, MemoryLongTermTarget, MemoryPrivacyClass,
     MemoryProfile, MemoryProjectionOutput, MemoryProjectionReport, MemoryProjectionSafeAuditReport,
-    MemoryRuntime, MemoryRuntimeSystemKind, MemoryScope, MemorySubjectVisibilityPolicy,
-    MemoryTranscriptCommitRequest, MemoryTranscriptExportRequest, MemoryTranscriptLifecycleRequest,
-    MemoryTranscriptRepairRequest, MemoryTranscriptReplayRequest, MemoryWriteRequest,
-    PostReplyMemoryMaintenanceContext, PrivateMaterialRedactionReport,
-    ProceduralMemoryPromotionInput, ProceduralMemoryPromotionPolicy, ProfileId,
-    ProjectedAgentSkillHint, PromptMemoryContextParams, PromptParticipationPlan,
-    ProviderProjectionPayload, RedactedTranscriptSlice, RuntimeSkillRecallTransport,
-    StoreBackendConfig, SubjectKind, SubjectRegistry, SubjectRelationshipGraph,
-    SubjectScopedRuntime, TranscriptEvidenceRef, TranscriptLifecycleTransition,
-    TranscriptRedactionReason, TranscriptRedactionReportItem, TranscriptRepairIssue,
-    TranscriptRepairIssueKind, TranscriptRepairReport, TranscriptReplayAudit, TranscriptReplayView,
-    TranscriptTurnPage, TranscriptTurnRecord, VaultManifest, AGENT_TOOL_NO_EXPERIENCE_REASON,
+    MemoryRuntime, MemoryRuntimeSystemKind, MemoryScope, MemoryStoreHandle,
+    MemorySubjectVisibilityPolicy, MemoryTranscriptActivityRequest, MemoryTranscriptCommitRequest,
+    MemoryTranscriptExportRequest, MemoryTranscriptLifecycleRequest, MemoryTranscriptRepairRequest,
+    MemoryTranscriptReplayRequest, MemoryTranscriptSearchRequest, MemoryTranscriptSearchScope,
+    MemoryTranscriptTimelineRequest, MemoryWriteRequest, PostReplyMemoryMaintenanceContext,
+    PrivateMaterialRedactionReport, ProceduralMemoryPromotionInput,
+    ProceduralMemoryPromotionPolicy, ProfileId, ProjectedAgentSkillHint, PromptMemoryContextParams,
+    PromptParticipationPlan, ProviderProjectionPayload, RedactedTranscriptSlice,
+    RuntimeSkillRecallTransport, StoreBackendConfig, StoreMigrationReport, SubjectKind,
+    SubjectRegistry, SubjectRelationshipGraph, SubjectScopedRuntime, TranscriptCatalogLifecycle,
+    TranscriptEvidenceRef, TranscriptLifecycleTransition, TranscriptRedactionReason,
+    TranscriptRedactionReportItem, TranscriptRepairIssue, TranscriptRepairIssueKind,
+    TranscriptRepairReport, TranscriptReplayAudit, TranscriptReplayView, TranscriptSearchLifecycle,
+    TranscriptSearchSort, TranscriptTimelineAnchor, TranscriptTurnPage, TranscriptTurnRecord,
+    TranscriptUtcRange, VaultManifest, AGENT_TOOL_NO_EXPERIENCE_REASON,
     AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH, AGENT_TOOL_REGISTRY_FORBIDDEN_BY_PROFILE,
 };
 
@@ -131,6 +135,10 @@ fn sdk_transcript_contract_types_are_importable(
     _slice: Option<RedactedTranscriptSlice>,
     _commit: Option<MemoryTranscriptCommitRequest>,
     _replay: MemoryTranscriptReplayRequest,
+    _catalog: MemoryConversationListRequest,
+    _timeline: MemoryTranscriptTimelineRequest,
+    _search: MemoryTranscriptSearchRequest,
+    _activity: MemoryTranscriptActivityRequest,
     _lifecycle: MemoryTranscriptLifecycleRequest,
     _repair: MemoryTranscriptRepairRequest,
     _export: MemoryTranscriptExportRequest,
@@ -150,7 +158,7 @@ fn sdk_transcript_contract_types_are_importable(
 }
 
 #[test]
-fn transcript_replay_export_page_requests_are_public() {
+fn transcript_catalog_timeline_search_activity_requests_are_public() {
     let replay = MemoryTranscriptReplayRequest {
         memory_space_id: "space".to_string(),
         channel_id: "channel".to_string(),
@@ -171,9 +179,79 @@ fn transcript_replay_export_page_requests_are_public() {
         channel_id: replay.channel_id.clone(),
         conversation_id: replay.conversation_id.clone(),
     };
+    let key = ConversationKey::new(
+        replay.memory_space_id.clone(),
+        replay.channel_id.clone(),
+        replay.conversation_id.clone(),
+    )
+    .unwrap();
+    let catalog = MemoryConversationListRequest {
+        channel_id: None,
+        lifecycle: TranscriptCatalogLifecycle::ActiveOnly,
+        limit: 8,
+        cursor: None,
+        view: TranscriptReplayView::HostUi,
+    };
+    let timeline = MemoryTranscriptTimelineRequest {
+        channel_id: key.channel_id.clone(),
+        conversation_id: key.conversation_id.clone(),
+        anchor: TranscriptTimelineAnchor::Latest,
+        limit: 8,
+        cursor: None,
+        view: TranscriptReplayView::HostUi,
+    };
+    let search = MemoryTranscriptSearchRequest {
+        scope: MemoryTranscriptSearchScope::MountedSubject { channel_id: None },
+        query_text: "memory".to_string(),
+        sort: TranscriptSearchSort::RelevanceThenObservedAt,
+        lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+        limit: 8,
+        cursor: None,
+        view: TranscriptReplayView::HostUi,
+    };
+    let activity = MemoryTranscriptActivityRequest {
+        channel_id: key.channel_id,
+        conversation_id: key.conversation_id,
+        ranges: vec![TranscriptUtcRange {
+            start_inclusive: 1,
+            end_exclusive: 86_401,
+        }],
+        lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+        view: TranscriptReplayView::HostUi,
+    };
 
     assert_eq!(export.cursor.as_deref(), Some("1:turn-a"));
     assert_eq!(repair.conversation_id, "conversation");
+    assert_eq!(catalog.limit, 8);
+    assert_eq!(timeline.limit, 8);
+    assert_eq!(search.limit, 8);
+    assert_eq!(activity.ranges[0].end_exclusive, 86_401);
+
+    let _list = MemoryRuntime::list_conversations;
+    let _timeline = MemoryRuntime::query_transcript_timeline;
+    let _search = MemoryRuntime::search_transcripts;
+    let _activity = MemoryRuntime::query_transcript_activity;
+}
+
+#[test]
+fn transcript_public_surface_has_no_host_ui_window_or_cursor_authority() {
+    let runtime_source = include_str!("../src/runtime.rs");
+    let ops_source = include_str!("../src/ops.rs");
+    let lib_source = include_str!("../src/lib.rs");
+
+    for forbidden in [
+        "replay_transcript_window",
+        "MemoryTranscriptWindowRequest",
+        "MemoryTranscriptWindowReport",
+        "TranscriptHistoryCursorAuthority",
+        "TranscriptHistoryPage",
+    ] {
+        assert!(!runtime_source.contains(forbidden), "{forbidden}");
+        assert!(!ops_source.contains(forbidden), "{forbidden}");
+        assert!(!lib_source.contains(forbidden), "{forbidden}");
+    }
+    assert!(!ops_source.contains("governance_context_digest"));
+    assert!(!lib_source.contains("TranscriptCursorDisclosurePolicyV1"));
 }
 
 fn sdk_projection_report_set_types_are_importable(
@@ -283,6 +361,12 @@ fn sdk_runtime_uses_opaque_memory_store_handle_as_public_store_entry() {
     assert_eq!(default_agent_subject_id("agent-main"), "agent:agent-main");
     assert_eq!(runtime.scope().chat_id, "chat-1");
     assert_eq!(runtime.capabilities().profile, support::host_test_profile());
+}
+
+#[test]
+fn exact_v10_to_v11_migration_is_an_explicit_public_store_operation() {
+    let _migrate: fn(StoreBackendConfig) -> bm_sdk::Result<StoreMigrationReport> =
+        MemoryStoreHandle::migrate_v10_to_v11;
 }
 
 #[test]

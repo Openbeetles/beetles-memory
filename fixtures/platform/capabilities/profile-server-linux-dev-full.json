@@ -1,5 +1,5 @@
 {
-  "schema": "beetle-memory.platform.capability.v3",
+  "schema": "beetle-memory.platform.capability.v4",
   "profile": "profile-server-linux-dev-full",
   "target": "target-server-linux",
   "role": "role-dev-full",
@@ -25,6 +25,8 @@
     "maintenance": true,
     "inspection": true,
     "transcript_replay": true,
+    "transcript_search": true,
+    "transcript_activity": true,
     "transcript_export": true,
     "replay": true,
     "export": true,

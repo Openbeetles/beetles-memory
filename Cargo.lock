@@ -166,7 +166,7 @@ dependencies = [
 
 [[package]]
 name = "bm-a2a"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bm-adapter",
  "bm-entry",
@@ -177,7 +177,7 @@ dependencies = [
 
 [[package]]
 name = "bm-adapter"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bm-sdk",
  "serde",
@@ -188,7 +188,7 @@ dependencies = [
 
 [[package]]
 name = "bm-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bm-adapter",
  "bm-entry",
@@ -199,7 +199,7 @@ dependencies = [
 
 [[package]]
 name = "bm-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "indexmap 2.14.0",
  "log",
@@ -212,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "bm-desktop"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bm-entry",
  "bm-http",
@@ -227,7 +227,7 @@ dependencies = [
 
 [[package]]
 name = "bm-entry"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bm-adapter",
  "bm-replay",
@@ -242,7 +242,7 @@ dependencies = [
 
 [[package]]
 name = "bm-evolve"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bm-core",
  "bm-sdk",
@@ -252,7 +252,7 @@ dependencies = [
 
 [[package]]
 name = "bm-http"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bm-adapter",
  "bm-entry",
@@ -264,7 +264,7 @@ dependencies = [
 
 [[package]]
 name = "bm-llm-gateway"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bm-adapter",
  "bm-entry",
@@ -279,7 +279,7 @@ dependencies = [
 
 [[package]]
 name = "bm-mcp"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bm-adapter",
  "bm-entry",
@@ -290,7 +290,7 @@ dependencies = [
 
 [[package]]
 name = "bm-ollama-transparent"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "libc",
  "serde",
@@ -302,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "bm-replay"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bm-core",
  "bm-sdk",
@@ -315,9 +315,11 @@ dependencies = [
 
 [[package]]
 name = "bm-sdk"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bm-core",
+ "getrandom 0.3.4",
+ "hmac",
  "rusqlite",
  "serde",
  "serde_json",
@@ -327,7 +329,7 @@ dependencies = [
 
 [[package]]
 name = "bm-store-contract-tests"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bm-core",
  "bm-sdk",
@@ -339,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "bm-wss"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bm-adapter",
  "bm-entry",
@@ -770,6 +772,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
+ "subtle",
 ]
 
 [[package]]
@@ -1471,6 +1474,15 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest",
+]
 
 [[package]]
 name = "html5ever"

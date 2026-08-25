@@ -1,5 +1,5 @@
 {
-  "schema": "beetle-memory.platform.capability.v3",
+  "schema": "beetle-memory.platform.capability.v4",
   "profile": "profile-esp-embedded-sdk",
   "target": "target-esp",
   "role": "role-embedded-sdk",
@@ -25,6 +25,8 @@
     "maintenance": false,
     "inspection": true,
     "transcript_replay": true,
+    "transcript_search": false,
+    "transcript_activity": false,
     "transcript_export": false,
     "replay": false,
     "export": false,

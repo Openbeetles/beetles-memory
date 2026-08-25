@@ -74,12 +74,26 @@ SDK transcript 操作：
 | --- | --- | --- |
 | Transcript Commit | `MemoryRuntime::finalize_turn` + `CanonicalTurnDelta`；手动提交使用 `MemoryTranscriptCommitRequest` / `MemoryTranscriptCommitReport`，通过 `MemoryRuntime::commit_transcript` 调用 | 将 delivered turn 作为 governed evidence 提交到 `memory_space_id + channel_id + conversation_id`。 |
 | Redacted Transcript Replay | `MemoryTranscriptReplayRequest` / `MemoryTranscriptReplayReport`，通过 `MemoryRuntime::replay_transcript` 调用 | 通过 model context、host UI、operator audit 或 export 等分层视图读取 transcript evidence。 |
+| Conversation Catalog | `MemoryConversationListRequest` / `MemoryConversationListReport`，通过 `MemoryRuntime::list_conversations` 调用 | 列出当前 mounted subject 可见且已有受治理 evidence 的 conversations，可按 channel 与 lifecycle 过滤。 |
+| Transcript Timeline | `MemoryTranscriptTimelineRequest` / `MemoryTranscriptTimelineReport`，通过 `MemoryRuntime::query_transcript_timeline` 调用 | 围绕 `Latest`、`Before`、`After`、durable anchor、sequence、UTC time 或 UTC range 内第一条可见消息读取同一 conversation。 |
+| Transcript Search | `MemoryTranscriptSearchRequest` / `MemoryTranscriptSearchReport`，通过 `MemoryRuntime::search_transcripts` 调用 | 在 exact conversation 或当前 mounted subject 范围搜索可见 transcript text，返回受治理 excerpt 与可进入 timeline 的 anchor。 |
+| Transcript Activity | `MemoryTranscriptActivityRequest` / `MemoryTranscriptActivityReport`，通过 `MemoryRuntime::query_transcript_activity` 调用 | 计算有界 UTC 半开区间内的可见消息数及首末 anchor，供日期导航使用。 |
 | Transcript Lifecycle | `MemoryTranscriptLifecycleRequest` / `MemoryTranscriptLifecycleReport`，通过 `MemoryRuntime::request_transcript_lifecycle` 调用 | 执行 archive、mask、delete raw content 或 lifecycle review，并产出 audit。 |
 | Transcript Repair | `MemoryTranscriptRepairRequest` / `MemoryTranscriptRepairReport`，通过 `MemoryRuntime::repair_transcript` 调用 | 检查 Memory-owned evidence link 断裂，不扫描宿主业务数据库。 |
 | Transcript Attr Write | `MemoryTranscriptAttrWriteRequest` / `MemoryTranscriptAttrWriteReport`，通过 `MemoryRuntime::record_transcript_attrs` 调用 | 在 transcript target 已存在后写入 turn/message `TranscriptAttrEnvelope`。适用于每条消息的模型用量、运行延迟/状态、附件摘要、provenance 标签等轻量 metadata。 |
 | Transcript Export | `MemoryTranscriptExportRequest` / `MemoryTranscriptExportReport`，通过 `MemoryRuntime::export_transcript` 调用；`MemorySpaceExportRequest { private_material_policy: MemorySpacePrivateMaterialPolicy::ExcludePrivate, .. }` 会把 private transcript material 及其依赖的 export-visible index 作为一个受治理 closure 排除 | 导出 redacted transcript slice；除非调用方明确选择 `IncludePrivate`，否则 private transcript material 不进入公开 memory-space archive。 |
 
 `MemoryTranscriptReplayRequest` 和 `MemoryTranscriptExportRequest` 接收 `limit` 与可选 `cursor`；对应 report 返回 `next_cursor` 和 `has_more`。SDK 调用方应通过 `MemoryRuntime` 分页 replay/export transcript，不应下沉到 core/store trait。Runtime profile budget 可以裁剪 page size、每 turn 可见 host refs、每 turn/message 可见 attrs、redaction items、lifecycle derived refs 和 repair issues 数量，但不能放宽 redaction、lifecycle 或 privacy policy。Lifecycle 和 repair report 的列表被裁剪时会设置 `profile_budget_applied=true`。
+
+CTQ1 query surface 统一使用 Store-owned `TranscriptQueryCursor`。调用方必须把它当 opaque value：不得解码、铸造、签名、持久化 claims 或注入 host cursor authority。Cursor validation 绑定 operation、exact MemorySpace、mounted subject、filters、view、query digest、方向/anchor、Store incarnation 与 owner/index generation；每一页都重新执行 capability、subject、lifecycle、privacy 和 disclosure。Catalog/timeline 继续受 `transcript_replay` 控制；indexed search/activity 还分别要求 `transcript_search` 和 `transcript_activity`。Platform capability snapshot 通过 `beetle-memory.platform.capability.v4` 暴露这些开关。
+
+`HostUi` 只是 **host-presentable redacted disclosure view**。它不是聊天窗口 API、分页方向、宿主产品名、transcript index owner 或 authorization token。Catalog、timeline、search、activity 只返回 Runtime hydration 后仍能通过请求 view 脱敏规则的结果。Search hit 携带受治理的 Unicode-safe excerpt 和 durable `TranscriptAnchor`；宿主应把 anchor 交给 `TranscriptTimelineAnchor::Around`，不得在 UI 内扫描或二次匹配 transcript 正文。
+
+Store v10 到 v11 是显式离线 operator 操作，不属于 runtime open。关闭全部 handle、在数据路径之外备份 exact persistent Store 后，调用 `MemoryStoreHandle::migrate_v10_to_v11(StoreBackendConfig)` 并保留 `StoreMigrationReport`。普通 open 零迁移写入并返回 `store_migration_required`；in-memory/embedded backend、部分状态和非 v10 schema 一律拒绝。
+
+Timeline 支持 latest、before、after、around-anchor、around-sequence、around-time 与 first-visible-in-range；页内 turn 始终按 sequence 正序，report 可返回 opaque older/newer cursor。日历换算归宿主：按用户 IANA timezone 把本地日期转换为 canonical UTC `[start_inclusive, end_exclusive)` 后再调用 Memory。不得假设每天都是 86400 秒，DST 当天可以是 23 或 25 小时；Beetle Memory 不保存也不猜宿主时区。
+
+本地 0.5.0 source candidate 的 CTQ1 engineering 已完成：public Core/SDK query shape、capability snapshot v4、Store v11 原子 query-index closure、InMemory/File/SQLite reopen、显式合成 v10->v11 migration、repair/archive closure、隐私 exact-zero 与严格合同证据均已成立。该结论只表示 engineering closeout，不表示 Git tag、crates.io publication、托管 Release、真实数据迁移或运行时/UAT 回执。
 
 Transcript attrs 是 Memory-owned transcript metadata，不是宿主业务对象库。每条 attr 都必须有 `TranscriptAttrTarget`、命名空间化 key、`TranscriptAttrValueKind`、JSON value、`HostRefVisibility`、`TranscriptAttrSource`、`TranscriptAttrGovernance` 和可选 `TranscriptAttrLink`。`HostUi` replay 只返回 HostUi-visible attrs，`ModelContext` 只返回 model-context attrs，`OperatorAudit` 返回审计可见 attrs，`Export` 只返回 export-visible 且 `export_allowed=true` 的 attrs；`RawOwnerOnly` 仍是内部视图。Repair report 会把 target turn/message 缺失、attr source key 不匹配、非法 key、超限 value、corrupt attr record 作为 fail-closed issue。`DeleteRaw` 默认隐藏 attrs；`OperatorAuditOnlyAfterMask` 最多保留脱敏后的审计 metadata，raw deletion 后绝不返回原始 attr value。
 
@@ -137,6 +151,10 @@ Transcript attrs 是 Memory-owned transcript metadata，不是宿主业务对象
 | `MemoryLongTermDetailRequest` | `target`, `view` | 通过 record id、slot 或 transcript derived ref 查看一条长期记忆及 revision/tombstone/evidence refs。 |
 | `MemoryLongTermMutationRequest` | `operation`, `reason`, `dry_run`, `mode_input` | 执行 correct、supersede、delete、forget_by_query、mark_stale 或 change_scope；批量 forget 必须先 dry-run preview 并带 confirmation token。 |
 | `MemoryLongTermPolicyRequest` | `operation`, `reason`, `dry_run`, `mode_input` | 执行 pause、resume、suppress 或 remove_suppression；被 policy 拦截的后续写入会进入 SDK governance report。 |
+| `MemoryConversationListRequest` | `channel_id`, `lifecycle`, `limit`, `cursor`, `view` | 列出 runtime mounted subject 可见的 evidenceful conversations；`TranscriptCatalogLifecycle` 控制仅 active 或 active + archived。 |
+| `MemoryTranscriptTimelineRequest` | `channel_id`, `conversation_id`, `anchor`, `limit`, `cursor`, `view` | 使用 `TranscriptTimelineAnchor` 查询 exact conversation；search/activity 返回的 anchor 可直接回到该 timeline。 |
+| `MemoryTranscriptSearchRequest` | `scope`, `query_text`, `sort`, `lifecycle`, `limit`, `cursor`, `view` | 在 mounted subject 或 exact conversation 内执行 governed text search；空、仅标点、非法或超预算查询在 Store search 前拒绝。 |
+| `MemoryTranscriptActivityRequest` | `channel_id`, `conversation_id`, `ranges`, `lifecycle`, `view` | 计算 sorted、non-overlapping UTC 半开区间并返回 visible count 与首末 `TranscriptAnchor`。 |
 | `MemoryTranscriptAttrWriteRequest` | `memory_space_id`, `channel_id`, `conversation_id`, `attrs`, `dry_run` | 把受治理的 `TranscriptAttrEnvelope` metadata 写到已存在的 transcript turn/message。`idempotency_key` 用于宿主/adapter 关联；dry-run 只校验 target 存在和 attr envelope 规则，不落库，并返回 rejected attrs 与 `redactions_preview`。 |
 | `MemoryReplayRequest` | `chat_id`, `limit` | 只做 inspection 的 replay surface。 |
 | `MemorySpaceExportRequest` | `scope`, `private_material_policy` | 使用 `MemoryArchiveScope::subject(...)` 或 `MemoryArchiveScope::shared_program(...)`，返回带 canonical governed root 的 opaque archive。 |

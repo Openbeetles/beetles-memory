@@ -24,7 +24,12 @@ use bm_sdk::{
     MemorySpacePrivateMaterialPolicy, MemoryWriteRequest, RuntimeLifecycleModeInput,
 };
 #[cfg(feature = "sqlite-store")]
-use bm_sdk::{MemoryStoreHandle, ProfileId, StoreBackendConfig};
+use bm_sdk::{
+    CanonicalTurnDelta, ConversationScope, IngressKind, MemoryStoreHandle,
+    MemoryTranscriptCommitRequest, MemoryTranscriptSearchRequest, MemoryTranscriptSearchScope,
+    MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource, ProfileId, StoreBackendConfig,
+    TranscriptInputMessage, TranscriptReplayView, TranscriptSearchLifecycle, TranscriptSearchSort,
+};
 
 #[cfg(feature = "sqlite-store")]
 use support::open_memory_store;
@@ -740,7 +745,46 @@ fn assert_backend_archive_restore(
     source: MemoryStoreHandle,
     target: MemoryStoreHandle,
 ) {
+    let source_backend = source.config().backend();
     let runtime = test_runtime_with_scope(source.clone(), profile, "local", "backend-a");
+    if source_backend != bm_sdk::StoreBackendKind::Embedded {
+        runtime
+            .commit_transcript(MemoryTranscriptCommitRequest {
+                turn: CanonicalTurnDelta {
+                    turn_id: format!("{case_name}-transcript-turn"),
+                    conversation: ConversationScope {
+                        channel: "local".to_string(),
+                        chat_id: "backend-a".to_string(),
+                        conversation_id: Some("backend-a".to_string()),
+                    },
+                    subject: runtime.subject_id().to_string(),
+                    delivery_status: MemoryTurnDeliveryStatus::Delivered,
+                    source: MemoryTurnSource {
+                        ingress: IngressKind::User,
+                        channel: "local".to_string(),
+                        provider: None,
+                        protocol: MemoryTurnProtocol::Native,
+                        endpoint: None,
+                        model_alias: None,
+                        model_resolved: None,
+                        request_id: None,
+                        client_conversation_hint: None,
+                    },
+                    actor: None,
+                    input_messages: vec![TranscriptInputMessage::user(format!(
+                        "{case_name} archive cobalt transcript"
+                    ))],
+                    assistant_message: Some(TranscriptInputMessage::assistant(
+                        "archive transcript response",
+                    )),
+                    tool_observations: Vec::new(),
+                    external_content_used: false,
+                    candidate_ids: Vec::new(),
+                },
+                host_refs: Vec::new(),
+            })
+            .expect("seed transcript query closure");
+    }
     write_project_candidate(
         &runtime,
         &format!("{case_name}-owner"),
@@ -756,9 +800,19 @@ fn assert_backend_archive_restore(
             private_material_policy: MemorySpacePrivateMaterialPolicy::IncludePrivate,
         },
     )
-    .expect("export backend archive");
+    .unwrap_or_else(|error| panic!("export {case_name} backend archive: {error}"));
     assert_v6_long_term_closure(&exported.archive);
+    if source_backend != bm_sdk::StoreBackendKind::Embedded {
+        assert!(exported
+            .archive
+            .contains_json_namespace("conversation_transcript_search_roots"));
+    }
+    assert!(!exported
+        .archive
+        .contains_json_namespace("conversation_transcript_query_keyring_private"));
     let expected_root = exported.archive.root().clone();
+    let target_config = target.config().clone();
+    let target_backend = target_config.backend();
     let report = import_memory_space(
         &target,
         MemorySpaceImportRequest {
@@ -770,8 +824,37 @@ fn assert_backend_archive_restore(
     .expect("restore backend archive");
     assert_eq!(report.archive_root, expected_root);
     assert!(report.inserted_json_docs > 0);
+    let query_store = if matches!(
+        target_config.backend(),
+        bm_sdk::StoreBackendKind::File | bm_sdk::StoreBackendKind::Sqlite
+    ) {
+        drop(target);
+        MemoryStoreHandle::open_for_nonproduction_harness(target_config)
+            .expect("reopen persistent archive target")
+    } else {
+        target
+    };
+    if target_backend != bm_sdk::StoreBackendKind::Embedded {
+        let restored_runtime =
+            test_runtime_with_scope(query_store.clone(), profile, "local", "backend-a");
+        let search = restored_runtime
+            .search_transcripts(MemoryTranscriptSearchRequest {
+                scope: MemoryTranscriptSearchScope::ExactConversation {
+                    channel_id: "local".to_string(),
+                    conversation_id: "backend-a".to_string(),
+                },
+                query_text: "cobalt".to_string(),
+                sort: TranscriptSearchSort::ObservedAtDescending,
+                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+                limit: 8,
+                cursor: None,
+                view: TranscriptReplayView::HostUi,
+            })
+            .expect("search restored transcript query closure");
+        assert_eq!(search.page.hits.len(), 1);
+    }
     let restored = export_memory_space(
-        &target,
+        &query_store,
         MemorySpaceExportRequest {
             scope: archive_scope,
             private_material_policy: MemorySpacePrivateMaterialPolicy::IncludePrivate,

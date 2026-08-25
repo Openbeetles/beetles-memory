@@ -3,17 +3,22 @@ use bm_core::feature_gate::ProfileId;
 use bm_core::memory::{
     CanonicalTurnDelta, ConversationKey, DerivedMemoryPlane, DerivedMemoryRef, HostOpaqueRef,
     HostRefRelation, HostRefVisibility, MemoryEvidenceAuthority, MemoryTurnDeliveryStatus,
-    MemoryTurnProtocol, MemoryTurnSource, TranscriptAttrEnvelope, TranscriptAttrGovernance,
-    TranscriptAttrLink, TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
-    TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind,
+    MemoryTurnProtocol, MemoryTurnSource, TranscriptActivityQuery, TranscriptAttrEnvelope,
+    TranscriptAttrGovernance, TranscriptAttrLink, TranscriptAttrRedactionPolicy,
+    TranscriptAttrScope, TranscriptAttrSource, TranscriptAttrSourceKind, TranscriptAttrTarget,
+    TranscriptAttrValueKind, TranscriptCatalogLifecycle, TranscriptCatalogQuery,
     TranscriptConversationAlias, TranscriptEvidenceRef, TranscriptInputMessage,
     TranscriptLifecycleRequest, TranscriptLifecycleState, TranscriptLifecycleTransition,
-    TranscriptRepairIssueKind, TranscriptReplayView, TranscriptTurnRecord,
+    TranscriptRepairIssueKind, TranscriptReplayView, TranscriptSearchLifecycle,
+    TranscriptSearchNormalizerV1, TranscriptSearchQuery, TranscriptSearchScope,
+    TranscriptSearchSort, TranscriptTimelineAnchor, TranscriptTimelineQuery, TranscriptTurnRecord,
+    TranscriptUtcRange,
 };
 use bm_core::platform::Platform;
 use bm_sdk::nonproduction_replay_harness::{
     StoreBackendConfig, StoreCapacityBudget, StoreEventScope,
 };
+use bm_sdk::MemoryStoreHandle;
 use serde_json::json;
 
 fn temp_root(name: &str) -> std::path::PathBuf {
@@ -23,6 +28,499 @@ fn temp_root(name: &str) -> std::path::PathBuf {
     ));
     let _ = std::fs::remove_dir_all(&root);
     root
+}
+
+const TRANSCRIPT_QUERY_NAMESPACES: &[&str] = &[
+    "conversation_transcript_catalog_pages",
+    "conversation_transcript_catalog_roots",
+    "conversation_transcript_time_postings",
+    "conversation_transcript_time_roots",
+    "conversation_transcript_search_postings",
+    "conversation_transcript_search_roots",
+    "conversation_transcript_search_message_manifests",
+    "conversation_transcript_query_keyring_private",
+];
+
+fn downgrade_file_transcript_query_to_v10(root: &std::path::Path, keep_partial: Option<&str>) {
+    for namespace in TRANSCRIPT_QUERY_NAMESPACES {
+        if keep_partial == Some(*namespace) {
+            continue;
+        }
+        let path = root.join("kv").join(namespace);
+        if path.exists() {
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+    let manifest_path = root.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["schema_id"] = json!("beetle_memory_store_schema_v10");
+    manifest["schema_version"] = json!(10);
+    std::fs::write(manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+}
+
+#[test]
+fn transcript_query_indexes_cover_catalog_timeline_search_activity_and_tamper() {
+    let platform = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let store = platform.conversation_transcript_store();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    for sequence in 1..=17 {
+        let mut record = transcript_record(
+            &key,
+            &format!("turn-query-{sequence:02}"),
+            &format!("cobalt 检索消息 {sequence}"),
+        );
+        record.sequence = sequence;
+        record.created_at = 1_800_000_000 + sequence;
+        record.updated_at = 1_800_000_000 + sequence;
+        for message in record
+            .input_messages
+            .iter_mut()
+            .chain(record.assistant_message.iter_mut())
+        {
+            message.observed_at = 1_800_000_000 + sequence;
+            message.created_at = 1_800_000_000 + sequence;
+        }
+        store.append_turn(&record).unwrap();
+    }
+
+    let governance = governance_context_digest("store-contract-query");
+    let catalog = store
+        .list_conversation_catalog(
+            "subject-store",
+            &TranscriptCatalogQuery {
+                memory_space_id: "space-store".to_string(),
+                governance_context_digest: governance.clone(),
+                channel_id: Some("llm.gateway".to_string()),
+                lifecycle: TranscriptCatalogLifecycle::ActiveOnly,
+                limit: 8,
+                cursor: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(catalog.heads.len(), 1);
+    assert_eq!(catalog.heads[0].turn_count, 17);
+    assert_eq!(catalog.heads[0].lifecycle.active.message_count, 34);
+
+    let latest = store
+        .query_transcript_timeline(
+            "subject-store",
+            &TranscriptTimelineQuery {
+                key: key.clone(),
+                governance_context_digest: governance.clone(),
+                anchor: TranscriptTimelineAnchor::Latest,
+                limit: 8,
+                cursor: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        latest
+            .turns
+            .iter()
+            .map(|turn| turn.sequence)
+            .collect::<Vec<_>>(),
+        (10..=17).collect::<Vec<_>>()
+    );
+    let older_cursor = latest.older_cursor.expect("latest page has older cursor");
+    let older = store
+        .query_transcript_timeline(
+            "subject-store",
+            &TranscriptTimelineQuery {
+                key: key.clone(),
+                governance_context_digest: governance.clone(),
+                anchor: TranscriptTimelineAnchor::Latest,
+                limit: 8,
+                cursor: Some(older_cursor),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        older
+            .turns
+            .iter()
+            .map(|turn| turn.sequence)
+            .collect::<Vec<_>>(),
+        (2..=9).collect::<Vec<_>>()
+    );
+    let newer_cursor = older
+        .newer_cursor
+        .clone()
+        .expect("middle page has newer cursor");
+    let newest_again = store
+        .query_transcript_timeline(
+            "subject-store",
+            &TranscriptTimelineQuery {
+                key: key.clone(),
+                governance_context_digest: governance.clone(),
+                anchor: TranscriptTimelineAnchor::Latest,
+                limit: 8,
+                cursor: Some(newer_cursor),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        newest_again
+            .turns
+            .iter()
+            .map(|turn| turn.sequence)
+            .collect::<Vec<_>>(),
+        (10..=17).collect::<Vec<_>>()
+    );
+
+    let oldest = store
+        .query_transcript_timeline(
+            "subject-store",
+            &TranscriptTimelineQuery {
+                key: key.clone(),
+                governance_context_digest: governance.clone(),
+                anchor: TranscriptTimelineAnchor::Latest,
+                limit: 8,
+                cursor: older.older_cursor,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        oldest
+            .turns
+            .iter()
+            .map(|turn| turn.sequence)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    let middle_again = store
+        .query_transcript_timeline(
+            "subject-store",
+            &TranscriptTimelineQuery {
+                key: key.clone(),
+                governance_context_digest: governance.clone(),
+                anchor: TranscriptTimelineAnchor::Latest,
+                limit: 8,
+                cursor: Some(oldest.newer_cursor.expect("oldest page has newer cursor")),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        middle_again
+            .turns
+            .iter()
+            .map(|turn| turn.sequence)
+            .collect::<Vec<_>>(),
+        (2..=9).collect::<Vec<_>>()
+    );
+
+    let search_query = TranscriptSearchQuery {
+        scope: TranscriptSearchScope::ExactConversation { key: key.clone() },
+        governance_context_digest: governance,
+        query: TranscriptSearchNormalizerV1::normalize("cobalt").unwrap(),
+        sort: TranscriptSearchSort::ObservedAtDescending,
+        lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+        limit: 8,
+        cursor: None,
+    };
+    let search = store
+        .search_transcript("subject-store", &search_query)
+        .unwrap();
+    assert_eq!(search.candidates.len(), 8);
+    assert!(search.has_more);
+    assert_eq!(search.candidates[0].record.sequence, 17);
+    let mut encoded = search.next_cursor.unwrap().as_str().to_string();
+    let replacement = if encoded.ends_with('0') { '1' } else { '0' };
+    encoded.pop();
+    encoded.push(replacement);
+    let mut tampered_query = search_query;
+    tampered_query.cursor =
+        Some(bm_core::memory::TranscriptQueryCursor::try_from_encoded(encoded).unwrap());
+    assert!(store
+        .search_transcript("subject-store", &tampered_query)
+        .is_err());
+
+    let activity = store
+        .query_transcript_activity(
+            "subject-store",
+            &TranscriptActivityQuery {
+                key,
+                ranges: vec![TranscriptUtcRange::new(1_800_000_000, 1_800_000_100).unwrap()],
+                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+            },
+        )
+        .unwrap();
+    assert_eq!(activity.buckets.len(), 1);
+    assert_eq!(activity.buckets[0].candidates.len(), 34);
+}
+
+#[test]
+fn transcript_query_indexes_exclude_private_authority_before_candidate_hydration() {
+    let platform = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let store = platform.conversation_transcript_store();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    let mut record = transcript_record(&key, "turn-private-authority", "private-cobalt-secret");
+    record.input_messages[0].authority = MemoryEvidenceAuthority::PrivateGardenInternal;
+    record.input_messages[0].observed_at = 1_800_000_001;
+    record.assistant_message.as_mut().unwrap().content = "public-amber-sentinel".to_string();
+    record.assistant_message.as_mut().unwrap().observed_at = 1_800_000_002;
+    let public_message_id = record
+        .assistant_message
+        .as_ref()
+        .unwrap()
+        .message_id
+        .clone();
+    record.created_at = 1_800_000_001;
+    record.updated_at = 1_800_000_002;
+    store.append_turn(&record).unwrap();
+
+    let governance = governance_context_digest("store-contract-private-authority");
+    for private_term in ["private-cobalt-secret", "cobalt"] {
+        let private = store
+            .search_transcript(
+                "subject-store",
+                &TranscriptSearchQuery {
+                    scope: TranscriptSearchScope::ExactConversation { key: key.clone() },
+                    governance_context_digest: governance.clone(),
+                    query: TranscriptSearchNormalizerV1::normalize(private_term).unwrap(),
+                    sort: TranscriptSearchSort::ObservedAtDescending,
+                    lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+                    limit: 8,
+                    cursor: None,
+                },
+            )
+            .unwrap();
+        assert!(private.candidates.is_empty());
+        assert!(!private.has_more);
+        assert!(private.next_cursor.is_none());
+    }
+
+    let public = store
+        .search_transcript(
+            "subject-store",
+            &TranscriptSearchQuery {
+                scope: TranscriptSearchScope::ExactConversation { key: key.clone() },
+                governance_context_digest: governance.clone(),
+                query: TranscriptSearchNormalizerV1::normalize("amber").unwrap(),
+                sort: TranscriptSearchSort::ObservedAtDescending,
+                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+                limit: 8,
+                cursor: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(public.candidates.len(), 1);
+    assert_eq!(public.candidates[0].message_id, public_message_id);
+
+    let activity = store
+        .query_transcript_activity(
+            "subject-store",
+            &TranscriptActivityQuery {
+                key,
+                ranges: vec![TranscriptUtcRange::new(1_800_000_000, 1_800_000_010).unwrap()],
+                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+            },
+        )
+        .unwrap();
+    assert_eq!(activity.buckets[0].candidates.len(), 1);
+    assert_eq!(
+        activity.buckets[0].candidates[0].message_id,
+        public_message_id
+    );
+}
+
+#[test]
+fn query_keyring_rotates_without_append_keeps_grace_then_prunes_expired_previous() {
+    let platform = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let store = platform.conversation_transcript_store();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    for sequence in 1..=2 {
+        let mut record = transcript_record(
+            &key,
+            &format!("turn-rotation-{sequence}"),
+            "rotation evidence",
+        );
+        record.sequence = sequence;
+        store.append_turn(&record).unwrap();
+    }
+    let governance = governance_context_digest("store-contract-key-rotation");
+    let old_cursor = store
+        .query_transcript_timeline(
+            "subject-store",
+            &TranscriptTimelineQuery {
+                key: key.clone(),
+                governance_context_digest: governance.clone(),
+                anchor: TranscriptTimelineAnchor::Latest,
+                limit: 1,
+                cursor: None,
+            },
+        )
+        .unwrap()
+        .older_cursor
+        .expect("two turns require an older cursor");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut snapshot = platform.export_store_snapshot().unwrap();
+    let keyring = snapshot
+        .json_docs
+        .iter_mut()
+        .find(|doc| doc.namespace == "conversation_transcript_query_keyring_private")
+        .expect("private keyring owner");
+    let old_key_id = keyring.value["current"]["key_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    keyring.value["current"]["expires_at"] = json!(now + 604_800);
+    platform.import_store_snapshot(&snapshot).unwrap();
+
+    let historical = store
+        .query_transcript_timeline(
+            "subject-store",
+            &TranscriptTimelineQuery {
+                key: key.clone(),
+                governance_context_digest: governance.clone(),
+                anchor: TranscriptTimelineAnchor::Latest,
+                limit: 1,
+                cursor: Some(old_cursor.clone()),
+            },
+        )
+        .unwrap();
+    assert_eq!(historical.turns[0].sequence, 1);
+    let mut rotated = platform.export_store_snapshot().unwrap();
+    let keyring = rotated
+        .json_docs
+        .iter_mut()
+        .find(|doc| doc.namespace == "conversation_transcript_query_keyring_private")
+        .expect("rotated keyring owner");
+    assert_ne!(keyring.value["current"]["key_id"], json!(old_key_id));
+    assert_eq!(keyring.value["previous"]["key_id"], json!(old_key_id));
+
+    keyring.value["previous"]["created_at"] = json!(1);
+    keyring.value["previous"]["expires_at"] = json!(2);
+    platform.import_store_snapshot(&rotated).unwrap();
+    store
+        .query_transcript_timeline(
+            "subject-store",
+            &TranscriptTimelineQuery {
+                key: key.clone(),
+                governance_context_digest: governance.clone(),
+                anchor: TranscriptTimelineAnchor::Latest,
+                limit: 1,
+                cursor: None,
+            },
+        )
+        .unwrap();
+    let pruned = platform.export_store_snapshot().unwrap();
+    let keyring = pruned
+        .json_docs
+        .iter()
+        .find(|doc| doc.namespace == "conversation_transcript_query_keyring_private")
+        .expect("pruned keyring owner");
+    assert!(keyring.value["previous"].is_null());
+    assert!(store
+        .query_transcript_timeline(
+            "subject-store",
+            &TranscriptTimelineQuery {
+                key,
+                governance_context_digest: governance,
+                anchor: TranscriptTimelineAnchor::Latest,
+                limit: 1,
+                cursor: Some(old_cursor),
+            },
+        )
+        .is_err());
+}
+
+#[test]
+fn file_store_reopens_with_transcript_query_cursor_authority_and_indexes() {
+    let root = temp_root("query-reopen");
+    let config = StoreBackendConfig::file(&root, support::native_persistent_profile()).unwrap();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    let governance = governance_context_digest("store-contract-query-reopen");
+    let cursor = {
+        let platform = support::open_store(config.clone()).unwrap();
+        let store = platform.conversation_transcript_store();
+        for sequence in 1..=9 {
+            let mut record = transcript_record(
+                &key,
+                &format!("turn-reopen-{sequence:02}"),
+                &format!("持久检索 cobalt {sequence}"),
+            );
+            record.sequence = sequence;
+            record.created_at = 1_800_100_000 + sequence;
+            record.updated_at = 1_800_100_000 + sequence;
+            for message in record
+                .input_messages
+                .iter_mut()
+                .chain(record.assistant_message.iter_mut())
+            {
+                message.observed_at = 1_800_100_000 + sequence;
+                message.created_at = 1_800_100_000 + sequence;
+            }
+            store.append_turn(&record).unwrap();
+        }
+        store
+            .query_transcript_timeline(
+                "subject-store",
+                &TranscriptTimelineQuery {
+                    key: key.clone(),
+                    governance_context_digest: governance.clone(),
+                    anchor: TranscriptTimelineAnchor::Latest,
+                    limit: 8,
+                    cursor: None,
+                },
+            )
+            .unwrap()
+            .older_cursor
+            .expect("nine turns require an older cursor")
+    };
+
+    let reopened = support::open_store(config).unwrap();
+    let store = reopened.conversation_transcript_store();
+    let older = store
+        .query_transcript_timeline(
+            "subject-store",
+            &TranscriptTimelineQuery {
+                key: key.clone(),
+                governance_context_digest: governance.clone(),
+                anchor: TranscriptTimelineAnchor::Latest,
+                limit: 8,
+                cursor: Some(cursor),
+            },
+        )
+        .unwrap();
+    assert_eq!(older.turns.len(), 1);
+    assert_eq!(older.turns[0].sequence, 1);
+    let search = store
+        .search_transcript(
+            "subject-store",
+            &TranscriptSearchQuery {
+                scope: TranscriptSearchScope::ExactConversation { key: key.clone() },
+                governance_context_digest: governance,
+                query: TranscriptSearchNormalizerV1::normalize("持久检索").unwrap(),
+                sort: TranscriptSearchSort::RelevanceThenObservedAt,
+                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+                limit: 8,
+                cursor: None,
+            },
+        )
+        .unwrap();
+    assert!(!search.candidates.is_empty());
 }
 
 fn turn_source() -> MemoryTurnSource {
@@ -138,6 +636,11 @@ fn delta(turn_id: &str, user: &str) -> CanonicalTurnDelta {
         external_content_used: false,
         candidate_ids: Vec::new(),
     }
+}
+
+fn governance_context_digest(label: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("sha256:{:x}", Sha256::digest(label.as_bytes()))
 }
 
 #[test]
@@ -401,6 +904,11 @@ fn transcript_per_turn_aux_scales_with_one_thousand_turns() {
     let key = ConversationKey::new("space-aux", "llm.gateway", "conversation-store").unwrap();
 
     for sequence in 1..=1_000 {
+        if sequence % 200 == 1 {
+            platform
+                .refresh_runtime_resource_snapshot_for_nonproduction_harness()
+                .unwrap();
+        }
         let turn_id = format!("turn-{sequence:04}");
         let mut record = transcript_record(&key, &turn_id, "bounded aux");
         record.sequence = sequence;
@@ -423,6 +931,9 @@ fn transcript_per_turn_aux_scales_with_one_thousand_turns() {
             .unwrap();
     }
 
+    platform
+        .refresh_runtime_resource_snapshot_for_nonproduction_harness()
+        .unwrap();
     let snapshot = platform.export_store_snapshot().unwrap();
     let head = snapshot
         .json_docs
@@ -1340,4 +1851,839 @@ fn independent_persistent_platforms_conflict_then_explicitly_replan_transcript_a
             .collect::<Vec<_>>();
         assert_eq!(transcript_events.len(), 2, "backend={backend}");
     }
+}
+
+#[cfg(feature = "sqlite-store")]
+#[test]
+fn sqlite_store_reopens_with_transcript_catalog_timeline_search_and_activity() {
+    let root = temp_root("query-sqlite-reopen");
+    let path = root.join("memory.sqlite3");
+    let config = StoreBackendConfig::sqlite(&path, support::native_persistent_profile()).unwrap();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    let governance = governance_context_digest("store-contract-query-sqlite");
+    {
+        let platform = support::open_store(config.clone()).unwrap();
+        let store = platform.conversation_transcript_store();
+        for sequence in 1..=9 {
+            let mut record = transcript_record(
+                &key,
+                &format!("turn-sqlite-{sequence:02}"),
+                &format!("sqlite 持久检索 cobalt {sequence}"),
+            );
+            record.sequence = sequence;
+            record.created_at = 1_800_200_000 + sequence;
+            record.updated_at = 1_800_200_000 + sequence;
+            for message in record
+                .input_messages
+                .iter_mut()
+                .chain(record.assistant_message.iter_mut())
+            {
+                message.observed_at = 1_800_200_000 + sequence;
+                message.created_at = 1_800_200_000 + sequence;
+            }
+            store.append_turn(&record).unwrap();
+        }
+    }
+
+    let reopened = support::open_store(config).unwrap();
+    let store = reopened.conversation_transcript_store();
+    let catalog = store
+        .list_conversation_catalog(
+            "subject-store",
+            &TranscriptCatalogQuery {
+                memory_space_id: "space-store".to_string(),
+                governance_context_digest: governance.clone(),
+                channel_id: None,
+                lifecycle: TranscriptCatalogLifecycle::ActiveOnly,
+                limit: 8,
+                cursor: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(catalog.heads.len(), 1);
+    assert_eq!(catalog.heads[0].turn_count, 9);
+    let timeline = store
+        .query_transcript_timeline(
+            "subject-store",
+            &TranscriptTimelineQuery {
+                key: key.clone(),
+                governance_context_digest: governance.clone(),
+                anchor: TranscriptTimelineAnchor::Latest,
+                limit: 8,
+                cursor: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(timeline.turns.len(), 8);
+    assert_eq!(timeline.turns[0].sequence, 2);
+    let search = store
+        .search_transcript(
+            "subject-store",
+            &TranscriptSearchQuery {
+                scope: TranscriptSearchScope::ExactConversation { key: key.clone() },
+                governance_context_digest: governance,
+                query: TranscriptSearchNormalizerV1::normalize("sqlite 持久检索").unwrap(),
+                sort: TranscriptSearchSort::RelevanceThenObservedAt,
+                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+                limit: 8,
+                cursor: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(search.candidates.len(), 8);
+    let activity = store
+        .query_transcript_activity(
+            "subject-store",
+            &TranscriptActivityQuery {
+                key,
+                ranges: vec![TranscriptUtcRange::new(1_800_200_000, 1_800_200_100).unwrap()],
+                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+            },
+        )
+        .unwrap();
+    assert_eq!(activity.buckets[0].candidates.len(), 18);
+}
+
+#[cfg(feature = "sqlite-store")]
+#[test]
+fn sqlite_store_requires_explicit_v10_to_v11_migration_and_preserves_source_on_open() {
+    let root = temp_root("query-sqlite-v10-migration");
+    let path = root.join("memory.sqlite3");
+    let config = StoreBackendConfig::sqlite(&path, support::native_persistent_profile()).unwrap();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    {
+        let platform = support::open_store(config.clone()).unwrap();
+        let store = platform.conversation_transcript_store();
+        let mut record = transcript_record(&key, "turn-v10", "private cobalt 迁移");
+        record.input_messages[0].authority = MemoryEvidenceAuthority::PrivateGardenInternal;
+        record.assistant_message.as_mut().unwrap().content = "public amber migration".to_string();
+        store.append_turn(&record).unwrap();
+    }
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "DELETE FROM bm_kv WHERE namespace IN (
+                    'conversation_transcript_catalog_pages',
+                    'conversation_transcript_catalog_roots',
+                    'conversation_transcript_time_postings',
+                    'conversation_transcript_time_roots',
+                    'conversation_transcript_search_postings',
+                    'conversation_transcript_search_roots',
+                    'conversation_transcript_search_message_manifests',
+                    'conversation_transcript_query_keyring_private'
+                )",
+                [],
+            )
+            .unwrap();
+        let raw: String = connection
+            .query_row("SELECT manifest_json FROM bm_schema", [], |row| row.get(0))
+            .unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        manifest["schema_id"] = json!("beetle_memory_store_schema_v10");
+        manifest["schema_version"] = json!(10);
+        connection.execute("DELETE FROM bm_schema", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO bm_schema(schema_id, schema_version, manifest_json) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    "beetle_memory_store_schema_v10",
+                    10,
+                    serde_json::to_string(&manifest).unwrap()
+                ],
+            )
+            .unwrap();
+    }
+
+    let before_identity = {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .query_row(
+                "SELECT schema_id, schema_version FROM bm_schema",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)),
+            )
+            .unwrap()
+    };
+    let open_error = match support::open_store(config.clone()) {
+        Ok(_) => panic!("normal open must not migrate exact v10"),
+        Err(error) => error,
+    };
+    assert_eq!(open_error.stage(), "store_migration_required");
+    let after_rejected_open = {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .query_row(
+                "SELECT schema_id, schema_version FROM bm_schema",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)),
+            )
+            .unwrap()
+    };
+    assert_eq!(after_rejected_open, before_identity);
+
+    let report = MemoryStoreHandle::migrate_v10_to_v11(config.clone()).unwrap();
+    assert!(report.migrated);
+    assert_eq!(report.from_schema_version, 10);
+    assert_eq!(report.to_schema_version, 11);
+    assert!(!report.migration_event_id.is_empty());
+
+    let migrated = support::open_store(config).unwrap();
+    let store = migrated.conversation_transcript_store();
+    let catalog = store
+        .list_conversation_catalog(
+            "subject-store",
+            &TranscriptCatalogQuery {
+                memory_space_id: "space-store".to_string(),
+                governance_context_digest: governance_context_digest("sqlite-v10-migration"),
+                channel_id: None,
+                lifecycle: TranscriptCatalogLifecycle::ActiveOnly,
+                limit: 8,
+                cursor: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(catalog.heads.len(), 1);
+    let search = store
+        .search_transcript(
+            "subject-store",
+            &TranscriptSearchQuery {
+                scope: TranscriptSearchScope::ExactConversation { key: key.clone() },
+                governance_context_digest: governance_context_digest("sqlite-v10-search"),
+                query: TranscriptSearchNormalizerV1::normalize("amber").unwrap(),
+                sort: TranscriptSearchSort::RelevanceThenObservedAt,
+                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+                limit: 8,
+                cursor: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(search.candidates.len(), 1);
+    let private = store
+        .search_transcript(
+            "subject-store",
+            &TranscriptSearchQuery {
+                scope: TranscriptSearchScope::ExactConversation { key: key.clone() },
+                governance_context_digest: governance_context_digest("sqlite-v10-private"),
+                query: TranscriptSearchNormalizerV1::normalize("cobalt").unwrap(),
+                sort: TranscriptSearchSort::RelevanceThenObservedAt,
+                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+                limit: 8,
+                cursor: None,
+            },
+        )
+        .unwrap();
+    assert!(private.candidates.is_empty());
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let identity: (String, u32) = connection
+        .query_row(
+            "SELECT schema_id, schema_version FROM bm_schema",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(identity, ("beetle_memory_store_schema_v11".to_string(), 11));
+}
+
+#[test]
+fn file_store_requires_explicit_v10_to_v11_sibling_migration_with_reopen_queries() {
+    let root = temp_root("query-file-v10-migration");
+    let config = StoreBackendConfig::file(&root, support::native_persistent_profile()).unwrap();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    {
+        let platform = support::open_store(config.clone()).unwrap();
+        let mut record = transcript_record(&key, "turn-v10", "private cobalt 迁移");
+        record.input_messages[0].authority = MemoryEvidenceAuthority::SoulGovernance;
+        record.assistant_message.as_mut().unwrap().content = "public amber migration".to_string();
+        platform
+            .conversation_transcript_store()
+            .append_turn(&record)
+            .unwrap();
+    }
+    downgrade_file_transcript_query_to_v10(&root, None);
+
+    let manifest_path = root.join("manifest.json");
+    let before = std::fs::read(&manifest_path).unwrap();
+    let open_error = match support::open_store(config.clone()) {
+        Ok(_) => panic!("normal open must not migrate exact v10"),
+        Err(error) => error,
+    };
+    assert_eq!(open_error.stage(), "store_migration_required");
+    assert_eq!(std::fs::read(&manifest_path).unwrap(), before);
+
+    let report = MemoryStoreHandle::migrate_v10_to_v11(config.clone()).unwrap();
+    assert!(report.migrated);
+    assert_eq!(report.from_schema_version, 10);
+    assert_eq!(report.to_schema_version, 11);
+    assert!(!report.migration_event_id.is_empty());
+
+    let migrated = support::open_store(config).unwrap();
+    let store = migrated.conversation_transcript_store();
+    let catalog = store
+        .list_conversation_catalog(
+            "subject-store",
+            &TranscriptCatalogQuery {
+                memory_space_id: "space-store".to_string(),
+                governance_context_digest: governance_context_digest("file-v10-migration"),
+                channel_id: None,
+                lifecycle: TranscriptCatalogLifecycle::ActiveOnly,
+                limit: 8,
+                cursor: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(catalog.heads.len(), 1);
+    let search = store
+        .search_transcript(
+            "subject-store",
+            &TranscriptSearchQuery {
+                scope: TranscriptSearchScope::ExactConversation { key: key.clone() },
+                governance_context_digest: governance_context_digest("file-v10-search"),
+                query: TranscriptSearchNormalizerV1::normalize("amber").unwrap(),
+                sort: TranscriptSearchSort::RelevanceThenObservedAt,
+                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+                limit: 8,
+                cursor: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(search.candidates.len(), 1);
+    let private = store
+        .search_transcript(
+            "subject-store",
+            &TranscriptSearchQuery {
+                scope: TranscriptSearchScope::ExactConversation { key: key.clone() },
+                governance_context_digest: governance_context_digest("file-v10-private"),
+                query: TranscriptSearchNormalizerV1::normalize("cobalt").unwrap(),
+                sort: TranscriptSearchSort::RelevanceThenObservedAt,
+                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+                limit: 8,
+                cursor: None,
+            },
+        )
+        .unwrap();
+    assert!(private.candidates.is_empty());
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+    assert_eq!(
+        manifest["schema_id"],
+        json!("beetle_memory_store_schema_v11")
+    );
+    assert_eq!(manifest["schema_version"], json!(11));
+}
+
+#[test]
+fn file_store_rejects_partial_v11_state_and_preserves_v10_authority() {
+    let root = temp_root("query-file-v10-partial");
+    let config = StoreBackendConfig::file(&root, support::native_persistent_profile()).unwrap();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    {
+        let platform = support::open_store(config.clone()).unwrap();
+        platform
+            .conversation_transcript_store()
+            .append_turn(&transcript_record(&key, "turn-v10", "partial migration"))
+            .unwrap();
+    }
+    downgrade_file_transcript_query_to_v10(&root, Some("conversation_transcript_catalog_roots"));
+    let manifest_path = root.join("manifest.json");
+    let before = std::fs::read(&manifest_path).unwrap();
+    let error = match support::open_store(config.clone()) {
+        Ok(_) => panic!("partial v11 state must fail closed"),
+        Err(error) => error,
+    };
+    assert_eq!(error.stage(), "store_migration_required");
+    assert_eq!(std::fs::read(&manifest_path).unwrap(), before);
+    let migration_error = MemoryStoreHandle::migrate_v10_to_v11(config).unwrap_err();
+    assert!(migration_error
+        .to_string()
+        .contains("partial or foreign v11 query state"));
+    assert_eq!(std::fs::read(manifest_path).unwrap(), before);
+}
+
+#[test]
+fn file_store_open_fails_closed_when_transcript_query_closure_is_missing() {
+    let root = temp_root("query-file-open-closure");
+    let config = StoreBackendConfig::file(&root, support::native_persistent_profile()).unwrap();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    {
+        let platform = support::open_store(config.clone()).unwrap();
+        platform
+            .conversation_transcript_store()
+            .append_turn(&transcript_record(&key, "turn-closure", "closure evidence"))
+            .unwrap();
+    }
+    std::fs::remove_dir_all(
+        root.join("kv")
+            .join("conversation_transcript_search_message_manifests"),
+    )
+    .unwrap();
+    let error = match support::open_store(config) {
+        Ok(_) => panic!("missing CTQ owner closure must fail open"),
+        Err(error) => error,
+    };
+    assert!(error
+        .to_string()
+        .contains("transcript message has no search manifest"));
+}
+
+#[cfg(feature = "sqlite-store")]
+#[test]
+fn sqlite_store_rejects_partial_v11_state_and_rolls_back_to_v10() {
+    let root = temp_root("query-sqlite-v10-partial");
+    let path = root.join("memory.sqlite3");
+    let config = StoreBackendConfig::sqlite(&path, support::native_persistent_profile()).unwrap();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    {
+        let platform = support::open_store(config.clone()).unwrap();
+        platform
+            .conversation_transcript_store()
+            .append_turn(&transcript_record(&key, "turn-v10", "partial migration"))
+            .unwrap();
+    }
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "DELETE FROM bm_kv WHERE namespace IN (
+                    'conversation_transcript_catalog_pages',
+                    'conversation_transcript_time_postings',
+                    'conversation_transcript_time_roots',
+                    'conversation_transcript_search_postings',
+                    'conversation_transcript_search_roots',
+                    'conversation_transcript_search_message_manifests',
+                    'conversation_transcript_query_keyring_private'
+                )",
+                [],
+            )
+            .unwrap();
+        let raw: String = connection
+            .query_row("SELECT manifest_json FROM bm_schema", [], |row| row.get(0))
+            .unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        manifest["schema_id"] = json!("beetle_memory_store_schema_v10");
+        manifest["schema_version"] = json!(10);
+        connection.execute("DELETE FROM bm_schema", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO bm_schema(schema_id, schema_version, manifest_json) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    "beetle_memory_store_schema_v10",
+                    10,
+                    serde_json::to_string(&manifest).unwrap()
+                ],
+            )
+            .unwrap();
+    }
+    let error = match support::open_store(config.clone()) {
+        Ok(_) => panic!("partial v11 state must fail closed"),
+        Err(error) => error,
+    };
+    assert_eq!(error.stage(), "store_migration_required");
+    let migration_error = MemoryStoreHandle::migrate_v10_to_v11(config).unwrap_err();
+    assert!(migration_error
+        .to_string()
+        .contains("partial or foreign v11 query state"));
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let identity: (String, u32) = connection
+        .query_row(
+            "SELECT schema_id, schema_version FROM bm_schema",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(identity, ("beetle_memory_store_schema_v10".to_string(), 10));
+}
+
+#[cfg(feature = "sqlite-store")]
+#[test]
+fn sqlite_store_open_fails_closed_when_transcript_query_closure_is_missing() {
+    let root = temp_root("query-sqlite-open-closure");
+    let path = root.join("memory.sqlite3");
+    let config = StoreBackendConfig::sqlite(&path, support::native_persistent_profile()).unwrap();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    {
+        let platform = support::open_store(config.clone()).unwrap();
+        platform
+            .conversation_transcript_store()
+            .append_turn(&transcript_record(&key, "turn-closure", "closure evidence"))
+            .unwrap();
+    }
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "DELETE FROM bm_kv WHERE namespace = 'conversation_transcript_search_message_manifests'",
+                [],
+            )
+            .unwrap();
+    }
+    let error = match support::open_store(config) {
+        Ok(_) => panic!("missing CTQ owner closure must fail open"),
+        Err(error) => error,
+    };
+    assert!(error
+        .to_string()
+        .contains("transcript message has no search manifest"));
+}
+
+#[test]
+fn transcript_lifecycle_exact_zeroes_catalog_timeline_search_and_activity_indexes() {
+    for transition in [
+        TranscriptLifecycleTransition::Mask,
+        TranscriptLifecycleTransition::DeleteRaw,
+    ] {
+        let platform = support::open_store_in_memory(
+            StoreBackendConfig::in_memory(
+                ProfileId::native_dev_full().expect("native dev-full profile"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let store = platform.conversation_transcript_store();
+        let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+        let mut record = transcript_record(&key, "turn-private", "private cobalt 私密消息");
+        record.created_at = 1_800_300_001;
+        record.updated_at = 1_800_300_001;
+        for message in record
+            .input_messages
+            .iter_mut()
+            .chain(record.assistant_message.iter_mut())
+        {
+            message.observed_at = 1_800_300_001;
+            message.created_at = 1_800_300_001;
+        }
+        store.append_turn(&record).unwrap();
+        store
+            .apply_lifecycle_request(
+                "subject-store",
+                &TranscriptLifecycleRequest {
+                    key: key.clone(),
+                    turn_id: Some(record.turn_id.clone()),
+                    transition,
+                    reason: "privacy contract".to_string(),
+                    requested_by: "owner".to_string(),
+                    requested_at: 1_800_300_010,
+                },
+            )
+            .unwrap();
+        let governance = governance_context_digest("store-contract-lifecycle-zero");
+        let catalog = store
+            .list_conversation_catalog(
+                "subject-store",
+                &TranscriptCatalogQuery {
+                    memory_space_id: "space-store".to_string(),
+                    governance_context_digest: governance.clone(),
+                    channel_id: None,
+                    lifecycle: TranscriptCatalogLifecycle::ActiveAndArchived,
+                    limit: 8,
+                    cursor: None,
+                },
+            )
+            .unwrap();
+        assert!(catalog.heads.is_empty());
+        let timeline = store
+            .query_transcript_timeline(
+                "subject-store",
+                &TranscriptTimelineQuery {
+                    key: key.clone(),
+                    governance_context_digest: governance.clone(),
+                    anchor: TranscriptTimelineAnchor::Latest,
+                    limit: 8,
+                    cursor: None,
+                },
+            )
+            .unwrap();
+        assert!(timeline.turns.is_empty());
+        let search = store
+            .search_transcript(
+                "subject-store",
+                &TranscriptSearchQuery {
+                    scope: TranscriptSearchScope::ExactConversation { key: key.clone() },
+                    governance_context_digest: governance,
+                    query: TranscriptSearchNormalizerV1::normalize("cobalt").unwrap(),
+                    sort: TranscriptSearchSort::RelevanceThenObservedAt,
+                    lifecycle: TranscriptSearchLifecycle::ActiveAndArchived,
+                    limit: 8,
+                    cursor: None,
+                },
+            )
+            .unwrap();
+        assert!(search.candidates.is_empty());
+        let activity = store
+            .query_transcript_activity(
+                "subject-store",
+                &TranscriptActivityQuery {
+                    key: key.clone(),
+                    ranges: vec![TranscriptUtcRange::new(1_800_300_000, 1_800_300_100).unwrap()],
+                    lifecycle: TranscriptSearchLifecycle::ActiveAndArchived,
+                },
+            )
+            .unwrap();
+        assert!(activity.buckets[0].candidates.is_empty());
+    }
+}
+
+#[test]
+fn transcript_query_continuation_pages_are_lossless_beyond_128_entries() {
+    let platform = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let store = platform.conversation_transcript_store();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    for sequence in 1..=129 {
+        let mut record = transcript_record(
+            &key,
+            &format!("turn-continuation-{sequence:03}"),
+            &format!("cobalt continuation evidence {sequence}"),
+        );
+        record.sequence = sequence;
+        record.created_at = 1_800_400_000 + sequence;
+        record.updated_at = 1_800_400_000 + sequence;
+        for message in record
+            .input_messages
+            .iter_mut()
+            .chain(record.assistant_message.iter_mut())
+        {
+            message.observed_at = 1_800_400_000 + sequence;
+            message.created_at = 1_800_400_000 + sequence;
+        }
+        store.append_turn(&record).unwrap();
+    }
+    let governance = governance_context_digest("store-contract-continuation");
+    let mut timeline_cursor = None;
+    let mut timeline_sequences = std::collections::BTreeSet::new();
+    loop {
+        let page = store
+            .query_transcript_timeline(
+                "subject-store",
+                &TranscriptTimelineQuery {
+                    key: key.clone(),
+                    governance_context_digest: governance.clone(),
+                    anchor: TranscriptTimelineAnchor::Latest,
+                    limit: 64,
+                    cursor: timeline_cursor,
+                },
+            )
+            .unwrap();
+        timeline_sequences.extend(page.turns.iter().map(|turn| turn.sequence));
+        if !page.has_older {
+            break;
+        }
+        timeline_cursor = page.older_cursor;
+    }
+    assert_eq!(timeline_sequences.len(), 129);
+    assert_eq!(timeline_sequences.first().copied(), Some(1));
+    assert_eq!(timeline_sequences.last().copied(), Some(129));
+
+    let mut search_query = TranscriptSearchQuery {
+        scope: TranscriptSearchScope::ExactConversation { key: key.clone() },
+        governance_context_digest: governance,
+        query: TranscriptSearchNormalizerV1::normalize("cobalt").unwrap(),
+        sort: TranscriptSearchSort::ObservedAtDescending,
+        lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+        limit: 64,
+        cursor: None,
+    };
+    let mut search_turns = std::collections::BTreeSet::new();
+    loop {
+        let page = store
+            .search_transcript("subject-store", &search_query)
+            .unwrap();
+        search_turns.extend(
+            page.candidates
+                .iter()
+                .map(|candidate| candidate.record.turn_id.clone()),
+        );
+        if !page.has_more {
+            break;
+        }
+        search_query.cursor = page.next_cursor;
+    }
+    assert_eq!(search_turns.len(), 129);
+    let activity = store
+        .query_transcript_activity(
+            "subject-store",
+            &TranscriptActivityQuery {
+                key,
+                ranges: vec![TranscriptUtcRange::new(1_800_400_000, 1_800_401_000).unwrap()],
+                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+            },
+        )
+        .unwrap();
+    assert_eq!(activity.buckets[0].candidates.len(), 258);
+}
+
+#[test]
+fn transcript_catalog_continuation_is_lossless_for_129_conversations() {
+    let platform = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let store = platform.conversation_transcript_store();
+    for index in 1..=129 {
+        let conversation_id = format!("conversation-catalog-{index:03}");
+        let key = ConversationKey::new("space-store", "llm.gateway", &conversation_id).unwrap();
+        let mut input = delta(&format!("turn-catalog-{index:03}"), "catalog evidence");
+        input.conversation.chat_id = conversation_id.clone();
+        input.conversation.conversation_id = Some(conversation_id);
+        let record =
+            TranscriptTurnRecord::from_delta(&key, 1, &input, Vec::new(), 1_800_500_000 + index)
+                .unwrap();
+        store.append_turn(&record).unwrap();
+    }
+    let mut query = TranscriptCatalogQuery {
+        memory_space_id: "space-store".to_string(),
+        governance_context_digest: governance_context_digest("store-contract-catalog-pages"),
+        channel_id: Some("llm.gateway".to_string()),
+        lifecycle: TranscriptCatalogLifecycle::ActiveOnly,
+        limit: 64,
+        cursor: None,
+    };
+    let mut conversations = Vec::new();
+    loop {
+        let page = store
+            .list_conversation_catalog("subject-store", &query)
+            .unwrap();
+        conversations.extend(
+            page.heads
+                .iter()
+                .map(|head| (head.updated_at, head.key.conversation_id.clone())),
+        );
+        if !page.has_more {
+            break;
+        }
+        query.cursor = page.next_cursor;
+    }
+    assert_eq!(conversations.len(), 129);
+    assert_eq!(
+        conversations
+            .iter()
+            .map(|(_, conversation)| conversation)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        129
+    );
+    assert!(conversations.windows(2).all(|pair| pair[0] > pair[1]));
+}
+
+#[test]
+fn timeline_cursor_survives_append_but_stales_on_lifecycle_and_hides_gap_flags() {
+    let platform = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(
+            ProfileId::native_dev_full().expect("native dev-full profile"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let store = platform.conversation_transcript_store();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    for sequence in 1..=9 {
+        let mut record = transcript_record(
+            &key,
+            &format!("turn-snapshot-{sequence:02}"),
+            &format!("snapshot {sequence}"),
+        );
+        record.sequence = sequence;
+        store.append_turn(&record).unwrap();
+    }
+    let governance = governance_context_digest("store-contract-timeline-snapshot");
+    let first = store
+        .query_transcript_timeline(
+            "subject-store",
+            &TranscriptTimelineQuery {
+                key: key.clone(),
+                governance_context_digest: governance.clone(),
+                anchor: TranscriptTimelineAnchor::Latest,
+                limit: 8,
+                cursor: None,
+            },
+        )
+        .unwrap();
+    let old_cursor = first.older_cursor.expect("nine turns require cursor");
+    let mut appended = transcript_record(&key, "turn-snapshot-10", "new tail");
+    appended.sequence = 10;
+    store.append_turn(&appended).unwrap();
+    let historical = store
+        .query_transcript_timeline(
+            "subject-store",
+            &TranscriptTimelineQuery {
+                key: key.clone(),
+                governance_context_digest: governance.clone(),
+                anchor: TranscriptTimelineAnchor::Latest,
+                limit: 8,
+                cursor: Some(old_cursor.clone()),
+            },
+        )
+        .unwrap();
+    assert_eq!(historical.turns.len(), 1);
+    assert_eq!(historical.turns[0].sequence, 1);
+    assert!(historical.turns.iter().all(|turn| turn.sequence <= 9));
+
+    store
+        .apply_lifecycle_request(
+            "subject-store",
+            &TranscriptLifecycleRequest {
+                key: key.clone(),
+                turn_id: Some("turn-snapshot-01".to_string()),
+                transition: TranscriptLifecycleTransition::Mask,
+                reason: "invalidate historical cursor".to_string(),
+                requested_by: "owner".to_string(),
+                requested_at: 20,
+            },
+        )
+        .unwrap();
+    let stale = store.query_transcript_timeline(
+        "subject-store",
+        &TranscriptTimelineQuery {
+            key: key.clone(),
+            governance_context_digest: governance.clone(),
+            anchor: TranscriptTimelineAnchor::Latest,
+            limit: 8,
+            cursor: Some(old_cursor),
+        },
+    );
+    assert!(stale.is_err());
+
+    for sequence in 2..=10 {
+        if sequence != 5 {
+            store
+                .apply_lifecycle_request(
+                    "subject-store",
+                    &TranscriptLifecycleRequest {
+                        key: key.clone(),
+                        turn_id: Some(format!("turn-snapshot-{sequence:02}")),
+                        transition: TranscriptLifecycleTransition::Mask,
+                        reason: "privacy gap".to_string(),
+                        requested_by: "owner".to_string(),
+                        requested_at: 20 + sequence,
+                    },
+                )
+                .unwrap();
+        }
+    }
+    let only_visible = store
+        .query_transcript_timeline(
+            "subject-store",
+            &TranscriptTimelineQuery {
+                key,
+                governance_context_digest: governance,
+                anchor: TranscriptTimelineAnchor::Latest,
+                limit: 1,
+                cursor: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(only_visible.turns.len(), 1);
+    assert_eq!(only_visible.turns[0].sequence, 5);
+    assert!(!only_visible.has_older);
+    assert!(!only_visible.has_newer);
+    assert!(only_visible.older_cursor.is_none());
+    assert!(only_visible.newer_cursor.is_none());
 }

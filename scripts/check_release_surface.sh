@@ -52,6 +52,7 @@ required_docs=(
   "docs/en/adapters.md"
   "docs/en/operator-guide.md"
   "docs/en/release-checklist.md"
+  "docs/en/release-notes-0.5.0.md"
   "docs/en/release-notes-0.4.0.md"
   "docs/zh-CN/api.md"
   "docs/zh-CN/cli-usage.md"
@@ -64,6 +65,7 @@ required_docs=(
   "docs/zh-CN/adapters.md"
   "docs/zh-CN/operator-guide.md"
   "docs/zh-CN/release-checklist.md"
+  "docs/zh-CN/release-notes-0.5.0.md"
   "docs/zh-CN/release-notes-0.4.0.md"
   "dev-docs/deployment-runtime-plan.md"
   "dev-docs/entry-runtime-plan.md"
@@ -82,7 +84,7 @@ for doc in "${required_docs[@]}"; do
   fi
 done
 
-release_version="0.4.0"
+release_version="0.5.0"
 version_manifests=(
   "crates/core/Cargo.toml"
   "crates/store-contract-tests/Cargo.toml"
@@ -169,10 +171,10 @@ for desktop_identity in apps/desktop/package.json apps/desktop/package-lock.json
   }
 done
 
-for doc in docs/en/release-notes-0.4.0.md docs/zh-CN/release-notes-0.4.0.md; do
-  for marker in 'Store v10' 'material v5' 'Adapter V2' 'automatic migration' 'operation key' 'SPV1'; do
+for doc in docs/en/release-notes-0.5.0.md docs/zh-CN/release-notes-0.5.0.md; do
+  for marker in 'Store v11' 'material v5' 'Adapter V2' 'automatic migration' 'operation identity' 'CTQ1' 'TranscriptQueryCursor' 'HostUi'; do
     rg -F -q "$marker" "$doc" || {
-      echo "0.4.0 release notes omit required compatibility marker: doc=$doc marker=$marker" >&2
+      echo "0.5.0 source candidate notes omit required compatibility marker: doc=$doc marker=$marker" >&2
       exit 1
     }
   done
@@ -479,6 +481,7 @@ bash scripts/check_deployment_runtime_contract.sh
 bash scripts/check_next_gen_memory_plan.sh
 bash scripts/check_memory_benchmark_wall.sh
 bash scripts/check_long_term_memory_control_surface.sh
+bash scripts/check_conversation_transcript_substrate.sh
 bash scripts/check_conversation_transcript_attr_plane.sh
 bash scripts/check_production_hardening_contract.sh
 

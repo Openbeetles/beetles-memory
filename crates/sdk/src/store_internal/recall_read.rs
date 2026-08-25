@@ -11,18 +11,22 @@ use bm_core::memory::{
     scoped_long_term_control_storage_key, select_long_term_version_as_of,
     select_long_term_version_current, validate_governed_evidence_document, ContinuityCapsule,
     ContinuityCapsuleDraft, ContinuityCapsuleScopeKind, ContinuityCapsuleStore,
-    ContinuityCapsuleWriteOutcome, ConversationKey, ConversationTranscriptStore, DerivedMemoryRef,
-    GovernedEvidenceDocument, GovernedMemoryOwnerRef, GovernedOwnerRevisionRef,
-    LongTermCurrentRecallAuthority, LongTermHistoricalRecallAuthority,
-    LongTermMemoryControlRevision, LongTermMemoryEntry, LongTermMemoryHeadManifest,
-    LongTermMemoryQuery, LongTermMemoryReadStore, LongTermMemoryVersionHeadBinding,
-    LongTermMemoryVersionMaterial, LongTermMemoryVersionReadProjection,
-    LongTermMemoryVersionScopeManifest, MemoryStore, PremiseTypedSource, RedactedTranscriptSlice,
-    SessionMessage, SessionMessageRecord, SessionStore, SessionSummaryStore,
-    SubjectSoulReadRequestV1, TranscriptAttrEnvelope, TranscriptAttrWriteReport,
-    TranscriptCommitReport, TranscriptConversationAlias, TranscriptLifecycleReport,
-    TranscriptLifecycleRequest, TranscriptReplayView, TranscriptTurnRecord, TurnLedger,
-    TurnLedgerStore, LONG_TERM_CONTROL_REVISION_NAMESPACE, LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
+    ContinuityCapsuleWriteOutcome, ConversationCatalogCandidatePage, ConversationKey,
+    ConversationTranscriptStore, DerivedMemoryRef, GovernedEvidenceDocument,
+    GovernedMemoryOwnerRef, GovernedOwnerRevisionRef, LongTermCurrentRecallAuthority,
+    LongTermHistoricalRecallAuthority, LongTermMemoryControlRevision, LongTermMemoryEntry,
+    LongTermMemoryHeadManifest, LongTermMemoryQuery, LongTermMemoryReadStore,
+    LongTermMemoryVersionHeadBinding, LongTermMemoryVersionMaterial,
+    LongTermMemoryVersionReadProjection, LongTermMemoryVersionScopeManifest, MemoryStore,
+    PremiseTypedSource, RedactedTranscriptSlice, SessionMessage, SessionMessageRecord,
+    SessionStore, SessionSummaryStore, SubjectSoulReadRequestV1, TranscriptActivityCandidateReport,
+    TranscriptActivityQuery, TranscriptAppendIntent, TranscriptAttrEnvelope,
+    TranscriptAttrWriteReport, TranscriptCatalogQuery, TranscriptCommitReport,
+    TranscriptConversationAlias, TranscriptLifecycleReport, TranscriptLifecycleRequest,
+    TranscriptReplayView, TranscriptSearchCandidatePage, TranscriptSearchQuery,
+    TranscriptTimelineCandidatePage, TranscriptTimelineQuery, TranscriptTurnPage,
+    TranscriptTurnRecord, TurnLedger, TurnLedgerStore, LONG_TERM_CONTROL_REVISION_NAMESPACE,
+    LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
 };
 use bm_core::platform::SkillStorage;
 use bm_core::skills::{
@@ -34,7 +38,10 @@ use bm_core::{Error, Result};
 use serde::{de::DeserializeOwned, Deserialize};
 use sha2::{Digest, Sha256};
 
-use super::recall_index::{decode_typed_recall_index, TypedRecallIndex};
+use super::recall_index::{
+    decode_typed_recall_index, ConversationRecallManifest, ConversationTranscriptPageIndex,
+    TypedRecallIndex, CONVERSATION_TRANSCRIPT_PAGE_SIZE,
+};
 use super::subject_soul::{
     read_verified_subject_soul_in_session, read_verified_subject_soul_with_relationship_in_session,
     StoreOpenClosureCertificate, SubjectSoulStoreFailure, SubjectSoulVerifiedStoreRead,
@@ -2157,7 +2164,10 @@ impl LongTermMemoryReadStore for RecallReadView {
 }
 
 impl ConversationTranscriptStore for RecallReadView {
-    fn append_turn(&self, _record: &TranscriptTurnRecord) -> Result<TranscriptCommitReport> {
+    fn append_turn_intent(
+        &self,
+        _intent: &TranscriptAppendIntent,
+    ) -> Result<TranscriptCommitReport> {
         self.reject_write()
     }
 
@@ -2201,22 +2211,160 @@ impl ConversationTranscriptStore for RecallReadView {
         mounted_subject_id: &str,
         limit: usize,
     ) -> Result<Vec<TranscriptTurnRecord>> {
-        let mut records = self.json_docs::<TranscriptTurnRecord>("conversation_transcript")?;
-        records.retain(|record| record.key == *key);
-        if records
-            .iter()
-            .any(|record| record.subject != mounted_subject_id)
-        {
-            return Err(Error::config(
-                "recall_read_view",
-                "conversation transcript owner differs from requested subject",
-            ));
+        let physical_key = ConversationRecallManifest::build(
+            1,
+            &key.memory_space_id,
+            mounted_subject_id,
+            &key.channel_id,
+            &key.conversation_id,
+            0,
+            0,
+        )?
+        .physical_key;
+        let Some(head) = self.json::<ConversationRecallManifest>(
+            ConversationRecallManifest::NAMESPACE,
+            &physical_key,
+        )?
+        else {
+            return Ok(Vec::new());
+        };
+        head.validate()?;
+        let requested = if limit == 0 {
+            head.turn_count
+        } else {
+            u64::try_from(limit)
+                .unwrap_or(u64::MAX)
+                .min(head.turn_count)
+        };
+        if requested == 0 {
+            return Ok(Vec::new());
+        }
+        let first_sequence = head
+            .last_sequence
+            .saturating_sub(requested)
+            .saturating_add(1);
+        let page_size = u64::try_from(CONVERSATION_TRANSCRIPT_PAGE_SIZE).unwrap_or(u64::MAX);
+        let first_page = first_sequence.saturating_sub(1) / page_size;
+        let mut records = Vec::new();
+        for page_id in first_page..head.page_count {
+            let page_id_string = format!("{page_id:020}");
+            let page_key = ConversationTranscriptPageIndex::build(
+                1,
+                &key.memory_space_id,
+                mounted_subject_id,
+                &key.channel_id,
+                &key.conversation_id,
+                &page_id_string,
+                std::iter::empty(),
+            )?
+            .physical_key;
+            let page = self
+                .json::<ConversationTranscriptPageIndex>(
+                    ConversationTranscriptPageIndex::NAMESPACE,
+                    &page_key,
+                )?
+                .ok_or_else(|| {
+                    Error::config(
+                        "recall_read_view",
+                        "conversation head references a missing transcript page",
+                    )
+                })?;
+            page.validate()?;
+            for entry in page.entries {
+                let record = self
+                    .json::<TranscriptTurnRecord>(&entry.namespace, &entry.key)?
+                    .ok_or_else(|| {
+                        Error::config(
+                            "recall_read_view",
+                            "transcript page references a missing turn",
+                        )
+                    })?;
+                if record.key != *key || record.subject != mounted_subject_id {
+                    return Err(Error::config(
+                        "recall_read_view",
+                        "conversation transcript owner differs from requested subject",
+                    ));
+                }
+                if record.sequence >= first_sequence {
+                    records.push(record);
+                }
+            }
         }
         records.sort_by_key(|record| record.sequence);
-        if records.len() > limit {
-            records = records.split_off(records.len() - limit);
-        }
         Ok(records)
+    }
+
+    fn list_conversation_catalog(
+        &self,
+        _mounted_subject_id: &str,
+        _query: &TranscriptCatalogQuery,
+    ) -> Result<ConversationCatalogCandidatePage> {
+        Err(Error::config(
+            "recall_read_view",
+            "catalog candidates require the Store query-index read owner",
+        ))
+    }
+
+    fn query_transcript_timeline(
+        &self,
+        _mounted_subject_id: &str,
+        _query: &TranscriptTimelineQuery,
+    ) -> Result<TranscriptTimelineCandidatePage> {
+        Err(Error::config(
+            "recall_read_view",
+            "timeline candidates require the Store query-index read owner",
+        ))
+    }
+
+    fn search_transcript(
+        &self,
+        _mounted_subject_id: &str,
+        _query: &TranscriptSearchQuery,
+    ) -> Result<TranscriptSearchCandidatePage> {
+        Err(Error::config(
+            "recall_read_view",
+            "search candidates require the Store query-index read owner",
+        ))
+    }
+
+    fn query_transcript_activity(
+        &self,
+        _mounted_subject_id: &str,
+        _query: &TranscriptActivityQuery,
+    ) -> Result<TranscriptActivityCandidateReport> {
+        Err(Error::config(
+            "recall_read_view",
+            "activity candidates require the Store query-index read owner",
+        ))
+    }
+
+    fn turn_count(&self, key: &ConversationKey, mounted_subject_id: &str) -> Result<usize> {
+        Ok(self.list_turns(key, mounted_subject_id, usize::MAX)?.len())
+    }
+
+    fn list_turns_page(
+        &self,
+        key: &ConversationKey,
+        mounted_subject_id: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<TranscriptTurnPage> {
+        let records = self.list_turns(key, mounted_subject_id, usize::MAX)?;
+        let start = cursor
+            .map(|cursor| {
+                cursor.parse::<usize>().map_err(|_| {
+                    Error::config("recall_read_view", "bounded transcript cursor is invalid")
+                })
+            })
+            .transpose()?
+            .unwrap_or(0);
+        let end = start.saturating_add(limit.max(1)).min(records.len());
+        Ok(TranscriptTurnPage {
+            key: key.clone(),
+            turns: records[start..end].to_vec(),
+            next_cursor: (end < records.len()).then(|| end.to_string()),
+            has_more: end < records.len(),
+        })
     }
 
     fn upsert_transcript_attrs(

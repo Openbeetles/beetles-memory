@@ -1,18 +1,26 @@
 use bm_core::memory::{
-    ActorAttribution, CanonicalTurnDelta, ConversationKey, ConversationTranscriptStore,
-    DerivedMemoryPlane, DerivedMemoryRef, HostOpaqueRef, HostRefRelation, HostRefVisibility,
-    MemoryEvidenceAuthority, MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource,
-    RedactedTranscriptSlice, ToolObservationDigest, TranscriptAttrEnvelope,
-    TranscriptAttrGovernance, TranscriptAttrLink, TranscriptAttrRedactionPolicy,
-    TranscriptAttrScope, TranscriptAttrSource, TranscriptAttrSourceKind, TranscriptAttrTarget,
-    TranscriptAttrValueKind, TranscriptCommitReport, TranscriptConversationAlias,
-    TranscriptEvidenceRef, TranscriptInputMessage, TranscriptLifecycleReport,
-    TranscriptLifecycleRequest, TranscriptLifecycleState, TranscriptRedactionReason,
-    TranscriptRedactionState, TranscriptRepairIssueKind, TranscriptReplayView,
-    TranscriptTurnRecord,
+    commit_canonical_turn_delta, commit_canonical_turn_delta_with_transcript,
+    transcript_cursor_governance_context_digest, transcript_message_is_query_index_eligible,
+    ActorAttribution, CanonicalTurnDelta, ConversationCatalogHead, ConversationKey,
+    ConversationTranscriptStore, DerivedMemoryPlane, DerivedMemoryRef, HostOpaqueRef,
+    HostRefRelation, HostRefVisibility, MemoryEvidenceAuthority, MemoryTurnDeliveryStatus,
+    MemoryTurnProtocol, MemoryTurnSource, RedactedTranscriptSlice, SessionMessage, SessionStore,
+    ToolObservationDigest, TranscriptActivityBucket, TranscriptAnchor, TranscriptAppendIntent,
+    TranscriptAttrEnvelope, TranscriptAttrGovernance, TranscriptAttrLink,
+    TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
+    TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind,
+    TranscriptCommitReport, TranscriptConversationAlias, TranscriptCursorDisclosurePolicyV1,
+    TranscriptCursorOperationKind, TranscriptEvidenceRef, TranscriptInputMessage,
+    TranscriptLifecycleReport, TranscriptLifecycleRequest, TranscriptLifecycleState,
+    TranscriptQueryCursor, TranscriptRedactionReason, TranscriptRedactionState,
+    TranscriptRepairIssueKind, TranscriptReplayView, TranscriptSearchCandidate,
+    TranscriptSearchCandidatePage, TranscriptSearchNormalizerV1, TranscriptSearchQuery,
+    TranscriptSearchScope, TranscriptSearchSort, TranscriptTurnRecord, TranscriptUtcRange,
 };
 use bm_core::Result;
 use serde_json::json;
+use std::collections::BTreeMap;
+use std::sync::Mutex;
 
 fn turn_source() -> MemoryTurnSource {
     MemoryTurnSource {
@@ -68,6 +76,38 @@ fn host_ref(id: &str, visibility: HostRefVisibility) -> HostOpaqueRef {
         visibility,
         label: Some(format!("opaque {id}")),
     }
+}
+
+fn governance_context_digest() -> String {
+    format!("sha256:{}", "a".repeat(64))
+}
+
+#[test]
+fn transcript_query_index_eligibility_is_canonical_and_excludes_private_authorities() {
+    let key = ConversationKey::new("space-a", "llm.gateway", "conversation-a").unwrap();
+    let mut record =
+        TranscriptTurnRecord::from_delta(&key, 1, &delivered_delta("turn-index"), Vec::new(), 10)
+            .unwrap();
+    assert!(record
+        .input_messages
+        .iter()
+        .chain(record.assistant_message.iter())
+        .all(transcript_message_is_query_index_eligible));
+    for authority in [
+        MemoryEvidenceAuthority::PrivateGardenInternal,
+        MemoryEvidenceAuthority::SoulGovernance,
+        MemoryEvidenceAuthority::OperatorDiagnostic,
+    ] {
+        record.input_messages[0].authority = authority;
+        assert!(!transcript_message_is_query_index_eligible(
+            &record.input_messages[0]
+        ));
+    }
+    record.input_messages[0].authority = MemoryEvidenceAuthority::UserAsserted;
+    record.input_messages[0].role = "tool".to_string();
+    assert!(!transcript_message_is_query_index_eligible(
+        &record.input_messages[0]
+    ));
 }
 
 fn message_usage_attr(
@@ -132,6 +172,406 @@ fn conversation_key_storage_key_is_not_ambiguous_when_components_contain_separat
     let right = ConversationKey::new("space", "a__channel", "conversation").unwrap();
 
     assert_ne!(left.storage_key(), right.storage_key());
+}
+
+#[test]
+fn transcript_query_contract_is_scope_bound_and_cursor_stays_opaque() {
+    let key = ConversationKey::new("space-a", "llm.gateway", "conversation-a").unwrap();
+    let locator = bm_core::memory::TranscriptLocator::new(
+        key.clone(),
+        "subject-qingchuan",
+        "turn-9",
+        Some("message-9".to_string()),
+        9,
+        1_700_000_009,
+    )
+    .unwrap();
+    let anchor = TranscriptAnchor::new(locator.clone(), 17, "sha256:catalog-head").unwrap();
+    assert_eq!(anchor.locator, locator);
+
+    let head = ConversationCatalogHead {
+        key,
+        mounted_subject_id: "subject-qingchuan".to_string(),
+        revision: 17,
+        head_digest: "sha256:catalog-head".to_string(),
+        turn_count: 9,
+        message_count: 18,
+        lifecycle: bm_core::memory::TranscriptLifecycleAggregate {
+            active: bm_core::memory::TranscriptLifecycleStats {
+                turn_count: 9,
+                message_count: 18,
+                first_observed_at: Some(1_700_000_001),
+                last_observed_at: Some(1_700_000_009),
+            },
+            archived: bm_core::memory::TranscriptLifecycleStats::default(),
+            masked: bm_core::memory::TranscriptLifecycleStats::default(),
+            raw_deleted: bm_core::memory::TranscriptLifecycleStats::default(),
+        },
+        first_sequence: Some(1),
+        last_sequence: Some(9),
+        content_generation: 17,
+        index_generation: 17,
+        updated_at: 1_700_000_010,
+    };
+    head.validate().unwrap();
+
+    let cursor = TranscriptQueryCursor::try_from_encoded("btq1:opaque-token").unwrap();
+    assert_eq!(cursor.as_str(), "btq1:opaque-token");
+    assert_eq!(format!("{cursor:?}"), "TranscriptQueryCursor([REDACTED])");
+    assert!(TranscriptQueryCursor::try_from_encoded("opaque-token").is_err());
+    assert!(TranscriptQueryCursor::try_from_encoded(format!("btq1:{}", "x".repeat(4096))).is_err());
+}
+
+#[test]
+fn catalog_lifecycle_stats_preserve_message_counts_and_time_bounds_per_state() {
+    let key = ConversationKey::new("space-a", "llm.gateway", "conversation-a").unwrap();
+    let mut head = ConversationCatalogHead {
+        key,
+        mounted_subject_id: "subject-qingchuan".to_string(),
+        revision: 3,
+        head_digest: "sha256:mixed-head".to_string(),
+        turn_count: 3,
+        message_count: 5,
+        lifecycle: bm_core::memory::TranscriptLifecycleAggregate {
+            active: bm_core::memory::TranscriptLifecycleStats {
+                turn_count: 1,
+                message_count: 2,
+                first_observed_at: Some(100),
+                last_observed_at: Some(101),
+            },
+            archived: bm_core::memory::TranscriptLifecycleStats {
+                turn_count: 1,
+                message_count: 2,
+                first_observed_at: Some(80),
+                last_observed_at: Some(81),
+            },
+            masked: bm_core::memory::TranscriptLifecycleStats {
+                turn_count: 1,
+                message_count: 1,
+                first_observed_at: Some(60),
+                last_observed_at: Some(60),
+            },
+            raw_deleted: bm_core::memory::TranscriptLifecycleStats::default(),
+        },
+        first_sequence: Some(1),
+        last_sequence: Some(3),
+        content_generation: 3,
+        index_generation: 3,
+        updated_at: 110,
+    };
+    head.validate().unwrap();
+
+    head.lifecycle.masked.message_count = 2;
+    assert!(head.validate().is_err());
+}
+
+#[test]
+fn catalog_and_mounted_subject_search_are_exact_memory_space_scoped() {
+    let catalog = bm_core::memory::TranscriptCatalogQuery {
+        memory_space_id: "space-a".to_string(),
+        governance_context_digest: governance_context_digest(),
+        channel_id: None,
+        lifecycle: bm_core::memory::TranscriptCatalogLifecycle::ActiveOnly,
+        limit: 8,
+        cursor: None,
+    };
+    catalog.validate().unwrap();
+
+    let search = TranscriptSearchQuery {
+        scope: TranscriptSearchScope::MountedSubject {
+            memory_space_id: "space-a".to_string(),
+            channel_id: None,
+        },
+        governance_context_digest: governance_context_digest(),
+        query: TranscriptSearchNormalizerV1::normalize("青川").unwrap(),
+        sort: TranscriptSearchSort::ObservedAtDescending,
+        lifecycle: bm_core::memory::TranscriptSearchLifecycle::ActiveOnly,
+        limit: 8,
+        cursor: None,
+    };
+    search.validate().unwrap();
+
+    let mut cross_space_delta = delivered_delta("turn-cross-space");
+    cross_space_delta.conversation.conversation_id = Some("conversation-b".to_string());
+    let record = TranscriptTurnRecord::from_delta(
+        &ConversationKey::new("space-b", "llm.gateway", "conversation-b").unwrap(),
+        1,
+        &cross_space_delta,
+        Vec::new(),
+        1_800_000_010,
+    )
+    .unwrap();
+    let page = TranscriptSearchCandidatePage {
+        candidates: vec![TranscriptSearchCandidate {
+            message_id: record.input_messages[0].message_id.clone(),
+            record,
+            score: 10,
+            head_revision: 1,
+            head_digest: "sha256:space-b-head".to_string(),
+        }],
+        next_cursor: None,
+        has_more: false,
+        budget_applied: false,
+    };
+    assert!(page
+        .validate_for_query("subject-qingchuan", &search)
+        .is_err());
+}
+
+#[test]
+fn cross_conversation_search_candidates_carry_each_head_identity() {
+    let key = ConversationKey::new("space-a", "llm.gateway", "conversation-a").unwrap();
+    let record = TranscriptTurnRecord::from_delta(
+        &key,
+        1,
+        &delivered_delta("turn-search-head"),
+        Vec::new(),
+        1_800_000_010,
+    )
+    .unwrap();
+    let candidate = TranscriptSearchCandidate {
+        message_id: record.input_messages[0].message_id.clone(),
+        record,
+        score: 10,
+        head_revision: 7,
+        head_digest: "sha256:conversation-a-head".to_string(),
+    };
+    candidate.validate().unwrap();
+
+    let mut invalid = candidate.clone();
+    invalid.head_revision = 0;
+    assert!(invalid.validate().is_err());
+}
+
+#[test]
+fn transcript_search_normalizer_is_canonical_and_highlight_is_unicode_safe() {
+    let normalized = TranscriptSearchNormalizerV1::normalize("  青川，HELLO！青川  ").unwrap();
+    assert_eq!(normalized.normalized, "青川 hello 青川");
+    assert!(normalized.terms.iter().any(|term| term == "青川"));
+    assert!(normalized.terms.iter().any(|term| term == "hello"));
+
+    let excerpt = TranscriptSearchNormalizerV1::excerpt(
+        "开头🙂这里记录了青川，HELLO！最后一段",
+        &normalized,
+        18,
+    )
+    .unwrap();
+    assert!(!excerpt.text.is_empty());
+    assert!(!excerpt.highlights.is_empty());
+    for highlight in &excerpt.highlights {
+        assert!(highlight.start_char < highlight.end_char);
+        assert!(highlight.end_char <= excerpt.text.chars().count());
+    }
+
+    assert!(TranscriptSearchNormalizerV1::normalize(" \n，！ ").is_err());
+    assert!(TranscriptSearchNormalizerV1::normalize(&"x".repeat(1025)).is_err());
+}
+
+#[test]
+fn transcript_document_indexing_is_not_limited_or_silently_truncated_like_a_query() {
+    let long_document = (0..80)
+        .map(|index| format!("document_term_{index}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(long_document.len() > bm_core::memory::MAX_TRANSCRIPT_SEARCH_QUERY_BYTES);
+    assert!(TranscriptSearchNormalizerV1::normalize(&long_document).is_err());
+
+    let terms = TranscriptSearchNormalizerV1::index_terms(&long_document, 128).unwrap();
+    assert!(terms.len() > bm_core::memory::MAX_TRANSCRIPT_SEARCH_TERMS);
+    assert!(TranscriptSearchNormalizerV1::index_terms(&long_document, 24).is_err());
+
+    let control_normalized = TranscriptSearchNormalizerV1::index_terms("hello\0world", 8).unwrap();
+    assert!(control_normalized.iter().any(|term| term == "hello"));
+    assert!(control_normalized.iter().any(|term| term == "world"));
+}
+
+#[test]
+fn transcript_document_indexing_allows_valid_content_without_searchable_terms() {
+    for content in ["好", "🙂", "……！？"] {
+        let terms = TranscriptSearchNormalizerV1::index_terms(content, 8).unwrap();
+        assert!(
+            terms.is_empty(),
+            "{content} must remain valid but unindexed"
+        );
+
+        let key = ConversationKey::new("space-a", "llm.gateway", "conversation-a").unwrap();
+        let mut delta = delivered_delta("turn-unindexable-content");
+        delta.input_messages = vec![TranscriptInputMessage::user(content)];
+        delta.assistant_message = None;
+        let record = TranscriptTurnRecord::from_delta(&key, 1, &delta, Vec::new(), 10).unwrap();
+        TranscriptAppendIntent {
+            record,
+            conversation_alias: None,
+        }
+        .validate()
+        .unwrap();
+    }
+
+    assert!(TranscriptSearchNormalizerV1::normalize("好").is_err());
+    assert!(TranscriptSearchNormalizerV1::normalize("🙂").is_err());
+    assert!(TranscriptSearchNormalizerV1::normalize("……！？").is_err());
+}
+
+#[test]
+fn transcript_utc_ranges_are_half_open_and_activity_buckets_validate_canonically() {
+    let first = TranscriptUtcRange::new(1_700_000_000, 1_700_082_800).unwrap();
+    let second = TranscriptUtcRange::new(1_700_082_800, 1_700_172_800).unwrap();
+    assert!(first.contains(1_700_000_000));
+    assert!(!first.contains(1_700_082_800));
+    assert!(TranscriptUtcRange::new(10, 10).is_err());
+    assert!(TranscriptUtcRange::validate_sorted_non_overlapping(&[first, second]).is_ok());
+    assert!(TranscriptUtcRange::validate_sorted_non_overlapping(&[second, first]).is_err());
+
+    let bucket = TranscriptActivityBucket {
+        range: first,
+        visible_message_count: 0,
+        first_visible_anchor: None,
+        last_visible_anchor: None,
+    };
+    bucket.validate().unwrap();
+
+    bm_core::memory::TranscriptActivityQuery {
+        key: ConversationKey::new("space-a", "llm.gateway", "conversation-a").unwrap(),
+        ranges: vec![first],
+        lifecycle: bm_core::memory::TranscriptSearchLifecycle::ActiveOnly,
+    }
+    .validate()
+    .unwrap();
+
+    let key = ConversationKey::new("space-a", "llm.gateway", "conversation-a").unwrap();
+    bm_core::memory::TranscriptTimelineQuery {
+        key: key.clone(),
+        governance_context_digest: governance_context_digest(),
+        anchor: bm_core::memory::TranscriptTimelineAnchor::AroundSequence(9),
+        limit: 8,
+        cursor: None,
+    }
+    .validate()
+    .unwrap();
+    let _ = key;
+}
+
+#[test]
+fn cursor_queries_require_exact_opaque_governance_context_digest() {
+    let mut catalog = bm_core::memory::TranscriptCatalogQuery {
+        memory_space_id: "space-a".to_string(),
+        governance_context_digest: governance_context_digest(),
+        channel_id: None,
+        lifecycle: bm_core::memory::TranscriptCatalogLifecycle::ActiveOnly,
+        limit: 8,
+        cursor: None,
+    };
+    catalog.validate().unwrap();
+    catalog.governance_context_digest = "sha256:not-64-hex".to_string();
+    assert!(catalog.validate().is_err());
+
+    let key = ConversationKey::new("space-a", "llm.gateway", "conversation-a").unwrap();
+    let mut timeline = bm_core::memory::TranscriptTimelineQuery {
+        key: key.clone(),
+        governance_context_digest: governance_context_digest(),
+        anchor: bm_core::memory::TranscriptTimelineAnchor::Latest,
+        limit: 8,
+        cursor: None,
+    };
+    timeline.validate().unwrap();
+    timeline.governance_context_digest = format!("sha256:{}", "g".repeat(64));
+    assert!(timeline.validate().is_err());
+
+    let mut search = TranscriptSearchQuery {
+        scope: TranscriptSearchScope::ExactConversation { key },
+        governance_context_digest: governance_context_digest(),
+        query: TranscriptSearchNormalizerV1::normalize("青川").unwrap(),
+        sort: TranscriptSearchSort::ObservedAtDescending,
+        lifecycle: bm_core::memory::TranscriptSearchLifecycle::ActiveOnly,
+        limit: 8,
+        cursor: None,
+    };
+    search.validate().unwrap();
+    search.governance_context_digest = format!("sha256:{}", "a".repeat(63));
+    assert!(search.validate().is_err());
+}
+
+#[test]
+fn cursor_governance_context_digest_is_deterministic_and_binds_kind_view_and_capability() {
+    let policy =
+        TranscriptCursorDisclosurePolicyV1::new(1, format!("sha256:{}", "b".repeat(64))).unwrap();
+    let same_left = transcript_cursor_governance_context_digest(
+        TranscriptCursorOperationKind::Catalog,
+        TranscriptReplayView::HostUi,
+        &policy,
+    )
+    .unwrap();
+    let same_right = transcript_cursor_governance_context_digest(
+        TranscriptCursorOperationKind::Catalog,
+        TranscriptReplayView::HostUi,
+        &policy,
+    )
+    .unwrap();
+    assert_eq!(same_left, same_right);
+    assert_eq!(same_left.len(), "sha256:".len() + 64);
+    assert!(same_left
+        .strip_prefix("sha256:")
+        .unwrap()
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    assert_ne!(
+        same_left,
+        transcript_cursor_governance_context_digest(
+            TranscriptCursorOperationKind::Search,
+            TranscriptReplayView::HostUi,
+            &policy,
+        )
+        .unwrap()
+    );
+    assert_ne!(
+        same_left,
+        transcript_cursor_governance_context_digest(
+            TranscriptCursorOperationKind::Catalog,
+            TranscriptReplayView::ModelContext,
+            &policy,
+        )
+        .unwrap()
+    );
+
+    let other_capability =
+        TranscriptCursorDisclosurePolicyV1::new(1, format!("sha256:{}", "c".repeat(64))).unwrap();
+    assert_ne!(
+        same_left,
+        transcript_cursor_governance_context_digest(
+            TranscriptCursorOperationKind::Catalog,
+            TranscriptReplayView::HostUi,
+            &other_capability,
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn transcript_search_and_activity_exclude_masked_or_raw_deleted_records() {
+    let key = ConversationKey::new("space-a", "llm.gateway", "conversation-a").unwrap();
+    let mut record =
+        TranscriptTurnRecord::from_delta(&key, 1, &delivered_delta("turn-1"), Vec::new(), 10)
+            .unwrap();
+    assert!(record.is_searchable_for_presentation());
+    assert!(record.contributes_to_presentation_activity());
+
+    record.apply_lifecycle_transition(bm_core::memory::TranscriptLifecycleTransition::Archive, 11);
+    assert!(record.is_searchable_for_presentation());
+    assert!(record.contributes_to_presentation_activity());
+
+    record.apply_lifecycle_transition(bm_core::memory::TranscriptLifecycleTransition::Mask, 12);
+    assert!(!record.is_searchable_for_presentation());
+    assert!(!record.contributes_to_presentation_activity());
+
+    let mut deleted =
+        TranscriptTurnRecord::from_delta(&key, 2, &delivered_delta("turn-2"), Vec::new(), 10)
+            .unwrap();
+    deleted.apply_lifecycle_transition(
+        bm_core::memory::TranscriptLifecycleTransition::DeleteRaw,
+        13,
+    );
+    assert!(!deleted.is_searchable_for_presentation());
+    assert!(!deleted.contributes_to_presentation_activity());
 }
 
 #[test]
@@ -634,14 +1074,31 @@ fn redaction_report_records_message_reasons() {
     }));
 }
 
+#[derive(Default)]
 struct RepairFixtureStore {
     turns: Vec<TranscriptTurnRecord>,
     derived_refs: Vec<DerivedMemoryRef>,
+    appended_intents: Mutex<Vec<TranscriptAppendIntent>>,
 }
 
 impl ConversationTranscriptStore for RepairFixtureStore {
-    fn append_turn(&self, _record: &TranscriptTurnRecord) -> Result<TranscriptCommitReport> {
-        unimplemented!("repair fixture is read-only")
+    fn append_turn_intent(
+        &self,
+        intent: &TranscriptAppendIntent,
+    ) -> Result<TranscriptCommitReport> {
+        intent.validate()?;
+        let mut appended = self.appended_intents.lock().unwrap();
+        let before_count = appended.len();
+        appended.push(intent.clone());
+        Ok(TranscriptCommitReport {
+            key: intent.record.key.clone(),
+            turn_id: intent.record.turn_id.clone(),
+            sequence: u64::try_from(before_count).unwrap_or(u64::MAX) + 1,
+            committed: true,
+            before_count,
+            after_count: before_count + 1,
+            skipped_reason: None,
+        })
     }
 
     fn remember_conversation_alias(&self, _alias: &TranscriptConversationAlias) -> Result<()> {
@@ -660,11 +1117,21 @@ impl ConversationTranscriptStore for RepairFixtureStore {
 
     fn get_turn(
         &self,
-        _key: &ConversationKey,
-        _mounted_subject_id: &str,
-        _turn_id: &str,
+        key: &ConversationKey,
+        mounted_subject_id: &str,
+        turn_id: &str,
     ) -> Result<Option<TranscriptTurnRecord>> {
-        unimplemented!("repair fixture is read-only")
+        Ok(self
+            .appended_intents
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|intent| {
+                intent.record.key == *key
+                    && intent.record.subject == mounted_subject_id
+                    && intent.record.turn_id == turn_id
+            })
+            .map(|intent| intent.record.clone()))
     }
 
     fn list_turns(
@@ -674,6 +1141,52 @@ impl ConversationTranscriptStore for RepairFixtureStore {
         _limit: usize,
     ) -> Result<Vec<TranscriptTurnRecord>> {
         Ok(self.turns.clone())
+    }
+
+    fn turn_count(&self, _key: &ConversationKey, _mounted_subject_id: &str) -> Result<usize> {
+        Ok(self.turns.len() + self.appended_intents.lock().unwrap().len())
+    }
+
+    fn list_turns_page(
+        &self,
+        key: &ConversationKey,
+        _mounted_subject_id: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<bm_core::memory::TranscriptTurnPage> {
+        bm_core::memory::TranscriptTurnPage::from_records(key.clone(), &self.turns, cursor, limit)
+    }
+
+    fn list_conversation_catalog(
+        &self,
+        _mounted_subject_id: &str,
+        _query: &bm_core::memory::TranscriptCatalogQuery,
+    ) -> Result<bm_core::memory::ConversationCatalogCandidatePage> {
+        unimplemented!("repair fixture is read-only")
+    }
+
+    fn query_transcript_timeline(
+        &self,
+        _mounted_subject_id: &str,
+        _query: &bm_core::memory::TranscriptTimelineQuery,
+    ) -> Result<bm_core::memory::TranscriptTimelineCandidatePage> {
+        unimplemented!("repair fixture is read-only")
+    }
+
+    fn search_transcript(
+        &self,
+        _mounted_subject_id: &str,
+        _query: &bm_core::memory::TranscriptSearchQuery,
+    ) -> Result<bm_core::memory::TranscriptSearchCandidatePage> {
+        unimplemented!("repair fixture is read-only")
+    }
+
+    fn query_transcript_activity(
+        &self,
+        _mounted_subject_id: &str,
+        _query: &bm_core::memory::TranscriptActivityQuery,
+    ) -> Result<bm_core::memory::TranscriptActivityCandidateReport> {
+        unimplemented!("repair fixture is read-only")
     }
 
     fn append_derived_memory_ref(
@@ -700,6 +1213,156 @@ impl ConversationTranscriptStore for RepairFixtureStore {
     ) -> Result<TranscriptLifecycleReport> {
         unimplemented!("repair fixture is read-only")
     }
+}
+
+#[derive(Default)]
+struct TranscriptSessionStore {
+    messages: Mutex<BTreeMap<String, Vec<SessionMessage>>>,
+}
+
+impl SessionStore for TranscriptSessionStore {
+    fn append(&self, chat_id: &str, role: &str, content: &str) -> Result<()> {
+        self.messages
+            .lock()
+            .unwrap()
+            .entry(chat_id.to_string())
+            .or_default()
+            .push(SessionMessage::synthetic(role, content));
+        Ok(())
+    }
+
+    fn append_batch(&self, chat_id: &str, messages: &[SessionMessage]) -> Result<()> {
+        self.messages
+            .lock()
+            .unwrap()
+            .entry(chat_id.to_string())
+            .or_default()
+            .extend_from_slice(messages);
+        Ok(())
+    }
+
+    fn load_recent(&self, chat_id: &str, n: usize) -> Result<Vec<SessionMessage>> {
+        let mut messages = self
+            .messages
+            .lock()
+            .unwrap()
+            .get(chat_id)
+            .cloned()
+            .unwrap_or_default();
+        if messages.len() > n {
+            messages = messages[messages.len() - n..].to_vec();
+        }
+        Ok(messages)
+    }
+
+    fn clear(&self, chat_id: &str) -> Result<()> {
+        self.messages.lock().unwrap().remove(chat_id);
+        Ok(())
+    }
+
+    fn list_chat_ids(&self) -> Result<Vec<String>> {
+        Ok(self.messages.lock().unwrap().keys().cloned().collect())
+    }
+}
+
+#[test]
+fn canonical_turn_commit_passes_conversation_alias_in_same_append_intent() {
+    let session_store = TranscriptSessionStore::default();
+    let transcript_store = RepairFixtureStore::default();
+    let delta = delivered_delta("turn-alias-intent");
+    let alias = TranscriptConversationAlias::new(
+        "space-a",
+        "subject-qingchuan",
+        "llm.gateway",
+        "legacy-chat-a",
+        "conversation-a",
+        1_800_000_010,
+    )
+    .unwrap();
+
+    let report = commit_canonical_turn_delta_with_transcript(
+        &session_store,
+        &transcript_store,
+        "space-a",
+        &delta,
+        Vec::new(),
+        Some(alias.clone()),
+        1_800_000_010,
+    )
+    .unwrap();
+
+    assert!(report.session_commit.committed);
+    assert!(report.transcript_commit.unwrap().committed);
+    let intents = transcript_store.appended_intents.lock().unwrap();
+    assert_eq!(intents.len(), 1);
+    assert_eq!(intents[0].conversation_alias.as_ref(), Some(&alias));
+}
+
+#[test]
+fn canonical_turn_backfill_passes_conversation_alias_in_same_append_intent() {
+    let session_store = TranscriptSessionStore::default();
+    let transcript_store = RepairFixtureStore::default();
+    let delta = delivered_delta("turn-alias-backfill");
+    assert!(
+        commit_canonical_turn_delta(&session_store, &delta)
+            .unwrap()
+            .committed
+    );
+    let alias = TranscriptConversationAlias::new(
+        "space-a",
+        "subject-qingchuan",
+        "llm.gateway",
+        "legacy-chat-a",
+        "conversation-a",
+        1_800_000_010,
+    )
+    .unwrap();
+
+    let report = commit_canonical_turn_delta_with_transcript(
+        &session_store,
+        &transcript_store,
+        "space-a",
+        &delta,
+        Vec::new(),
+        Some(alias.clone()),
+        1_800_000_010,
+    )
+    .unwrap();
+
+    assert!(!report.session_commit.committed);
+    assert!(report.transcript_commit.unwrap().committed);
+    let intents = transcript_store.appended_intents.lock().unwrap();
+    assert_eq!(intents.len(), 1);
+    assert_eq!(intents[0].conversation_alias.as_ref(), Some(&alias));
+}
+
+#[test]
+fn mismatched_alias_fails_before_session_or_transcript_mutation() {
+    let session_store = TranscriptSessionStore::default();
+    let transcript_store = RepairFixtureStore::default();
+    let delta = delivered_delta("turn-alias-mismatch");
+    let alias = TranscriptConversationAlias::new(
+        "space-b",
+        "subject-qingchuan",
+        "llm.gateway",
+        "legacy-chat-a",
+        "conversation-a",
+        1_800_000_010,
+    )
+    .unwrap();
+
+    assert!(commit_canonical_turn_delta_with_transcript(
+        &session_store,
+        &transcript_store,
+        "space-a",
+        &delta,
+        Vec::new(),
+        Some(alias),
+        1_800_000_010,
+    )
+    .is_err());
+    assert_eq!(session_store.message_count("legacy-chat-a").unwrap(), 0);
+    assert!(transcript_store.appended_intents.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -741,6 +1404,7 @@ fn transcript_repair_report_flags_mismatched_orphan_duplicate_and_corrupt_record
     let store = RepairFixtureStore {
         turns: vec![first, duplicate_sequence],
         derived_refs: vec![derived],
+        appended_intents: Mutex::new(Vec::new()),
     };
 
     let report = store.repair_report(&key, "subject-agent").unwrap();

@@ -67,6 +67,20 @@ use crate::store_internal::transaction::{
     ConditionalDeleteEventTemplate, GraphRepairAuthority, StoreAdmissionAuthority,
     StoreGovernedEvidenceExactReadRequest, StoreGovernedEvidenceExactReadResult,
 };
+use crate::store_internal::transcript_query::{
+    catalog_page_key, catalog_root_key, decode_cursor, encode_cursor, keyring_key,
+    message_locators, search_message_manifest_key, search_posting_key, search_root_key,
+    term_digest, term_set_digest, time_posting_key, time_root_key,
+    transcript_query_namespace_is_derived, TranscriptCatalogPageV1, TranscriptCatalogRootV1,
+    TranscriptMessageSearchManifestV1, TranscriptPostingLocatorV1, TranscriptQueryCursorClaimsV1,
+    TranscriptQueryKeyringV1, TranscriptSearchPostingPageV1, TranscriptSearchPostingRootV1,
+    TranscriptTimePostingPageV1, TranscriptTimePostingRootV1, TRANSCRIPT_CATALOG_PAGE_NAMESPACE,
+    TRANSCRIPT_CATALOG_ROOT_NAMESPACE, TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
+    TRANSCRIPT_QUERY_KEYRING_NAMESPACE, TRANSCRIPT_QUERY_PAGE_CAPACITY,
+    TRANSCRIPT_SEARCH_MESSAGE_MANIFEST_NAMESPACE, TRANSCRIPT_SEARCH_POSTING_NAMESPACE,
+    TRANSCRIPT_SEARCH_ROOT_NAMESPACE, TRANSCRIPT_TIME_POSTING_NAMESPACE,
+    TRANSCRIPT_TIME_ROOT_NAMESPACE,
+};
 
 pub(crate) struct RecallImmutableReadSessionOutcome<T> {
     pub(crate) output: T,
@@ -97,6 +111,13 @@ type RecallIndexMutationPlan = (
     String,
     serde_json::Value,
     Option<serde_json::Value>,
+);
+type TranscriptCatalogPageSnapshot = (String, TranscriptCatalogPageV1, serde_json::Value);
+type TranscriptCatalogLoad = (
+    String,
+    Option<TranscriptCatalogRootV1>,
+    Option<serde_json::Value>,
+    Vec<TranscriptCatalogPageSnapshot>,
 );
 
 /// SDK-private physical owner plan assembled before one governed Store commit.
@@ -474,6 +495,17 @@ pub(crate) struct StorePlatformPreparation {
     consumption: Arc<AtomicU8>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreMigrationReport {
+    pub backend: StoreBackendKind,
+    pub from_schema_id: String,
+    pub from_schema_version: u32,
+    pub to_schema_id: String,
+    pub to_schema_version: u32,
+    pub migrated: bool,
+    pub migration_event_id: String,
+}
+
 impl StorePlatformPreparation {
     fn prepare(
         config: StoreBackendConfig,
@@ -622,6 +654,68 @@ impl StorePlatform {
         StorePlatformPreparation::prepare(config, None)?
             .open()
             .map(|(platform, _report)| platform)
+    }
+
+    pub(crate) fn migrate_v10_to_v11(config: StoreBackendConfig) -> Result<StoreMigrationReport> {
+        let preparation = StorePlatformPreparation::prepare(config.clone(), None)?;
+        preparation.consume()?;
+        let capacity = resolve_store_capacity(&preparation.runtime_budget_authority)?;
+        let migration_event =
+            build_runtime_event(&config, "store.migration.v10_to_v11", current_unix_secs())
+                .with_plane("store_schema")
+                .with_record_key(STORE_SCHEMA_ID)
+                .with_payload("from_schema_id", "beetle_memory_store_schema_v10")
+                .with_payload("from_schema_version", "10")
+                .with_payload("to_schema_id", STORE_SCHEMA_ID)
+                .with_payload("to_schema_version", STORE_SCHEMA_VERSION.to_string());
+        let migration_event_id = migration_event.event_id.clone();
+        let open_preflight = StoreOpenPreflight::new(
+            capacity,
+            &preparation.runtime_budget.governed_state_budget,
+            build_runtime_event(&config, "open", current_unix_secs()),
+        );
+        match config.backend {
+            StoreBackendKind::File => {
+                crate::store_internal::file::FileStoreEngine::migrate_v10_to_v11_explicit(
+                    &config,
+                    capacity,
+                    StoreAdmissionAuthority::new(),
+                    &open_preflight,
+                    migration_event,
+                )?
+            }
+            #[cfg(feature = "sqlite-store")]
+            StoreBackendKind::Sqlite => {
+                crate::store_internal::sqlite::migrate_sqlite_v10_to_v11_explicit(
+                    &config,
+                    capacity,
+                    &open_preflight,
+                    migration_event,
+                )?;
+            }
+            #[cfg(not(feature = "sqlite-store"))]
+            StoreBackendKind::Sqlite => {
+                return Err(Error::config(
+                    "store_migration_not_supported",
+                    "SQLite migration requires the sqlite-store feature",
+                ));
+            }
+            StoreBackendKind::InMemory | StoreBackendKind::Embedded => {
+                return Err(Error::config(
+                    "store_migration_not_supported",
+                    "v10 to v11 migration requires a persistent File or SQLite backend",
+                ));
+            }
+        }
+        Ok(StoreMigrationReport {
+            backend: config.backend,
+            from_schema_id: "beetle_memory_store_schema_v10".to_string(),
+            from_schema_version: 10,
+            to_schema_id: STORE_SCHEMA_ID.to_string(),
+            to_schema_version: STORE_SCHEMA_VERSION,
+            migrated: true,
+            migration_event_id,
+        })
     }
 
     pub fn open_with_firmware_resource_probe(
@@ -880,6 +974,9 @@ impl StorePlatform {
             runtime_budget_authority,
             subject_soul_open_closure_certificate,
         };
+        validate_transcript_query_engine_open_closure(platform.engine.as_ref()).map_err(
+            |error| Error::config("store_transcript_query_open_closure", error.to_string()),
+        )?;
         platform.append_validated_event(open_event)?;
         Ok((platform, report))
     }
@@ -975,6 +1072,13 @@ impl StorePlatform {
         now_secs: u64,
     ) -> Result<RuntimeBudgetReport> {
         self.runtime_budget_authority.refresh(now_secs)
+    }
+
+    #[cfg(feature = "nonproduction-replay-harness")]
+    pub fn refresh_runtime_resource_snapshot_for_nonproduction_harness(
+        &self,
+    ) -> Result<RuntimeBudgetReport> {
+        self.refresh_runtime_resource_snapshot(current_unix_secs())
     }
 
     pub(crate) fn refresh_runtime_resource_snapshot_if_stale(
@@ -1396,43 +1500,49 @@ impl StorePlatform {
                             subject_soul_authorized,
                         )
                     })?;
-                    let event_scope =
-                        graph_effect_event_scope(&batch.scope, namespace, key, &graph_scopes);
-                    let event = self.build_batch_event_in_scope(
-                        StoreBatchEventContext {
-                            batch: &batch,
-                            event_scope,
-                            transaction_timestamp,
-                            kind: event_kind.clone(),
-                            plane,
-                            record_key,
-                        },
-                        stable_hash_json(value).map_err(|error| {
-                            memory_write_transaction_preflight_error_for_authority(
-                                error,
-                                subject_soul_authorized,
-                            )
-                        })?,
-                    );
-                    enforce_event_key_budget(
-                        operation_capacity,
-                        &event,
-                        "memory_write_transaction",
-                    )
-                    .map_err(|error| {
-                        memory_write_transaction_preflight_error_for_authority(
-                            error,
-                            subject_soul_authorized,
-                        )
-                    })?;
                     engine_mutations.push(StoreEngineMutation::PutJson {
                         namespace: namespace.clone(),
                         key: key.clone(),
                         value: value.clone(),
                     });
-                    engine_mutations.push(StoreEngineMutation::AppendEvent {
-                        event: Box::new(event),
-                    });
+                    // CTQ postings/catalog documents are a derived closure of the
+                    // authoritative transcript/head mutation in this same batch.
+                    // Emitting one event per term posting causes unbounded audit-log
+                    // amplification while adding no independent owner fact.
+                    if !transcript_query_namespace_is_derived(namespace) {
+                        let event_scope =
+                            graph_effect_event_scope(&batch.scope, namespace, key, &graph_scopes);
+                        let event = self.build_batch_event_in_scope(
+                            StoreBatchEventContext {
+                                batch: &batch,
+                                event_scope,
+                                transaction_timestamp,
+                                kind: event_kind.clone(),
+                                plane,
+                                record_key,
+                            },
+                            stable_hash_json(value).map_err(|error| {
+                                memory_write_transaction_preflight_error_for_authority(
+                                    error,
+                                    subject_soul_authorized,
+                                )
+                            })?,
+                        );
+                        enforce_event_key_budget(
+                            operation_capacity,
+                            &event,
+                            "memory_write_transaction",
+                        )
+                        .map_err(|error| {
+                            memory_write_transaction_preflight_error_for_authority(
+                                error,
+                                subject_soul_authorized,
+                            )
+                        })?;
+                        engine_mutations.push(StoreEngineMutation::AppendEvent {
+                            event: Box::new(event),
+                        });
+                    }
                 }
                 StoreMutation::DeleteJson {
                     namespace,
@@ -2170,10 +2280,15 @@ impl StorePlatform {
             },
             operation_capacity,
         )?;
+        let mut omitted_private_entries = 0usize;
         let json_docs = projection
             .json_docs
             .into_iter()
             .filter_map(|document| {
+                if document.namespace == TRANSCRIPT_QUERY_KEYRING_NAMESPACE {
+                    omitted_private_entries = omitted_private_entries.saturating_add(1);
+                    return None;
+                }
                 crate::store_internal::engine::json_document_is_protected_owner(
                     &document.namespace,
                     &document.value,
@@ -2197,7 +2312,7 @@ impl StorePlatform {
         Ok((
             snapshot,
             StoreMemorySpaceProjectionReport {
-                omitted_private_entries: 0,
+                omitted_private_entries,
                 operation_capacity,
                 max_retained_long_term_revisions_per_owner: runtime_budget
                     .governed_state_budget
@@ -2221,12 +2336,16 @@ impl StorePlatform {
         };
         let operation_capacity =
             StoreCapacityBudget::from_runtime_budget(runtime_budget.store_budget);
-        validate_snapshot_import_contract(
-            snapshot,
-            &runtime_budget.governed_state_budget,
-            operation_capacity,
-        )?;
-        validate_scoped_projection_governed_closure(snapshot, scope)?;
+        if snapshot
+            .json_docs
+            .iter()
+            .any(|document| document.namespace == TRANSCRIPT_QUERY_KEYRING_NAMESPACE)
+        {
+            return Err(Error::config(
+                "memory_space_import",
+                "typed memory-space archive must not carry transcript cursor authority",
+            ));
+        }
         if !snapshot.blobs.is_empty() {
             return Err(Error::config(
                 "memory_space_import",
@@ -2254,6 +2373,25 @@ impl StorePlatform {
                 "typed memory-space archive must not contain protected Soul/Relationship events",
             ));
         }
+        let mut admitted_snapshot = snapshot.clone();
+        if admitted_snapshot.json_docs.iter().any(|document| {
+            document.namespace == CONVERSATION_RECALL_MANIFEST_NAMESPACE
+                || transcript_query_namespace_is_derived(&document.namespace)
+        }) {
+            let keyring = Self::fresh_query_keyring(&scope.memory_space_id, current_unix_secs())?;
+            admitted_snapshot.json_docs.push(StoreSnapshotJsonDoc {
+                namespace: TRANSCRIPT_QUERY_KEYRING_NAMESPACE.to_string(),
+                key: keyring_key(&scope.memory_space_id),
+                value: serde_json::to_value(keyring)
+                    .map_err(|error| Error::config("memory_space_import", error.to_string()))?,
+            });
+        }
+        validate_snapshot_import_contract(
+            &admitted_snapshot,
+            &runtime_budget.governed_state_budget,
+            operation_capacity,
+        )?;
+        validate_scoped_projection_governed_closure(&admitted_snapshot, scope)?;
         let admission = self.store_transaction_admission_for_report(runtime_budget)?;
         let replace = self.engine.replace_scoped_projection(
             &StoreScopedProjectionReplaceRequest {
@@ -2261,8 +2399,8 @@ impl StorePlatform {
                 json_namespaces: store_memory_space_archive_json_namespaces()
                     .map(str::to_string)
                     .collect(),
-                json_docs: snapshot.json_docs.clone(),
-                events: snapshot.events.clone(),
+                json_docs: admitted_snapshot.json_docs,
+                events: admitted_snapshot.events,
                 preserve_protected_owner_state: true,
             },
             &admission,
@@ -8612,6 +8750,14 @@ pub(crate) fn snapshot_namespace_requires_private_export(namespace: &str) -> boo
             | "conversation_transcript_alias"
             | "conversation_transcript_attr"
             | "conversation_transcript_derived_ref"
+            | crate::store_internal::transcript_query::TRANSCRIPT_CATALOG_PAGE_NAMESPACE
+            | crate::store_internal::transcript_query::TRANSCRIPT_CATALOG_ROOT_NAMESPACE
+            | crate::store_internal::transcript_query::TRANSCRIPT_TIME_POSTING_NAMESPACE
+            | crate::store_internal::transcript_query::TRANSCRIPT_TIME_ROOT_NAMESPACE
+            | crate::store_internal::transcript_query::TRANSCRIPT_SEARCH_POSTING_NAMESPACE
+            | crate::store_internal::transcript_query::TRANSCRIPT_SEARCH_ROOT_NAMESPACE
+            | crate::store_internal::transcript_query::TRANSCRIPT_SEARCH_MESSAGE_MANIFEST_NAMESPACE
+            | crate::store_internal::transcript_query::TRANSCRIPT_QUERY_KEYRING_NAMESPACE
             | GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE
             | GOVERNED_EVIDENCE_SOURCE_REF_NAMESPACE
             | GOVERNED_EVIDENCE_SOURCE_CLAIM_MANIFEST_NAMESPACE
@@ -8629,6 +8775,7 @@ pub(crate) fn snapshot_key_requires_private_export(key: &str) -> bool {
         || key.contains("conversation_transcript")
         || key.contains("conversation_transcript_alias")
         || key.contains("conversation_transcript_derived_ref")
+        || key.contains("conversation_transcript_query")
 }
 
 pub(crate) fn snapshot_json_requires_private_export(
@@ -9394,8 +9541,1306 @@ impl SessionStore for StorePlatform {
     }
 }
 
+impl StorePlatform {
+    fn load_catalog_head_exact(
+        &self,
+        key: &ConversationKey,
+        mounted_subject_id: &str,
+    ) -> Result<Option<ConversationCatalogHead>> {
+        let (_, root, _, pages) = self.load_catalog_pages(
+            &key.memory_space_id,
+            mounted_subject_id,
+            Some(&key.channel_id),
+        )?;
+        if root.is_none() {
+            return Ok(None);
+        }
+        Ok(pages
+            .into_iter()
+            .flat_map(|(_, page, _)| page.heads)
+            .find(|head| head.key == *key))
+    }
+
+    fn load_query_keyring(&self, memory_space_id: &str) -> Result<TranscriptQueryKeyringV1> {
+        let key = keyring_key(memory_space_id);
+        let value = self
+            .engine
+            .get_json_value(TRANSCRIPT_QUERY_KEYRING_NAMESPACE, &key)?
+            .ok_or_else(|| {
+                Error::config(
+                    "conversation_transcript_query_cursor",
+                    "query keyring is missing",
+                )
+            })?;
+        let keyring =
+            serde_json::from_value::<TranscriptQueryKeyringV1>(value).map_err(|error| {
+                Error::config("conversation_transcript_query_cursor", error.to_string())
+            })?;
+        keyring.validate_for_memory_space(memory_space_id)?;
+        Ok(keyring)
+    }
+
+    fn fresh_query_keyring(memory_space_id: &str, now: u64) -> Result<TranscriptQueryKeyringV1> {
+        let mut secret = [0u8; 32];
+        getrandom::fill(&mut secret).map_err(|error| {
+            Error::config(
+                "conversation_transcript_query_cursor_entropy",
+                error.to_string(),
+            )
+        })?;
+        let digest = secret
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        Ok(TranscriptQueryKeyringV1 {
+            schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
+            memory_space_id: memory_space_id.to_string(),
+            incarnation: format!(
+                "sha256:{:x}",
+                Sha256::digest(format!("incarnation:{digest}").as_bytes())
+            ),
+            current: crate::store_internal::transcript_query::TranscriptQuerySigningKeyV1 {
+                key_id: format!(
+                    "sha256:{:x}",
+                    Sha256::digest(format!("key-id:{digest}").as_bytes())
+                ),
+                key_hex: digest,
+                created_at: now,
+                expires_at: now.saturating_add(7_776_000),
+            },
+            previous: None,
+        })
+    }
+
+    fn plan_query_keyring(&self, memory_space_id: &str) -> Result<Option<RecallIndexMutationPlan>> {
+        let key = keyring_key(memory_space_id);
+        let before = self
+            .engine
+            .get_json_value(TRANSCRIPT_QUERY_KEYRING_NAMESPACE, &key)?;
+        let now = current_unix_secs();
+        let previous = before
+            .as_ref()
+            .map(|value| serde_json::from_value::<TranscriptQueryKeyringV1>(value.clone()))
+            .transpose()
+            .map_err(|error| {
+                Error::config("conversation_transcript_query_cursor", error.to_string())
+            })?;
+        if let Some(existing) = previous.as_ref() {
+            existing.validate_for_memory_space(memory_space_id)?;
+            if existing.current.expires_at > now.saturating_add(604_800) {
+                if existing
+                    .previous
+                    .as_ref()
+                    .is_some_and(|key| key.expires_at <= now)
+                {
+                    let mut pruned = existing.clone();
+                    pruned.previous = None;
+                    return Ok(Some((
+                        TRANSCRIPT_QUERY_KEYRING_NAMESPACE,
+                        key,
+                        serde_json::to_value(pruned).map_err(|error| {
+                            Error::config("conversation_transcript_query_cursor", error.to_string())
+                        })?,
+                        before,
+                    )));
+                }
+                return Ok(None);
+            }
+        }
+        let mut keyring = Self::fresh_query_keyring(memory_space_id, now)?;
+        if let Some(previous) = previous {
+            keyring.incarnation = previous.incarnation;
+            keyring.previous = Some(previous.current).filter(|key| key.expires_at > now);
+        }
+        Ok(Some((
+            TRANSCRIPT_QUERY_KEYRING_NAMESPACE,
+            key,
+            serde_json::to_value(keyring).map_err(|error| {
+                Error::config("conversation_transcript_query_cursor", error.to_string())
+            })?,
+            before,
+        )))
+    }
+
+    fn ensure_query_keyring(
+        &self,
+        memory_space_id: &str,
+        mounted_subject_id: &str,
+        channel_id: Option<&str>,
+    ) -> Result<TranscriptQueryKeyringV1> {
+        let _transaction_guard = self.lock_transaction("conversation_transcript_query_keyring")?;
+        if let Some(plan) = self.plan_query_keyring(memory_space_id)? {
+            let mut scope = self.recall_scope();
+            scope.memory_space_id = memory_space_id.to_string();
+            scope.subject_id = mounted_subject_id.to_string();
+            if let Some(channel_id) = channel_id {
+                scope.channel = channel_id.to_string();
+            }
+            self.commit_recall_indexed_mutations(
+                "conversation.transcript.query_keyring.rotate",
+                scope,
+                Vec::new(),
+                vec![plan],
+            )?;
+        }
+        self.load_query_keyring(memory_space_id)
+    }
+
+    fn validate_transcript_query_record_closure(
+        &self,
+        record: &TranscriptTurnRecord,
+        owner_head: &ConversationRecallManifest,
+    ) -> Result<()> {
+        let catalog_head = self
+            .load_catalog_head_exact(&record.key, &record.subject)?
+            .ok_or_else(|| {
+                Error::config(
+                    "conversation_transcript_query_repair_required",
+                    "transcript owner is missing its catalog head",
+                )
+            })?;
+        if catalog_head.revision != owner_head.revision
+            || catalog_head.head_digest != owner_head.head_digest
+            || catalog_head.content_generation != owner_head.revision
+            || catalog_head.index_generation != owner_head.revision
+        {
+            return Err(Error::config(
+                "conversation_transcript_query_repair_required",
+                "transcript catalog head identity differs from its owner head",
+            ));
+        }
+        self.load_query_keyring(&record.key.memory_space_id)?;
+        for (locator, content) in message_locators(record) {
+            let manifest_key = search_message_manifest_key(&locator);
+            let manifest_value = self
+                .engine
+                .get_json_value(TRANSCRIPT_SEARCH_MESSAGE_MANIFEST_NAMESPACE, &manifest_key)?
+                .ok_or_else(|| {
+                    Error::config(
+                        "conversation_transcript_query_repair_required",
+                        "transcript message is missing its search manifest",
+                    )
+                })?;
+            let manifest =
+                serde_json::from_value::<TranscriptMessageSearchManifestV1>(manifest_value)
+                    .map_err(|error| {
+                        Error::config(
+                            "conversation_transcript_query_repair_required",
+                            error.to_string(),
+                        )
+                    })?;
+            let expected_terms = TranscriptSearchNormalizerV1::index_terms(
+                content,
+                MAX_TRANSCRIPT_INDEX_TERMS_PER_MESSAGE,
+            )?
+            .iter()
+            .map(|term| term_digest(term))
+            .collect::<Vec<_>>();
+            if manifest.locator != locator
+                || manifest.term_set_digest != term_set_digest(&expected_terms)
+            {
+                return Err(Error::config(
+                    "conversation_transcript_query_repair_required",
+                    "transcript message search manifest differs from canonical content",
+                ));
+            }
+            let day = locator.observed_at / 86_400;
+            let time_root_key = time_root_key(&record.key, &record.subject, day);
+            let time_root = self
+                .engine
+                .get_json_value(TRANSCRIPT_TIME_ROOT_NAMESPACE, &time_root_key)?
+                .map(serde_json::from_value::<TranscriptTimePostingRootV1>)
+                .transpose()
+                .map_err(|error| {
+                    Error::config(
+                        "conversation_transcript_query_repair_required",
+                        error.to_string(),
+                    )
+                })?
+                .ok_or_else(|| {
+                    Error::config(
+                        "conversation_transcript_query_repair_required",
+                        "transcript message is missing its time root",
+                    )
+                })?;
+            let mut time_bound = false;
+            for page_id in 0..time_root.page_count {
+                let page_key = time_posting_key(&record.key, &record.subject, day, page_id);
+                let page = self
+                    .engine
+                    .get_json_value(TRANSCRIPT_TIME_POSTING_NAMESPACE, &page_key)?
+                    .map(serde_json::from_value::<TranscriptTimePostingPageV1>)
+                    .transpose()
+                    .map_err(|error| {
+                        Error::config(
+                            "conversation_transcript_query_repair_required",
+                            error.to_string(),
+                        )
+                    })?
+                    .ok_or_else(|| {
+                        Error::config(
+                            "conversation_transcript_query_repair_required",
+                            "time root references a missing page",
+                        )
+                    })?;
+                time_bound |= page.locators.iter().any(|entry| entry.locator == locator);
+            }
+            if !time_bound {
+                return Err(Error::config(
+                    "conversation_transcript_query_repair_required",
+                    "transcript message is absent from its time posting",
+                ));
+            }
+            for digest in &expected_terms {
+                let root_key =
+                    search_root_key(&record.key.memory_space_id, &record.subject, digest);
+                let root = self
+                    .engine
+                    .get_json_value(TRANSCRIPT_SEARCH_ROOT_NAMESPACE, &root_key)?
+                    .map(serde_json::from_value::<TranscriptSearchPostingRootV1>)
+                    .transpose()
+                    .map_err(|error| {
+                        Error::config(
+                            "conversation_transcript_query_repair_required",
+                            error.to_string(),
+                        )
+                    })?
+                    .ok_or_else(|| {
+                        Error::config(
+                            "conversation_transcript_query_repair_required",
+                            "transcript message search term root is missing",
+                        )
+                    })?;
+                let mut search_bound = false;
+                for page_id in 0..root.page_count {
+                    let page_key = search_posting_key(
+                        &record.key.memory_space_id,
+                        &record.subject,
+                        digest,
+                        page_id,
+                    );
+                    let page = self
+                        .engine
+                        .get_json_value(TRANSCRIPT_SEARCH_POSTING_NAMESPACE, &page_key)?
+                        .map(serde_json::from_value::<TranscriptSearchPostingPageV1>)
+                        .transpose()
+                        .map_err(|error| {
+                            Error::config(
+                                "conversation_transcript_query_repair_required",
+                                error.to_string(),
+                            )
+                        })?
+                        .ok_or_else(|| {
+                            Error::config(
+                                "conversation_transcript_query_repair_required",
+                                "search root references a missing page",
+                            )
+                        })?;
+                    search_bound |= page.locators.iter().any(|entry| entry.locator == locator);
+                }
+                if !search_bound {
+                    return Err(Error::config(
+                        "conversation_transcript_query_repair_required",
+                        "transcript message is absent from its search posting",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn transcript_catalog_head_after_append(
+        previous: Option<&ConversationCatalogHead>,
+        manifest: &ConversationRecallManifest,
+        record: &TranscriptTurnRecord,
+    ) -> Result<ConversationCatalogHead> {
+        if let Some(previous) = previous {
+            if previous.revision.saturating_add(1) != manifest.revision
+                || previous.head_digest == manifest.head_digest
+                || previous.key != record.key
+                || previous.mounted_subject_id != record.subject
+            {
+                return Err(Error::config(
+                    "conversation_transcript_catalog_index",
+                    "catalog head is not the exact predecessor of the transcript head",
+                ));
+            }
+        }
+        let mut lifecycle = previous.map(|head| head.lifecycle).unwrap_or_default();
+        let stats = match record.lifecycle_state {
+            TranscriptLifecycleState::Active => &mut lifecycle.active,
+            TranscriptLifecycleState::Archived => &mut lifecycle.archived,
+            TranscriptLifecycleState::Masked => &mut lifecycle.masked,
+            TranscriptLifecycleState::RawDeleted => &mut lifecycle.raw_deleted,
+        };
+        let messages = record
+            .input_messages
+            .iter()
+            .chain(record.assistant_message.iter())
+            .collect::<Vec<_>>();
+        stats.turn_count = stats.turn_count.saturating_add(1);
+        stats.message_count = stats
+            .message_count
+            .saturating_add(u64::try_from(messages.len()).unwrap_or(u64::MAX));
+        for message in messages {
+            stats.first_observed_at = Some(
+                stats
+                    .first_observed_at
+                    .map(|value| value.min(message.observed_at))
+                    .unwrap_or(message.observed_at),
+            );
+            stats.last_observed_at = Some(
+                stats
+                    .last_observed_at
+                    .map(|value| value.max(message.observed_at))
+                    .unwrap_or(message.observed_at),
+            );
+        }
+        let head = ConversationCatalogHead {
+            key: record.key.clone(),
+            mounted_subject_id: record.subject.clone(),
+            revision: manifest.revision,
+            head_digest: manifest.head_digest.clone(),
+            turn_count: manifest.turn_count,
+            message_count: previous
+                .map(|head| head.message_count)
+                .unwrap_or(0)
+                .saturating_add(
+                    u64::try_from(
+                        record.input_messages.len()
+                            + usize::from(record.assistant_message.is_some()),
+                    )
+                    .unwrap_or(u64::MAX),
+                ),
+            lifecycle,
+            first_sequence: previous
+                .and_then(|head| head.first_sequence)
+                .or(Some(record.sequence)),
+            last_sequence: Some(record.sequence),
+            // Append extends the immutable transcript tail but does not invalidate a
+            // cursor whose authenticated snapshot upper bound precedes the append.
+            // Lifecycle/repair rebuilds intentionally advance both generations.
+            content_generation: previous.map(|head| head.content_generation).unwrap_or(1),
+            index_generation: previous.map(|head| head.index_generation).unwrap_or(1),
+            updated_at: record.updated_at,
+        };
+        head.validate()?;
+        Ok(head)
+    }
+
+    fn transcript_catalog_head_from_records(
+        manifest: &ConversationRecallManifest,
+        records: &[TranscriptTurnRecord],
+    ) -> Result<ConversationCatalogHead> {
+        if records.len() != usize::try_from(manifest.turn_count).unwrap_or(usize::MAX) {
+            return Err(Error::config(
+                "conversation_transcript_catalog_index",
+                "head and transcript page closure differ",
+            ));
+        }
+        let mut message_count = 0u64;
+        let mut lifecycle = TranscriptLifecycleAggregate::default();
+        for record in records {
+            let count = u64::try_from(
+                record.input_messages.len() + usize::from(record.assistant_message.is_some()),
+            )
+            .unwrap_or(u64::MAX);
+            message_count = message_count.saturating_add(count);
+            let stats = match record.lifecycle_state {
+                TranscriptLifecycleState::Active => &mut lifecycle.active,
+                TranscriptLifecycleState::Archived => &mut lifecycle.archived,
+                TranscriptLifecycleState::Masked => &mut lifecycle.masked,
+                TranscriptLifecycleState::RawDeleted => &mut lifecycle.raw_deleted,
+            };
+            stats.turn_count = stats.turn_count.saturating_add(1);
+            stats.message_count = stats.message_count.saturating_add(count);
+            for message in record
+                .input_messages
+                .iter()
+                .chain(record.assistant_message.iter())
+            {
+                stats.first_observed_at = Some(
+                    stats
+                        .first_observed_at
+                        .map(|value| value.min(message.observed_at))
+                        .unwrap_or(message.observed_at),
+                );
+                stats.last_observed_at = Some(
+                    stats
+                        .last_observed_at
+                        .map(|value| value.max(message.observed_at))
+                        .unwrap_or(message.observed_at),
+                );
+            }
+        }
+        let head = ConversationCatalogHead {
+            key: ConversationKey::new(
+                manifest.memory_space_id.clone(),
+                manifest.channel_id.clone(),
+                manifest.conversation_id.clone(),
+            )?,
+            mounted_subject_id: manifest.mounted_subject_id.clone(),
+            revision: manifest.revision,
+            head_digest: manifest.head_digest.clone(),
+            turn_count: manifest.turn_count,
+            message_count,
+            lifecycle,
+            first_sequence: records.first().map(|record| record.sequence),
+            last_sequence: records.last().map(|record| record.sequence),
+            content_generation: manifest.revision,
+            index_generation: manifest.revision,
+            updated_at: records
+                .iter()
+                .map(|record| record.updated_at)
+                .max()
+                .unwrap_or(1),
+        };
+        head.validate()?;
+        Ok(head)
+    }
+
+    fn load_catalog_pages(
+        &self,
+        memory_space_id: &str,
+        mounted_subject_id: &str,
+        channel_id: Option<&str>,
+    ) -> Result<TranscriptCatalogLoad> {
+        let root_key = catalog_root_key(memory_space_id, mounted_subject_id, channel_id);
+        let root_before = self
+            .engine
+            .get_json_value(TRANSCRIPT_CATALOG_ROOT_NAMESPACE, &root_key)?;
+        let root = root_before
+            .clone()
+            .map(serde_json::from_value::<TranscriptCatalogRootV1>)
+            .transpose()
+            .map_err(|error| {
+                Error::config("conversation_transcript_catalog_index", error.to_string())
+            })?;
+        let mut pages = Vec::new();
+        if let Some(root) = root.as_ref() {
+            for page_id in 0..root.page_count {
+                let key =
+                    catalog_page_key(memory_space_id, mounted_subject_id, channel_id, page_id);
+                let value = self
+                    .engine
+                    .get_json_value(TRANSCRIPT_CATALOG_PAGE_NAMESPACE, &key)?
+                    .ok_or_else(|| {
+                        Error::config(
+                            "conversation_transcript_catalog_index",
+                            "catalog root references a missing page",
+                        )
+                    })?;
+                let page = serde_json::from_value::<TranscriptCatalogPageV1>(value.clone())
+                    .map_err(|error| {
+                        Error::config("conversation_transcript_catalog_index", error.to_string())
+                    })?;
+                page.validate()?;
+                if page.page_id != page_id {
+                    return Err(Error::config(
+                        "conversation_transcript_catalog_index",
+                        "catalog page ordinal differs from root",
+                    ));
+                }
+                pages.push((key, page, value));
+            }
+        }
+        Ok((root_key, root, root_before, pages))
+    }
+
+    fn plan_catalog_page_upsert(
+        &self,
+        head: &ConversationCatalogHead,
+        channel_id: Option<&str>,
+    ) -> Result<Vec<RecallIndexMutationPlan>> {
+        let (root_key, previous_root, root_before, previous_pages) = self.load_catalog_pages(
+            &head.key.memory_space_id,
+            &head.mounted_subject_id,
+            channel_id,
+        )?;
+        let mut heads = previous_pages
+            .iter()
+            .flat_map(|(_, page, _)| page.heads.clone())
+            .collect::<Vec<_>>();
+        heads.retain(|candidate| candidate.key != head.key);
+        heads.push(head.clone());
+        heads.sort_by(|left, right| {
+            (right.updated_at, &right.key.conversation_id)
+                .cmp(&(left.updated_at, &left.key.conversation_id))
+        });
+        let revision = previous_root
+            .as_ref()
+            .map(|root| root.revision.saturating_add(1))
+            .unwrap_or(1);
+        let page_count =
+            u64::try_from(heads.len().div_ceil(TRANSCRIPT_QUERY_PAGE_CAPACITY)).unwrap_or(u64::MAX);
+        let root = TranscriptCatalogRootV1 {
+            schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
+            memory_space_id: head.key.memory_space_id.clone(),
+            mounted_subject_id: head.mounted_subject_id.clone(),
+            channel_id: channel_id.map(str::to_string),
+            revision,
+            page_count,
+            entry_count: u64::try_from(heads.len()).unwrap_or(u64::MAX),
+        };
+        let mut plans = vec![(
+            TRANSCRIPT_CATALOG_ROOT_NAMESPACE,
+            root_key,
+            serde_json::to_value(root).map_err(|error| {
+                Error::config("conversation_transcript_catalog_index", error.to_string())
+            })?,
+            root_before,
+        )];
+        for (page_id, chunk) in heads.chunks(TRANSCRIPT_QUERY_PAGE_CAPACITY).enumerate() {
+            let page_id = u64::try_from(page_id).unwrap_or(u64::MAX);
+            let page = TranscriptCatalogPageV1 {
+                schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
+                memory_space_id: head.key.memory_space_id.clone(),
+                mounted_subject_id: head.mounted_subject_id.clone(),
+                channel_id: channel_id.map(str::to_string),
+                page_id,
+                revision,
+                heads: chunk.to_vec(),
+            };
+            page.validate()?;
+            let key = catalog_page_key(
+                &head.key.memory_space_id,
+                &head.mounted_subject_id,
+                channel_id,
+                page_id,
+            );
+            let before = previous_pages
+                .iter()
+                .find(|(candidate, _, _)| candidate == &key)
+                .map(|(_, _, value)| value.clone());
+            plans.push((
+                TRANSCRIPT_CATALOG_PAGE_NAMESPACE,
+                key,
+                serde_json::to_value(page).map_err(|error| {
+                    Error::config("conversation_transcript_catalog_index", error.to_string())
+                })?,
+                before,
+            ));
+        }
+        Ok(plans)
+    }
+
+    fn plan_transcript_query_indexes(
+        &self,
+        record: &TranscriptTurnRecord,
+        head: &ConversationCatalogHead,
+    ) -> Result<Vec<RecallIndexMutationPlan>> {
+        let mut plans = self.plan_catalog_page_upsert(head, None)?;
+        plans.extend(self.plan_catalog_page_upsert(head, Some(&record.key.channel_id))?);
+        if let Some(keyring) = self.plan_query_keyring(&record.key.memory_space_id)? {
+            plans.push(keyring);
+        }
+        let mut by_day = BTreeMap::<u64, Vec<TranscriptPostingLocatorV1>>::new();
+        let mut by_term = BTreeMap::<String, Vec<TranscriptPostingLocatorV1>>::new();
+        let mut manifests = Vec::<(TranscriptLocator, Vec<String>)>::new();
+        for (locator, content) in message_locators(record) {
+            let posting_locator = TranscriptPostingLocatorV1 {
+                locator: locator.clone(),
+                lifecycle_state: record.lifecycle_state,
+                redaction_state: record.redaction_state,
+            };
+            let utc_day = locator.observed_at / 86_400;
+            by_day
+                .entry(utc_day)
+                .or_default()
+                .push(posting_locator.clone());
+            let mut term_digests = TranscriptSearchNormalizerV1::index_terms(
+                content,
+                MAX_TRANSCRIPT_INDEX_TERMS_PER_MESSAGE,
+            )?
+            .iter()
+            .map(|term| term_digest(term))
+            .collect::<Vec<_>>();
+            term_digests.sort();
+            term_digests.dedup();
+            for digest in &term_digests {
+                by_term
+                    .entry(digest.clone())
+                    .or_default()
+                    .push(posting_locator.clone());
+            }
+            manifests.push((locator, term_digests));
+        }
+        for (utc_day, additions) in by_day {
+            plans.extend(self.plan_time_posting_upsert(record, utc_day, additions)?);
+        }
+        for (digest, additions) in by_term {
+            plans.extend(self.plan_search_posting_upsert(record, &digest, additions)?);
+        }
+        for (locator, term_digests) in manifests {
+            let manifest_key = search_message_manifest_key(&locator);
+            let manifest_before = self
+                .engine
+                .get_json_value(TRANSCRIPT_SEARCH_MESSAGE_MANIFEST_NAMESPACE, &manifest_key)?;
+            plans.push((
+                TRANSCRIPT_SEARCH_MESSAGE_MANIFEST_NAMESPACE,
+                manifest_key,
+                serde_json::to_value(TranscriptMessageSearchManifestV1 {
+                    locator,
+                    term_set_digest: term_set_digest(&term_digests),
+                })
+                .map_err(|error| {
+                    Error::config("conversation_transcript_search_manifest", error.to_string())
+                })?,
+                manifest_before,
+            ));
+        }
+        Ok(plans)
+    }
+
+    fn plan_time_posting_upsert(
+        &self,
+        record: &TranscriptTurnRecord,
+        utc_day: u64,
+        additions: Vec<TranscriptPostingLocatorV1>,
+    ) -> Result<Vec<RecallIndexMutationPlan>> {
+        let root_key = time_root_key(&record.key, &record.subject, utc_day);
+        let root_before = self
+            .engine
+            .get_json_value(TRANSCRIPT_TIME_ROOT_NAMESPACE, &root_key)?;
+        let previous_root = root_before
+            .clone()
+            .map(serde_json::from_value::<TranscriptTimePostingRootV1>)
+            .transpose()
+            .map_err(|error| {
+                Error::config("conversation_transcript_time_index", error.to_string())
+            })?;
+        if let Some(root) = previous_root.as_ref() {
+            root.validate()?;
+            let last_page_id = root.page_count.saturating_sub(1);
+            let last_key = time_posting_key(&record.key, &record.subject, utc_day, last_page_id);
+            let last_before = self
+                .engine
+                .get_json_value(TRANSCRIPT_TIME_POSTING_NAMESPACE, &last_key)?
+                .ok_or_else(|| {
+                    Error::config(
+                        "conversation_transcript_time_index",
+                        "time root references a missing tail page",
+                    )
+                })?;
+            let last_page =
+                serde_json::from_value::<TranscriptTimePostingPageV1>(last_before.clone())
+                    .map_err(|error| {
+                        Error::config("conversation_transcript_time_index", error.to_string())
+                    })?;
+            last_page.validate_for_root(root)?;
+            let order = |entry: &TranscriptPostingLocatorV1| {
+                (
+                    entry.locator.observed_at,
+                    entry.locator.turn_sequence,
+                    entry.locator.message_id.clone(),
+                )
+            };
+            let mut additions = additions.clone();
+            additions.sort_by_key(&order);
+            if last_page.locators.last().is_some_and(|last| {
+                additions
+                    .first()
+                    .is_some_and(|first| order(first) > order(last))
+            }) {
+                let revision = root.revision.saturating_add(1);
+                let mut tail = last_page.locators.clone();
+                tail.extend(additions);
+                let added_pages = tail.len().div_ceil(TRANSCRIPT_QUERY_PAGE_CAPACITY);
+                let page_count =
+                    last_page_id.saturating_add(u64::try_from(added_pages).unwrap_or(u64::MAX));
+                let next_root = TranscriptTimePostingRootV1 {
+                    schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
+                    key: record.key.clone(),
+                    mounted_subject_id: record.subject.clone(),
+                    utc_day,
+                    revision,
+                    page_count,
+                    entry_count: root.entry_count.saturating_add(
+                        u64::try_from(tail.len() - last_page.locators.len()).unwrap_or(u64::MAX),
+                    ),
+                };
+                let mut plans = vec![(
+                    TRANSCRIPT_TIME_ROOT_NAMESPACE,
+                    root_key,
+                    serde_json::to_value(next_root).map_err(|error| {
+                        Error::config("conversation_transcript_time_index", error.to_string())
+                    })?,
+                    root_before,
+                )];
+                for (offset, chunk) in tail.chunks(TRANSCRIPT_QUERY_PAGE_CAPACITY).enumerate() {
+                    let page_id =
+                        last_page_id.saturating_add(u64::try_from(offset).unwrap_or(u64::MAX));
+                    let key = time_posting_key(&record.key, &record.subject, utc_day, page_id);
+                    plans.push((
+                        TRANSCRIPT_TIME_POSTING_NAMESPACE,
+                        key,
+                        serde_json::to_value(TranscriptTimePostingPageV1 {
+                            schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
+                            key: record.key.clone(),
+                            mounted_subject_id: record.subject.clone(),
+                            utc_day,
+                            page_id,
+                            revision: if page_id == last_page_id {
+                                last_page.revision.saturating_add(1)
+                            } else {
+                                1
+                            },
+                            locators: chunk.to_vec(),
+                        })
+                        .map_err(|error| {
+                            Error::config("conversation_transcript_time_index", error.to_string())
+                        })?,
+                        (page_id == last_page_id).then(|| last_before.clone()),
+                    ));
+                }
+                return Ok(plans);
+            }
+        }
+        let mut previous_pages = Vec::new();
+        let mut locators = Vec::new();
+        for page_id in 0..previous_root
+            .as_ref()
+            .map(|root| root.page_count)
+            .unwrap_or(0)
+        {
+            let key = time_posting_key(&record.key, &record.subject, utc_day, page_id);
+            let value = self
+                .engine
+                .get_json_value(TRANSCRIPT_TIME_POSTING_NAMESPACE, &key)?
+                .ok_or_else(|| {
+                    Error::config(
+                        "conversation_transcript_time_index",
+                        "time root references a missing page",
+                    )
+                })?;
+            let page = serde_json::from_value::<TranscriptTimePostingPageV1>(value.clone())
+                .map_err(|error| {
+                    Error::config("conversation_transcript_time_index", error.to_string())
+                })?;
+            locators.extend(page.locators);
+            previous_pages.push((key, value));
+        }
+        for addition in additions {
+            locators.retain(|candidate| candidate.locator != addition.locator);
+            locators.push(addition);
+        }
+        locators.sort_by_key(|candidate| {
+            (
+                candidate.locator.observed_at,
+                candidate.locator.turn_sequence,
+                candidate.locator.message_id.clone(),
+            )
+        });
+        let revision = previous_root
+            .as_ref()
+            .map(|root| root.revision.saturating_add(1))
+            .unwrap_or(1);
+        let page_count = u64::try_from(locators.len().div_ceil(TRANSCRIPT_QUERY_PAGE_CAPACITY))
+            .unwrap_or(u64::MAX);
+        let mut plans = vec![(
+            TRANSCRIPT_TIME_ROOT_NAMESPACE,
+            root_key,
+            serde_json::to_value(TranscriptTimePostingRootV1 {
+                schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
+                key: record.key.clone(),
+                mounted_subject_id: record.subject.clone(),
+                utc_day,
+                revision,
+                page_count,
+                entry_count: u64::try_from(locators.len()).unwrap_or(u64::MAX),
+            })
+            .map_err(|error| {
+                Error::config("conversation_transcript_time_index", error.to_string())
+            })?,
+            root_before,
+        )];
+        for (page_id, chunk) in locators.chunks(TRANSCRIPT_QUERY_PAGE_CAPACITY).enumerate() {
+            let page_id = u64::try_from(page_id).unwrap_or(u64::MAX);
+            let key = time_posting_key(&record.key, &record.subject, utc_day, page_id);
+            plans.push((
+                TRANSCRIPT_TIME_POSTING_NAMESPACE,
+                key.clone(),
+                serde_json::to_value(TranscriptTimePostingPageV1 {
+                    schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
+                    key: record.key.clone(),
+                    mounted_subject_id: record.subject.clone(),
+                    utc_day,
+                    page_id,
+                    revision,
+                    locators: chunk.to_vec(),
+                })
+                .map_err(|error| {
+                    Error::config("conversation_transcript_time_index", error.to_string())
+                })?,
+                previous_pages
+                    .iter()
+                    .find(|(candidate, _)| candidate == &key)
+                    .map(|(_, value)| value.clone()),
+            ));
+        }
+        Ok(plans)
+    }
+
+    fn plan_search_posting_upsert(
+        &self,
+        record: &TranscriptTurnRecord,
+        digest: &str,
+        additions: Vec<TranscriptPostingLocatorV1>,
+    ) -> Result<Vec<RecallIndexMutationPlan>> {
+        let root_key = search_root_key(&record.key.memory_space_id, &record.subject, digest);
+        let root_before = self
+            .engine
+            .get_json_value(TRANSCRIPT_SEARCH_ROOT_NAMESPACE, &root_key)?;
+        let previous_root = root_before
+            .clone()
+            .map(serde_json::from_value::<TranscriptSearchPostingRootV1>)
+            .transpose()
+            .map_err(|error| {
+                Error::config("conversation_transcript_search_index", error.to_string())
+            })?;
+        if let Some(root) = previous_root.as_ref() {
+            root.validate()?;
+            let last_page_id = root.page_count.saturating_sub(1);
+            let last_key = search_posting_key(
+                &record.key.memory_space_id,
+                &record.subject,
+                digest,
+                last_page_id,
+            );
+            let last_before = self
+                .engine
+                .get_json_value(TRANSCRIPT_SEARCH_POSTING_NAMESPACE, &last_key)?
+                .ok_or_else(|| {
+                    Error::config(
+                        "conversation_transcript_search_index",
+                        "search root references a missing tail page",
+                    )
+                })?;
+            let last_page =
+                serde_json::from_value::<TranscriptSearchPostingPageV1>(last_before.clone())
+                    .map_err(|error| {
+                        Error::config("conversation_transcript_search_index", error.to_string())
+                    })?;
+            last_page.validate_for_root(root)?;
+            let order = |entry: &TranscriptPostingLocatorV1| {
+                (
+                    entry.locator.observed_at,
+                    entry.locator.turn_sequence,
+                    entry.locator.message_id.clone(),
+                )
+            };
+            let mut additions = additions.clone();
+            additions.sort_by_key(&order);
+            if last_page.locators.last().is_some_and(|last| {
+                additions
+                    .first()
+                    .is_some_and(|first| order(first) > order(last))
+            }) {
+                let revision = root.revision.saturating_add(1);
+                let mut tail = last_page.locators.clone();
+                tail.extend(additions);
+                let added_pages = tail.len().div_ceil(TRANSCRIPT_QUERY_PAGE_CAPACITY);
+                let page_count =
+                    last_page_id.saturating_add(u64::try_from(added_pages).unwrap_or(u64::MAX));
+                let next_root = TranscriptSearchPostingRootV1 {
+                    schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
+                    memory_space_id: record.key.memory_space_id.clone(),
+                    mounted_subject_id: record.subject.clone(),
+                    term_digest: digest.to_string(),
+                    revision,
+                    page_count,
+                    entry_count: root.entry_count.saturating_add(
+                        u64::try_from(tail.len() - last_page.locators.len()).unwrap_or(u64::MAX),
+                    ),
+                };
+                let mut plans = vec![(
+                    TRANSCRIPT_SEARCH_ROOT_NAMESPACE,
+                    root_key,
+                    serde_json::to_value(next_root).map_err(|error| {
+                        Error::config("conversation_transcript_search_index", error.to_string())
+                    })?,
+                    root_before,
+                )];
+                for (offset, chunk) in tail.chunks(TRANSCRIPT_QUERY_PAGE_CAPACITY).enumerate() {
+                    let page_id =
+                        last_page_id.saturating_add(u64::try_from(offset).unwrap_or(u64::MAX));
+                    let key = search_posting_key(
+                        &record.key.memory_space_id,
+                        &record.subject,
+                        digest,
+                        page_id,
+                    );
+                    plans.push((
+                        TRANSCRIPT_SEARCH_POSTING_NAMESPACE,
+                        key,
+                        serde_json::to_value(TranscriptSearchPostingPageV1 {
+                            schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
+                            memory_space_id: record.key.memory_space_id.clone(),
+                            mounted_subject_id: record.subject.clone(),
+                            term_digest: digest.to_string(),
+                            page_id,
+                            revision: if page_id == last_page_id {
+                                last_page.revision.saturating_add(1)
+                            } else {
+                                1
+                            },
+                            locators: chunk.to_vec(),
+                        })
+                        .map_err(|error| {
+                            Error::config("conversation_transcript_search_index", error.to_string())
+                        })?,
+                        (page_id == last_page_id).then(|| last_before.clone()),
+                    ));
+                }
+                return Ok(plans);
+            }
+        }
+        let mut previous_pages = Vec::new();
+        let mut locators = Vec::new();
+        for page_id in 0..previous_root
+            .as_ref()
+            .map(|root| root.page_count)
+            .unwrap_or(0)
+        {
+            let key = search_posting_key(
+                &record.key.memory_space_id,
+                &record.subject,
+                digest,
+                page_id,
+            );
+            let value = self
+                .engine
+                .get_json_value(TRANSCRIPT_SEARCH_POSTING_NAMESPACE, &key)?
+                .ok_or_else(|| {
+                    Error::config(
+                        "conversation_transcript_search_index",
+                        "search root references a missing page",
+                    )
+                })?;
+            let page = serde_json::from_value::<TranscriptSearchPostingPageV1>(value.clone())
+                .map_err(|error| {
+                    Error::config("conversation_transcript_search_index", error.to_string())
+                })?;
+            locators.extend(page.locators);
+            previous_pages.push((key, value));
+        }
+        for addition in additions {
+            locators.retain(|candidate| candidate.locator != addition.locator);
+            locators.push(addition);
+        }
+        locators.sort_by_key(|candidate| {
+            (
+                candidate.locator.observed_at,
+                candidate.locator.turn_sequence,
+                candidate.locator.message_id.clone(),
+            )
+        });
+        let revision = previous_root
+            .as_ref()
+            .map(|root| root.revision.saturating_add(1))
+            .unwrap_or(1);
+        let page_count = u64::try_from(locators.len().div_ceil(TRANSCRIPT_QUERY_PAGE_CAPACITY))
+            .unwrap_or(u64::MAX);
+        let mut plans = vec![(
+            TRANSCRIPT_SEARCH_ROOT_NAMESPACE,
+            root_key,
+            serde_json::to_value(TranscriptSearchPostingRootV1 {
+                schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
+                memory_space_id: record.key.memory_space_id.clone(),
+                mounted_subject_id: record.subject.clone(),
+                term_digest: digest.to_string(),
+                revision,
+                page_count,
+                entry_count: u64::try_from(locators.len()).unwrap_or(u64::MAX),
+            })
+            .map_err(|error| {
+                Error::config("conversation_transcript_search_index", error.to_string())
+            })?,
+            root_before,
+        )];
+        for (page_id, chunk) in locators.chunks(TRANSCRIPT_QUERY_PAGE_CAPACITY).enumerate() {
+            let page_id = u64::try_from(page_id).unwrap_or(u64::MAX);
+            let key = search_posting_key(
+                &record.key.memory_space_id,
+                &record.subject,
+                digest,
+                page_id,
+            );
+            plans.push((
+                TRANSCRIPT_SEARCH_POSTING_NAMESPACE,
+                key.clone(),
+                serde_json::to_value(TranscriptSearchPostingPageV1 {
+                    schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
+                    memory_space_id: record.key.memory_space_id.clone(),
+                    mounted_subject_id: record.subject.clone(),
+                    term_digest: digest.to_string(),
+                    page_id,
+                    revision,
+                    locators: chunk.to_vec(),
+                })
+                .map_err(|error| {
+                    Error::config("conversation_transcript_search_index", error.to_string())
+                })?,
+                previous_pages
+                    .iter()
+                    .find(|(candidate, _)| candidate == &key)
+                    .map(|(_, value)| value.clone()),
+            ));
+        }
+        Ok(plans)
+    }
+
+    fn plan_transcript_query_lifecycle_indexes(
+        &self,
+        changed: &[(TranscriptTurnRecord, TranscriptTurnRecord)],
+        head: &ConversationCatalogHead,
+    ) -> Result<Vec<RecallIndexMutationPlan>> {
+        let mut plans = self.plan_catalog_page_upsert(head, None)?;
+        plans.extend(self.plan_catalog_page_upsert(head, Some(&head.key.channel_id))?);
+        let mut by_day = BTreeMap::<u64, Vec<TranscriptPostingLocatorV1>>::new();
+        let mut by_term = BTreeMap::<String, Vec<TranscriptPostingLocatorV1>>::new();
+        let mut owner = None::<TranscriptTurnRecord>;
+        for (before_record, after_record) in changed {
+            owner.get_or_insert_with(|| after_record.clone());
+            for (locator, content) in message_locators(before_record) {
+                let replacement = TranscriptPostingLocatorV1 {
+                    locator: locator.clone(),
+                    lifecycle_state: after_record.lifecycle_state,
+                    redaction_state: after_record.redaction_state,
+                };
+                let utc_day = locator.observed_at / 86_400;
+                by_day.entry(utc_day).or_default().push(replacement.clone());
+
+                let manifest_key = search_message_manifest_key(&locator);
+                let manifest_value = self
+                    .engine
+                    .get_json_value(TRANSCRIPT_SEARCH_MESSAGE_MANIFEST_NAMESPACE, &manifest_key)?
+                    .ok_or_else(|| {
+                        Error::config(
+                            "conversation_transcript_search_manifest",
+                            "lifecycle target search manifest is missing",
+                        )
+                    })?;
+                let manifest =
+                    serde_json::from_value::<TranscriptMessageSearchManifestV1>(manifest_value)
+                        .map_err(|error| {
+                            Error::config(
+                                "conversation_transcript_search_manifest",
+                                error.to_string(),
+                            )
+                        })?;
+                let mut term_digests = TranscriptSearchNormalizerV1::index_terms(
+                    content,
+                    MAX_TRANSCRIPT_INDEX_TERMS_PER_MESSAGE,
+                )?
+                .iter()
+                .map(|term| term_digest(term))
+                .collect::<Vec<_>>();
+                term_digests.sort();
+                term_digests.dedup();
+                if manifest.locator != locator
+                    || manifest.term_set_digest != term_set_digest(&term_digests)
+                {
+                    return Err(Error::config(
+                        "conversation_transcript_search_manifest",
+                        "lifecycle target search manifest differs from canonical content",
+                    ));
+                }
+                for digest in term_digests {
+                    by_term.entry(digest).or_default().push(replacement.clone());
+                }
+            }
+        }
+        if let Some(owner) = owner.as_ref() {
+            for (utc_day, additions) in by_day {
+                plans.extend(self.plan_time_posting_upsert(owner, utc_day, additions)?);
+            }
+            for (digest, additions) in by_term {
+                plans.extend(self.plan_search_posting_upsert(owner, &digest, additions)?);
+            }
+        }
+        Ok(plans)
+    }
+
+    fn load_visible_timeline_backward(
+        &self,
+        key: &ConversationKey,
+        mounted_subject_id: &str,
+        manifest: &ConversationRecallManifest,
+        end_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<TranscriptTurnRecord>> {
+        if end_sequence == 0 || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut page_id =
+            Self::conversation_page_for_sequence(end_sequence.min(manifest.last_sequence))?;
+        let mut output = Vec::new();
+        loop {
+            let mut page = self.load_validated_conversation_page_records(
+                key,
+                mounted_subject_id,
+                manifest,
+                page_id,
+            )?;
+            page.reverse();
+            for record in page {
+                if record.sequence <= end_sequence && record.is_searchable_for_presentation() {
+                    output.push(record);
+                    if output.len() == limit {
+                        output.reverse();
+                        return Ok(output);
+                    }
+                }
+            }
+            if page_id == 0 {
+                break;
+            }
+            page_id -= 1;
+        }
+        output.reverse();
+        Ok(output)
+    }
+
+    fn load_visible_timeline_forward(
+        &self,
+        key: &ConversationKey,
+        mounted_subject_id: &str,
+        manifest: &ConversationRecallManifest,
+        start_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<TranscriptTurnRecord>> {
+        if start_sequence == 0 || start_sequence > manifest.last_sequence || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let first_page = Self::conversation_page_for_sequence(start_sequence)?;
+        let mut output = Vec::new();
+        for page_id in first_page..manifest.page_count {
+            for record in self.load_validated_conversation_page_records(
+                key,
+                mounted_subject_id,
+                manifest,
+                page_id,
+            )? {
+                if record.sequence >= start_sequence && record.is_searchable_for_presentation() {
+                    output.push(record);
+                    if output.len() == limit {
+                        return Ok(output);
+                    }
+                }
+            }
+        }
+        Ok(output)
+    }
+
+    fn has_visible_timeline_before(
+        &self,
+        key: &ConversationKey,
+        mounted_subject_id: &str,
+        manifest: &ConversationRecallManifest,
+        sequence: u64,
+    ) -> Result<bool> {
+        if sequence <= 1 {
+            return Ok(false);
+        }
+        self.load_visible_timeline_backward(
+            key,
+            mounted_subject_id,
+            manifest,
+            sequence.saturating_sub(1),
+            1,
+        )
+        .map(|turns| !turns.is_empty())
+    }
+
+    fn has_visible_timeline_after_until(
+        &self,
+        key: &ConversationKey,
+        mounted_subject_id: &str,
+        manifest: &ConversationRecallManifest,
+        sequence: u64,
+        snapshot_upper_bound: u64,
+    ) -> Result<bool> {
+        if sequence >= snapshot_upper_bound {
+            return Ok(false);
+        }
+        let first_page = Self::conversation_page_for_sequence(sequence.saturating_add(1))?;
+        let last_page = Self::conversation_page_for_sequence(snapshot_upper_bound)?;
+        for page_id in first_page..=last_page.min(manifest.page_count.saturating_sub(1)) {
+            if self
+                .load_validated_conversation_page_records(
+                    key,
+                    mounted_subject_id,
+                    manifest,
+                    page_id,
+                )?
+                .into_iter()
+                .any(|record| {
+                    record.sequence > sequence
+                        && record.sequence <= snapshot_upper_bound
+                        && record.is_searchable_for_presentation()
+                })
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn first_visible_sequence_in_range(
+        &self,
+        key: &ConversationKey,
+        mounted_subject_id: &str,
+        range: &TranscriptUtcRange,
+    ) -> Result<Option<u64>> {
+        let mut first = None::<u64>;
+        for day in range.start_inclusive / 86_400..=range.end_exclusive.saturating_sub(1) / 86_400 {
+            let root_key = time_root_key(key, mounted_subject_id, day);
+            let Some(root_value) = self
+                .engine
+                .get_json_value(TRANSCRIPT_TIME_ROOT_NAMESPACE, &root_key)?
+            else {
+                continue;
+            };
+            let root = serde_json::from_value::<TranscriptTimePostingRootV1>(root_value).map_err(
+                |error| Error::config("conversation_transcript_time_index", error.to_string()),
+            )?;
+            for page_id in 0..root.page_count {
+                let page_key = time_posting_key(key, mounted_subject_id, day, page_id);
+                let value = self
+                    .engine
+                    .get_json_value(TRANSCRIPT_TIME_POSTING_NAMESPACE, &page_key)?
+                    .ok_or_else(|| {
+                        Error::config(
+                            "conversation_transcript_time_index",
+                            "time root references a missing page",
+                        )
+                    })?;
+                let page = serde_json::from_value::<TranscriptTimePostingPageV1>(value).map_err(
+                    |error| Error::config("conversation_transcript_time_index", error.to_string()),
+                )?;
+                for locator in page.locators.into_iter().filter(|locator| {
+                    locator.visible(true) && range.contains(locator.locator.observed_at)
+                }) {
+                    first = Some(
+                        first
+                            .map(|value| value.min(locator.locator.turn_sequence))
+                            .unwrap_or(locator.locator.turn_sequence),
+                    );
+                }
+            }
+        }
+        Ok(first)
+    }
+}
+
 impl ConversationTranscriptStore for StorePlatform {
-    fn append_turn(&self, record: &TranscriptTurnRecord) -> Result<TranscriptCommitReport> {
+    fn append_turn_intent(
+        &self,
+        intent: &TranscriptAppendIntent,
+    ) -> Result<TranscriptCommitReport> {
+        intent.validate()?;
+        let record = &intent.record;
         let _transaction_guard = self.lock_transaction("conversation_recall_manifest_append")?;
         let key = transcript_turn_storage_key(&record.key, &record.subject, &record.turn_id);
         let (_, head, head_before) =
@@ -9443,6 +10888,24 @@ impl ConversationTranscriptStore for StorePlatform {
                     "conversation_transcript_append",
                     "turn id already exists with divergent payload",
                 ));
+            }
+            self.validate_transcript_query_record_closure(&existing, head)?;
+            if let Some(alias) = intent.conversation_alias.as_ref() {
+                let alias_key = alias.storage_key();
+                let stored = self
+                    .engine
+                    .get_json_value("conversation_transcript_alias", &alias_key)?
+                    .map(serde_json::from_value::<TranscriptConversationAlias>)
+                    .transpose()
+                    .map_err(|error| {
+                        Error::config("conversation_transcript_alias", error.to_string())
+                    })?;
+                if stored.as_ref() != Some(alias) {
+                    return Err(Error::config(
+                        "conversation_transcript_query_repair_required",
+                        "idempotent transcript retry is missing its exact conversation alias",
+                    ));
+                }
             }
             return Ok(TranscriptCommitReport {
                 key: existing.key,
@@ -9506,6 +10969,60 @@ impl ConversationTranscriptStore for StorePlatform {
             sequence,
             sequence,
         )?;
+        let next_manifest = serde_json::from_value::<ConversationRecallManifest>(
+            head_plan.2.clone(),
+        )
+        .map_err(|error| Error::config("conversation_transcript_head", error.to_string()))?;
+        let previous_catalog_head = self.load_catalog_head_exact(&record.key, &record.subject)?;
+        if head.is_some() && previous_catalog_head.is_none() {
+            return Err(Error::config(
+                "conversation_transcript_query_migration_required",
+                "existing transcript head has no v11 catalog closure",
+            ));
+        }
+        let catalog_head = Self::transcript_catalog_head_after_append(
+            previous_catalog_head.as_ref(),
+            &next_manifest,
+            &record,
+        )?;
+        let mut index_plans = vec![head_plan, page_plan];
+        index_plans.extend(self.plan_transcript_query_indexes(&record, &catalog_head)?);
+
+        let mut owner_mutations = vec![StoreMutation::PutJson {
+            namespace: "conversation_transcript".to_string(),
+            key: key.clone(),
+            value,
+            event_kind: MemoryStoreEventKind::MemoryWrite,
+            plane: "conversation_transcript".to_string(),
+            record_key: key,
+        }];
+        if let Some(alias) = intent.conversation_alias.as_ref() {
+            let alias_key = alias.storage_key();
+            let alias_value = serde_json::to_value(alias).map_err(|error| {
+                Error::config("conversation_transcript_alias", error.to_string())
+            })?;
+            let archive_plan = self.plan_archive_index_upsert_for_scope(
+                &alias.memory_space_id,
+                &alias.mounted_subject_id,
+                RecallIndexAddress::json(
+                    "conversation_transcript_alias",
+                    &alias_key,
+                    1,
+                    alias.updated_at,
+                    &alias_value,
+                )?,
+            )?;
+            owner_mutations.push(StoreMutation::PutJson {
+                namespace: "conversation_transcript_alias".to_string(),
+                key: alias_key.clone(),
+                value: alias_value,
+                event_kind: MemoryStoreEventKind::MemoryWrite,
+                plane: "conversation_transcript_alias".to_string(),
+                record_key: alias_key,
+            });
+            index_plans.push(archive_plan);
+        }
+
         let mut scope = self.recall_scope();
         scope
             .memory_space_id
@@ -9516,15 +11033,8 @@ impl ConversationTranscriptStore for StorePlatform {
         self.commit_recall_indexed_mutations(
             "conversation.transcript.append",
             scope,
-            vec![StoreMutation::PutJson {
-                namespace: "conversation_transcript".to_string(),
-                key: key.clone(),
-                value,
-                event_kind: MemoryStoreEventKind::MemoryWrite,
-                plane: "conversation_transcript".to_string(),
-                record_key: key,
-            }],
-            vec![head_plan, page_plan],
+            owner_mutations,
+            index_plans,
         )?;
         Ok(TranscriptCommitReport {
             key: record.key,
@@ -9695,6 +11205,768 @@ impl ConversationTranscriptStore for StorePlatform {
         }
         records.retain(|record| record.sequence >= first_sequence);
         Ok(records)
+    }
+
+    fn list_conversation_catalog(
+        &self,
+        mounted_subject_id: &str,
+        query: &TranscriptCatalogQuery,
+    ) -> Result<ConversationCatalogCandidatePage> {
+        query.validate()?;
+        let (_, root, _, pages) = self.load_catalog_pages(
+            &query.memory_space_id,
+            mounted_subject_id,
+            query.channel_id.as_deref(),
+        )?;
+        let Some(root) = root else {
+            return Ok(ConversationCatalogCandidatePage {
+                heads: Vec::new(),
+                next_cursor: None,
+                has_more: false,
+            });
+        };
+        let keyring = self.ensure_query_keyring(
+            &query.memory_space_id,
+            mounted_subject_id,
+            query.channel_id.as_deref(),
+        )?;
+        let root_bytes = serde_json::to_vec(&root).map_err(|error| {
+            Error::config("conversation_transcript_catalog_index", error.to_string())
+        })?;
+        let root_digest = format!("sha256:{:x}", Sha256::digest(root_bytes));
+        let kind = match query.lifecycle {
+            TranscriptCatalogLifecycle::ActiveOnly => "catalog_active",
+            TranscriptCatalogLifecycle::ActiveAndArchived => "catalog_active_archived",
+        };
+        let query_digest = format!(
+            "sha256:{:x}",
+            Sha256::digest(
+                format!(
+                    "catalog:{}:{}:{}:{:?}:{}",
+                    query.memory_space_id,
+                    query.governance_context_digest,
+                    query.channel_id.as_deref().unwrap_or("*"),
+                    query.lifecycle,
+                    query.limit,
+                )
+                .as_bytes()
+            )
+        );
+        let start = if let Some(cursor) = query.cursor.as_ref() {
+            let claims = decode_cursor(&keyring, cursor)?;
+            if claims.kind != kind
+                || claims.memory_space_id != query.memory_space_id
+                || claims.mounted_subject_id != mounted_subject_id
+                || claims.channel_id != query.channel_id.as_deref().unwrap_or("*")
+                || claims.head_revision != root.revision
+                || claims.head_digest != root_digest
+                || claims.query_digest != query_digest
+                || claims.limit != query.limit
+                || claims.lifecycle != format!("{:?}", query.lifecycle)
+                || claims.direction != "forward"
+                || claims.view_context != "candidate"
+                || claims.snapshot_upper_bound != root.entry_count
+                || claims.content_generation != root.revision
+                || claims.index_generation != root.revision
+                || claims.incarnation != keyring.incarnation
+                || claims.expires_at < current_unix_secs()
+            {
+                return Err(Error::config(
+                    "conversation_transcript_query_cursor_stale",
+                    "catalog cursor is stale or outside scope",
+                ));
+            }
+            usize::try_from(claims.position).unwrap_or(usize::MAX)
+        } else {
+            0
+        };
+        let mut heads = pages
+            .into_iter()
+            .flat_map(|(_, page, _)| page.heads)
+            .filter(|head| match query.lifecycle {
+                TranscriptCatalogLifecycle::ActiveOnly => head.lifecycle.active.turn_count > 0,
+                TranscriptCatalogLifecycle::ActiveAndArchived => {
+                    head.lifecycle.active.turn_count > 0 || head.lifecycle.archived.turn_count > 0
+                }
+            })
+            .collect::<Vec<_>>();
+        if start > heads.len() {
+            return Err(Error::config(
+                "conversation_transcript_query_cursor_stale",
+                "catalog cursor position is outside snapshot",
+            ));
+        }
+        heads = heads.into_iter().skip(start).collect();
+        let has_more = heads.len() > query.limit;
+        heads.truncate(query.limit);
+        let next_position = start.saturating_add(heads.len());
+        let now = current_unix_secs();
+        let next_cursor = if has_more {
+            Some(encode_cursor(
+                &keyring,
+                &TranscriptQueryCursorClaimsV1 {
+                    schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
+                    key_id: keyring.current.key_id.clone(),
+                    kind: kind.to_string(),
+                    direction: "forward".to_string(),
+                    query_digest: query_digest.clone(),
+                    lifecycle: format!("{:?}", query.lifecycle),
+                    view_context: "candidate".to_string(),
+                    limit: query.limit,
+                    memory_space_id: query.memory_space_id.clone(),
+                    mounted_subject_id: mounted_subject_id.to_string(),
+                    channel_id: query.channel_id.clone().unwrap_or_else(|| "*".to_string()),
+                    conversation_id: "*".to_string(),
+                    head_revision: root.revision,
+                    head_digest: root_digest,
+                    snapshot_upper_bound: root.entry_count,
+                    content_generation: root.revision,
+                    index_generation: root.revision,
+                    position: u64::try_from(next_position).unwrap_or(u64::MAX),
+                    incarnation: keyring.incarnation.clone(),
+                    issued_at: now,
+                    expires_at: now.saturating_add(604_800).min(keyring.current.expires_at),
+                },
+            )?)
+        } else {
+            None
+        };
+        Ok(ConversationCatalogCandidatePage {
+            heads,
+            next_cursor,
+            has_more,
+        })
+    }
+
+    fn query_transcript_timeline(
+        &self,
+        mounted_subject_id: &str,
+        query: &TranscriptTimelineQuery,
+    ) -> Result<TranscriptTimelineCandidatePage> {
+        query.validate()?;
+        let (_, manifest, _) =
+            self.load_conversation_recall_manifest(&query.key, mounted_subject_id)?;
+        let manifest = manifest.ok_or_else(|| {
+            Error::config(
+                "conversation_transcript_timeline",
+                "conversation head not found",
+            )
+        })?;
+        let head = self
+            .load_catalog_head_exact(&query.key, mounted_subject_id)?
+            .ok_or_else(|| {
+                Error::config(
+                    "conversation_transcript_timeline",
+                    "conversation catalog head not found",
+                )
+            })?;
+        if head.revision != manifest.revision || head.head_digest != manifest.head_digest {
+            return Err(Error::config(
+                "conversation_transcript_timeline",
+                "catalog and transcript head identity differ",
+            ));
+        }
+        let keyring = self.ensure_query_keyring(
+            &query.key.memory_space_id,
+            mounted_subject_id,
+            Some(&query.key.channel_id),
+        )?;
+        let anchor_bytes = serde_json::to_vec(&query.anchor).map_err(|error| {
+            Error::config("conversation_transcript_query_cursor", error.to_string())
+        })?;
+        let query_digest = format!(
+            "sha256:{:x}",
+            Sha256::digest(
+                [
+                    b"timeline:".as_slice(),
+                    query.key.memory_space_id.as_bytes(),
+                    query.key.channel_id.as_bytes(),
+                    query.key.conversation_id.as_bytes(),
+                    mounted_subject_id.as_bytes(),
+                    query.governance_context_digest.as_bytes(),
+                    &anchor_bytes,
+                    query.limit.to_string().as_bytes(),
+                ]
+                .concat()
+            )
+        );
+        let cursor_claims = query
+            .cursor
+            .as_ref()
+            .map(|cursor| decode_cursor(&keyring, cursor))
+            .transpose()?;
+        if let Some(claims) = cursor_claims.as_ref() {
+            let direction_is_valid = matches!(
+                (claims.kind.as_str(), claims.direction.as_str()),
+                ("timeline_older", "backward") | ("timeline_newer", "forward")
+            );
+            if !direction_is_valid
+                || claims.memory_space_id != query.key.memory_space_id
+                || claims.mounted_subject_id != mounted_subject_id
+                || claims.channel_id != query.key.channel_id
+                || claims.conversation_id != query.key.conversation_id
+                || claims.incarnation != keyring.incarnation
+                || claims.expires_at < current_unix_secs()
+                || claims.head_revision > head.revision
+                || (claims.head_revision == head.revision && claims.head_digest != head.head_digest)
+                || claims.query_digest != query_digest
+                || claims.limit != query.limit
+                || claims.lifecycle != "active_and_archived"
+                || claims.view_context != "candidate"
+                || claims.snapshot_upper_bound > manifest.last_sequence
+                || claims.content_generation != head.content_generation
+                || claims.index_generation != head.index_generation
+            {
+                return Err(Error::config(
+                    "conversation_transcript_query_cursor_stale",
+                    "cursor scope, snapshot, incarnation, or expiry is stale",
+                ));
+            }
+        }
+        let snapshot_upper_bound = cursor_claims
+            .as_ref()
+            .map(|claims| claims.snapshot_upper_bound)
+            .unwrap_or(manifest.last_sequence);
+        let effective_anchor = cursor_claims.as_ref().map(|claims| claims.position);
+        let (turns, _, _) = if let Some(position) = effective_anchor {
+            if cursor_claims
+                .as_ref()
+                .is_some_and(|claims| claims.kind == "timeline_newer")
+            {
+                let turns = self.load_visible_timeline_forward(
+                    &query.key,
+                    mounted_subject_id,
+                    &manifest,
+                    position.saturating_add(1),
+                    query.limit,
+                )?;
+                (turns, true, false)
+            } else {
+                let turns = self.load_visible_timeline_backward(
+                    &query.key,
+                    mounted_subject_id,
+                    &manifest,
+                    position.saturating_sub(1),
+                    query.limit,
+                )?;
+                (turns, false, true)
+            }
+        } else {
+            match &query.anchor {
+                TranscriptTimelineAnchor::Latest => {
+                    let turns = self.load_visible_timeline_backward(
+                        &query.key,
+                        mounted_subject_id,
+                        &manifest,
+                        manifest.last_sequence,
+                        query.limit,
+                    )?;
+                    let has_older = turns.first().is_some_and(|turn| turn.sequence > 1);
+                    (turns, has_older, false)
+                }
+                TranscriptTimelineAnchor::Before(anchor) => {
+                    let end = anchor.locator.turn_sequence.saturating_sub(1);
+                    let turns = self.load_visible_timeline_backward(
+                        &query.key,
+                        mounted_subject_id,
+                        &manifest,
+                        end,
+                        query.limit,
+                    )?;
+                    let has_older = turns.first().is_some_and(|turn| turn.sequence > 1);
+                    (turns, has_older, end < manifest.last_sequence)
+                }
+                TranscriptTimelineAnchor::After(anchor) => {
+                    let start = anchor.locator.turn_sequence.saturating_add(1);
+                    let turns = self.load_visible_timeline_forward(
+                        &query.key,
+                        mounted_subject_id,
+                        &manifest,
+                        start,
+                        query.limit,
+                    )?;
+                    let has_newer = turns
+                        .last()
+                        .is_some_and(|turn| turn.sequence < manifest.last_sequence);
+                    (turns, start > 1, has_newer)
+                }
+                TranscriptTimelineAnchor::Around(anchor) => {
+                    let center = anchor.locator.turn_sequence;
+                    let older_limit = query.limit / 2;
+                    let mut turns = self.load_visible_timeline_backward(
+                        &query.key,
+                        mounted_subject_id,
+                        &manifest,
+                        center,
+                        older_limit.saturating_add(1),
+                    )?;
+                    let next = turns
+                        .last()
+                        .map(|turn| turn.sequence.saturating_add(1))
+                        .unwrap_or(center);
+                    let remaining = query.limit.saturating_sub(turns.len());
+                    turns.extend(self.load_visible_timeline_forward(
+                        &query.key,
+                        mounted_subject_id,
+                        &manifest,
+                        next,
+                        remaining,
+                    )?);
+                    let has_older = turns.first().is_some_and(|turn| turn.sequence > 1);
+                    let has_newer = turns
+                        .last()
+                        .is_some_and(|turn| turn.sequence < manifest.last_sequence);
+                    (turns, has_older, has_newer)
+                }
+                TranscriptTimelineAnchor::AroundSequence(sequence) => {
+                    let older_limit = query.limit / 2;
+                    let mut turns = self.load_visible_timeline_backward(
+                        &query.key,
+                        mounted_subject_id,
+                        &manifest,
+                        *sequence,
+                        older_limit.saturating_add(1),
+                    )?;
+                    let next = turns
+                        .last()
+                        .map(|turn| turn.sequence.saturating_add(1))
+                        .unwrap_or(*sequence);
+                    let remaining = query.limit.saturating_sub(turns.len());
+                    turns.extend(self.load_visible_timeline_forward(
+                        &query.key,
+                        mounted_subject_id,
+                        &manifest,
+                        next,
+                        remaining,
+                    )?);
+                    let has_older = turns.first().is_some_and(|turn| turn.sequence > 1);
+                    let has_newer = turns
+                        .last()
+                        .is_some_and(|turn| turn.sequence < manifest.last_sequence);
+                    (turns, has_older, has_newer)
+                }
+                TranscriptTimelineAnchor::FirstVisibleInRange(range) => {
+                    let Some(sequence) = self.first_visible_sequence_in_range(
+                        &query.key,
+                        mounted_subject_id,
+                        range,
+                    )?
+                    else {
+                        return Ok(TranscriptTimelineCandidatePage {
+                            head,
+                            turns: Vec::new(),
+                            older_cursor: None,
+                            newer_cursor: None,
+                            has_older: false,
+                            has_newer: false,
+                        });
+                    };
+                    let turns = self.load_visible_timeline_forward(
+                        &query.key,
+                        mounted_subject_id,
+                        &manifest,
+                        sequence,
+                        query.limit,
+                    )?;
+                    let has_newer = turns
+                        .last()
+                        .is_some_and(|turn| turn.sequence < manifest.last_sequence);
+                    (turns, sequence > 1, has_newer)
+                }
+            }
+        };
+        let has_older = match turns.first() {
+            Some(first) => self.has_visible_timeline_before(
+                &query.key,
+                mounted_subject_id,
+                &manifest,
+                first.sequence,
+            )?,
+            None => false,
+        };
+        let has_newer = match turns.last() {
+            Some(last) => self.has_visible_timeline_after_until(
+                &query.key,
+                mounted_subject_id,
+                &manifest,
+                last.sequence,
+                snapshot_upper_bound,
+            )?,
+            None => false,
+        };
+        let now = current_unix_secs();
+        let encode_timeline_cursor =
+            |kind: &str, direction: &str, position: u64| -> Result<TranscriptQueryCursor> {
+                encode_cursor(
+                    &keyring,
+                    &TranscriptQueryCursorClaimsV1 {
+                        schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
+                        key_id: keyring.current.key_id.clone(),
+                        kind: kind.to_string(),
+                        direction: direction.to_string(),
+                        query_digest: query_digest.clone(),
+                        lifecycle: "active_and_archived".to_string(),
+                        view_context: "candidate".to_string(),
+                        limit: query.limit,
+                        memory_space_id: query.key.memory_space_id.clone(),
+                        mounted_subject_id: mounted_subject_id.to_string(),
+                        channel_id: query.key.channel_id.clone(),
+                        conversation_id: query.key.conversation_id.clone(),
+                        head_revision: cursor_claims
+                            .as_ref()
+                            .map(|claims| claims.head_revision)
+                            .unwrap_or(head.revision),
+                        head_digest: cursor_claims
+                            .as_ref()
+                            .map(|claims| claims.head_digest.clone())
+                            .unwrap_or_else(|| head.head_digest.clone()),
+                        snapshot_upper_bound,
+                        content_generation: cursor_claims
+                            .as_ref()
+                            .map(|claims| claims.content_generation)
+                            .unwrap_or(head.content_generation),
+                        index_generation: cursor_claims
+                            .as_ref()
+                            .map(|claims| claims.index_generation)
+                            .unwrap_or(head.index_generation),
+                        position,
+                        incarnation: keyring.incarnation.clone(),
+                        issued_at: now,
+                        expires_at: now.saturating_add(604_800).min(keyring.current.expires_at),
+                    },
+                )
+            };
+        let older_cursor = if has_older {
+            turns
+                .first()
+                .map(|turn| encode_timeline_cursor("timeline_older", "backward", turn.sequence))
+                .transpose()?
+        } else {
+            None
+        };
+        let newer_cursor = if has_newer {
+            turns
+                .last()
+                .map(|turn| encode_timeline_cursor("timeline_newer", "forward", turn.sequence))
+                .transpose()?
+        } else {
+            None
+        };
+        Ok(TranscriptTimelineCandidatePage {
+            head,
+            turns,
+            older_cursor,
+            newer_cursor,
+            has_older,
+            has_newer,
+        })
+    }
+
+    fn search_transcript(
+        &self,
+        mounted_subject_id: &str,
+        query: &TranscriptSearchQuery,
+    ) -> Result<TranscriptSearchCandidatePage> {
+        query.validate()?;
+        let memory_space_id = match &query.scope {
+            TranscriptSearchScope::ExactConversation { key } => key.memory_space_id.as_str(),
+            TranscriptSearchScope::MountedSubject {
+                memory_space_id, ..
+            } => memory_space_id,
+        };
+        let include_archived = query.lifecycle == TranscriptSearchLifecycle::ActiveAndArchived;
+        let query_channel = match &query.scope {
+            TranscriptSearchScope::ExactConversation { key } => Some(key.channel_id.as_str()),
+            TranscriptSearchScope::MountedSubject { channel_id, .. } => channel_id.as_deref(),
+        };
+        let keyring =
+            self.ensure_query_keyring(memory_space_id, mounted_subject_id, query_channel)?;
+        let query_identity = serde_json::to_vec(&serde_json::json!({
+            "scope": &query.scope,
+            "query": &query.query,
+            "governance_context_digest": &query.governance_context_digest,
+            "sort": query.sort,
+            "lifecycle": query.lifecycle,
+            "limit": query.limit,
+            "view": "candidate",
+        }))
+        .map_err(|error| {
+            Error::config("conversation_transcript_query_cursor", error.to_string())
+        })?;
+        let query_digest = format!("sha256:{:x}", Sha256::digest(query_identity));
+        let mut snapshot_hasher = Sha256::new();
+        let mut snapshot_revision = 0u64;
+        let mut snapshot_entries = 0u64;
+        let mut scores = BTreeMap::<
+            (String, String, String, String, String),
+            (u32, TranscriptPostingLocatorV1),
+        >::new();
+        for term in &query.query.terms {
+            let digest = term_digest(term);
+            let root_key = search_root_key(memory_space_id, mounted_subject_id, &digest);
+            let Some(root_value) = self
+                .engine
+                .get_json_value(TRANSCRIPT_SEARCH_ROOT_NAMESPACE, &root_key)?
+            else {
+                continue;
+            };
+            let root = serde_json::from_value::<TranscriptSearchPostingRootV1>(root_value)
+                .map_err(|error| {
+                    Error::config("conversation_transcript_search_index", error.to_string())
+                })?;
+            snapshot_hasher.update(serde_json::to_vec(&root).map_err(|error| {
+                Error::config("conversation_transcript_search_index", error.to_string())
+            })?);
+            snapshot_revision = snapshot_revision.max(root.revision);
+            snapshot_entries = snapshot_entries.saturating_add(root.entry_count);
+            let mut postings = Vec::new();
+            for page_id in 0..root.page_count {
+                let key = search_posting_key(memory_space_id, mounted_subject_id, &digest, page_id);
+                let value = self
+                    .engine
+                    .get_json_value(TRANSCRIPT_SEARCH_POSTING_NAMESPACE, &key)?
+                    .ok_or_else(|| {
+                        Error::config(
+                            "conversation_transcript_search_index",
+                            "search root references a missing page",
+                        )
+                    })?;
+                let page = serde_json::from_value::<TranscriptSearchPostingPageV1>(value).map_err(
+                    |error| {
+                        Error::config("conversation_transcript_search_index", error.to_string())
+                    },
+                )?;
+                postings.extend(page.locators);
+            }
+            for locator in postings
+                .into_iter()
+                .filter(|locator| locator.visible(include_archived))
+            {
+                let in_scope = match &query.scope {
+                    TranscriptSearchScope::ExactConversation { key } => locator.locator.key == *key,
+                    TranscriptSearchScope::MountedSubject { channel_id, .. } => channel_id
+                        .as_ref()
+                        .is_none_or(|channel| locator.locator.key.channel_id == *channel),
+                };
+                if !in_scope {
+                    continue;
+                }
+                let identity = (
+                    locator.locator.key.memory_space_id.clone(),
+                    locator.locator.key.channel_id.clone(),
+                    locator.locator.key.conversation_id.clone(),
+                    locator.locator.turn_id.clone(),
+                    locator.locator.message_id.clone().unwrap_or_default(),
+                );
+                let entry = scores.entry(identity).or_insert((0, locator));
+                entry.0 = entry.0.saturating_add(1);
+            }
+        }
+        let mut candidates = scores
+            .into_values()
+            .map(|(score, locator)| {
+                let observed_at = locator.locator.observed_at;
+                let record = self
+                    .get_turn(
+                        &locator.locator.key,
+                        mounted_subject_id,
+                        &locator.locator.turn_id,
+                    )?
+                    .ok_or_else(|| {
+                        Error::config(
+                            "conversation_transcript_search_index",
+                            "posting references a missing turn",
+                        )
+                    })?;
+                let owner_head = self
+                    .load_conversation_recall_manifest(&locator.locator.key, mounted_subject_id)?
+                    .1
+                    .ok_or_else(|| {
+                        Error::config(
+                            "conversation_transcript_search_index",
+                            "posting owner head is missing",
+                        )
+                    })?;
+                Ok((
+                    TranscriptSearchCandidate {
+                        record,
+                        message_id: locator.locator.message_id.unwrap_or_default(),
+                        score,
+                        head_revision: owner_head.revision,
+                        head_digest: owner_head.head_digest,
+                    },
+                    observed_at,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        candidates.sort_by(|(left, left_observed_at), (right, right_observed_at)| {
+            match query.sort {
+                TranscriptSearchSort::RelevanceThenObservedAt => right
+                    .score
+                    .cmp(&left.score)
+                    .then_with(|| right_observed_at.cmp(left_observed_at)),
+                TranscriptSearchSort::ObservedAtDescending => {
+                    right_observed_at.cmp(left_observed_at)
+                }
+            }
+            .then_with(|| right.record.sequence.cmp(&left.record.sequence))
+            .then_with(|| right.message_id.cmp(&left.message_id))
+        });
+        let snapshot_digest = format!("sha256:{:x}", snapshot_hasher.finalize());
+        let start = if let Some(cursor) = query.cursor.as_ref() {
+            let claims = decode_cursor(&keyring, cursor)?;
+            if claims.kind != "search"
+                || claims.direction != "forward"
+                || claims.query_digest != query_digest
+                || claims.lifecycle != format!("{:?}", query.lifecycle)
+                || claims.view_context != "candidate"
+                || claims.limit != query.limit
+                || claims.memory_space_id != memory_space_id
+                || claims.mounted_subject_id != mounted_subject_id
+                || claims.head_revision != snapshot_revision
+                || claims.head_digest != snapshot_digest
+                || claims.snapshot_upper_bound != snapshot_entries
+                || claims.incarnation != keyring.incarnation
+                || claims.expires_at < current_unix_secs()
+            {
+                return Err(Error::config(
+                    "conversation_transcript_query_cursor_stale",
+                    "search cursor is stale or outside query scope",
+                ));
+            }
+            usize::try_from(claims.position).unwrap_or(usize::MAX)
+        } else {
+            0
+        };
+        if start > candidates.len() {
+            return Err(Error::config(
+                "conversation_transcript_query_cursor_stale",
+                "search cursor position is outside snapshot",
+            ));
+        }
+        candidates = candidates.into_iter().skip(start).collect();
+        let has_more = candidates.len() > query.limit;
+        candidates.truncate(query.limit);
+        let now = current_unix_secs();
+        let next_position = start.saturating_add(candidates.len());
+        let next_cursor = if has_more {
+            Some(encode_cursor(
+                &keyring,
+                &TranscriptQueryCursorClaimsV1 {
+                    schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
+                    key_id: keyring.current.key_id.clone(),
+                    kind: "search".to_string(),
+                    direction: "forward".to_string(),
+                    query_digest,
+                    lifecycle: format!("{:?}", query.lifecycle),
+                    view_context: "candidate".to_string(),
+                    limit: query.limit,
+                    memory_space_id: memory_space_id.to_string(),
+                    mounted_subject_id: mounted_subject_id.to_string(),
+                    channel_id: "*".to_string(),
+                    conversation_id: "*".to_string(),
+                    head_revision: snapshot_revision,
+                    head_digest: snapshot_digest,
+                    snapshot_upper_bound: snapshot_entries,
+                    content_generation: snapshot_revision,
+                    index_generation: snapshot_revision,
+                    position: u64::try_from(next_position).unwrap_or(u64::MAX),
+                    incarnation: keyring.incarnation.clone(),
+                    issued_at: now,
+                    expires_at: now.saturating_add(604_800).min(keyring.current.expires_at),
+                },
+            )?)
+        } else {
+            None
+        };
+        Ok(TranscriptSearchCandidatePage {
+            candidates: candidates
+                .into_iter()
+                .map(|(candidate, _)| candidate)
+                .collect(),
+            next_cursor,
+            has_more,
+            budget_applied: false,
+        })
+    }
+
+    fn query_transcript_activity(
+        &self,
+        mounted_subject_id: &str,
+        query: &TranscriptActivityQuery,
+    ) -> Result<TranscriptActivityCandidateReport> {
+        query.validate()?;
+        let head = self
+            .load_catalog_head_exact(&query.key, mounted_subject_id)?
+            .ok_or_else(|| {
+                Error::config(
+                    "conversation_transcript_activity",
+                    "conversation catalog head not found",
+                )
+            })?;
+        let mut buckets = Vec::with_capacity(query.ranges.len());
+        for range in &query.ranges {
+            let first_day = range.start_inclusive / 86_400;
+            let last_day = range.end_exclusive.saturating_sub(1) / 86_400;
+            let mut candidates = Vec::new();
+            for day in first_day..=last_day {
+                let root_key = time_root_key(&query.key, mounted_subject_id, day);
+                let Some(root_value) = self
+                    .engine
+                    .get_json_value(TRANSCRIPT_TIME_ROOT_NAMESPACE, &root_key)?
+                else {
+                    continue;
+                };
+                let root = serde_json::from_value::<TranscriptTimePostingRootV1>(root_value)
+                    .map_err(|error| {
+                        Error::config("conversation_transcript_time_index", error.to_string())
+                    })?;
+                let mut postings = Vec::new();
+                for page_id in 0..root.page_count {
+                    let key = time_posting_key(&query.key, mounted_subject_id, day, page_id);
+                    let value = self
+                        .engine
+                        .get_json_value(TRANSCRIPT_TIME_POSTING_NAMESPACE, &key)?
+                        .ok_or_else(|| {
+                            Error::config(
+                                "conversation_transcript_time_index",
+                                "time root references a missing page",
+                            )
+                        })?;
+                    let page = serde_json::from_value::<TranscriptTimePostingPageV1>(value)
+                        .map_err(|error| {
+                            Error::config("conversation_transcript_time_index", error.to_string())
+                        })?;
+                    postings.extend(page.locators);
+                }
+                for locator in postings.into_iter().filter(|locator| {
+                    locator.visible(query.lifecycle == TranscriptSearchLifecycle::ActiveAndArchived)
+                        && range.contains(locator.locator.observed_at)
+                }) {
+                    let record = self
+                        .get_turn(&query.key, mounted_subject_id, &locator.locator.turn_id)?
+                        .ok_or_else(|| {
+                            Error::config(
+                                "conversation_transcript_time_index",
+                                "posting references a missing turn",
+                            )
+                        })?;
+                    candidates.push(TranscriptActivityCandidate {
+                        record,
+                        message_id: locator.locator.message_id.unwrap_or_default(),
+                    });
+                }
+            }
+            buckets.push(TranscriptActivityCandidateBucket {
+                range: *range,
+                candidates,
+            });
+        }
+        Ok(TranscriptActivityCandidateReport {
+            head,
+            buckets,
+            budget_applied: false,
+        })
     }
 
     fn turn_count(&self, key: &ConversationKey, mounted_subject_id: &str) -> Result<usize> {
@@ -10325,13 +12597,8 @@ impl ConversationTranscriptStore for StorePlatform {
                 Vec<RecallIndexAddress>,
             ),
         >::new();
-        let mut records = match request.turn_id.as_deref() {
-            Some(turn_id) => self
-                .get_turn(&request.key, mounted_subject_id, turn_id)?
-                .into_iter()
-                .collect::<Vec<_>>(),
-            None => self.list_turns(&request.key, mounted_subject_id, usize::MAX)?,
-        };
+        let mut records = self.list_turns(&request.key, mounted_subject_id, usize::MAX)?;
+        let mut changed_records = Vec::<(TranscriptTurnRecord, TranscriptTurnRecord)>::new();
         let mut owner_subject_id = None::<String>;
         for record in &mut records {
             let matches_turn = request
@@ -10350,6 +12617,7 @@ impl ConversationTranscriptStore for StorePlatform {
                     ));
                 }
                 owner_subject_id.get_or_insert_with(|| record.subject.clone());
+                let before_record = record.clone();
                 affected_turn_ids.push(record.turn_id.clone());
                 for message in &record.input_messages {
                     affected_message_ids.push(message.message_id.clone());
@@ -10359,6 +12627,7 @@ impl ConversationTranscriptStore for StorePlatform {
                 }
                 affected_host_refs.extend(record.host_refs.clone());
                 record.apply_lifecycle_transition(request.transition, request.requested_at);
+                changed_records.push((before_record, record.clone()));
                 let page_id = Self::conversation_page_for_sequence(record.sequence)?;
                 if let std::collections::btree_map::Entry::Vacant(entry) = pages.entry(page_id) {
                     let (_, page, before) = self.load_conversation_transcript_page(
@@ -10421,7 +12690,7 @@ impl ConversationTranscriptStore for StorePlatform {
             }
         }
         if !mutations.is_empty() {
-            let mut indexes = Vec::with_capacity(pages.len());
+            let mut indexes = Vec::with_capacity(pages.len().saturating_add(8));
             for (page_id, (page, before, entries)) in pages {
                 indexes.push(self.plan_conversation_transcript_page(
                     &request.key,
@@ -10432,6 +12701,25 @@ impl ConversationTranscriptStore for StorePlatform {
                     entries,
                 )?);
             }
+            let head_plan = self.plan_conversation_head(
+                &request.key,
+                mounted_subject_id,
+                Some(&head),
+                self.engine
+                    .get_json_value(ConversationRecallManifest::NAMESPACE, &head.physical_key)?,
+                head.turn_count,
+                head.last_sequence,
+            )?;
+            let next_manifest = serde_json::from_value::<ConversationRecallManifest>(
+                head_plan.2.clone(),
+            )
+            .map_err(|error| Error::config("conversation_transcript_head", error.to_string()))?;
+            let catalog_head =
+                Self::transcript_catalog_head_from_records(&next_manifest, &records)?;
+            indexes.push(head_plan);
+            indexes.extend(
+                self.plan_transcript_query_lifecycle_indexes(&changed_records, &catalog_head)?,
+            );
             let mut scope = self.recall_scope();
             scope
                 .memory_space_id
@@ -11823,6 +14111,773 @@ fn stable_hash_id<T: Hash>(prefix: &str, value: &T) -> String {
     format!("{prefix}_{}", stable_hash_hex(value))
 }
 
+fn validate_transcript_query_engine_open_closure(engine: &dyn StoreEngine) -> Result<()> {
+    let namespaces = [
+        "conversation_transcript",
+        CONVERSATION_RECALL_MANIFEST_NAMESPACE,
+        TRANSCRIPT_CATALOG_ROOT_NAMESPACE,
+        TRANSCRIPT_CATALOG_PAGE_NAMESPACE,
+        TRANSCRIPT_TIME_ROOT_NAMESPACE,
+        TRANSCRIPT_TIME_POSTING_NAMESPACE,
+        TRANSCRIPT_SEARCH_ROOT_NAMESPACE,
+        TRANSCRIPT_SEARCH_POSTING_NAMESPACE,
+        TRANSCRIPT_SEARCH_MESSAGE_MANIFEST_NAMESPACE,
+        TRANSCRIPT_QUERY_KEYRING_NAMESPACE,
+    ];
+    let mut json = BTreeMap::new();
+    for namespace in namespaces {
+        for key in engine.list_json_keys(namespace)? {
+            let value = engine.get_json_value(namespace, &key)?.ok_or_else(|| {
+                Error::config(
+                    "conversation_transcript_query_open_closure",
+                    "listed query owner disappeared during open closure read",
+                )
+            })?;
+            json.insert((namespace.to_string(), key), value);
+        }
+    }
+    validate_transcript_query_snapshot_closure(&json)
+}
+
+pub(crate) fn migrate_v10_snapshot_to_v11(
+    snapshot: &StoreSnapshot,
+    now_secs: u64,
+) -> Result<StoreSnapshot> {
+    const V10_SCHEMA_ID: &str = "beetle_memory_store_schema_v10";
+    if snapshot.schema_id != V10_SCHEMA_ID
+        || snapshot.schema_manifest.schema_id != V10_SCHEMA_ID
+        || snapshot.schema_manifest.schema_version != 10
+    {
+        return Err(Error::config(
+            "conversation_transcript_query_migration",
+            "only an exact Store v10 snapshot may migrate to v11",
+        ));
+    }
+    let query_namespaces = [
+        TRANSCRIPT_CATALOG_ROOT_NAMESPACE,
+        TRANSCRIPT_CATALOG_PAGE_NAMESPACE,
+        TRANSCRIPT_TIME_ROOT_NAMESPACE,
+        TRANSCRIPT_TIME_POSTING_NAMESPACE,
+        TRANSCRIPT_SEARCH_ROOT_NAMESPACE,
+        TRANSCRIPT_SEARCH_POSTING_NAMESPACE,
+        TRANSCRIPT_SEARCH_MESSAGE_MANIFEST_NAMESPACE,
+        TRANSCRIPT_QUERY_KEYRING_NAMESPACE,
+    ];
+    if snapshot
+        .json_docs
+        .iter()
+        .any(|doc| query_namespaces.contains(&doc.namespace.as_str()))
+    {
+        return Err(Error::config(
+            "conversation_transcript_query_migration",
+            "v10 migration source contains partial or foreign v11 query state",
+        ));
+    }
+    let mut manifests =
+        BTreeMap::<(String, String, String, String), ConversationRecallManifest>::new();
+    let mut records =
+        BTreeMap::<(String, String, String, String), Vec<TranscriptTurnRecord>>::new();
+    for doc in &snapshot.json_docs {
+        if doc.namespace == CONVERSATION_RECALL_MANIFEST_NAMESPACE {
+            let manifest = serde_json::from_value::<ConversationRecallManifest>(doc.value.clone())
+                .map_err(|error| {
+                    Error::config("conversation_transcript_query_migration", error.to_string())
+                })?;
+            manifests.insert(
+                (
+                    manifest.memory_space_id.clone(),
+                    manifest.mounted_subject_id.clone(),
+                    manifest.channel_id.clone(),
+                    manifest.conversation_id.clone(),
+                ),
+                manifest,
+            );
+        } else if doc.namespace == "conversation_transcript" {
+            let record = serde_json::from_value::<TranscriptTurnRecord>(doc.value.clone())
+                .map_err(|error| {
+                    Error::config("conversation_transcript_query_migration", error.to_string())
+                })?;
+            records
+                .entry((
+                    record.key.memory_space_id.clone(),
+                    record.subject.clone(),
+                    record.key.channel_id.clone(),
+                    record.key.conversation_id.clone(),
+                ))
+                .or_default()
+                .push(record);
+        }
+    }
+    if manifests.len() != records.len() {
+        return Err(Error::config(
+            "conversation_transcript_query_migration",
+            "v10 transcript heads and owner groups are not a closed set",
+        ));
+    }
+
+    let mut catalog_groups =
+        BTreeMap::<(String, String, Option<String>), Vec<ConversationCatalogHead>>::new();
+    let mut time_groups =
+        BTreeMap::<(String, String, String, String, u64), Vec<TranscriptPostingLocatorV1>>::new();
+    let mut search_groups =
+        BTreeMap::<(String, String, String), Vec<TranscriptPostingLocatorV1>>::new();
+    let mut message_manifests = Vec::<(String, TranscriptMessageSearchManifestV1)>::new();
+    let mut memory_spaces = BTreeSet::new();
+    for (identity, owner_records) in &mut records {
+        owner_records.sort_by_key(|record| record.sequence);
+        let manifest = manifests.get(identity).ok_or_else(|| {
+            Error::config(
+                "conversation_transcript_query_migration",
+                "v10 transcript owner group has no exact head",
+            )
+        })?;
+        let head = StorePlatform::transcript_catalog_head_from_records(manifest, owner_records)?;
+        memory_spaces.insert(head.key.memory_space_id.clone());
+        catalog_groups
+            .entry((
+                head.key.memory_space_id.clone(),
+                head.mounted_subject_id.clone(),
+                None,
+            ))
+            .or_default()
+            .push(head.clone());
+        catalog_groups
+            .entry((
+                head.key.memory_space_id.clone(),
+                head.mounted_subject_id.clone(),
+                Some(head.key.channel_id.clone()),
+            ))
+            .or_default()
+            .push(head);
+        for record in owner_records {
+            for (locator, content) in message_locators(record) {
+                let posting = TranscriptPostingLocatorV1 {
+                    locator: locator.clone(),
+                    lifecycle_state: record.lifecycle_state,
+                    redaction_state: record.redaction_state,
+                };
+                time_groups
+                    .entry((
+                        record.key.memory_space_id.clone(),
+                        record.subject.clone(),
+                        record.key.channel_id.clone(),
+                        record.key.conversation_id.clone(),
+                        locator.observed_at / 86_400,
+                    ))
+                    .or_default()
+                    .push(posting.clone());
+                let mut digests = TranscriptSearchNormalizerV1::index_terms(
+                    content,
+                    MAX_TRANSCRIPT_INDEX_TERMS_PER_MESSAGE,
+                )?
+                .iter()
+                .map(|term| term_digest(term))
+                .collect::<Vec<_>>();
+                digests.sort();
+                digests.dedup();
+                for digest in &digests {
+                    search_groups
+                        .entry((
+                            record.key.memory_space_id.clone(),
+                            record.subject.clone(),
+                            digest.clone(),
+                        ))
+                        .or_default()
+                        .push(posting.clone());
+                }
+                message_manifests.push((
+                    search_message_manifest_key(&locator),
+                    TranscriptMessageSearchManifestV1 {
+                        locator,
+                        term_set_digest: term_set_digest(&digests),
+                    },
+                ));
+            }
+        }
+    }
+
+    let mut docs = snapshot.json_docs.clone();
+    let mut push_doc = |namespace: &str, key: String, value: serde_json::Value| {
+        docs.push(StoreSnapshotJsonDoc {
+            namespace: namespace.to_string(),
+            key,
+            value,
+        });
+    };
+    for ((space, subject, channel), heads) in &mut catalog_groups {
+        heads.sort_by(|left, right| {
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| right.key.conversation_id.cmp(&left.key.conversation_id))
+        });
+        let page_count =
+            u64::try_from(heads.len().div_ceil(TRANSCRIPT_QUERY_PAGE_CAPACITY)).unwrap_or(u64::MAX);
+        push_doc(
+            TRANSCRIPT_CATALOG_ROOT_NAMESPACE,
+            catalog_root_key(space, subject, channel.as_deref()),
+            serde_json::to_value(TranscriptCatalogRootV1 {
+                schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
+                memory_space_id: space.clone(),
+                mounted_subject_id: subject.clone(),
+                channel_id: channel.clone(),
+                revision: 1,
+                page_count,
+                entry_count: u64::try_from(heads.len()).unwrap_or(u64::MAX),
+            })
+            .map_err(|error| {
+                Error::config("conversation_transcript_query_migration", error.to_string())
+            })?,
+        );
+        for (page_id, chunk) in heads.chunks(TRANSCRIPT_QUERY_PAGE_CAPACITY).enumerate() {
+            let page_id = u64::try_from(page_id).unwrap_or(u64::MAX);
+            push_doc(
+                TRANSCRIPT_CATALOG_PAGE_NAMESPACE,
+                catalog_page_key(space, subject, channel.as_deref(), page_id),
+                serde_json::to_value(TranscriptCatalogPageV1 {
+                    schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
+                    memory_space_id: space.clone(),
+                    mounted_subject_id: subject.clone(),
+                    channel_id: channel.clone(),
+                    page_id,
+                    revision: 1,
+                    heads: chunk.to_vec(),
+                })
+                .map_err(|error| {
+                    Error::config("conversation_transcript_query_migration", error.to_string())
+                })?,
+            );
+        }
+    }
+    for ((space, subject, channel, conversation, day), locators) in &mut time_groups {
+        locators.sort_by_key(|entry| {
+            (
+                entry.locator.observed_at,
+                entry.locator.turn_sequence,
+                entry.locator.message_id.clone(),
+            )
+        });
+        let key = ConversationKey::new(space.clone(), channel.clone(), conversation.clone())?;
+        let page_count = u64::try_from(locators.len().div_ceil(TRANSCRIPT_QUERY_PAGE_CAPACITY))
+            .unwrap_or(u64::MAX);
+        push_doc(
+            TRANSCRIPT_TIME_ROOT_NAMESPACE,
+            time_root_key(&key, subject, *day),
+            serde_json::to_value(TranscriptTimePostingRootV1 {
+                schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
+                key: key.clone(),
+                mounted_subject_id: subject.clone(),
+                utc_day: *day,
+                revision: 1,
+                page_count,
+                entry_count: u64::try_from(locators.len()).unwrap_or(u64::MAX),
+            })
+            .map_err(|error| {
+                Error::config("conversation_transcript_query_migration", error.to_string())
+            })?,
+        );
+        for (page_id, chunk) in locators.chunks(TRANSCRIPT_QUERY_PAGE_CAPACITY).enumerate() {
+            let page_id = u64::try_from(page_id).unwrap_or(u64::MAX);
+            push_doc(
+                TRANSCRIPT_TIME_POSTING_NAMESPACE,
+                time_posting_key(&key, subject, *day, page_id),
+                serde_json::to_value(TranscriptTimePostingPageV1 {
+                    schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
+                    key: key.clone(),
+                    mounted_subject_id: subject.clone(),
+                    utc_day: *day,
+                    page_id,
+                    revision: 1,
+                    locators: chunk.to_vec(),
+                })
+                .map_err(|error| {
+                    Error::config("conversation_transcript_query_migration", error.to_string())
+                })?,
+            );
+        }
+    }
+    for ((space, subject, digest), locators) in &mut search_groups {
+        locators.sort_by_key(|entry| {
+            (
+                entry.locator.observed_at,
+                entry.locator.turn_sequence,
+                entry.locator.message_id.clone(),
+            )
+        });
+        let page_count = u64::try_from(locators.len().div_ceil(TRANSCRIPT_QUERY_PAGE_CAPACITY))
+            .unwrap_or(u64::MAX);
+        push_doc(
+            TRANSCRIPT_SEARCH_ROOT_NAMESPACE,
+            search_root_key(space, subject, digest),
+            serde_json::to_value(TranscriptSearchPostingRootV1 {
+                schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
+                memory_space_id: space.clone(),
+                mounted_subject_id: subject.clone(),
+                term_digest: digest.clone(),
+                revision: 1,
+                page_count,
+                entry_count: u64::try_from(locators.len()).unwrap_or(u64::MAX),
+            })
+            .map_err(|error| {
+                Error::config("conversation_transcript_query_migration", error.to_string())
+            })?,
+        );
+        for (page_id, chunk) in locators.chunks(TRANSCRIPT_QUERY_PAGE_CAPACITY).enumerate() {
+            let page_id = u64::try_from(page_id).unwrap_or(u64::MAX);
+            push_doc(
+                TRANSCRIPT_SEARCH_POSTING_NAMESPACE,
+                search_posting_key(space, subject, digest, page_id),
+                serde_json::to_value(TranscriptSearchPostingPageV1 {
+                    schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
+                    memory_space_id: space.clone(),
+                    mounted_subject_id: subject.clone(),
+                    term_digest: digest.clone(),
+                    page_id,
+                    revision: 1,
+                    locators: chunk.to_vec(),
+                })
+                .map_err(|error| {
+                    Error::config("conversation_transcript_query_migration", error.to_string())
+                })?,
+            );
+        }
+    }
+    for (key, manifest) in message_manifests {
+        push_doc(
+            TRANSCRIPT_SEARCH_MESSAGE_MANIFEST_NAMESPACE,
+            key,
+            serde_json::to_value(manifest).map_err(|error| {
+                Error::config("conversation_transcript_query_migration", error.to_string())
+            })?,
+        );
+    }
+    for memory_space_id in memory_spaces {
+        let mut secret = [0u8; 32];
+        getrandom::fill(&mut secret).map_err(|error| {
+            Error::config(
+                "conversation_transcript_query_migration_entropy",
+                error.to_string(),
+            )
+        })?;
+        let key_hex = secret
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let key_id = format!(
+            "sha256:{:x}",
+            Sha256::digest(format!("key-id:{key_hex}").as_bytes())
+        );
+        push_doc(
+            TRANSCRIPT_QUERY_KEYRING_NAMESPACE,
+            keyring_key(&memory_space_id),
+            serde_json::to_value(TranscriptQueryKeyringV1 {
+                schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
+                memory_space_id: memory_space_id.clone(),
+                incarnation: format!(
+                    "sha256:{:x}",
+                    Sha256::digest(format!("incarnation:{key_hex}").as_bytes())
+                ),
+                current: crate::store_internal::transcript_query::TranscriptQuerySigningKeyV1 {
+                    key_id,
+                    key_hex,
+                    created_at: now_secs.max(1),
+                    expires_at: now_secs.max(1).saturating_add(7_776_000),
+                },
+                previous: None,
+            })
+            .map_err(|error| {
+                Error::config("conversation_transcript_query_migration", error.to_string())
+            })?,
+        );
+    }
+    let mut schema_manifest = snapshot.schema_manifest.clone();
+    schema_manifest.schema_id = STORE_SCHEMA_ID.to_string();
+    schema_manifest.schema_version = STORE_SCHEMA_VERSION;
+    schema_manifest.last_opened_at_unix_secs = now_secs;
+    let migrated = StoreSnapshot::new(
+        schema_manifest,
+        docs,
+        snapshot.blobs.clone(),
+        snapshot.events.clone(),
+    );
+    let json = migrated
+        .json_docs
+        .iter()
+        .map(|doc| ((doc.namespace.clone(), doc.key.clone()), doc.value.clone()))
+        .collect::<BTreeMap<_, _>>();
+    validate_transcript_query_snapshot_closure(&json)?;
+    Ok(migrated)
+}
+
+pub(crate) fn validate_transcript_query_snapshot_closure(
+    json: &BTreeMap<(String, String), serde_json::Value>,
+) -> Result<()> {
+    validate_transcript_query_snapshot_closure_with_keyring(json, true)
+}
+
+fn validate_transcript_query_snapshot_closure_with_keyring(
+    json: &BTreeMap<(String, String), serde_json::Value>,
+    require_keyring: bool,
+) -> Result<()> {
+    let stage = "conversation_transcript_query_closure";
+    let mut expected_query_message_keys = HashSet::new();
+    for ((namespace, _), value) in json {
+        if namespace == TRANSCRIPT_QUERY_KEYRING_NAMESPACE {
+            let keyring = serde_json::from_value::<TranscriptQueryKeyringV1>(value.clone())
+                .map_err(|error| Error::config(stage, error.to_string()))?;
+            keyring
+                .validate_for_memory_space(&keyring.memory_space_id)
+                .map_err(|error| Error::config(stage, error.to_string()))?;
+            if !json.contains_key(&(
+                TRANSCRIPT_QUERY_KEYRING_NAMESPACE.to_string(),
+                keyring_key(&keyring.memory_space_id),
+            )) {
+                return Err(Error::config(
+                    stage,
+                    "query keyring is stored under a non-canonical key",
+                ));
+            }
+        }
+        if namespace != "conversation_transcript" {
+            continue;
+        }
+        let record = serde_json::from_value::<TranscriptTurnRecord>(value.clone())
+            .map_err(|error| Error::config(stage, error.to_string()))?;
+        expected_query_message_keys.extend(
+            message_locators(&record)
+                .into_iter()
+                .map(|(locator, _)| search_message_manifest_key(&locator)),
+        );
+    }
+    let mut catalog_heads =
+        BTreeMap::<(String, String, String, String), ConversationCatalogHead>::new();
+    for ((namespace, _), value) in json {
+        if namespace == TRANSCRIPT_CATALOG_PAGE_NAMESPACE {
+            let page = serde_json::from_value::<TranscriptCatalogPageV1>(value.clone())
+                .map_err(|error| Error::config(stage, error.to_string()))?;
+            page.validate()?;
+            for head in page.heads {
+                catalog_heads.insert(
+                    (
+                        head.key.memory_space_id.clone(),
+                        head.mounted_subject_id.clone(),
+                        head.key.channel_id.clone(),
+                        head.key.conversation_id.clone(),
+                    ),
+                    head,
+                );
+            }
+        }
+    }
+    for ((namespace, _), value) in json {
+        if namespace == "conversation_transcript" {
+            let record = serde_json::from_value::<TranscriptTurnRecord>(value.clone())
+                .map_err(|error| Error::config(stage, error.to_string()))?;
+            for (locator, content) in message_locators(&record) {
+                let manifest_key = search_message_manifest_key(&locator);
+                let manifest_value = json
+                    .get(&(
+                        TRANSCRIPT_SEARCH_MESSAGE_MANIFEST_NAMESPACE.to_string(),
+                        manifest_key,
+                    ))
+                    .ok_or_else(|| {
+                        Error::config(stage, "transcript message has no search manifest")
+                    })?;
+                let search_manifest = serde_json::from_value::<TranscriptMessageSearchManifestV1>(
+                    manifest_value.clone(),
+                )
+                .map_err(|error| Error::config(stage, error.to_string()))?;
+                search_manifest.validate()?;
+                if search_manifest.locator != locator {
+                    return Err(Error::config(
+                        stage,
+                        "message search manifest locator differs from transcript owner",
+                    ));
+                }
+                let mut terms = TranscriptSearchNormalizerV1::index_terms(
+                    content,
+                    MAX_TRANSCRIPT_INDEX_TERMS_PER_MESSAGE,
+                )?
+                .iter()
+                .map(|term| term_digest(term))
+                .collect::<Vec<_>>();
+                terms.sort();
+                terms.dedup();
+                if record.redaction_state == TranscriptRedactionState::RawAvailable
+                    && search_manifest.term_set_digest != term_set_digest(&terms)
+                {
+                    return Err(Error::config(
+                        stage,
+                        "message search manifest digest differs from transcript content",
+                    ));
+                }
+                let day = locator.observed_at / 86_400;
+                let time_root_value = json
+                    .get(&(
+                        TRANSCRIPT_TIME_ROOT_NAMESPACE.to_string(),
+                        time_root_key(&record.key, &record.subject, day),
+                    ))
+                    .ok_or_else(|| Error::config(stage, "message has no time root"))?;
+                let time_root =
+                    serde_json::from_value::<TranscriptTimePostingRootV1>(time_root_value.clone())
+                        .map_err(|error| Error::config(stage, error.to_string()))?;
+                let mut time_bound = false;
+                for page_id in 0..time_root.page_count {
+                    let page_value = json
+                        .get(&(
+                            TRANSCRIPT_TIME_POSTING_NAMESPACE.to_string(),
+                            time_posting_key(&record.key, &record.subject, day, page_id),
+                        ))
+                        .ok_or_else(|| Error::config(stage, "time root page is missing"))?;
+                    let page =
+                        serde_json::from_value::<TranscriptTimePostingPageV1>(page_value.clone())
+                            .map_err(|error| Error::config(stage, error.to_string()))?;
+                    time_bound |= page.locators.iter().any(|entry| {
+                        entry.locator == locator
+                            && entry.lifecycle_state == record.lifecycle_state
+                            && entry.redaction_state == record.redaction_state
+                    });
+                }
+                if !time_bound {
+                    return Err(Error::config(
+                        stage,
+                        "message is absent from its exact time posting",
+                    ));
+                }
+                if record.redaction_state == TranscriptRedactionState::RawAvailable {
+                    for digest in terms {
+                        let root_value = json
+                            .get(&(
+                                TRANSCRIPT_SEARCH_ROOT_NAMESPACE.to_string(),
+                                search_root_key(
+                                    &record.key.memory_space_id,
+                                    &record.subject,
+                                    &digest,
+                                ),
+                            ))
+                            .ok_or_else(|| {
+                                Error::config(stage, "message search root is missing")
+                            })?;
+                        let root = serde_json::from_value::<TranscriptSearchPostingRootV1>(
+                            root_value.clone(),
+                        )
+                        .map_err(|error| Error::config(stage, error.to_string()))?;
+                        let mut search_bound = false;
+                        for page_id in 0..root.page_count {
+                            let page_value = json
+                                .get(&(
+                                    TRANSCRIPT_SEARCH_POSTING_NAMESPACE.to_string(),
+                                    search_posting_key(
+                                        &record.key.memory_space_id,
+                                        &record.subject,
+                                        &digest,
+                                        page_id,
+                                    ),
+                                ))
+                                .ok_or_else(|| {
+                                    Error::config(stage, "search root page is missing")
+                                })?;
+                            let page = serde_json::from_value::<TranscriptSearchPostingPageV1>(
+                                page_value.clone(),
+                            )
+                            .map_err(|error| Error::config(stage, error.to_string()))?;
+                            search_bound |= page.locators.iter().any(|entry| {
+                                entry.locator == locator
+                                    && entry.lifecycle_state == record.lifecycle_state
+                                    && entry.redaction_state == record.redaction_state
+                            });
+                        }
+                        if !search_bound {
+                            return Err(Error::config(
+                                stage,
+                                "message is absent from its exact search posting",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        if namespace == CONVERSATION_RECALL_MANIFEST_NAMESPACE {
+            let head = serde_json::from_value::<ConversationRecallManifest>(value.clone())
+                .map_err(|error| Error::config(stage, error.to_string()))?;
+            let identity = (
+                head.memory_space_id.clone(),
+                head.mounted_subject_id.clone(),
+                head.channel_id.clone(),
+                head.conversation_id.clone(),
+            );
+            let catalog = catalog_heads.get(&identity).ok_or_else(|| {
+                Error::config(
+                    "conversation_transcript_query_migration_required",
+                    "transcript head has no v11 catalog closure",
+                )
+            })?;
+            if catalog.revision != head.revision || catalog.head_digest != head.head_digest {
+                return Err(Error::config(
+                    stage,
+                    "catalog and transcript head identity differ",
+                ));
+            }
+            if require_keyring
+                && !json.contains_key(&(
+                    TRANSCRIPT_QUERY_KEYRING_NAMESPACE.to_string(),
+                    keyring_key(&head.memory_space_id),
+                ))
+            {
+                return Err(Error::config(
+                    stage,
+                    "transcript memory space has no private query keyring",
+                ));
+            }
+        }
+        if namespace == TRANSCRIPT_CATALOG_ROOT_NAMESPACE {
+            let root = serde_json::from_value::<TranscriptCatalogRootV1>(value.clone())
+                .map_err(|error| Error::config(stage, error.to_string()))?;
+            let mut entries = 0u64;
+            for page_id in 0..root.page_count {
+                let key = catalog_page_key(
+                    &root.memory_space_id,
+                    &root.mounted_subject_id,
+                    root.channel_id.as_deref(),
+                    page_id,
+                );
+                let page = json
+                    .get(&(TRANSCRIPT_CATALOG_PAGE_NAMESPACE.to_string(), key))
+                    .ok_or_else(|| {
+                        Error::config(stage, "catalog root references a missing page")
+                    })?;
+                let page = serde_json::from_value::<TranscriptCatalogPageV1>(page.clone())
+                    .map_err(|error| Error::config(stage, error.to_string()))?;
+                entries =
+                    entries.saturating_add(u64::try_from(page.heads.len()).unwrap_or(u64::MAX));
+            }
+            if entries != root.entry_count {
+                return Err(Error::config(
+                    stage,
+                    "catalog root entry count differs from pages",
+                ));
+            }
+        }
+        if namespace == TRANSCRIPT_TIME_ROOT_NAMESPACE {
+            let root = serde_json::from_value::<TranscriptTimePostingRootV1>(value.clone())
+                .map_err(|error| Error::config(stage, error.to_string()))?;
+            root.validate()?;
+            let mut entries = 0u64;
+            for page_id in 0..root.page_count {
+                let key =
+                    time_posting_key(&root.key, &root.mounted_subject_id, root.utc_day, page_id);
+                let page = json
+                    .get(&(TRANSCRIPT_TIME_POSTING_NAMESPACE.to_string(), key))
+                    .ok_or_else(|| Error::config(stage, "time root references a missing page"))?;
+                let page = serde_json::from_value::<TranscriptTimePostingPageV1>(page.clone())
+                    .map_err(|error| Error::config(stage, error.to_string()))?;
+                page.validate_for_root(&root)?;
+                if page.locators.iter().any(|entry| {
+                    !expected_query_message_keys
+                        .contains(&search_message_manifest_key(&entry.locator))
+                }) {
+                    return Err(Error::config(
+                        stage,
+                        "time posting contains a non-indexable transcript message",
+                    ));
+                }
+                entries =
+                    entries.saturating_add(u64::try_from(page.locators.len()).unwrap_or(u64::MAX));
+            }
+            if entries != root.entry_count {
+                return Err(Error::config(
+                    stage,
+                    "time root entry count differs from pages",
+                ));
+            }
+        }
+        if namespace == TRANSCRIPT_SEARCH_ROOT_NAMESPACE {
+            let root = serde_json::from_value::<TranscriptSearchPostingRootV1>(value.clone())
+                .map_err(|error| Error::config(stage, error.to_string()))?;
+            root.validate()?;
+            let mut entries = 0u64;
+            for page_id in 0..root.page_count {
+                let key = search_posting_key(
+                    &root.memory_space_id,
+                    &root.mounted_subject_id,
+                    &root.term_digest,
+                    page_id,
+                );
+                let page = json
+                    .get(&(TRANSCRIPT_SEARCH_POSTING_NAMESPACE.to_string(), key))
+                    .ok_or_else(|| Error::config(stage, "search root references a missing page"))?;
+                let page = serde_json::from_value::<TranscriptSearchPostingPageV1>(page.clone())
+                    .map_err(|error| Error::config(stage, error.to_string()))?;
+                page.validate_for_root(&root)?;
+                if page.locators.iter().any(|entry| {
+                    !expected_query_message_keys
+                        .contains(&search_message_manifest_key(&entry.locator))
+                }) {
+                    return Err(Error::config(
+                        stage,
+                        "search posting contains a non-indexable transcript message",
+                    ));
+                }
+                entries =
+                    entries.saturating_add(u64::try_from(page.locators.len()).unwrap_or(u64::MAX));
+            }
+            if entries != root.entry_count {
+                return Err(Error::config(
+                    stage,
+                    "search root entry count differs from pages",
+                ));
+            }
+        }
+        if namespace == TRANSCRIPT_SEARCH_MESSAGE_MANIFEST_NAMESPACE {
+            let manifest =
+                serde_json::from_value::<TranscriptMessageSearchManifestV1>(value.clone())
+                    .map_err(|error| Error::config(stage, error.to_string()))?;
+            manifest.validate()?;
+            if !expected_query_message_keys
+                .contains(&search_message_manifest_key(&manifest.locator))
+            {
+                return Err(Error::config(
+                    stage,
+                    "search manifest belongs to a non-indexable transcript message",
+                ));
+            }
+            let day = manifest.locator.observed_at / 86_400;
+            if !json.contains_key(&(
+                TRANSCRIPT_TIME_ROOT_NAMESPACE.to_string(),
+                time_root_key(
+                    &manifest.locator.key,
+                    &manifest.locator.mounted_subject_id,
+                    day,
+                ),
+            )) {
+                return Err(Error::config(
+                    stage,
+                    "message search manifest has no time root",
+                ));
+            }
+        }
+    }
+    for ((memory_space_id, subject, channel, conversation), catalog) in catalog_heads {
+        let key = ConversationKey::new(memory_space_id, channel, conversation)?;
+        let physical_key = StorePlatform::conversation_head_physical_key(&key, &subject)?;
+        let value = json
+            .get(&(
+                CONVERSATION_RECALL_MANIFEST_NAMESPACE.to_string(),
+                physical_key,
+            ))
+            .ok_or_else(|| Error::config(stage, "catalog head has no transcript owner head"))?;
+        let head = serde_json::from_value::<ConversationRecallManifest>(value.clone())
+            .map_err(|error| Error::config(stage, error.to_string()))?;
+        if catalog.revision != head.revision || catalog.head_digest != head.head_digest {
+            return Err(Error::config(
+                stage,
+                "catalog reverse closure identity differs",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_snapshot_import_contract(
     snapshot: &StoreSnapshot,
     governed_state_budget: &GovernedStateRuntimeBudget,
@@ -11963,6 +15018,7 @@ fn validate_snapshot_import_contract(
             );
         }
     }
+    validate_transcript_query_snapshot_closure(&snapshot_json)?;
     let typed_state = BackendTransactionState {
         json: snapshot_json.clone(),
         blobs: BTreeMap::new(),
@@ -12381,7 +15437,18 @@ pub(crate) fn validate_scoped_projection_governed_closure(
         projection_scope,
         snapshot.json_docs.len().max(1),
     )?;
-    validate_complete_snapshot_facet_graph_closure(&after.json)
+    validate_complete_snapshot_facet_graph_closure(&after.json)?;
+    if after.json.keys().any(|(namespace, _)| {
+        namespace == CONVERSATION_RECALL_MANIFEST_NAMESPACE
+            || transcript_query_namespace_is_derived(namespace)
+    }) {
+        let has_keyring = after
+            .json
+            .keys()
+            .any(|(namespace, _)| namespace == TRANSCRIPT_QUERY_KEYRING_NAMESPACE);
+        validate_transcript_query_snapshot_closure_with_keyring(&after.json, has_keyring)?;
+    }
+    Ok(())
 }
 
 fn enforce_snapshot_logical_budget(

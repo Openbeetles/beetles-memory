@@ -29,7 +29,7 @@ fn snapshot_shape_is_stable_and_reviewable() {
     let snapshot = platform_capability_snapshot(&catalog);
     let value = serde_json::to_value(&snapshot).expect("snapshot json");
 
-    assert_eq!(value["schema"], "beetle-memory.platform.capability.v3");
+    assert_eq!(value["schema"], "beetle-memory.platform.capability.v4");
     assert_eq!(value["profile"], "profile-esp-standalone-memory");
     assert_eq!(value["target"], "target-esp");
     assert_eq!(value["role"], "role-standalone-memory");
@@ -37,6 +37,8 @@ fn snapshot_shape_is_stable_and_reviewable() {
     assert_eq!(value["memory"]["write"], true);
     assert!(value["compiled"].get("target_desktop_linux").is_some());
     assert!(value["memory"].get("transcript_export").is_some());
+    assert_eq!(value["memory"]["transcript_search"], false);
+    assert_eq!(value["memory"]["transcript_activity"], false);
     assert_eq!(value["adapter"]["wss"]["client_allowed"], true);
     assert_eq!(value["adapter"]["wss"]["server_allowed"], false);
     assert_eq!(value["entry"]["llm_gateway_server"]["visible"], false);

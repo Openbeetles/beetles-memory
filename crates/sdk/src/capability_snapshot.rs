@@ -5,7 +5,7 @@ use crate::{
     MemoryCapabilityCatalog, MemoryOperationVisibility, ProfileId, RuntimeSkillRecallTransport,
 };
 
-pub const PLATFORM_CAPABILITY_SNAPSHOT_SCHEMA: &str = "beetle-memory.platform.capability.v3";
+pub const PLATFORM_CAPABILITY_SNAPSHOT_SCHEMA: &str = "beetle-memory.platform.capability.v4";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PlatformCapabilitySnapshot {
@@ -48,6 +48,8 @@ pub struct PlatformMemoryOperationSnapshot {
     pub maintenance: bool,
     pub inspection: bool,
     pub transcript_replay: bool,
+    pub transcript_search: bool,
+    pub transcript_activity: bool,
     pub transcript_export: bool,
     pub replay: bool,
     pub export: bool,
@@ -184,6 +186,8 @@ pub fn platform_capability_snapshot(
             maintenance: catalog.maintenance.visible,
             inspection: catalog.inspection.visible,
             transcript_replay: catalog.transcript_replay.visible,
+            transcript_search: catalog.transcript_search.visible,
+            transcript_activity: catalog.transcript_activity.visible,
             transcript_export: catalog.transcript_export.visible,
             replay: catalog.replay.visible,
             export: catalog.export.visible,

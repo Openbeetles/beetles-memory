@@ -20,7 +20,7 @@ The project is not a vector database, a generic RAG framework, a chat-history du
 | Model gateway and transparent local-model control | `bm-llm-gateway`, `bm-ollama-transparent` |
 | Adapters | `bm-cli`, `bm-http`, `bm-wss`, `bm-mcp`, `bm-a2a` |
 
-The Cargo workspace is versioned as `0.4.0`. See the [0.4.0 release notes](docs/en/release-notes-0.4.0.md) before opening an existing persistent store. The repository includes five smoke-test examples under `examples/` and platform capability fixtures under `fixtures/platform/capabilities/`.
+The Cargo workspace is prepared as a local `0.5.0` source candidate. See the [0.5.0 source candidate notes](docs/en/release-notes-0.5.0.md) before opening or migrating an existing persistent store. The repository includes five smoke-test examples under `examples/` and platform capability fixtures under `fixtures/platform/capabilities/`.
 
 ## Capabilities
 
@@ -137,6 +137,7 @@ English documentation:
 - [Replay and Archive](docs/en/replay-and-archive.md)
 - [Operator Guide](docs/en/operator-guide.md)
 - [Release Checklist](docs/en/release-checklist.md)
+- [0.5.0 Source Candidate Notes](docs/en/release-notes-0.5.0.md)
 - [0.4.0 Release Notes](docs/en/release-notes-0.4.0.md)
 - [0.3.0 Release Notes](docs/en/release-notes-0.3.0.md)
 
@@ -155,6 +156,7 @@ English documentation:
 - [回放与归档](docs/zh-CN/replay-and-archive.md)
 - [运维与检查](docs/zh-CN/operator-guide.md)
 - [发布清单](docs/zh-CN/release-checklist.md)
+- [0.5.0 源码候选说明](docs/zh-CN/release-notes-0.5.0.md)
 - [0.4.0 发布说明](docs/zh-CN/release-notes-0.4.0.md)
 - [0.3.0 发布说明](docs/zh-CN/release-notes-0.3.0.md)
 

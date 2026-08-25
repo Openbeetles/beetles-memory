@@ -9,19 +9,24 @@ use bm_sdk::{
     DerivedMemoryRef, HostOpaqueRef, HostRefRelation, HostRefVisibility, LongTermMemoryDraft,
     LongTermMemoryKind, LongTermMemoryProvenance, MemoryArchiveScope, MemoryCandidateContent,
     MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
-    MemoryEvidenceAuthority, MemoryInspectionRequest, MemoryMaintenanceRequest, MemoryPrivacyClass,
-    MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest, MemoryReplayRequest,
-    MemorySemanticJudgmentSource, MemorySpaceExportRequest, MemorySpacePrivateMaterialPolicy,
-    MemorySubjectVisibilityPolicy, MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitRequest,
-    MemoryTranscriptExportRequest, MemoryTranscriptLifecycleRequest, MemoryTranscriptReplayRequest,
-    MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource,
-    MemoryWriteCandidate, MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel,
-    ProfileId, RuntimeLifecycleModeInput, RuntimeSkillOwningScope, RuntimeSkillReuseOutcome,
+    MemoryConversationListRequest, MemoryEvidenceAuthority, MemoryInspectionRequest,
+    MemoryMaintenanceRequest, MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryProjectionRequest,
+    MemoryRecallRequest, MemoryReplayRequest, MemorySemanticJudgmentSource,
+    MemorySpaceExportRequest, MemorySpaceImportRequest, MemorySpacePrivateMaterialPolicy,
+    MemorySubjectVisibilityPolicy, MemoryTranscriptActivityRequest,
+    MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitRequest, MemoryTranscriptExportRequest,
+    MemoryTranscriptLifecycleRequest, MemoryTranscriptReplayRequest, MemoryTranscriptSearchRequest,
+    MemoryTranscriptSearchScope, MemoryTranscriptTimelineRequest, MemoryTurnDeliveryStatus,
+    MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteCandidate,
+    MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel, ProfileId,
+    RuntimeLifecycleModeInput, RuntimeSkillOwningScope, RuntimeSkillReuseOutcome,
     TranscriptAttrEnvelope, TranscriptAttrGovernance, TranscriptAttrLink,
     TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
-    TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind, TranscriptEvidenceRef,
-    TranscriptInputMessage, TranscriptLifecycleTransition, TranscriptRedactionReason,
-    TranscriptReplayView,
+    TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind,
+    TranscriptCatalogLifecycle, TranscriptEvidenceRef, TranscriptInputMessage,
+    TranscriptLifecycleTransition, TranscriptQueryCursor, TranscriptRedactionReason,
+    TranscriptReplayView, TranscriptSearchLifecycle, TranscriptSearchSort,
+    TranscriptTimelineAnchor, TranscriptUtcRange,
 };
 use serde_json::json;
 
@@ -71,6 +76,15 @@ fn finalize_request(user: &str, assistant: &str) -> MemoryTurnFinalizeRequest {
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     }
+}
+
+fn indexed_transcript_turn(index: usize) -> CanonicalTurnDelta {
+    let mut request = finalize_request(
+        &format!("history user message {index}"),
+        &format!("history assistant message {index}"),
+    );
+    request.turn.turn_id = format!("history-turn-{index:03}");
+    request.turn
 }
 
 fn host_ref() -> HostOpaqueRef {
@@ -1609,6 +1623,126 @@ fn memory_space_export_redacts_raw_conversation_transcript_by_default() {
 }
 
 #[test]
+fn private_subject_archive_roundtrips_transcript_query_closure_with_fresh_cursor_authority() {
+    let profile = support::host_test_profile();
+    let source_store = empty_store_platform(profile);
+    let source = test_runtime_with_scope_and_subject(
+        source_store,
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    for index in 1..=9 {
+        let mut request = finalize_request(
+            &format!("archive cobalt message {index}"),
+            &format!("archive response {index}"),
+        );
+        request.turn.turn_id = format!("archive-turn-{index:02}");
+        source
+            .commit_transcript(MemoryTranscriptCommitRequest {
+                turn: request.turn,
+                host_refs: Vec::new(),
+            })
+            .unwrap();
+    }
+    let source_page = source
+        .query_transcript_timeline(MemoryTranscriptTimelineRequest {
+            channel_id: "llm.gateway".to_string(),
+            conversation_id: "conversation-a".to_string(),
+            anchor: TranscriptTimelineAnchor::Latest,
+            limit: 4,
+            cursor: None,
+            view: TranscriptReplayView::HostUi,
+        })
+        .unwrap();
+    let source_cursor = source_page.page.older_cursor.expect("source older cursor");
+
+    let scope = MemoryArchiveScope::subject(source.memory_space_id(), source.subject_id()).unwrap();
+    let exported = source
+        .export_memory_space(MemorySpaceExportRequest {
+            scope: scope.clone(),
+            private_material_policy: MemorySpacePrivateMaterialPolicy::IncludePrivate,
+        })
+        .unwrap();
+    for namespace in [
+        "conversation_transcript_catalog_pages",
+        "conversation_transcript_catalog_roots",
+        "conversation_transcript_time_postings",
+        "conversation_transcript_time_roots",
+        "conversation_transcript_search_postings",
+        "conversation_transcript_search_roots",
+        "conversation_transcript_search_message_manifests",
+    ] {
+        assert!(exported.archive.contains_json_namespace(namespace));
+    }
+    assert!(!exported
+        .archive
+        .contains_json_namespace("conversation_transcript_query_keyring_private"));
+    let expected_root = exported.archive.root().clone();
+
+    let target_store = empty_store_platform(profile);
+    let target = test_runtime_with_scope_and_subject(
+        target_store,
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    target
+        .import_memory_space(MemorySpaceImportRequest {
+            scope: scope.clone(),
+            expected_private_material_policy: MemorySpacePrivateMaterialPolicy::IncludePrivate,
+            archive: exported.archive,
+        })
+        .unwrap();
+
+    let restored_search = target
+        .search_transcripts(MemoryTranscriptSearchRequest {
+            scope: MemoryTranscriptSearchScope::ExactConversation {
+                channel_id: "llm.gateway".to_string(),
+                conversation_id: "conversation-a".to_string(),
+            },
+            query_text: "cobalt".to_string(),
+            sort: TranscriptSearchSort::ObservedAtDescending,
+            lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+            limit: 16,
+            cursor: None,
+            view: TranscriptReplayView::HostUi,
+        })
+        .unwrap();
+    assert_eq!(restored_search.page.hits.len(), 9);
+    let restored_timeline = target
+        .query_transcript_timeline(MemoryTranscriptTimelineRequest {
+            channel_id: "llm.gateway".to_string(),
+            conversation_id: "conversation-a".to_string(),
+            anchor: TranscriptTimelineAnchor::Latest,
+            limit: 4,
+            cursor: None,
+            view: TranscriptReplayView::HostUi,
+        })
+        .unwrap();
+    assert_eq!(restored_timeline.page.turns.len(), 4);
+    assert!(target
+        .query_transcript_timeline(MemoryTranscriptTimelineRequest {
+            channel_id: "llm.gateway".to_string(),
+            conversation_id: "conversation-a".to_string(),
+            anchor: TranscriptTimelineAnchor::Latest,
+            limit: 4,
+            cursor: Some(source_cursor),
+            view: TranscriptReplayView::HostUi,
+        })
+        .is_err());
+    let reexported = target
+        .export_memory_space(MemorySpaceExportRequest {
+            scope,
+            private_material_policy: MemorySpacePrivateMaterialPolicy::IncludePrivate,
+        })
+        .unwrap();
+    assert_eq!(reexported.archive.root(), &expected_root);
+}
+
+#[test]
 fn private_garden_self_work_records_private_garden_derived_refs_without_raw_content() {
     let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
@@ -1834,6 +1968,239 @@ fn runtime_replay_and_export_transcript_support_cursor_pages() {
 }
 
 #[test]
+fn desktop_embedded_timeline_starts_with_latest_eight_without_host_ui_specific_api() {
+    let profile = ProfileId::DesktopMacosEmbeddedSdk;
+    let platform = empty_store_platform(profile);
+    let runtime = test_runtime_with_scope_and_subject(
+        platform.clone(),
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    assert_eq!(
+        runtime
+            .runtime_budget()
+            .transcript_governance_budget
+            .transcript_page_size,
+        8
+    );
+    for index in 1..=17 {
+        runtime
+            .commit_transcript(MemoryTranscriptCommitRequest {
+                turn: indexed_transcript_turn(index),
+                host_refs: Vec::new(),
+            })
+            .unwrap();
+    }
+
+    let latest = runtime
+        .query_transcript_timeline(MemoryTranscriptTimelineRequest {
+            channel_id: "llm.gateway".to_string(),
+            conversation_id: "conversation-a".to_string(),
+            anchor: TranscriptTimelineAnchor::Latest,
+            limit: usize::MAX,
+            cursor: None,
+            view: TranscriptReplayView::HostUi,
+        })
+        .unwrap();
+    assert_eq!(
+        latest
+            .page
+            .turns
+            .iter()
+            .map(|turn| turn.sequence)
+            .collect::<Vec<_>>(),
+        (10..=17).collect::<Vec<_>>()
+    );
+    assert!(latest.page.has_older);
+    let older_cursor = latest
+        .page
+        .older_cursor
+        .clone()
+        .expect("latest page must issue an opaque older cursor");
+
+    let reopened_runtime = test_runtime_with_scope_and_subject(
+        platform,
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    let reopened_page = reopened_runtime
+        .query_transcript_timeline(MemoryTranscriptTimelineRequest {
+            channel_id: latest.page.key.channel_id.clone(),
+            conversation_id: latest.page.key.conversation_id.clone(),
+            anchor: TranscriptTimelineAnchor::Latest,
+            limit: usize::MAX,
+            cursor: Some(older_cursor.clone()),
+            view: TranscriptReplayView::HostUi,
+        })
+        .unwrap();
+    assert_eq!(
+        reopened_page
+            .page
+            .turns
+            .iter()
+            .map(|turn| turn.sequence)
+            .collect::<Vec<_>>(),
+        (2..=9).collect::<Vec<_>>()
+    );
+    let wrong_view = runtime
+        .query_transcript_timeline(MemoryTranscriptTimelineRequest {
+            channel_id: latest.page.key.channel_id.clone(),
+            conversation_id: latest.page.key.conversation_id.clone(),
+            anchor: TranscriptTimelineAnchor::Latest,
+            limit: usize::MAX,
+            cursor: Some(older_cursor.clone()),
+            view: TranscriptReplayView::OperatorAudit,
+        })
+        .unwrap_err();
+    assert!(wrong_view.to_string().contains("cursor"));
+    let wrong_limit = runtime
+        .query_transcript_timeline(MemoryTranscriptTimelineRequest {
+            channel_id: latest.page.key.channel_id.clone(),
+            conversation_id: latest.page.key.conversation_id.clone(),
+            anchor: TranscriptTimelineAnchor::Latest,
+            limit: 7,
+            cursor: Some(older_cursor.clone()),
+            view: TranscriptReplayView::HostUi,
+        })
+        .unwrap_err();
+    assert!(wrong_limit.to_string().contains("cursor"));
+    let mut tampered = older_cursor.into_encoded();
+    let replacement = if tampered.ends_with('0') { '1' } else { '0' };
+    tampered.pop();
+    tampered.push(replacement);
+    let tampered = TranscriptQueryCursor::try_from_encoded(tampered).unwrap();
+    let tamper_error = runtime
+        .query_transcript_timeline(MemoryTranscriptTimelineRequest {
+            channel_id: latest.page.key.channel_id.clone(),
+            conversation_id: latest.page.key.conversation_id.clone(),
+            anchor: TranscriptTimelineAnchor::Latest,
+            limit: usize::MAX,
+            cursor: Some(tampered),
+            view: TranscriptReplayView::HostUi,
+        })
+        .unwrap_err();
+    assert!(tamper_error.to_string().contains("cursor"));
+
+    let middle = runtime
+        .query_transcript_timeline(MemoryTranscriptTimelineRequest {
+            channel_id: latest.page.key.channel_id.clone(),
+            conversation_id: latest.page.key.conversation_id.clone(),
+            anchor: TranscriptTimelineAnchor::Latest,
+            limit: usize::MAX,
+            cursor: latest.page.older_cursor,
+            view: TranscriptReplayView::HostUi,
+        })
+        .unwrap();
+    assert_eq!(
+        middle
+            .page
+            .turns
+            .iter()
+            .map(|turn| turn.sequence)
+            .collect::<Vec<_>>(),
+        (2..=9).collect::<Vec<_>>()
+    );
+    assert!(middle.page.has_older);
+
+    let oldest = runtime
+        .query_transcript_timeline(MemoryTranscriptTimelineRequest {
+            channel_id: middle.page.key.channel_id.clone(),
+            conversation_id: middle.page.key.conversation_id.clone(),
+            anchor: TranscriptTimelineAnchor::Latest,
+            limit: usize::MAX,
+            cursor: middle.page.older_cursor,
+            view: TranscriptReplayView::HostUi,
+        })
+        .unwrap();
+    assert_eq!(
+        oldest
+            .page
+            .turns
+            .iter()
+            .map(|turn| turn.sequence)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert!(!oldest.page.has_older);
+    assert!(oldest.page.older_cursor.is_none());
+
+    let forward = runtime
+        .replay_transcript(MemoryTranscriptReplayRequest {
+            memory_space_id: runtime.memory_space_id().to_string(),
+            channel_id: "llm.gateway".to_string(),
+            conversation_id: "conversation-a".to_string(),
+            limit: 1,
+            cursor: None,
+            view: TranscriptReplayView::HostUi,
+        })
+        .unwrap();
+    assert_eq!(forward.slice.turns[0].sequence, 1);
+}
+
+#[test]
+fn transcript_search_cursor_pages_are_stable_without_overlap_or_omission() {
+    let profile = ProfileId::DesktopMacosEmbeddedSdk;
+    let platform = empty_store_platform(profile);
+    let runtime = test_runtime_with_scope_and_subject(
+        platform,
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    for index in 1..=17 {
+        let mut turn = indexed_transcript_turn(index);
+        turn.input_messages[0].content = format!("cobalt searchable turn {index}");
+        turn.input_messages[0].observed_at = 10_000 + index as u64;
+        turn.assistant_message.as_mut().unwrap().content = "ordinary answer".to_string();
+        turn.assistant_message.as_mut().unwrap().observed_at = 10_000 + index as u64;
+        runtime
+            .commit_transcript(MemoryTranscriptCommitRequest {
+                turn,
+                host_refs: Vec::new(),
+            })
+            .unwrap();
+    }
+    let key =
+        ConversationKey::new(runtime.memory_space_id(), "llm.gateway", "conversation-a").unwrap();
+    let mut cursor = None;
+    let mut turn_ids = Vec::new();
+    loop {
+        let page = runtime
+            .search_transcripts(MemoryTranscriptSearchRequest {
+                scope: MemoryTranscriptSearchScope::ExactConversation {
+                    channel_id: key.channel_id.clone(),
+                    conversation_id: key.conversation_id.clone(),
+                },
+                query_text: "cobalt".to_string(),
+                sort: TranscriptSearchSort::ObservedAtDescending,
+                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+                limit: 8,
+                cursor,
+                view: TranscriptReplayView::HostUi,
+            })
+            .unwrap()
+            .page;
+        turn_ids.extend(page.hits.iter().map(|hit| hit.locator.turn_id.clone()));
+        if !page.has_more {
+            assert!(page.next_cursor.is_none());
+            break;
+        }
+        cursor = Some(
+            page.next_cursor
+                .expect("has_more requires an opaque cursor"),
+        );
+    }
+    assert_eq!(turn_ids.len(), 17);
+    let unique = turn_ids.iter().collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(unique.len(), 17);
+}
+
+#[test]
 fn manual_transcript_commit_is_idempotent_by_transcript_turn_even_if_session_shadow_was_cleared() {
     let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
@@ -2047,4 +2414,413 @@ fn runtime_transcript_requests_reject_other_memory_space() {
         })
         .unwrap_err();
     assert!(lifecycle_err.to_string().contains("memory_space_id"));
+}
+
+#[test]
+fn transcript_query_surfaces_fail_closed_cross_subject_and_runtime_owns_memory_space() {
+    let profile = support::host_test_profile();
+    let platform = empty_store_platform(profile);
+    let owner_runtime = test_runtime_with_scope_and_subject(
+        platform.clone(),
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    owner_runtime
+        .commit_transcript(MemoryTranscriptCommitRequest {
+            turn: finalize_request("scope cobalt evidence", "owner response").turn,
+            host_refs: Vec::new(),
+        })
+        .unwrap();
+    let other_runtime = test_runtime_with_scope_and_subject(
+        platform,
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-other",
+    );
+    let memory_space_id = other_runtime.memory_space_id().to_string();
+    let key =
+        ConversationKey::new(memory_space_id.clone(), "llm.gateway", "conversation-a").unwrap();
+
+    let catalog = other_runtime
+        .list_conversations(MemoryConversationListRequest {
+            channel_id: None,
+            lifecycle: TranscriptCatalogLifecycle::ActiveOnly,
+            limit: 8,
+            cursor: None,
+            view: TranscriptReplayView::HostUi,
+        })
+        .unwrap();
+    assert!(catalog.page.conversations.is_empty());
+
+    let search = other_runtime
+        .search_transcripts(MemoryTranscriptSearchRequest {
+            scope: MemoryTranscriptSearchScope::MountedSubject { channel_id: None },
+            query_text: "cobalt".to_string(),
+            sort: TranscriptSearchSort::RelevanceThenObservedAt,
+            lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+            limit: 8,
+            cursor: None,
+            view: TranscriptReplayView::HostUi,
+        })
+        .unwrap();
+    assert!(search.page.hits.is_empty());
+
+    assert!(other_runtime
+        .query_transcript_timeline(MemoryTranscriptTimelineRequest {
+            channel_id: key.channel_id,
+            conversation_id: key.conversation_id,
+            anchor: TranscriptTimelineAnchor::Latest,
+            limit: 8,
+            cursor: None,
+            view: TranscriptReplayView::HostUi,
+        })
+        .is_err());
+}
+
+#[test]
+fn masked_and_raw_deleted_turns_are_exact_zero_across_query_surfaces() {
+    for transition in [
+        TranscriptLifecycleTransition::Mask,
+        TranscriptLifecycleTransition::DeleteRaw,
+    ] {
+        let profile = support::host_test_profile();
+        let platform = empty_store_platform(profile);
+        let runtime = test_runtime_with_scope_and_subject(
+            platform,
+            profile,
+            "llm.gateway",
+            "chat-a",
+            "subject-default",
+        );
+        let commit = runtime
+            .commit_transcript(MemoryTranscriptCommitRequest {
+                turn: finalize_request("privacy cobalt evidence", "ordinary response").turn,
+                host_refs: Vec::new(),
+            })
+            .unwrap();
+        let turn_id = commit.transcript_commit.unwrap().turn_id;
+        let key = ConversationKey::new(runtime.memory_space_id(), "llm.gateway", "conversation-a")
+            .unwrap();
+        let positive = runtime
+            .search_transcripts(MemoryTranscriptSearchRequest {
+                scope: MemoryTranscriptSearchScope::ExactConversation {
+                    channel_id: key.channel_id.clone(),
+                    conversation_id: key.conversation_id.clone(),
+                },
+                query_text: "cobalt".to_string(),
+                sort: TranscriptSearchSort::RelevanceThenObservedAt,
+                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+                limit: 8,
+                cursor: None,
+                view: TranscriptReplayView::HostUi,
+            })
+            .unwrap();
+        assert_eq!(positive.page.hits.len(), 1);
+        let observed_at = positive.page.hits[0].locator.observed_at;
+        let range = TranscriptUtcRange {
+            start_inclusive: observed_at,
+            end_exclusive: observed_at + 1,
+        };
+        let positive_activity = runtime
+            .query_transcript_activity(MemoryTranscriptActivityRequest {
+                channel_id: key.channel_id.clone(),
+                conversation_id: key.conversation_id.clone(),
+                ranges: vec![range],
+                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+                view: TranscriptReplayView::HostUi,
+            })
+            .unwrap();
+        assert!(positive_activity.activity.buckets[0].visible_message_count > 0);
+
+        runtime
+            .request_transcript_lifecycle(MemoryTranscriptLifecycleRequest {
+                memory_space_id: runtime.memory_space_id().to_string(),
+                channel_id: "llm.gateway".to_string(),
+                conversation_id: "conversation-a".to_string(),
+                turn_id: Some(turn_id),
+                transition,
+                reason: "query_privacy_exact_zero".to_string(),
+            })
+            .unwrap();
+
+        let catalog = runtime
+            .list_conversations(MemoryConversationListRequest {
+                channel_id: None,
+                lifecycle: TranscriptCatalogLifecycle::ActiveAndArchived,
+                limit: 8,
+                cursor: None,
+                view: TranscriptReplayView::HostUi,
+            })
+            .unwrap();
+        assert!(catalog.page.conversations.is_empty());
+        let timeline = runtime
+            .query_transcript_timeline(MemoryTranscriptTimelineRequest {
+                channel_id: key.channel_id.clone(),
+                conversation_id: key.conversation_id.clone(),
+                anchor: TranscriptTimelineAnchor::Latest,
+                limit: 8,
+                cursor: None,
+                view: TranscriptReplayView::HostUi,
+            })
+            .unwrap();
+        assert!(timeline.page.turns.is_empty());
+        let search = runtime
+            .search_transcripts(MemoryTranscriptSearchRequest {
+                scope: MemoryTranscriptSearchScope::ExactConversation {
+                    channel_id: key.channel_id.clone(),
+                    conversation_id: key.conversation_id.clone(),
+                },
+                query_text: "cobalt".to_string(),
+                sort: TranscriptSearchSort::RelevanceThenObservedAt,
+                lifecycle: TranscriptSearchLifecycle::ActiveAndArchived,
+                limit: 8,
+                cursor: None,
+                view: TranscriptReplayView::HostUi,
+            })
+            .unwrap();
+        assert!(search.page.hits.is_empty());
+        let activity = runtime
+            .query_transcript_activity(MemoryTranscriptActivityRequest {
+                channel_id: key.channel_id,
+                conversation_id: key.conversation_id,
+                ranges: vec![range],
+                lifecycle: TranscriptSearchLifecycle::ActiveAndArchived,
+                view: TranscriptReplayView::HostUi,
+            })
+            .unwrap();
+        assert_eq!(activity.activity.buckets[0].visible_message_count, 0);
+        assert!(activity.activity.buckets[0].first_visible_anchor.is_none());
+        assert!(activity.activity.buckets[0].last_visible_anchor.is_none());
+    }
+}
+
+#[test]
+fn private_authority_messages_are_exact_zero_before_runtime_query_hydration() {
+    for authority in [
+        MemoryEvidenceAuthority::PrivateGardenInternal,
+        MemoryEvidenceAuthority::SoulGovernance,
+        MemoryEvidenceAuthority::OperatorDiagnostic,
+    ] {
+        let profile = support::host_test_profile();
+        let platform = empty_store_platform(profile);
+        let runtime = test_runtime_with_scope_and_subject(
+            platform,
+            profile,
+            "llm.gateway",
+            "chat-a",
+            "subject-default",
+        );
+        let mut request = finalize_request("private cobalt authority", "public amber sentinel");
+        request.turn.input_messages[0].authority = authority;
+        runtime
+            .commit_transcript(MemoryTranscriptCommitRequest {
+                turn: request.turn,
+                host_refs: Vec::new(),
+            })
+            .unwrap();
+
+        let private = runtime
+            .search_transcripts(MemoryTranscriptSearchRequest {
+                scope: MemoryTranscriptSearchScope::ExactConversation {
+                    channel_id: "llm.gateway".to_string(),
+                    conversation_id: "conversation-a".to_string(),
+                },
+                query_text: "cobalt".to_string(),
+                sort: TranscriptSearchSort::ObservedAtDescending,
+                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+                limit: 8,
+                cursor: None,
+                view: TranscriptReplayView::HostUi,
+            })
+            .unwrap();
+        assert!(private.page.hits.is_empty(), "authority={authority:?}");
+        assert!(!private.page.has_more, "authority={authority:?}");
+        assert!(
+            private.page.next_cursor.is_none(),
+            "authority={authority:?}"
+        );
+
+        let public = runtime
+            .search_transcripts(MemoryTranscriptSearchRequest {
+                scope: MemoryTranscriptSearchScope::ExactConversation {
+                    channel_id: "llm.gateway".to_string(),
+                    conversation_id: "conversation-a".to_string(),
+                },
+                query_text: "amber".to_string(),
+                sort: TranscriptSearchSort::ObservedAtDescending,
+                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+                limit: 8,
+                cursor: None,
+                view: TranscriptReplayView::HostUi,
+            })
+            .unwrap();
+        assert_eq!(public.page.hits.len(), 1, "authority={authority:?}");
+        let observed_at = public.page.hits[0].locator.observed_at;
+        let activity = runtime
+            .query_transcript_activity(MemoryTranscriptActivityRequest {
+                channel_id: "llm.gateway".to_string(),
+                conversation_id: "conversation-a".to_string(),
+                ranges: vec![TranscriptUtcRange::new(
+                    observed_at.saturating_sub(1),
+                    observed_at.saturating_add(1),
+                )
+                .unwrap()],
+                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+                view: TranscriptReplayView::HostUi,
+            })
+            .unwrap();
+        assert_eq!(
+            activity.activity.buckets[0].visible_message_count, 1,
+            "authority={authority:?}"
+        );
+    }
+}
+
+#[test]
+fn search_hit_and_utc_half_open_activity_jump_into_the_same_timeline() {
+    let profile = support::host_test_profile();
+    let platform = empty_store_platform(profile);
+    let runtime = test_runtime_with_scope_and_subject(
+        platform,
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    let mut before = indexed_transcript_turn(1);
+    before.input_messages[0].content = "before boundary".to_string();
+    before.input_messages[0].observed_at = 86_399;
+    before.assistant_message.as_mut().unwrap().observed_at = 86_399;
+    let mut at = indexed_transcript_turn(2);
+    at.input_messages[0].content = "calendar cobalt jump".to_string();
+    at.input_messages[0].observed_at = 86_400;
+    at.assistant_message.as_mut().unwrap().observed_at = 86_400;
+    for turn in [before, at] {
+        runtime
+            .commit_transcript(MemoryTranscriptCommitRequest {
+                turn,
+                host_refs: Vec::new(),
+            })
+            .unwrap();
+    }
+    let key =
+        ConversationKey::new(runtime.memory_space_id(), "llm.gateway", "conversation-a").unwrap();
+    let search = runtime
+        .search_transcripts(MemoryTranscriptSearchRequest {
+            scope: MemoryTranscriptSearchScope::ExactConversation {
+                channel_id: key.channel_id.clone(),
+                conversation_id: key.conversation_id.clone(),
+            },
+            query_text: "cobalt".to_string(),
+            sort: TranscriptSearchSort::ObservedAtDescending,
+            lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+            limit: 8,
+            cursor: None,
+            view: TranscriptReplayView::HostUi,
+        })
+        .unwrap();
+    assert_eq!(search.page.hits.len(), 1);
+    assert!(!search.page.hits[0].excerpt.highlights.is_empty());
+    let timeline = runtime
+        .query_transcript_timeline(MemoryTranscriptTimelineRequest {
+            channel_id: key.channel_id.clone(),
+            conversation_id: key.conversation_id.clone(),
+            anchor: TranscriptTimelineAnchor::Around(search.page.hits[0].anchor.clone()),
+            limit: 8,
+            cursor: None,
+            view: TranscriptReplayView::HostUi,
+        })
+        .unwrap();
+    assert!(timeline
+        .page
+        .turns
+        .iter()
+        .any(|turn| turn.turn_id == search.page.hits[0].locator.turn_id));
+
+    let activity = runtime
+        .query_transcript_activity(MemoryTranscriptActivityRequest {
+            channel_id: key.channel_id,
+            conversation_id: key.conversation_id,
+            ranges: vec![
+                TranscriptUtcRange {
+                    start_inclusive: 86_399,
+                    end_exclusive: 86_400,
+                },
+                TranscriptUtcRange {
+                    start_inclusive: 86_400,
+                    end_exclusive: 86_401,
+                },
+            ],
+            lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+            view: TranscriptReplayView::HostUi,
+        })
+        .unwrap();
+    assert_eq!(activity.activity.buckets[0].visible_message_count, 2);
+    assert_eq!(activity.activity.buckets[1].visible_message_count, 2);
+    assert_eq!(
+        activity.activity.buckets[1]
+            .first_visible_anchor
+            .as_ref()
+            .unwrap()
+            .locator
+            .observed_at,
+        86_400
+    );
+}
+
+#[test]
+fn compact_profiles_fail_closed_for_indexed_query_without_hiding_catalog() {
+    let profile = ProfileId::EspEmbeddedSdk;
+    let platform = empty_store_platform(profile);
+    let runtime = test_runtime_with_scope_and_subject(
+        platform,
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    let catalog = runtime
+        .list_conversations(MemoryConversationListRequest {
+            channel_id: None,
+            lifecycle: TranscriptCatalogLifecycle::ActiveOnly,
+            limit: 8,
+            cursor: None,
+            view: TranscriptReplayView::HostUi,
+        })
+        .unwrap();
+    assert!(catalog.page.conversations.is_empty());
+
+    let search_error = runtime
+        .search_transcripts(MemoryTranscriptSearchRequest {
+            scope: MemoryTranscriptSearchScope::MountedSubject { channel_id: None },
+            query_text: "cobalt".to_string(),
+            sort: TranscriptSearchSort::RelevanceThenObservedAt,
+            lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+            limit: 8,
+            cursor: None,
+            view: TranscriptReplayView::HostUi,
+        })
+        .unwrap_err();
+    assert!(search_error
+        .to_string()
+        .contains("query.transcript.search is not visible"));
+
+    let activity_error = runtime
+        .query_transcript_activity(MemoryTranscriptActivityRequest {
+            channel_id: "llm.gateway".to_string(),
+            conversation_id: "conversation-a".to_string(),
+            ranges: vec![TranscriptUtcRange {
+                start_inclusive: 1,
+                end_exclusive: 2,
+            }],
+            lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+            view: TranscriptReplayView::HostUi,
+        })
+        .unwrap_err();
+    assert!(activity_error
+        .to_string()
+        .contains("query.transcript.activity is not visible"));
 }
