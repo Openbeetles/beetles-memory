@@ -145,6 +145,7 @@ compile_error!("nonproduction-replay-harness cannot be combined with a productio
 mod capability;
 mod capability_snapshot;
 mod governed_report;
+mod learning;
 mod mutation_capability;
 mod ops;
 #[cfg(feature = "nonproduction-replay-harness")]
@@ -247,29 +248,35 @@ pub use bm_core::memory::{
     MemoryMutationOperationKind, MemoryMutationReceipt, MemoryPlaneGovernanceReport,
     MemoryPrivacyClass, MemorySemanticJudgmentSource, MemorySubjectVisibilityPolicy,
     MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteAuthority,
-    MemoryWriteCandidate, MemoryWriteDomain, PostTurnGovernanceAttemptAuthorityV2,
-    PostTurnGovernanceErrorClassV2, PostTurnGovernanceIdentityV2, PostTurnGovernanceJobRefV1,
-    PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV2, PostTurnGovernanceReceiptV2,
-    PostTurnGovernanceReconciliationCursorV1, PostTurnGovernanceScopeIndexV2,
-    PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport, PrivateDocEntry,
-    PrivateDocWorkspace, PrivateGardenAdmissionDecision, PrivateGardenGovernanceManifestAction,
-    PrivateGardenGovernanceManifestEntry, RedactedTranscriptSlice, RelationshipAccessConstraintV1,
-    RelationshipConstraintLatticeV1, RelationshipDisclosureCeilingV1,
-    RelationshipSourceAuthorityKindV1, RelationshipSourceClausesV1,
-    RelationshipSourceConstitutionV1, RelationshipSourceControlActionV1,
-    RelationshipSourceControlAuthorityV1, RelationshipSourceControlContractErrorV1,
-    RelationshipSourceControlErrorKeyV1, RelationshipSourceControlIntentActionV1,
-    RelationshipSourceControlIntentV1, RelationshipSourceControlOutcomeV1,
-    RelationshipSourceControlPlanV1, RelationshipSourceControlReportV1,
-    RelationshipSourceControlResultV1, RelationshipSourceExpectedStateV1,
-    RelationshipSourceProvenanceV1, RelationshipSourceReadRequestV1,
-    RelationshipSourceReadSelectorV1, RelationshipSourceScopeManifestV1, RelationshipSourceStateV1,
-    SessionTurnCommitReport, SharedFactWriteGovernanceContext, SharedMemoryWriteOutcome,
-    SoulCandidateDisposition, SoulCandidateHandoffReport, SubjectDescriptor, SubjectKind,
-    SubjectLifecycleState, SubjectRegistry, SubjectRelationshipEdge, SubjectRelationshipGraph,
-    SubjectRelationshipKind, SubjectScopedRuntime, SubjectSoulBinding,
-    SubjectSoulConstitutionalViewV1, SubjectSoulContractError, SubjectSoulContractResult,
-    SubjectSoulExpectedStateV1, SubjectSoulFoundingCharterSeedV1, SubjectSoulGenerationTombstoneV1,
+    MemoryWriteCandidate, MemoryWriteDomain, PostTurnGovernanceAttemptAuthorityV3,
+    PostTurnGovernanceBindingRevisionIndexV1, PostTurnGovernanceBindingRevisionRefV1,
+    PostTurnGovernanceBindingSnapshotV1, PostTurnGovernanceDecisionDispositionV1,
+    PostTurnGovernanceDecisionSummaryV1, PostTurnGovernanceErrorClassV2,
+    PostTurnGovernanceExecutionBindingV1, PostTurnGovernanceExecutionBlockAuthorityV1,
+    PostTurnGovernanceExecutionBlockReasonV1, PostTurnGovernanceIdentityV2,
+    PostTurnGovernanceJobRefV2, PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV3,
+    PostTurnGovernancePrivacyAuthorityV1, PostTurnGovernanceProviderProtocolV1,
+    PostTurnGovernanceReceiptV3, PostTurnGovernanceReconciliationCursorV1,
+    PostTurnGovernanceScopeIndexV3, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
+    PrivateDocEntry, PrivateDocWorkspace, PrivateGardenAdmissionDecision,
+    PrivateGardenGovernanceManifestAction, PrivateGardenGovernanceManifestEntry,
+    RedactedTranscriptSlice, RelationshipAccessConstraintV1, RelationshipConstraintLatticeV1,
+    RelationshipDisclosureCeilingV1, RelationshipSourceAuthorityKindV1,
+    RelationshipSourceClausesV1, RelationshipSourceConstitutionV1,
+    RelationshipSourceControlActionV1, RelationshipSourceControlAuthorityV1,
+    RelationshipSourceControlContractErrorV1, RelationshipSourceControlErrorKeyV1,
+    RelationshipSourceControlIntentActionV1, RelationshipSourceControlIntentV1,
+    RelationshipSourceControlOutcomeV1, RelationshipSourceControlPlanV1,
+    RelationshipSourceControlReportV1, RelationshipSourceControlResultV1,
+    RelationshipSourceExpectedStateV1, RelationshipSourceProvenanceV1,
+    RelationshipSourceReadRequestV1, RelationshipSourceReadSelectorV1,
+    RelationshipSourceScopeManifestV1, RelationshipSourceStateV1, SessionTurnCommitReport,
+    SharedFactWriteGovernanceContext, SharedMemoryWriteOutcome, SoulCandidateDisposition,
+    SoulCandidateHandoffReport, SubjectDescriptor, SubjectKind, SubjectLifecycleState,
+    SubjectRegistry, SubjectRelationshipEdge, SubjectRelationshipGraph, SubjectRelationshipKind,
+    SubjectScopedRuntime, SubjectSoulBinding, SubjectSoulConstitutionalViewV1,
+    SubjectSoulContractError, SubjectSoulContractResult, SubjectSoulExpectedStateV1,
+    SubjectSoulFoundingCharterSeedV1, SubjectSoulGenerationTombstoneV1,
     SubjectSoulLifecycleActionV1, SubjectSoulLifecycleAuthorityV1, SubjectSoulLifecycleErrorKey,
     SubjectSoulLifecycleMutationRequestV1, SubjectSoulLifecycleStateV1,
     SubjectSoulManifestOwnerRoleV1, SubjectSoulMutationOutcomeV1, SubjectSoulMutationReportV1,
@@ -366,6 +373,15 @@ pub use capability_snapshot::{
     PlatformIndexedRecallSnapshot, PlatformLifecycleSnapshot, PlatformMemoryOperationSnapshot,
     PlatformValidationSnapshot, PLATFORM_CAPABILITY_SNAPSHOT_SCHEMA,
 };
+pub use learning::{
+    AuthorizedGovernanceEnvelope, GovernanceEgressAuthority, GovernanceExecutionOperation,
+    GovernanceExecutionPort, GovernanceExecutionPortFailure, ImmutableGovernanceExecutionBinding,
+    MemoryLearningAttachmentIdentity, MemoryLearningAttachmentStatusAuthority,
+    MemoryLearningCycleOutcome, MemoryLearningCycleRequest, MemoryLearningEngine,
+    MemoryLearningServiceControlAuthorities, MemoryLearningServiceControlAuthority,
+    MemoryLearningServiceControlOperation, MemoryLearningServiceStatusAuthority,
+    MemoryLearningStateReport, MemoryLearningWakeSink,
+};
 pub use ops::{
     GovernedRuntimeSkillWriteInput, GovernedScopeArchiveEntry, GovernedScopeArchiveRootV1,
     MemoryArchiveScope, MemoryCloseReport, MemoryCloseRequest, MemoryConsolidationReport,
@@ -382,19 +398,13 @@ pub use ops::{
     MemoryEvalRecallStageEvidenceRefs, MemoryEvidenceDocumentMutation,
     MemoryEvidenceDocumentReadReport, MemoryEvidenceDocumentReadRequest,
     MemoryEvidenceDocumentView, MemoryEvidenceDocumentWriteSummary, MemoryEvidenceRefView,
-    MemoryEvidenceRefVisibility, MemoryFacetRecallIndexReport, MemoryGovernanceActiveJobsReport,
-    MemoryGovernanceActiveJobsRequest, MemoryGovernanceAttemptAuthorityReport,
-    MemoryGovernanceAttemptAuthorityRequest, MemoryGovernanceBlockKind,
-    MemoryGovernanceClaimedJobBlockReport, MemoryGovernanceClaimedJobBlockRequest,
-    MemoryGovernanceJobBlockReport, MemoryGovernanceJobBlockRequest,
-    MemoryGovernanceJobClaimReport, MemoryGovernanceJobClaimRequest, MemoryGovernanceJobFailReport,
-    MemoryGovernanceJobFailRequest, MemoryGovernanceJobRenewReport,
-    MemoryGovernanceJobRenewRequest, MemoryGovernanceJobResumeReport,
-    MemoryGovernanceJobResumeRequest, MemoryGovernanceJobRetryReport,
-    MemoryGovernanceJobRetryRequest, MemoryGovernanceJobRunReport, MemoryGovernanceJobRunRequest,
-    MemoryGovernanceJobStatusReport, MemoryGovernanceJobStatusRequest,
-    MemoryGovernancePolicyMutationReport, MemoryGovernanceReconcileReport,
-    MemoryGovernanceReconcileRequest, MemoryGraphIntegrityMaintenanceReport,
+    MemoryEvidenceRefVisibility, MemoryFacetRecallIndexReport,
+    MemoryGovernanceBindingInstallReport, MemoryGovernanceBindingInstallRequest,
+    MemoryGovernanceCredentialChangedReport, MemoryGovernanceCredentialChangedRequest,
+    MemoryGovernanceJobRunReport, MemoryGovernanceJobStatusReport,
+    MemoryGovernanceJobStatusRequest, MemoryGovernancePolicyMutationReport,
+    MemoryGovernanceProviderPermissionChangedReport,
+    MemoryGovernanceProviderPermissionChangedRequest, MemoryGraphIntegrityMaintenanceReport,
     MemoryGraphIntegrityMaintenanceRequest, MemoryGraphRecallIndexReport, MemoryInspectionReport,
     MemoryInspectionRequest, MemoryLongTermDetailReport, MemoryLongTermDetailRequest,
     MemoryLongTermListReport, MemoryLongTermListRequest, MemoryLongTermMutationReport,
@@ -434,6 +444,34 @@ pub use ops::{
     GOVERNED_SCOPE_ARCHIVE_ROOT_SCHEMA_VERSION, MEMORY_PROJECTION_DELIVERY_DIGEST_SCHEMA_VERSION,
     MEMORY_RECALL_DELIVERY_SCHEMA_VERSION,
 };
+
+#[cfg(feature = "nonproduction-replay-harness")]
+pub use ops::{
+    MemoryGovernanceActiveJobsReport, MemoryGovernanceActiveJobsRequest,
+    MemoryGovernanceAttemptAuthorityReport, MemoryGovernanceAttemptAuthorityRequest,
+    MemoryGovernanceBlockKind, MemoryGovernanceClaimedJobBlockReport,
+    MemoryGovernanceClaimedJobBlockRequest, MemoryGovernanceJobBlockReport,
+    MemoryGovernanceJobBlockRequest, MemoryGovernanceJobClaimReport,
+    MemoryGovernanceJobClaimRequest, MemoryGovernanceJobFailReport, MemoryGovernanceJobFailRequest,
+    MemoryGovernanceJobRenewReport, MemoryGovernanceJobRenewRequest,
+    MemoryGovernanceJobResumeReport, MemoryGovernanceJobResumeRequest,
+    MemoryGovernanceJobRetryReport, MemoryGovernanceJobRetryRequest, MemoryGovernanceJobRunRequest,
+    MemoryGovernanceReconcileReport, MemoryGovernanceReconcileRequest,
+};
+
+#[cfg(not(feature = "nonproduction-replay-harness"))]
+pub(crate) use ops::{
+    MemoryGovernanceActiveJobsReport, MemoryGovernanceActiveJobsRequest,
+    MemoryGovernanceAttemptAuthorityReport, MemoryGovernanceAttemptAuthorityRequest,
+    MemoryGovernanceBlockKind, MemoryGovernanceClaimedJobBlockReport,
+    MemoryGovernanceClaimedJobBlockRequest, MemoryGovernanceJobBlockReport,
+    MemoryGovernanceJobBlockRequest, MemoryGovernanceJobClaimReport,
+    MemoryGovernanceJobClaimRequest, MemoryGovernanceJobFailReport, MemoryGovernanceJobFailRequest,
+    MemoryGovernanceJobRenewReport, MemoryGovernanceJobRenewRequest,
+    MemoryGovernanceJobResumeReport, MemoryGovernanceJobResumeRequest,
+    MemoryGovernanceJobRetryReport, MemoryGovernanceJobRetryRequest, MemoryGovernanceJobRunRequest,
+    MemoryGovernanceReconcileReport, MemoryGovernanceReconcileRequest,
+};
 pub use runtime::{
     MemoryAuditEvent, MemoryAuditSink, MemoryClock, MemoryIdentity, MemoryRuntime,
     MemoryRuntimeBuilder, MemoryRuntimeConfig, MemoryScope, NoopMemoryAuditSink,
@@ -443,8 +481,7 @@ pub use runtime::{
 pub use store::NonproductionStorePreparation;
 pub use store::{
     profile_memory_system_kind, MemoryStoreHandle, StoreBackendConfig, StoreBackendKind,
-    StoreCapacityBudget, StoreMigrationReport, StoreOpenReport, StorePathBudget, StoreRepairPolicy,
-    StoreRepairReport,
+    StoreCapacityBudget, StoreOpenReport, StorePathBudget, StoreRepairPolicy, StoreRepairReport,
 };
 
 #[cfg(feature = "nonproduction-replay-harness")]

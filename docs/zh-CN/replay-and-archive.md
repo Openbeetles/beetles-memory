@@ -78,7 +78,7 @@ CTQ1 continuation value 统一为 Store-owned opaque `TranscriptQueryCursor`。�
 
 日期导航由宿主按用户 IANA timezone 把本地日期转换成 UTC `[start_inclusive, end_exclusive)`。Memory 只接受 canonical range，不猜测或持久化宿主时区。DST 本地日可能为 23 或 25 小时，宿主不能固定增加 86400 秒。Search/activity hydrate canonical turn 后重新执行请求 view；masked/raw-deleted material 的可见结果必须 exact-zero，也不能 fallback legacy archive search 或宿主自建 index。
 
-本地 0.5.0 source candidate 的 CTQ1 engineering 已完成。InMemory/File/SQLite 原子 head/catalog/time/search closure、持久 reopen、显式合成 v10->v11 migration、repair/archive closure、private authority exact-zero 与严格回归证据均为 GREEN。该结论不表示 Git tag、crates.io/托管 Release、真实数据迁移或运行时/UAT 已执行。
+0.6.0 source candidate 在 Store v12 下继续保持 CTQ1 的 InMemory/File/SQLite 原子 head/catalog/time/search closure 与持久 reopen。Store v11 不提供 compatibility reader 或 migration path；旧代开发数据必须明确重建。Repair/archive closure、private authority exact-zero 与严格回归证据继续是发布门禁。该结论不表示真实数据处理、crates.io/托管 Release 或运行时/UAT 已执行。
 
 Transcript attrs 会跟随 target turn/message 一起 replay。`TranscriptAttrEnvelope` 只用于模型用量、latency、retry status、附件摘要、provenance 标签等轻量 metadata；它不替代宿主拥有的 task、capability call、artifact、human gate、file workspace 或 governance command/report 本体。`HostUi` 只看到 HostUi-visible attrs，`ModelContext` 只看到 model-context attrs，`Export` 只看到 export-visible 且 `export_allowed=true` 的 attrs。Profile budget 可以裁剪每 turn/message 可见 attrs，并在 `TranscriptRedactionReportItem` 中用 `AttrValueBudget`、`attr_id`、`attr_key` 记录；当裁剪来自 profile ceiling 时，replay audit 也会记录 `ProfileBudget`。
 

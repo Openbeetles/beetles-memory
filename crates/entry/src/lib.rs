@@ -5,11 +5,11 @@ mod auth;
 mod config;
 mod console;
 mod error;
-mod governance_coordinator;
 mod governance_model;
 mod governance_model_client;
 mod http_ingress;
 mod idempotency;
+mod learning_service;
 mod network_front;
 mod response;
 mod runtime;
@@ -43,9 +43,6 @@ pub use console::{
     EntryConsoleWorkbenchStatus,
 };
 pub use error::EntryErrorKey;
-pub use governance_coordinator::{
-    EntryGovernanceCoordinatorReport, EntryGovernanceCoordinatorState,
-};
 pub use governance_model::{
     EntryGovernanceModelAuthMode, EntryGovernanceModelConfigUpdate, EntryGovernanceModelConfigView,
     EntryGovernanceModelExecutionBinding, EntryGovernanceModelProbePlan,
@@ -63,6 +60,13 @@ pub use http_ingress::{
     EntryHttpIngressError, EntryHttpIngressErrorKind, EntryHttpIngressLimits, EntryHttpRequestHead,
 };
 pub use idempotency::EntryIdempotencyCache;
+pub use learning_service::{
+    EnvironmentGovernanceCredentialResolver, GovernanceBindingSource, GovernanceCredentialRequest,
+    GovernanceCredentialResolver, GovernanceProviderBinding, MemoryLearningAttachment,
+    MemoryLearningAttachmentReport, MemoryLearningAttachmentStatusRequest, MemoryLearningService,
+    MemoryLearningServiceBuilder, MemoryLearningServiceReport, MemoryLearningServiceStatusRequest,
+    MemoryLearningWorkerLimits, ResolvedGovernanceCredential,
+};
 pub use network_front::{
     EntryTcpDispatchOutcome, EntryTcpNetworkFront, EntryTcpNetworkFrontConfig,
 };

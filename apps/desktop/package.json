@@ -1,7 +1,7 @@
 {
   "name": "@beetle-memory/desktop",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.6.0",
   "type": "module",
   "scripts": {
     "dev": "cargo build --locked -p bm-llm-gateway --no-default-features --features server-async,client-reqwest,profile-desktop-macos-standalone-memory && tauri dev --features profile-desktop-macos-standalone-memory",

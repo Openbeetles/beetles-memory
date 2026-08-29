@@ -38,9 +38,33 @@ SDK API 是主要入口。宿主项目应通过 `bm-sdk` 进入，或通过 `bm-
 | Memory-Space Export / Import | `MemoryRuntime::export_memory_space` / `MemoryRuntime::import_memory_space` | 在显式 private-material policy 下导出 opaque archive，并原子替换完全相同的 `MemoryArchiveScope`。 |
 | Recover / Close | `MemoryRuntime::recover` / `MemoryRuntime::close` | 控制 runtime lifecycle 并产生 lifecycle report。 |
 
+## Universal Long-Term Learning
+
+`finalize_turn` 会提交 delivered canonical turn 和唯一 durable governance intent。之后由 `bm-sdk::MemoryLearningEngine` 统一拥有完整 due-job cycle：exact scope discovery、lease/CAS、当前 transcript/subject/privacy 准入、最小 Provider 外发、候选严格验证、accepted long-term mutation、receipt/audit、retry、blocking、cancellation 与 terminal completion。生产宿主不得再把旧 low-level worker transition 拼成第二套 Worker。
+
+`bm-entry::MemoryLearningService` 是官方异步执行的 process owner。它从已有 `Arc<MemoryRuntime>`、唯一 `GovernanceBindingSource` 和唯一 `GovernanceCredentialResolver` 启动；只有 Store authority、Subject Registry 与 MemorySpace 全部一致的其他 Runtime 才能 attach。`EntryRuntime` 内部也消费同一 service，因此 server 与 embedded consumer 不存在两套 governance 状态机。
+
+```rust,ignore
+let control_authorities = governor_runtime.learning_service_control_authorities()?;
+let (service, attachment) = MemoryLearningService::builder(runtime.clone())
+    .control_authorities(control_authorities)
+    .binding_source(binding_source)
+    .credential_resolver(credential_resolver)
+    .start()?;
+
+let another_control = another_governor_runtime.learning_service_control_authorities()?;
+let another = service.attach_runtime(another_runtime, another_control)?;
+service.wake();
+service.credential_changed("product.primary-key", 2, "credential-op-2")?;
+```
+
+产品 Provider 配置继续由宿主拥有。Beetle 只把不含 secret 的 immutable execution binding snapshot 持久化为 job 历史 authority，绝不保存 raw credential。`provider_config_changed`、`credential_changed` 和 `provider_permission_changed` 是重新读取同一 source、带 operation-aware Store receipt 的 typed notification，不是第二份配置 payload。
+
+Status read 与 recovery control 必须携带 SDK 铸造的 opaque capability。`MemoryRuntime::learning_service_status_authority` 和 `MemoryRuntime::learning_service_control_authorities` 要求 Runtime actor 本身就是 exact active governing `SystemGovernor`；其中每个 recovery authority 绑定 exact Store、registry、MemorySpace、mounted subject、scope 与 recovery kind。`MemoryRuntime::learning_attachment_status_authority` 要求 exact active mounted-subject actor。跨主体、跨 operation 或 foreign Store/registry authority 必须在返回 job identity、reason detail 或执行 mutation 前失败。
+
 ## Subject Soul Provisioning
 
-`bm-sdk` 0.4.0 提供宿主无关的 Subject Soul 建档与生命周期公共合同。宿主只能提交 typed intent；Soul revision、generation、material、manifest、ledger、审计、事件和 durable operation receipt 由 Core、SDK 与 Store 在同一事务中拥有。Adapter、HTTP、MCP、Console 或宿主数据库不得维护第二套 Soul 状态，也不得先写默认人格再覆盖。
+`bm-sdk` 0.6.0 提供宿主无关的 Subject Soul 建档与生命周期公共合同。宿主只能提交 typed intent；Soul revision、generation、material、manifest、ledger、审计、事件和 durable operation receipt 由 Core、SDK 与 Store 在同一事务中拥有。Adapter、HTTP、MCP、Console 或宿主数据库不得维护第二套 Soul 状态，也不得先写默认人格再覆盖。
 
 | 操作 | SDK surface | 合同 |
 | --- | --- | --- |
@@ -89,11 +113,11 @@ CTQ1 query surface 统一使用 Store-owned `TranscriptQueryCursor`。调用方�
 
 `HostUi` 只是 **host-presentable redacted disclosure view**。它不是聊天窗口 API、分页方向、宿主产品名、transcript index owner 或 authorization token。Catalog、timeline、search、activity 只返回 Runtime hydration 后仍能通过请求 view 脱敏规则的结果。Search hit 携带受治理的 Unicode-safe excerpt 和 durable `TranscriptAnchor`；宿主应把 anchor 交给 `TranscriptTimelineAnchor::Around`，不得在 UI 内扫描或二次匹配 transcript 正文。
 
-Store v10 到 v11 是显式离线 operator 操作，不属于 runtime open。关闭全部 handle、在数据路径之外备份 exact persistent Store 后，调用 `MemoryStoreHandle::migrate_v10_to_v11(StoreBackendConfig)` 并保留 `StoreMigrationReport`。普通 open 零迁移写入并返回 `store_migration_required`；in-memory/embedded backend、部分状态和非 v10 schema 一律拒绝。
+0.6.0 只接受 Store v12，不提供 public Store migration API、compatibility reader、双写或 automatic migration。Store v11、governance V2、partial v12 closure 与 foreign schema payload 都会 fail closed。旧代开发数据只能由其 owner 明确删除并重建；archive export/import 不是 schema migration。
 
 Timeline 支持 latest、before、after、around-anchor、around-sequence、around-time 与 first-visible-in-range；页内 turn 始终按 sequence 正序，report 可返回 opaque older/newer cursor。日历换算归宿主：按用户 IANA timezone 把本地日期转换为 canonical UTC `[start_inclusive, end_exclusive)` 后再调用 Memory。不得假设每天都是 86400 秒，DST 当天可以是 23 或 25 小时；Beetle Memory 不保存也不猜宿主时区。
 
-本地 0.5.0 source candidate 的 CTQ1 engineering 已完成：public Core/SDK query shape、capability snapshot v4、Store v11 原子 query-index closure、InMemory/File/SQLite reopen、显式合成 v10->v11 migration、repair/archive closure、隐私 exact-zero 与严格合同证据均已成立。该结论只表示 engineering closeout，不表示 Git tag、crates.io publication、托管 Release、真实数据迁移或运行时/UAT 回执。
+0.6.0 source candidate 保留 CTQ1 public query shape 与 capability snapshot v4，并把 Store 升到 v12 来承载 PL2 Job/Index/Binding closure。InMemory/File/SQLite 合同覆盖 query/learning persistence、reopen、repair/archive closure 与 privacy exact-zero。该工程结论不等于真实数据、Provider、GUI/UAT、crates.io 或托管 Release 回执。
 
 Transcript attrs 是 Memory-owned transcript metadata，不是宿主业务对象库。每条 attr 都必须有 `TranscriptAttrTarget`、命名空间化 key、`TranscriptAttrValueKind`、JSON value、`HostRefVisibility`、`TranscriptAttrSource`、`TranscriptAttrGovernance` 和可选 `TranscriptAttrLink`。`HostUi` replay 只返回 HostUi-visible attrs，`ModelContext` 只返回 model-context attrs，`OperatorAudit` 返回审计可见 attrs，`Export` 只返回 export-visible 且 `export_allowed=true` 的 attrs；`RawOwnerOnly` 仍是内部视图。Repair report 会把 target turn/message 缺失、attr source key 不匹配、非法 key、超限 value、corrupt attr record 作为 fail-closed issue。`DeleteRaw` 默认隐藏 attrs；`OperatorAuditOnlyAfterMask` 最多保留脱敏后的审计 metadata，raw deletion 后绝不返回原始 attr value。
 

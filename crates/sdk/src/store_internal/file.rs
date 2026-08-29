@@ -20,7 +20,7 @@ use crate::store_internal::transaction::{
 };
 use crate::{
     enforce_logical_key_budget, store_budget_error,
-    store_internal::platform::{migrate_v10_snapshot_to_v11, StoreOpenPreflight},
+    store_internal::platform::StoreOpenPreflight,
     store_internal::schema::{
         admit_store_json_address, admit_store_json_document, classify_store_blob_address,
         StoreAddressAdmission,
@@ -50,6 +50,7 @@ const MAX_PHYSICAL_DIGEST_HEX_CHARS: usize = 32;
 const TRANSACTION_LOCK_FILE: &str = ".beetle-memory.lock";
 const TRANSACTION_MARKER_FILE: &str = ".beetle-memory.transaction";
 const TRANSACTION_REPAIR_REQUIRED_STAGE: &str = "memory_write_transaction_repair_required";
+#[cfg(feature = "nonproduction-replay-harness")]
 static SNAPSHOT_IMPORT_SEQUENCE: Mutex<u64> = Mutex::new(1);
 static DURABILITY_TRACE_SEQUENCE: Mutex<u64> = Mutex::new(1);
 static CANONICAL_ROOT_GATES: OnceLock<Mutex<BTreeMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
@@ -342,15 +343,6 @@ impl FileStoreEngine {
             lock_timeout: config.lock_timeout,
             admission_authority,
         };
-        if engine
-            .exact_v10_manifest(config, "store_migration_required")?
-            .is_some()
-        {
-            return Err(Error::config(
-                "store_migration_required",
-                "exact v10 File Store requires explicit offline migration to v11",
-            ));
-        }
         let existing_manifest = engine.validate_existing_manifest_read_only(config)?;
         if let Some(manifest) = existing_manifest.as_ref() {
             engine.run_open_preflight(manifest, open_preflight)?;
@@ -499,7 +491,18 @@ impl FileStoreEngine {
         else {
             return Ok(None);
         };
-        let manifest: StoreSchemaManifest = serde_json::from_slice(&bytes)
+        let identity: Value = serde_json::from_slice(&bytes)
+            .map_err(|error| Error::config("file_store_manifest", error.to_string()))?;
+        if identity.get("schema_id").and_then(Value::as_str) != Some(STORE_SCHEMA_ID)
+            || identity.get("schema_version").and_then(Value::as_u64)
+                != Some(u64::from(STORE_SCHEMA_VERSION))
+        {
+            return Err(Error::config(
+                "store_rebuild_required",
+                "persistent File Store schema differs from this clean-break runtime; delete and recreate the Store",
+            ));
+        }
+        let manifest: StoreSchemaManifest = serde_json::from_value(identity)
             .map_err(|error| Error::config("file_store_manifest", error.to_string()))?;
         manifest.validate_against(
             config.backend,
@@ -508,270 +511,6 @@ impl FileStoreEngine {
             "file_store_manifest",
         )?;
         Ok(Some(manifest))
-    }
-
-    fn exact_v10_manifest(
-        &self,
-        config: &StoreBackendConfig,
-        stage: &'static str,
-    ) -> Result<Option<StoreSchemaManifest>> {
-        let path = self.root.join("manifest.json");
-        let Some(bytes) = read_file_bounded(
-            &path,
-            self.capacity
-                .snapshot_max_bytes
-                .min(self.capacity.import_max_bytes),
-            stage,
-        )?
-        else {
-            return Ok(None);
-        };
-        let Ok(identity) = serde_json::from_slice::<Value>(&bytes) else {
-            return Ok(None);
-        };
-        let is_v10 = identity.get("schema_id").and_then(Value::as_str)
-            == Some("beetle_memory_store_schema_v10")
-            && identity.get("schema_version").and_then(Value::as_u64) == Some(10);
-        if !is_v10 {
-            return Ok(None);
-        }
-        let manifest: StoreSchemaManifest = serde_json::from_slice(&bytes)
-            .map_err(|error| Error::config(stage, error.to_string()))?;
-        if manifest.backend != config.backend.as_str()
-            || manifest.profile != config.profile.as_str()
-            || manifest.memory_system_kind != config.memory_system_kind.as_str()
-            || manifest.projection_scope
-                != crate::store_internal::schema::StoreProjectionScope::FullStore
-        {
-            return Err(Error::config(
-                stage,
-                "v10 schema authority does not match the configured Store identity",
-            ));
-        }
-        Ok(Some(manifest))
-    }
-
-    fn write_schema_manifest(
-        &self,
-        manifest: &StoreSchemaManifest,
-        stage: &'static str,
-    ) -> Result<()> {
-        let bytes = serde_json::to_vec_pretty(manifest)
-            .map_err(|error| Error::config(stage, error.to_string()))?;
-        atomic_write(&self.root.join("manifest.json"), &bytes, self.fsync, stage)?;
-        self.sync_root(stage)
-    }
-
-    pub(crate) fn migrate_v10_to_v11_explicit(
-        config: &StoreBackendConfig,
-        capacity: StoreCapacityBudget,
-        admission_authority: StoreAdmissionAuthority,
-        open_preflight: &StoreOpenPreflight,
-        migration_event: MemoryStoreEvent,
-    ) -> Result<()> {
-        let configured_root = config.data_path.as_deref().ok_or_else(|| {
-            Error::config("store_migration_required", "File Store root is required")
-        })?;
-        if !configured_root.exists() {
-            return Err(Error::config(
-                "store_migration_not_required",
-                "File Store does not exist",
-            ));
-        }
-        let root = fs::canonicalize(configured_root)
-            .map_err(|error| Error::io("file_store_v10_migration", error))?;
-        let source_engine = Self {
-            local_root_gate: canonical_root_gate(&root)?,
-            root: root.clone(),
-            fsync: config.fsync,
-            capacity,
-            path_budget: config.path_budget,
-            lock_timeout: config.lock_timeout,
-            admission_authority,
-        };
-        if source_engine
-            .exact_v10_manifest(config, "file_store_v10_migration")?
-            .is_none()
-        {
-            return Err(Error::config(
-                "store_migration_not_required",
-                "Store is not an exact v10 File Store",
-            ));
-        }
-        let _lock =
-            source_engine.acquire_existing_backend_lock(true, "file_store_v10_migration")?;
-        let Some(manifest) =
-            source_engine.exact_v10_manifest(config, "file_store_v10_migration")?
-        else {
-            return Err(Error::config(
-                "store_migration_conflict",
-                "File Store changed before migration acquired authority",
-            ));
-        };
-        if source_engine
-            .read_transaction_journal_read_only()?
-            .is_some()
-        {
-            return Err(Error::config(
-                "store_migration_repair_required",
-                "v10 File Store has an unresolved transaction journal",
-            ));
-        }
-
-        let mut source = source_engine.read_store_snapshot_for_open_preflight(&manifest, None)?;
-        source.schema_id = "beetle_memory_store_schema_v10".to_string();
-        source.schema_manifest.schema_id = source.schema_id.clone();
-        source.schema_manifest.schema_version = 10;
-        let mut migrated = migrate_v10_snapshot_to_v11(&source, current_unix_secs())?;
-        migrated.events.push(migration_event);
-        open_preflight.admit_snapshot(&migrated, "file_store_v10_migration")?;
-
-        let parent = root.parent().ok_or_else(|| {
-            Error::config(
-                "file_store_v10_migration",
-                "File Store root must have a sibling staging parent",
-            )
-        })?;
-        let leaf = root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| Error::config("file_store_v10_migration", "invalid Store root name"))?;
-        let migration_id = snapshot_import_id();
-        let stage_root = parent.join(format!(".{leaf}.v11-stage-{migration_id}"));
-        let backup_root = parent.join(format!(".{leaf}.v10-backup-{migration_id}"));
-        if stage_root.exists() || backup_root.exists() {
-            return Err(Error::config(
-                "file_store_v10_migration",
-                "migration sibling staging path already exists",
-            ));
-        }
-        fs::create_dir(&stage_root)
-            .map_err(|error| Error::io("file_store_v10_migration", error))?;
-        for lane in ["events", "kv", "blob", "snapshots"] {
-            fs::create_dir(stage_root.join(lane))
-                .map_err(|error| Error::io("file_store_v10_migration", error))?;
-        }
-        OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(stage_root.join(TRANSACTION_LOCK_FILE))
-            .and_then(|file| {
-                if config.fsync {
-                    file.sync_all()
-                } else {
-                    Ok(())
-                }
-            })
-            .map_err(|error| Error::io("file_store_v10_migration", error))?;
-        let canonical_stage = fs::canonicalize(&stage_root)
-            .map_err(|error| Error::io("file_store_v10_migration", error))?;
-        let stage_engine = Self {
-            local_root_gate: canonical_root_gate(&canonical_stage)?,
-            root: canonical_stage,
-            fsync: config.fsync,
-            capacity,
-            path_budget: config.path_budget,
-            lock_timeout: config.lock_timeout,
-            admission_authority: StoreAdmissionAuthority::new(),
-        };
-        let after = FileTransactionImage {
-            json: migrated
-                .json_docs
-                .iter()
-                .map(|doc| FileTransactionJsonValue {
-                    namespace: doc.namespace.clone(),
-                    key: doc.key.clone(),
-                    value: Some(doc.value.clone()),
-                })
-                .collect(),
-            blobs: migrated
-                .blobs
-                .iter()
-                .map(|blob| FileTransactionBlobValue {
-                    namespace: blob.namespace.clone(),
-                    key: blob.key.clone(),
-                    value: Some(blob.value.clone()),
-                })
-                .collect(),
-            events: FileTransactionEventsImage::Replace {
-                events: migrated.events.clone(),
-            },
-        };
-        let stage_result = (|| {
-            stage_engine.restore_transaction_image(&after)?;
-            stage_engine
-                .write_schema_manifest(&migrated.schema_manifest, "file_store_v10_migration")?;
-            let verified = stage_engine
-                .read_store_snapshot_for_open_preflight(&migrated.schema_manifest, None)?;
-            open_preflight.admit_snapshot(&verified, "file_store_v10_migration")?;
-            if verified.state_fingerprint() != migrated.state_fingerprint()
-                || verified.event_fingerprint() != migrated.event_fingerprint()
-            {
-                return Err(Error::config(
-                    "file_store_v10_migration",
-                    "sibling staging verification fingerprint differs",
-                ));
-            }
-            sync_directory(parent, config.fsync, "file_store_v10_migration")
-        })();
-        if let Err(error) = stage_result {
-            let _ = fs::remove_dir_all(&stage_root);
-            return Err(error);
-        }
-
-        fs::rename(&root, &backup_root)
-            .map_err(|error| Error::io("file_store_v10_migration", error))?;
-        if let Err(error) = fs::rename(&stage_root, &root) {
-            let _ = fs::rename(&backup_root, &root);
-            return Err(Error::io("file_store_v10_migration", error));
-        }
-        if let Err(error) = sync_directory(parent, config.fsync, "file_store_v10_migration") {
-            let _ = fs::rename(&root, &stage_root);
-            let _ = fs::rename(&backup_root, &root);
-            let _ = fs::remove_dir_all(&stage_root);
-            return Err(error);
-        }
-
-        let final_result = (|| {
-            let final_root = fs::canonicalize(&root)
-                .map_err(|error| Error::io("file_store_v10_migration", error))?;
-            let final_engine = Self {
-                local_root_gate: canonical_root_gate(&final_root)?,
-                root: final_root,
-                fsync: config.fsync,
-                capacity,
-                path_budget: config.path_budget,
-                lock_timeout: config.lock_timeout,
-                admission_authority: StoreAdmissionAuthority::new(),
-            };
-            let verified = final_engine
-                .read_store_snapshot_for_open_preflight(&migrated.schema_manifest, None)?;
-            open_preflight.admit_snapshot(&verified, "file_store_v10_migration")?;
-            if verified.state_fingerprint() != migrated.state_fingerprint()
-                || verified.event_fingerprint() != migrated.event_fingerprint()
-            {
-                return Err(Error::config(
-                    "file_store_v10_migration",
-                    "swapped File Store fingerprint differs from verified staging",
-                ));
-            }
-            Ok(())
-        })();
-        if let Err(error) = final_result {
-            let _ = fs::rename(&root, &stage_root);
-            let _ = fs::rename(&backup_root, &root);
-            let _ = fs::remove_dir_all(&stage_root);
-            let _ = sync_directory(parent, config.fsync, "file_store_v10_migration");
-            return Err(error);
-        }
-        if let Err(error) = fs::remove_dir_all(&backup_root) {
-            let _ = fs::rename(&root, &stage_root);
-            let _ = fs::rename(&backup_root, &root);
-            let _ = fs::remove_dir_all(&stage_root);
-            let _ = sync_directory(parent, config.fsync, "file_store_v10_migration");
-            return Err(Error::io("file_store_v10_migration", error));
-        }
-        sync_directory(parent, config.fsync, "file_store_v10_migration")
     }
 
     fn run_open_preflight(
@@ -4143,6 +3882,7 @@ fn current_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(feature = "nonproduction-replay-harness")]
 fn snapshot_import_id() -> String {
     let now_nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4294,7 +4034,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_manifest_is_rejected_before_file_store_mutation() {
+    fn legacy_manifest_requires_explicit_rebuild_before_file_store_mutation() {
         let root = std::env::temp_dir().join(format!(
             "bm-file-v5-zero-mutation-{}-{}",
             std::process::id(),
@@ -4317,7 +4057,7 @@ mod tests {
             Ok(_) => panic!("v5 must fail closed"),
             Err(error) => error,
         };
-        assert_eq!(error.stage(), "file_store_manifest");
+        assert_eq!(error.stage(), "store_rebuild_required");
         assert_eq!(fs::read(&manifest_path).expect("manifest remains"), before);
         assert!(!root.join(TRANSACTION_LOCK_FILE).exists());
         assert!(!root.join("events").exists());

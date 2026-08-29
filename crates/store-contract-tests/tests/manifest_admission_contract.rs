@@ -417,16 +417,16 @@ fn file_store_rejects_unknown_manifest_fields_without_rewriting_bytes() {
 }
 
 #[test]
-fn file_store_rejects_v8_manifest_without_rewriting_bytes() {
+fn file_store_requires_rebuild_for_v8_manifest_without_rewriting_bytes() {
     let root = temp_root("file", "v8-fail-closed", PersistentStateKind::Kv);
     support::open_store(
         StoreBackendConfig::file(&root, support::native_persistent_profile()).expect("file config"),
     )
-    .expect("initialize v9 file store");
+    .expect("initialize v12 file store");
     let manifest_path = root.join("manifest.json");
     let mut manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&manifest_path).expect("read v9 manifest"))
-            .expect("decode v9 manifest");
+        serde_json::from_slice(&std::fs::read(&manifest_path).expect("read v12 manifest"))
+            .expect("decode v12 manifest");
     manifest["schema_id"] = serde_json::json!("beetle_memory_store_schema_v8");
     manifest["schema_version"] = serde_json::json!(8);
     let v8_bytes = serde_json::to_vec_pretty(&manifest).expect("encode v8 manifest fixture");
@@ -435,11 +435,11 @@ fn file_store_rejects_v8_manifest_without_rewriting_bytes() {
     let error = match support::open_store(
         StoreBackendConfig::file(&root, support::native_persistent_profile()).expect("file config"),
     ) {
-        Ok(_) => panic!("v8 file store must fail closed under v9"),
+        Ok(_) => panic!("v8 file store must require rebuild under v12"),
         Err(error) => error,
     };
 
-    assert_eq!(error.stage(), "file_store_manifest");
+    assert_eq!(error.stage(), "store_rebuild_required");
     assert_eq!(
         std::fs::read(&manifest_path).expect("read rejected v8 manifest"),
         v8_bytes,
@@ -943,7 +943,7 @@ fn sqlite_store_rejects_unknown_manifest_fields_without_rewriting_schema_row() {
 
 #[cfg(feature = "sqlite-store")]
 #[test]
-fn sqlite_store_rejects_v8_manifest_without_rewriting_schema_row() {
+fn sqlite_store_requires_rebuild_for_v8_manifest_without_rewriting_schema_row() {
     let root = temp_root("sqlite", "v8-fail-closed", PersistentStateKind::Kv);
     std::fs::create_dir_all(&root).expect("create sqlite test root");
     let path = root.join("memory.sqlite3");
@@ -951,14 +951,14 @@ fn sqlite_store_rejects_v8_manifest_without_rewriting_schema_row() {
         StoreBackendConfig::sqlite(&path, support::native_persistent_profile())
             .expect("sqlite config"),
     )
-    .expect("initialize v9 sqlite store");
+    .expect("initialize v12 sqlite store");
 
     let connection = rusqlite::Connection::open(&path).expect("open sqlite fixture");
     let initialized: String = connection
         .query_row("SELECT manifest_json FROM bm_schema", [], |row| row.get(0))
-        .expect("read v9 sqlite manifest");
+        .expect("read v12 sqlite manifest");
     let mut manifest: serde_json::Value =
-        serde_json::from_str(&initialized).expect("decode v9 sqlite manifest");
+        serde_json::from_str(&initialized).expect("decode v12 sqlite manifest");
     manifest["schema_id"] = serde_json::json!("beetle_memory_store_schema_v8");
     manifest["schema_version"] = serde_json::json!(8);
     let v8_manifest = serde_json::to_string(&manifest).expect("encode v8 sqlite manifest");
@@ -974,10 +974,10 @@ fn sqlite_store_rejects_v8_manifest_without_rewriting_schema_row() {
         StoreBackendConfig::sqlite(&path, support::native_persistent_profile())
             .expect("sqlite config"),
     ) {
-        Ok(_) => panic!("v8 sqlite store must fail closed under v9"),
+        Ok(_) => panic!("v8 sqlite store must require rebuild under v12"),
         Err(error) => error,
     };
-    assert_eq!(error.stage(), "sqlite_store_schema");
+    assert_eq!(error.stage(), "store_rebuild_required");
 
     let connection = rusqlite::Connection::open(&path).expect("reopen rejected sqlite fixture");
     let persisted: (String, u32, String) = connection

@@ -1,13 +1,21 @@
 use bm_core::memory::{
-    PostTurnGovernanceAttemptAuthorityV2, PostTurnGovernanceErrorClassV2,
-    PostTurnGovernanceJobRefV1, PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV2,
-    PostTurnGovernanceReceiptV2, PostTurnGovernanceReconciliationCursorV1,
-    PostTurnGovernanceScopeIndexV2, MAX_POST_TURN_GOVERNANCE_ACTIVE_JOBS,
-    MAX_POST_TURN_GOVERNANCE_RECENT_TERMINAL_JOBS, POST_TURN_GOVERNANCE_JOB_NAMESPACE,
+    MemoryMutationEffect, MemoryMutationOperationIdentity, MemoryMutationOperationKind,
+    MemoryMutationReceipt, PostTurnGovernanceAttemptAuthorityV3,
+    PostTurnGovernanceBindingRevisionIndexV1, PostTurnGovernanceBindingRevisionRefV1,
+    PostTurnGovernanceBindingSnapshotV1, PostTurnGovernanceDecisionSummaryV1,
+    PostTurnGovernanceErrorClassV2, PostTurnGovernanceExecutionBindingV1,
+    PostTurnGovernanceExecutionBlockAuthorityV1, PostTurnGovernanceJobRefV2,
+    PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV3, PostTurnGovernanceReceiptV3,
+    PostTurnGovernanceReconciliationCursorV1, PostTurnGovernanceScopeIndexV3,
+    MAX_POST_TURN_GOVERNANCE_ACTIVE_JOBS, MAX_POST_TURN_GOVERNANCE_BINDING_REVISIONS,
+    MAX_POST_TURN_GOVERNANCE_RECENT_TERMINAL_JOBS, MEMORY_MUTATION_RECEIPT_NAMESPACE,
+    POST_TURN_GOVERNANCE_BINDING_REVISION_INDEX_NAMESPACE,
+    POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE, POST_TURN_GOVERNANCE_JOB_NAMESPACE,
     POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
 };
 use bm_core::{Error, Result};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 
 use crate::{
     MemoryStoreEventKind, RuntimeBudgetReport, StoreBlobPrecondition, StoreEventScope,
@@ -20,7 +28,7 @@ use super::schema::{
 use super::subject_soul::{
     SubjectSoulStoreFailure, SubjectSoulStoreMutationOutcome, SubjectSoulStoreMutationPlan,
 };
-use super::StorePlatform;
+use super::{StoreMutationOperationOutcome, StoreMutationOperationPlan, StorePlatform};
 
 const GOVERNANCE_RETRY_BASE_SECS: u64 = 5;
 const GOVERNANCE_RETRY_MAX_SECS: u64 = 300;
@@ -31,11 +39,52 @@ pub(crate) enum GovernanceIntentEnsureOutcome {
     AlreadyPresent,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GovernanceRecoveryOutcome {
+    pub(crate) job: PostTurnGovernanceJobV3,
+    pub(crate) replayed: bool,
+}
+
+pub(crate) fn governance_recovery_operation_was_committed(
+    platform: &StorePlatform,
+    job: &PostTurnGovernanceJobV3,
+    caller_operation_id: &str,
+    actor_subject_id: &str,
+    operation_kind: MemoryMutationOperationKind,
+    recovery_authority_key: &str,
+    new_generation: u64,
+) -> Result<bool> {
+    let identity = governance_recovery_operation_identity(
+        job,
+        caller_operation_id,
+        actor_subject_id,
+        operation_kind,
+    )?;
+    let mut docs = platform
+        .read_json_docs_by_keys(MEMORY_MUTATION_RECEIPT_NAMESPACE, &[identity.storage_key()])?;
+    let Some(doc) = docs.pop() else {
+        return Ok(false);
+    };
+    let receipt = serde_json::from_value::<MemoryMutationReceipt>(doc.value).map_err(|error| {
+        Error::config("post_turn_governance_recovery_operation", error.to_string())
+    })?;
+    receipt.classify_replay(
+        &identity,
+        &governance_recovery_intent_digest(
+            &job.job_id,
+            operation_kind,
+            recovery_authority_key,
+            new_generation,
+        )?,
+    )?;
+    Ok(true)
+}
+
 pub(crate) fn ensure_governance_intent(
     platform: &StorePlatform,
     scope: StoreEventScope,
     runtime_budget: &RuntimeBudgetReport,
-    job: &PostTurnGovernanceJobV2,
+    job: &PostTurnGovernanceJobV3,
     now_secs: u64,
 ) -> Result<GovernanceIntentEnsureOutcome> {
     job.validate()?;
@@ -59,7 +108,7 @@ pub(crate) fn ensure_governance_intent(
     let before_index = read_scope_index(platform, &job.scope_index_key)?;
     let mut after_index = before_index
         .clone()
-        .unwrap_or_else(|| PostTurnGovernanceScopeIndexV2::empty(&job.identity, now_secs));
+        .unwrap_or_else(|| PostTurnGovernanceScopeIndexV3::empty(&job.identity, now_secs));
     if after_index.active_jobs.len() >= MAX_POST_TURN_GOVERNANCE_ACTIVE_JOBS {
         return Err(Error::config(
             "post_turn_governance_intent",
@@ -74,7 +123,7 @@ pub(crate) fn ensure_governance_intent(
     }
     after_index
         .active_jobs
-        .push(PostTurnGovernanceJobRefV1::from_job(job));
+        .push(PostTurnGovernanceJobRefV2::from_job(job));
     after_index.active_jobs.sort_by(|left, right| {
         left.created_at
             .cmp(&right.created_at)
@@ -96,7 +145,7 @@ pub(crate) fn ensure_governance_intent(
         .map_err(|error| Error::config("post_turn_governance_intent", error.to_string()))?;
     let index_value = serde_json::to_value(&after_index)
         .map_err(|error| Error::config("post_turn_governance_intent", error.to_string()))?;
-    let preconditions = vec![
+    let mut preconditions = vec![
         StoreJsonPrecondition::Absent {
             namespace: POST_TURN_GOVERNANCE_JOB_NAMESPACE.to_string(),
             key: job.job_id.clone(),
@@ -107,18 +156,26 @@ pub(crate) fn ensure_governance_intent(
             before_index.as_ref(),
         )?,
     ];
+    let mut mutations = vec![
+        put_json(POST_TURN_GOVERNANCE_JOB_NAMESPACE, &job.job_id, job_value),
+        put_json(
+            POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
+            &job.scope_index_key,
+            index_value,
+        ),
+    ];
+    append_binding_reference_mutation(
+        platform,
+        &job.execution_binding,
+        now_secs,
+        &mut mutations,
+        &mut preconditions,
+    )?;
     let batch = StoreMutationBatch {
         transaction_id: format!("post_turn_governance_enqueue_{}", job.job_id),
         operation: "post_turn.governance.enqueue".to_string(),
         scope,
-        mutations: vec![
-            put_json(POST_TURN_GOVERNANCE_JOB_NAMESPACE, &job.job_id, job_value),
-            put_json(
-                POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
-                &job.scope_index_key,
-                index_value,
-            ),
-        ],
+        mutations,
     };
     let commit = platform.commit_governed_memory_transaction_with_runtime_budget_at(
         batch,
@@ -155,7 +212,7 @@ pub(crate) fn reconcile_governance_intents(
     platform: &StorePlatform,
     scope: StoreEventScope,
     runtime_budget: &RuntimeBudgetReport,
-    jobs: &[PostTurnGovernanceJobV2],
+    jobs: &[PostTurnGovernanceJobV3],
     now_secs: u64,
 ) -> Result<usize> {
     let first = jobs.first().ok_or_else(|| {
@@ -172,7 +229,7 @@ pub(crate) fn reconcile_governance_intents(
     let before_index = read_scope_index(platform, &scope_index_key)?;
     let mut after_index = before_index
         .clone()
-        .unwrap_or_else(|| PostTurnGovernanceScopeIndexV2::empty(identity, now_secs));
+        .unwrap_or_else(|| PostTurnGovernanceScopeIndexV3::empty(identity, now_secs));
     if after_index.recent_terminal_jobs.len() >= MAX_POST_TURN_GOVERNANCE_RECENT_TERMINAL_JOBS {
         return Err(Error::config(
             "post_turn_governance_reconcile",
@@ -195,6 +252,7 @@ pub(crate) fn reconcile_governance_intents(
         before_index.as_ref(),
     )?];
     let mut mutations = Vec::new();
+    let mut referenced_bindings = BTreeSet::new();
     let mut created = 0usize;
     for job in jobs {
         job.validate()?;
@@ -239,7 +297,7 @@ pub(crate) fn reconcile_governance_intents(
                         }
                         None => after_index
                             .active_jobs
-                            .push(PostTurnGovernanceJobRefV1::from_job(existing)),
+                            .push(PostTurnGovernanceJobRefV2::from_job(existing)),
                     }
                 }
             }
@@ -263,7 +321,14 @@ pub(crate) fn reconcile_governance_intents(
                 ));
                 after_index
                     .active_jobs
-                    .push(PostTurnGovernanceJobRefV1::from_job(job));
+                    .push(PostTurnGovernanceJobRefV2::from_job(job));
+                if let PostTurnGovernanceExecutionBindingV1::Bound {
+                    binding_id,
+                    binding_revision,
+                } = &job.execution_binding
+                {
+                    referenced_bindings.insert((binding_id.clone(), *binding_revision));
+                }
                 created = created.saturating_add(1);
             }
         }
@@ -296,6 +361,19 @@ pub(crate) fn reconcile_governance_intents(
     }
     after_index.updated_at = now_secs;
     after_index.validate()?;
+    for (binding_id, binding_revision) in referenced_bindings {
+        let binding = PostTurnGovernanceExecutionBindingV1::Bound {
+            binding_id,
+            binding_revision,
+        };
+        append_binding_reference_mutation(
+            platform,
+            &binding,
+            now_secs,
+            &mut mutations,
+            &mut preconditions,
+        )?;
+    }
     mutations.push(put_json(
         POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
         &scope_index_key,
@@ -327,9 +405,9 @@ pub(crate) fn claim_governance_job(
     job_id: &str,
     lease_owner: &str,
     lease_until: u64,
-    authority: PostTurnGovernanceAttemptAuthorityV2,
+    authority: PostTurnGovernanceAttemptAuthorityV3,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV2> {
+) -> Result<PostTurnGovernanceJobV3> {
     authority.validate()?;
     if lease_owner.trim().is_empty() || lease_until <= now_secs {
         return Err(Error::invalid_input(
@@ -354,14 +432,25 @@ pub(crate) fn claim_governance_job(
             "governance job is not claimable",
         ));
     }
-    if matches!(
+    let unbound_adoption = before_job.status == PostTurnGovernanceJobStatusV2::BlockedConfiguration
+        && before_job.execution_binding == PostTurnGovernanceExecutionBindingV1::Unbound
+        && before_job.attempt_authority.is_none()
+        && before_job
+            .execution_block_authority
+            .as_ref()
+            .is_some_and(|block| {
+                block.typed_block_reason
+                    == bm_core::memory::PostTurnGovernanceExecutionBlockReasonV1::BindingUnavailable
+            });
+    if (matches!(
         before_job.status,
         PostTurnGovernanceJobStatusV2::BlockedConfiguration
             | PostTurnGovernanceJobStatusV2::BlockedCapability
             | PostTurnGovernanceJobStatusV2::BlockedPolicy
-    ) || before_job
-        .next_attempt_at
-        .is_some_and(|eligible_at| eligible_at > now_secs)
+    ) && !unbound_adoption)
+        || before_job
+            .next_attempt_at
+            .is_some_and(|eligible_at| eligible_at > now_secs)
     {
         return Err(Error::conflict(
             "post_turn_governance_claim",
@@ -373,6 +462,20 @@ pub(crate) fn claim_governance_job(
             return Err(Error::conflict(
                 "post_turn_governance_claim",
                 "retry attempt authority differs from the first claim",
+            ));
+        }
+    }
+    match &before_job.execution_binding {
+        PostTurnGovernanceExecutionBindingV1::Unbound => {}
+        PostTurnGovernanceExecutionBindingV1::Bound {
+            binding_id,
+            binding_revision,
+        } if binding_id == &authority.binding_id
+            && *binding_revision == authority.binding_revision => {}
+        _ => {
+            return Err(Error::conflict(
+                "post_turn_governance_claim",
+                "execution binding differs from the durable job authority",
             ));
         }
     }
@@ -399,7 +502,12 @@ pub(crate) fn claim_governance_job(
     after_job.lease_owner = Some(lease_owner.to_string());
     after_job.lease_until = Some(lease_until);
     after_job.next_attempt_at = None;
+    after_job.execution_binding = PostTurnGovernanceExecutionBindingV1::Bound {
+        binding_id: authority.binding_id.clone(),
+        binding_revision: authority.binding_revision,
+    };
     after_job.attempt_authority = Some(authority);
+    after_job.execution_block_authority = None;
     after_job.blocking_reason = None;
     after_job.updated_at = now_secs;
     after_job.validate()?;
@@ -420,7 +528,18 @@ pub(crate) fn claim_governance_job(
     after_index.updated_at = now_secs;
     after_index.validate()?;
 
-    commit_job_and_index(
+    let mut extra_mutations = Vec::new();
+    let mut extra_preconditions = Vec::new();
+    if before_job.execution_binding == PostTurnGovernanceExecutionBindingV1::Unbound {
+        append_binding_reference_mutation(
+            platform,
+            &after_job.execution_binding,
+            now_secs,
+            &mut extra_mutations,
+            &mut extra_preconditions,
+        )?;
+    }
+    commit_job_and_index_with_extra(
         platform,
         scope,
         runtime_budget,
@@ -429,6 +548,8 @@ pub(crate) fn claim_governance_job(
         &after_job,
         &before_index,
         &after_index,
+        extra_mutations,
+        extra_preconditions,
         now_secs,
     )?;
     Ok(after_job)
@@ -444,7 +565,7 @@ pub(crate) fn renew_governance_job_lease(
     lease_epoch: u64,
     lease_until: u64,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV2> {
+) -> Result<PostTurnGovernanceJobV3> {
     let before_job = read_job(platform, job_id)?.ok_or_else(|| {
         Error::not_found("post_turn_governance_renew", "governance job not found")
     })?;
@@ -518,7 +639,7 @@ pub(crate) fn retry_governance_job(
     lease_epoch: u64,
     error_class: PostTurnGovernanceErrorClassV2,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV2> {
+) -> Result<PostTurnGovernanceJobV3> {
     if !error_class.is_retryable() {
         return Err(Error::invalid_input(
             "post_turn_governance_retry",
@@ -551,6 +672,7 @@ pub(crate) fn retry_governance_job(
     })?;
     after_job.lease_owner = None;
     after_job.lease_until = None;
+    after_job.execution_block_authority = None;
     after_job.last_error_class = Some(error_class);
     after_job.updated_at = now_secs;
     let exhausted = after_job.attempt_count >= after_job.max_attempts;
@@ -623,6 +745,7 @@ pub(crate) fn retry_governance_job(
     Ok(after_job)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn block_governance_job(
     platform: &StorePlatform,
     scope: StoreEventScope,
@@ -630,8 +753,9 @@ pub(crate) fn block_governance_job(
     job_id: &str,
     status: PostTurnGovernanceJobStatusV2,
     reason: &str,
+    execution_block_authority: Option<PostTurnGovernanceExecutionBlockAuthorityV1>,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV2> {
+) -> Result<PostTurnGovernanceJobV3> {
     if !matches!(
         status,
         PostTurnGovernanceJobStatusV2::BlockedConfiguration
@@ -672,6 +796,7 @@ pub(crate) fn block_governance_job(
     after_job.next_attempt_at = None;
     after_job.lease_owner = None;
     after_job.lease_until = None;
+    after_job.execution_block_authority = execution_block_authority;
     after_job.blocking_reason = Some(reason.to_string());
     after_job.last_error_class = None;
     after_job.updated_at = now_secs;
@@ -716,8 +841,9 @@ pub(crate) fn block_claimed_governance_job(
     lease_epoch: u64,
     status: PostTurnGovernanceJobStatusV2,
     reason: &str,
+    execution_block_authority: Option<PostTurnGovernanceExecutionBlockAuthorityV1>,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV2> {
+) -> Result<PostTurnGovernanceJobV3> {
     if !matches!(
         status,
         PostTurnGovernanceJobStatusV2::BlockedConfiguration
@@ -764,6 +890,7 @@ pub(crate) fn block_claimed_governance_job(
     after_job.next_attempt_at = None;
     after_job.lease_owner = None;
     after_job.lease_until = None;
+    after_job.execution_block_authority = execution_block_authority;
     after_job.blocking_reason = Some(reason.to_string());
     after_job.last_error_class = None;
     after_job.updated_at = now_secs;
@@ -804,7 +931,7 @@ pub(crate) fn resume_governance_job(
     runtime_budget: &RuntimeBudgetReport,
     job_id: &str,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV2> {
+) -> Result<PostTurnGovernanceJobV3> {
     let before_job = read_job(platform, job_id)?.ok_or_else(|| {
         Error::not_found("post_turn_governance_resume", "governance job not found")
     })?;
@@ -832,6 +959,7 @@ pub(crate) fn resume_governance_job(
         Error::config("post_turn_governance_resume", "job state revision overflow")
     })?;
     after_job.next_attempt_at = Some(now_secs);
+    after_job.execution_block_authority = None;
     after_job.blocking_reason = None;
     after_job.last_error_class = None;
     after_job.updated_at = now_secs;
@@ -867,6 +995,241 @@ pub(crate) fn resume_governance_job(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn resume_governance_job_for_credential(
+    platform: &StorePlatform,
+    scope: StoreEventScope,
+    runtime_budget: &RuntimeBudgetReport,
+    job_id: &str,
+    credential_ref_safe_id: &str,
+    new_generation: u64,
+    operation_id: &str,
+    actor_subject_id: &str,
+    now_secs: u64,
+) -> Result<GovernanceRecoveryOutcome> {
+    if credential_ref_safe_id.trim().is_empty()
+        || new_generation == 0
+        || operation_id.trim().is_empty()
+        || operation_id.trim() != operation_id
+    {
+        return Err(Error::invalid_input(
+            "post_turn_governance_credential_resume",
+            "safe credential identity, generation, and operation id are required",
+        ));
+    }
+    let before_job = read_job(platform, job_id)?.ok_or_else(|| {
+        Error::not_found(
+            "post_turn_governance_credential_resume",
+            "governance job not found",
+        )
+    })?;
+    let block = before_job
+        .execution_block_authority
+        .as_ref()
+        .ok_or_else(|| {
+            Error::conflict(
+                "post_turn_governance_credential_resume",
+                "governance job has no durable execution block authority",
+            )
+        })?;
+    if before_job.status != PostTurnGovernanceJobStatusV2::BlockedConfiguration
+        || !block.typed_block_reason.is_credential_scoped()
+        || block.credential_ref_safe_id.as_deref() != Some(credential_ref_safe_id)
+        || block
+            .credential_generation
+            .is_some_and(|generation| new_generation <= generation)
+    {
+        return Err(Error::conflict(
+            "post_turn_governance_credential_resume",
+            "credential recovery authority does not advance the exact blocked generation",
+        ));
+    }
+    let before_index =
+        read_scope_index(platform, &before_job.scope_index_key)?.ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_credential_resume",
+                "governance job is missing its exact scope index",
+            )
+        })?;
+    let mut after_job = before_job.clone();
+    after_job.status = PostTurnGovernanceJobStatusV2::Pending;
+    after_job.state_revision = after_job.state_revision.checked_add(1).ok_or_else(|| {
+        Error::config(
+            "post_turn_governance_credential_resume",
+            "job state revision overflow",
+        )
+    })?;
+    after_job.next_attempt_at = Some(now_secs);
+    after_job.execution_block_authority = None;
+    after_job.blocking_reason = None;
+    after_job.last_error_class = None;
+    after_job.updated_at = now_secs;
+    after_job.validate()?;
+
+    let mut after_index = before_index.clone();
+    replace_scope_index_ref(
+        &mut after_index,
+        &before_job,
+        &after_job,
+        "post_turn_governance_credential_resume",
+    )?;
+    after_index.index_revision = after_index.index_revision.checked_add(1).ok_or_else(|| {
+        Error::config(
+            "post_turn_governance_credential_resume",
+            "governance scope index revision overflow",
+        )
+    })?;
+    after_index.updated_at = now_secs;
+    after_index.validate()?;
+    let replayed = commit_recovery_job_and_index(
+        platform,
+        scope,
+        runtime_budget,
+        "post_turn.governance.credential_resume",
+        &before_job,
+        &after_job,
+        &before_index,
+        &after_index,
+        operation_id,
+        actor_subject_id,
+        MemoryMutationOperationKind::GovernanceCredentialRecovery,
+        credential_ref_safe_id,
+        new_generation,
+        now_secs,
+    )?;
+    Ok(GovernanceRecoveryOutcome {
+        job: read_job(platform, &after_job.job_id)?.ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_credential_resume",
+                "recovered governance job disappeared after operation commit",
+            )
+        })?,
+        replayed,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resume_governance_job_for_provider_permission(
+    platform: &StorePlatform,
+    scope: StoreEventScope,
+    runtime_budget: &RuntimeBudgetReport,
+    job_id: &str,
+    binding_id: &str,
+    binding_revision: u64,
+    new_generation: u64,
+    operation_id: &str,
+    actor_subject_id: &str,
+    now_secs: u64,
+) -> Result<GovernanceRecoveryOutcome> {
+    if binding_id.trim().is_empty()
+        || binding_id.trim() != binding_id
+        || binding_revision == 0
+        || new_generation == 0
+        || operation_id.trim().is_empty()
+        || operation_id.trim() != operation_id
+    {
+        return Err(Error::invalid_input(
+            "post_turn_governance_permission_resume",
+            "exact binding, advanced permission generation, and operation id are required",
+        ));
+    }
+    let before_job = read_job(platform, job_id)?.ok_or_else(|| {
+        Error::not_found(
+            "post_turn_governance_permission_resume",
+            "governance job not found",
+        )
+    })?;
+    let block = before_job
+        .execution_block_authority
+        .as_ref()
+        .ok_or_else(|| {
+            Error::conflict(
+                "post_turn_governance_permission_resume",
+                "governance job has no durable execution block authority",
+            )
+        })?;
+    if before_job.status != PostTurnGovernanceJobStatusV2::BlockedPolicy
+        || block.typed_block_reason
+            != bm_core::memory::PostTurnGovernanceExecutionBlockReasonV1::ProviderPermissionDenied
+        || block.binding_id.as_deref() != Some(binding_id)
+        || block.binding_revision != Some(binding_revision)
+        || block
+            .provider_permission_generation
+            .is_none_or(|generation| new_generation <= generation)
+        || before_job
+            .last_provider_permission_recovery_generation
+            .is_some_and(|generation| new_generation <= generation)
+    {
+        return Err(Error::conflict(
+            "post_turn_governance_permission_resume",
+            "permission recovery authority does not advance the exact blocked binding generation",
+        ));
+    }
+    let before_index =
+        read_scope_index(platform, &before_job.scope_index_key)?.ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_permission_resume",
+                "governance job is missing its exact scope index",
+            )
+        })?;
+    let mut after_job = before_job.clone();
+    after_job.status = PostTurnGovernanceJobStatusV2::Pending;
+    after_job.state_revision = after_job.state_revision.checked_add(1).ok_or_else(|| {
+        Error::config(
+            "post_turn_governance_permission_resume",
+            "job state revision overflow",
+        )
+    })?;
+    after_job.next_attempt_at = Some(now_secs);
+    after_job.execution_block_authority = None;
+    after_job.last_provider_permission_recovery_generation = Some(new_generation);
+    after_job.blocking_reason = None;
+    after_job.last_error_class = None;
+    after_job.updated_at = now_secs;
+    after_job.validate()?;
+
+    let mut after_index = before_index.clone();
+    replace_scope_index_ref(
+        &mut after_index,
+        &before_job,
+        &after_job,
+        "post_turn_governance_permission_resume",
+    )?;
+    after_index.index_revision = after_index.index_revision.checked_add(1).ok_or_else(|| {
+        Error::config(
+            "post_turn_governance_permission_resume",
+            "governance scope index revision overflow",
+        )
+    })?;
+    after_index.updated_at = now_secs;
+    after_index.validate()?;
+    let replayed = commit_recovery_job_and_index(
+        platform,
+        scope,
+        runtime_budget,
+        "post_turn.governance.permission_resume",
+        &before_job,
+        &after_job,
+        &before_index,
+        &after_index,
+        operation_id,
+        actor_subject_id,
+        MemoryMutationOperationKind::GovernanceProviderPermissionRecovery,
+        binding_id,
+        new_generation,
+        now_secs,
+    )?;
+    Ok(GovernanceRecoveryOutcome {
+        job: read_job(platform, &after_job.job_id)?.ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_permission_resume",
+                "recovered governance job disappeared after operation commit",
+            )
+        })?,
+        replayed,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn dead_letter_governance_job(
     platform: &StorePlatform,
     scope: StoreEventScope,
@@ -877,7 +1240,7 @@ pub(crate) fn dead_letter_governance_job(
     error_class: PostTurnGovernanceErrorClassV2,
     reason: &str,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV2> {
+) -> Result<PostTurnGovernanceJobV3> {
     if error_class.is_retryable() || reason.trim().is_empty() {
         return Err(Error::invalid_input(
             "post_turn_governance_fail",
@@ -912,6 +1275,7 @@ pub(crate) fn dead_letter_governance_job(
     after_job.next_attempt_at = None;
     after_job.lease_owner = None;
     after_job.lease_until = None;
+    after_job.execution_block_authority = None;
     after_job.last_error_class = Some(error_class);
     after_job.blocking_reason = Some(reason.to_string());
     after_job.updated_at = now_secs;
@@ -968,7 +1332,7 @@ pub(crate) fn cancel_governance_job(
     job_id: &str,
     reason: &str,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV2> {
+) -> Result<PostTurnGovernanceJobV3> {
     if reason.trim().is_empty() {
         return Err(Error::invalid_input(
             "post_turn_governance_cancel",
@@ -996,6 +1360,7 @@ pub(crate) fn cancel_governance_job(
     after_job.next_attempt_at = None;
     after_job.lease_owner = None;
     after_job.lease_until = None;
+    after_job.execution_block_authority = None;
     after_job.blocking_reason = Some(reason.to_string());
     after_job.last_error_class = None;
     after_job.terminal_at = Some(now_secs);
@@ -1053,6 +1418,7 @@ fn plan_governance_job_completion(
     job_id: &str,
     lease_owner: &str,
     lease_epoch: u64,
+    decision_summary: PostTurnGovernanceDecisionSummaryV1,
     mut memory_mutations: Vec<StoreMutation>,
     mut memory_preconditions: Vec<StoreJsonPrecondition>,
     now_secs: u64,
@@ -1092,12 +1458,14 @@ fn plan_governance_job_completion(
             .map_err(|error| Error::config("post_turn_governance_complete", error.to_string()))?,
     );
     let transaction_id = governance_completion_transaction_id(job_id, lease_epoch)?;
-    let expected_receipt = PostTurnGovernanceReceiptV2 {
-        semantic_transaction_id: transaction_id.clone(),
+    let expected_receipt = PostTurnGovernanceReceiptV3::new(
+        job_id,
+        transaction_id.clone(),
         mutation_plan_digest,
         memory_post_image_digest,
-        completed_at: now_secs,
-    };
+        now_secs,
+        decision_summary,
+    )?;
 
     let before_job = read_job(platform, job_id)?.ok_or_else(|| {
         Error::not_found("post_turn_governance_complete", "governance job not found")
@@ -1154,6 +1522,7 @@ fn plan_governance_job_completion(
     after_job.next_attempt_at = None;
     after_job.lease_owner = None;
     after_job.lease_until = None;
+    after_job.execution_block_authority = None;
     after_job.blocking_reason = None;
     after_job.last_error_class = None;
     after_job.receipt = Some(expected_receipt.clone());
@@ -1228,15 +1597,15 @@ fn plan_governance_job_completion(
 
 enum GovernanceCompletionPlan {
     AlreadyCompleted {
-        job: Box<PostTurnGovernanceJobV2>,
+        job: Box<PostTurnGovernanceJobV3>,
         transaction_id: String,
     },
     Pending(Box<GovernanceCompletionPending>),
 }
 
 struct GovernanceCompletionPending {
-    expected_receipt: PostTurnGovernanceReceiptV2,
-    after_job: PostTurnGovernanceJobV2,
+    expected_receipt: PostTurnGovernanceReceiptV3,
+    after_job: PostTurnGovernanceJobV3,
     batch: StoreMutationBatch,
     preconditions: Vec<StoreJsonPrecondition>,
 }
@@ -1249,17 +1618,19 @@ pub(crate) fn complete_governance_job_with_memory_plan(
     job_id: &str,
     lease_owner: &str,
     lease_epoch: u64,
+    decision_summary: PostTurnGovernanceDecisionSummaryV1,
     memory_mutations: Vec<StoreMutation>,
     memory_preconditions: Vec<StoreJsonPrecondition>,
     memory_blob_preconditions: Vec<StoreBlobPrecondition>,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV2> {
+) -> Result<PostTurnGovernanceJobV3> {
     let plan = plan_governance_job_completion(
         platform,
         scope,
         job_id,
         lease_owner,
         lease_epoch,
+        decision_summary,
         memory_mutations,
         memory_preconditions,
         now_secs,
@@ -1299,7 +1670,7 @@ pub(crate) fn complete_governance_job_with_memory_plan(
 
 #[derive(Debug)]
 pub(crate) struct SubjectSoulGovernanceCompletionOutcome {
-    pub(crate) job: PostTurnGovernanceJobV2,
+    pub(crate) job: PostTurnGovernanceJobV3,
     pub(crate) soul: SubjectSoulStoreMutationOutcome,
 }
 
@@ -1311,6 +1682,7 @@ pub(crate) fn complete_governance_job_with_subject_soul_plan(
     job_id: &str,
     lease_owner: &str,
     lease_epoch: u64,
+    decision_summary: PostTurnGovernanceDecisionSummaryV1,
     soul_plan: SubjectSoulStoreMutationPlan,
     additional_mutations: Vec<StoreMutation>,
     additional_preconditions: Vec<StoreJsonPrecondition>,
@@ -1369,6 +1741,7 @@ pub(crate) fn complete_governance_job_with_subject_soul_plan(
         job_id,
         lease_owner,
         lease_epoch,
+        decision_summary,
         combined_mutations,
         combined_preconditions,
         now_secs,
@@ -1434,9 +1807,9 @@ pub(crate) fn complete_governance_job_with_subject_soul_plan(
 }
 
 fn completed_job_if_same_receipt(
-    job: PostTurnGovernanceJobV2,
-    expected: &PostTurnGovernanceReceiptV2,
-) -> Result<PostTurnGovernanceJobV2> {
+    job: PostTurnGovernanceJobV3,
+    expected: &PostTurnGovernanceReceiptV3,
+) -> Result<PostTurnGovernanceJobV3> {
     let Some(actual) = job.receipt.as_ref() else {
         return Err(Error::config(
             "post_turn_governance_complete",
@@ -1446,6 +1819,7 @@ fn completed_job_if_same_receipt(
     if actual.semantic_transaction_id == expected.semantic_transaction_id
         && actual.mutation_plan_digest == expected.mutation_plan_digest
         && actual.memory_post_image_digest == expected.memory_post_image_digest
+        && actual.decision_summary == expected.decision_summary
     {
         return Ok(job);
     }
@@ -1511,10 +1885,259 @@ fn merge_completion_preconditions(
     Ok(())
 }
 
+pub(crate) fn ensure_binding_snapshot(
+    platform: &StorePlatform,
+    scope: StoreEventScope,
+    runtime_budget: &RuntimeBudgetReport,
+    snapshot: &PostTurnGovernanceBindingSnapshotV1,
+    now_secs: u64,
+) -> Result<PostTurnGovernanceBindingSnapshotV1> {
+    snapshot.validate()?;
+    let key = snapshot.storage_key();
+    if let Some(existing) =
+        read_binding_snapshot(platform, &snapshot.binding_id, snapshot.binding_revision)?
+    {
+        if binding_snapshots_share_canonical_identity(&existing, snapshot) {
+            let index = read_binding_revision_index(platform, &snapshot.binding_id)?;
+            if index
+                .as_ref()
+                .is_some_and(|index| binding_snapshot_has_exact_revision_ref(&existing, index))
+            {
+                return Ok(existing);
+            }
+            return Err(Error::config(
+                "post_turn_governance_binding_revision_index",
+                "binding snapshot lacks its exact revision index reference",
+            ));
+        }
+        return Err(Error::conflict(
+            "post_turn_governance_binding_snapshot",
+            "immutable binding identity already has a different canonical snapshot",
+        ));
+    }
+    let before_index = read_binding_revision_index(platform, &snapshot.binding_id)?;
+    let mut after_index = before_index
+        .clone()
+        .unwrap_or_else(|| PostTurnGovernanceBindingRevisionIndexV1::empty(snapshot));
+    if after_index.binding_id != snapshot.binding_id
+        || after_index.source_owner_id != snapshot.source_owner_id
+        || after_index.source_config_id != snapshot.source_config_id
+    {
+        return Err(Error::config(
+            "post_turn_governance_binding_revision_index",
+            "binding revision index owner differs from the immutable snapshot",
+        ));
+    }
+    let mut pruned = None;
+    if after_index.revisions.len() >= MAX_POST_TURN_GOVERNANCE_BINDING_REVISIONS {
+        let position = after_index
+            .revisions
+            .iter()
+            .position(|revision| !revision.referenced)
+            .ok_or_else(|| {
+                Error::config(
+                    "post_turn_governance_binding_retention_exhausted",
+                    "all retained binding revisions are referenced by durable governance jobs",
+                )
+            })?;
+        pruned = Some(after_index.revisions.remove(position));
+    }
+    after_index
+        .revisions
+        .push(PostTurnGovernanceBindingRevisionRefV1::from_snapshot(
+            snapshot,
+        ));
+    after_index
+        .revisions
+        .sort_by_key(|revision| revision.binding_revision);
+    if before_index.is_some() {
+        after_index.index_revision =
+            after_index.index_revision.checked_add(1).ok_or_else(|| {
+                Error::config(
+                    "post_turn_governance_binding_revision_index",
+                    "binding revision index revision overflow",
+                )
+            })?;
+    }
+    after_index.updated_at = now_secs;
+    after_index.validate()?;
+    let value = serde_json::to_value(snapshot).map_err(|error| {
+        Error::config("post_turn_governance_binding_snapshot", error.to_string())
+    })?;
+    let index_value = serde_json::to_value(&after_index).map_err(|error| {
+        Error::config(
+            "post_turn_governance_binding_revision_index",
+            error.to_string(),
+        )
+    })?;
+    let mut mutations = Vec::with_capacity(3);
+    let mut preconditions = vec![
+        StoreJsonPrecondition::Absent {
+            namespace: POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE.to_string(),
+            key: key.clone(),
+        },
+        json_precondition(
+            POST_TURN_GOVERNANCE_BINDING_REVISION_INDEX_NAMESPACE,
+            &snapshot.binding_id,
+            before_index.as_ref(),
+        )?,
+    ];
+    if let Some(pruned) = pruned {
+        let pruned_key = format!("{}:{}", snapshot.binding_id, pruned.binding_revision);
+        let before_snapshot =
+            read_binding_snapshot(platform, &snapshot.binding_id, pruned.binding_revision)?
+                .ok_or_else(|| {
+                    Error::config(
+                        "post_turn_governance_binding_revision_index",
+                        "binding revision index references a missing snapshot",
+                    )
+                })?;
+        if before_snapshot.canonical_digest != pruned.canonical_digest {
+            return Err(Error::config(
+                "post_turn_governance_binding_revision_index",
+                "binding revision index digest differs from its snapshot",
+            ));
+        }
+        preconditions.push(json_precondition(
+            POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE,
+            &pruned_key,
+            Some(&before_snapshot),
+        )?);
+        mutations.push(StoreMutation::DeleteJson {
+            namespace: POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE.to_string(),
+            key: pruned_key.clone(),
+            event_kind: MemoryStoreEventKind::MemoryMaintenance,
+            plane: "post_turn_governance".to_string(),
+            record_key: pruned_key,
+        });
+    }
+    mutations.push(put_json(
+        POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE,
+        &key,
+        value,
+    ));
+    mutations.push(put_json(
+        POST_TURN_GOVERNANCE_BINDING_REVISION_INDEX_NAMESPACE,
+        &snapshot.binding_id,
+        index_value,
+    ));
+    let commit = platform.commit_governed_memory_transaction_with_runtime_budget_at(
+        StoreMutationBatch {
+            transaction_id: format!("post_turn_governance_binding_{}", snapshot.canonical_digest),
+            operation: "post_turn.governance.binding.ensure".to_string(),
+            scope,
+            mutations,
+        },
+        &preconditions,
+        runtime_budget,
+        now_secs,
+    );
+    match commit {
+        Ok(_) => Ok(snapshot.clone()),
+        Err(error) if error.stage() == "memory_write_transaction_precondition_failed" => {
+            let existing =
+                read_binding_snapshot(platform, &snapshot.binding_id, snapshot.binding_revision)?;
+            let index = read_binding_revision_index(platform, &snapshot.binding_id)?;
+            if existing.as_ref().is_some_and(|existing| {
+                binding_snapshots_share_canonical_identity(existing, snapshot)
+                    && index.as_ref().is_some_and(|index| {
+                        binding_snapshot_has_exact_revision_ref(existing, index)
+                    })
+            }) {
+                Ok(existing.expect("exact binding snapshot checked above"))
+            } else if existing.is_some() {
+                Err(Error::conflict(
+                    "post_turn_governance_binding_snapshot",
+                    "immutable binding identity already has a different canonical snapshot",
+                ))
+            } else {
+                Err(error)
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn binding_snapshots_share_canonical_identity(
+    existing: &PostTurnGovernanceBindingSnapshotV1,
+    requested: &PostTurnGovernanceBindingSnapshotV1,
+) -> bool {
+    existing.binding_id == requested.binding_id
+        && existing.binding_revision == requested.binding_revision
+        && existing.canonical_digest == requested.canonical_digest
+}
+
+fn binding_snapshot_has_exact_revision_ref(
+    snapshot: &PostTurnGovernanceBindingSnapshotV1,
+    index: &PostTurnGovernanceBindingRevisionIndexV1,
+) -> bool {
+    index.binding_id == snapshot.binding_id
+        && index.source_owner_id == snapshot.source_owner_id
+        && index.source_config_id == snapshot.source_config_id
+        && index.revisions.iter().any(|revision| {
+            revision.binding_revision == snapshot.binding_revision
+                && revision.canonical_digest == snapshot.canonical_digest
+                && revision.created_at == snapshot.created_at
+        })
+}
+
+pub(crate) fn read_binding_revision_index(
+    platform: &StorePlatform,
+    binding_id: &str,
+) -> Result<Option<PostTurnGovernanceBindingRevisionIndexV1>> {
+    if binding_id.trim().is_empty() || binding_id.trim() != binding_id {
+        return Err(Error::invalid_input(
+            "post_turn_governance_binding_revision_index",
+            "canonical binding identity is required",
+        ));
+    }
+    let mut docs = platform.read_json_docs_by_keys(
+        POST_TURN_GOVERNANCE_BINDING_REVISION_INDEX_NAMESPACE,
+        &[binding_id.to_string()],
+    )?;
+    let Some(doc) = docs.pop() else {
+        return Ok(None);
+    };
+    let index: PostTurnGovernanceBindingRevisionIndexV1 = serde_json::from_value(doc.value)
+        .map_err(|error| {
+            Error::config(
+                "post_turn_governance_binding_revision_index",
+                error.to_string(),
+            )
+        })?;
+    index.validate()?;
+    Ok(Some(index))
+}
+
+pub(crate) fn read_binding_snapshot(
+    platform: &StorePlatform,
+    binding_id: &str,
+    binding_revision: u64,
+) -> Result<Option<PostTurnGovernanceBindingSnapshotV1>> {
+    if binding_id.trim().is_empty() || binding_revision == 0 {
+        return Err(Error::invalid_input(
+            "post_turn_governance_binding_snapshot",
+            "binding identity and revision are required",
+        ));
+    }
+    let key = format!("{binding_id}:{binding_revision}");
+    let mut docs =
+        platform.read_json_docs_by_keys(POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE, &[key])?;
+    let Some(doc) = docs.pop() else {
+        return Ok(None);
+    };
+    let snapshot: PostTurnGovernanceBindingSnapshotV1 =
+        serde_json::from_value(doc.value).map_err(|error| {
+            Error::config("post_turn_governance_binding_snapshot", error.to_string())
+        })?;
+    snapshot.validate()?;
+    Ok(Some(snapshot))
+}
+
 pub(crate) fn read_job(
     platform: &StorePlatform,
     job_id: &str,
-) -> Result<Option<PostTurnGovernanceJobV2>> {
+) -> Result<Option<PostTurnGovernanceJobV3>> {
     let mut docs = platform
         .read_json_docs_by_keys(POST_TURN_GOVERNANCE_JOB_NAMESPACE, &[job_id.to_string()])?;
     let Some(doc) = docs.pop() else {
@@ -1528,7 +2151,7 @@ pub(crate) fn read_job(
 pub(crate) fn read_scope_index(
     platform: &StorePlatform,
     scope_index_key: &str,
-) -> Result<Option<PostTurnGovernanceScopeIndexV2>> {
+) -> Result<Option<PostTurnGovernanceScopeIndexV3>> {
     let mut docs = platform.read_json_docs_by_keys(
         POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
         &[scope_index_key.to_string()],
@@ -1547,10 +2170,39 @@ fn commit_job_and_index(
     scope: StoreEventScope,
     runtime_budget: &RuntimeBudgetReport,
     operation: &str,
-    before_job: &PostTurnGovernanceJobV2,
-    after_job: &PostTurnGovernanceJobV2,
-    before_index: &PostTurnGovernanceScopeIndexV2,
-    after_index: &PostTurnGovernanceScopeIndexV2,
+    before_job: &PostTurnGovernanceJobV3,
+    after_job: &PostTurnGovernanceJobV3,
+    before_index: &PostTurnGovernanceScopeIndexV3,
+    after_index: &PostTurnGovernanceScopeIndexV3,
+    now_secs: u64,
+) -> Result<()> {
+    commit_job_and_index_with_extra(
+        platform,
+        scope,
+        runtime_budget,
+        operation,
+        before_job,
+        after_job,
+        before_index,
+        after_index,
+        Vec::new(),
+        Vec::new(),
+        now_secs,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn commit_job_and_index_with_extra(
+    platform: &StorePlatform,
+    scope: StoreEventScope,
+    runtime_budget: &RuntimeBudgetReport,
+    operation: &str,
+    before_job: &PostTurnGovernanceJobV3,
+    after_job: &PostTurnGovernanceJobV3,
+    before_index: &PostTurnGovernanceScopeIndexV3,
+    after_index: &PostTurnGovernanceScopeIndexV3,
+    mut extra_mutations: Vec<StoreMutation>,
+    mut extra_preconditions: Vec<StoreJsonPrecondition>,
     now_secs: u64,
 ) -> Result<()> {
     let before_job_value = serde_json::to_value(before_job)
@@ -1561,12 +2213,109 @@ fn commit_job_and_index(
         .map_err(|error| Error::config("post_turn_governance_transaction", error.to_string()))?;
     let after_index_value = serde_json::to_value(after_index)
         .map_err(|error| Error::config("post_turn_governance_transaction", error.to_string()))?;
+    let mut mutations = vec![
+        put_json(
+            POST_TURN_GOVERNANCE_JOB_NAMESPACE,
+            &after_job.job_id,
+            after_job_value,
+        ),
+        put_json(
+            POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
+            &after_job.scope_index_key,
+            after_index_value,
+        ),
+    ];
+    mutations.append(&mut extra_mutations);
+    let mut preconditions = vec![
+        StoreJsonPrecondition::Exact {
+            namespace: POST_TURN_GOVERNANCE_JOB_NAMESPACE.to_string(),
+            key: before_job.job_id.clone(),
+            value: before_job_value,
+        },
+        StoreJsonPrecondition::Exact {
+            namespace: POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE.to_string(),
+            key: before_job.scope_index_key.clone(),
+            value: before_index_value,
+        },
+    ];
+    preconditions.append(&mut extra_preconditions);
     platform.commit_governed_memory_transaction_with_runtime_budget_at(
         StoreMutationBatch {
             transaction_id: format!(
                 "post_turn_governance_{}_{}",
                 after_job.job_id, after_job.state_revision
             ),
+            operation: operation.to_string(),
+            scope,
+            mutations,
+        },
+        &preconditions,
+        runtime_budget,
+        now_secs,
+    )?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn commit_recovery_job_and_index(
+    platform: &StorePlatform,
+    scope: StoreEventScope,
+    runtime_budget: &RuntimeBudgetReport,
+    operation: &str,
+    before_job: &PostTurnGovernanceJobV3,
+    after_job: &PostTurnGovernanceJobV3,
+    before_index: &PostTurnGovernanceScopeIndexV3,
+    after_index: &PostTurnGovernanceScopeIndexV3,
+    caller_operation_id: &str,
+    actor_subject_id: &str,
+    operation_kind: MemoryMutationOperationKind,
+    recovery_authority_key: &str,
+    new_generation: u64,
+    now_secs: u64,
+) -> Result<bool> {
+    let identity = governance_recovery_operation_identity(
+        before_job,
+        caller_operation_id,
+        actor_subject_id,
+        operation_kind,
+    )?;
+    let intent_digest = governance_recovery_intent_digest(
+        &before_job.job_id,
+        operation_kind,
+        recovery_authority_key,
+        new_generation,
+    )?;
+    let operation_plan = StoreMutationOperationPlan::new(
+        identity.clone(),
+        intent_digest,
+        MemoryMutationEffect::Changed,
+        2,
+        actor_subject_id,
+        now_secs,
+    )?;
+    let before_job_value = serde_json::to_value(before_job).map_err(|error| {
+        Error::config("post_turn_governance_recovery_operation", error.to_string())
+    })?;
+    let before_index_value = serde_json::to_value(before_index).map_err(|error| {
+        Error::config("post_turn_governance_recovery_operation", error.to_string())
+    })?;
+    let after_job_value = serde_json::to_value(after_job).map_err(|error| {
+        Error::config("post_turn_governance_recovery_operation", error.to_string())
+    })?;
+    let after_index_value = serde_json::to_value(after_index).map_err(|error| {
+        Error::config("post_turn_governance_recovery_operation", error.to_string())
+    })?;
+    let event = crate::MemoryStoreEvent::new(
+        format!("post-turn-governance-recovery:{}", identity.storage_key()),
+        MemoryStoreEventKind::MemoryControl,
+        scope.clone(),
+        now_secs,
+    )
+    .with_plane("post_turn_governance")
+    .with_record_key(&after_job.job_id);
+    let outcome = platform.commit_memory_mutation_operation_with_runtime_budget(
+        StoreMutationBatch {
+            transaction_id: operation_plan.transaction_id().to_string(),
             operation: operation.to_string(),
             scope,
             mutations: vec![
@@ -1580,6 +2329,9 @@ fn commit_job_and_index(
                     &after_job.scope_index_key,
                     after_index_value,
                 ),
+                StoreMutation::AppendEvent {
+                    event: Box::new(event),
+                },
             ],
         },
         &[
@@ -1594,16 +2346,166 @@ fn commit_job_and_index(
                 value: before_index_value,
             },
         ],
+        operation_plan,
         runtime_budget,
-        now_secs,
     )?;
+    Ok(matches!(
+        outcome,
+        StoreMutationOperationOutcome::Replayed { .. }
+    ))
+}
+
+fn governance_recovery_intent_digest(
+    job_id: &str,
+    operation_kind: MemoryMutationOperationKind,
+    recovery_authority_key: &str,
+    new_generation: u64,
+) -> Result<String> {
+    let operation_label = match operation_kind {
+        MemoryMutationOperationKind::GovernanceCredentialRecovery => "credential",
+        MemoryMutationOperationKind::GovernanceProviderPermissionRecovery => "permission",
+        _ => {
+            return Err(Error::config(
+                "post_turn_governance_recovery_operation",
+                "recovery intent requires an exact governance recovery operation kind",
+            ));
+        }
+    };
+    if job_id.trim().is_empty()
+        || recovery_authority_key.trim().is_empty()
+        || recovery_authority_key.trim() != recovery_authority_key
+        || new_generation == 0
+    {
+        return Err(Error::invalid_input(
+            "post_turn_governance_recovery_operation",
+            "canonical recovery job, authority key, and generation are required",
+        ));
+    }
+    Ok(format!(
+        "sha256:{:x}",
+        Sha256::digest(
+            [
+                b"post-turn-governance-recovery-intent-v1\0".as_slice(),
+                operation_label.as_bytes(),
+                b"\0",
+                job_id.as_bytes(),
+                b"\0",
+                recovery_authority_key.as_bytes(),
+                b"\0",
+                &new_generation.to_be_bytes(),
+            ]
+            .concat()
+        )
+    ))
+}
+
+fn governance_recovery_operation_identity(
+    job: &PostTurnGovernanceJobV3,
+    caller_operation_id: &str,
+    actor_subject_id: &str,
+    operation_kind: MemoryMutationOperationKind,
+) -> Result<MemoryMutationOperationIdentity> {
+    let effective_operation_id = format!(
+        "sha256:{:x}",
+        Sha256::digest(
+            [
+                b"post-turn-governance-recovery-operation-v1\0".as_slice(),
+                caller_operation_id.as_bytes(),
+                b"\0",
+                job.job_id.as_bytes(),
+            ]
+            .concat()
+        )
+    );
+    MemoryMutationOperationIdentity::new(
+        effective_operation_id,
+        &job.identity.memory_space_id,
+        &job.identity.mounted_subject_id,
+        actor_subject_id,
+        operation_kind,
+    )
+}
+
+fn append_binding_reference_mutation(
+    platform: &StorePlatform,
+    execution_binding: &PostTurnGovernanceExecutionBindingV1,
+    now_secs: u64,
+    mutations: &mut Vec<StoreMutation>,
+    preconditions: &mut Vec<StoreJsonPrecondition>,
+) -> Result<()> {
+    let PostTurnGovernanceExecutionBindingV1::Bound {
+        binding_id,
+        binding_revision,
+    } = execution_binding
+    else {
+        return Ok(());
+    };
+    let snapshot =
+        read_binding_snapshot(platform, binding_id, *binding_revision)?.ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_binding_reference",
+                "bound governance job is missing its immutable binding snapshot",
+            )
+        })?;
+    let before = read_binding_revision_index(platform, binding_id)?.ok_or_else(|| {
+        Error::config(
+            "post_turn_governance_binding_reference",
+            "bound governance job is missing its binding revision index",
+        )
+    })?;
+    let mut after = before.clone();
+    let revision = after
+        .revisions
+        .iter_mut()
+        .find(|revision| revision.binding_revision == *binding_revision)
+        .ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_binding_reference",
+                "binding revision index is missing the bound revision",
+            )
+        })?;
+    if revision.canonical_digest != snapshot.canonical_digest {
+        return Err(Error::config(
+            "post_turn_governance_binding_reference",
+            "binding revision index digest differs from the immutable snapshot",
+        ));
+    }
+    preconditions.push(json_precondition(
+        POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE,
+        &snapshot.storage_key(),
+        Some(&snapshot),
+    )?);
+    preconditions.push(json_precondition(
+        POST_TURN_GOVERNANCE_BINDING_REVISION_INDEX_NAMESPACE,
+        binding_id,
+        Some(&before),
+    )?);
+    if revision.referenced {
+        return Ok(());
+    }
+    revision.referenced = true;
+    after.index_revision = after.index_revision.checked_add(1).ok_or_else(|| {
+        Error::config(
+            "post_turn_governance_binding_reference",
+            "binding revision index revision overflow",
+        )
+    })?;
+    after.updated_at = now_secs;
+    after.validate()?;
+    mutations.push(put_json(
+        POST_TURN_GOVERNANCE_BINDING_REVISION_INDEX_NAMESPACE,
+        binding_id,
+        serde_json::to_value(after).map_err(|error| {
+            Error::config("post_turn_governance_binding_reference", error.to_string())
+        })?,
+    ));
     Ok(())
 }
 
 fn replace_scope_index_ref(
-    index: &mut PostTurnGovernanceScopeIndexV2,
-    before_job: &PostTurnGovernanceJobV2,
-    after_job: &PostTurnGovernanceJobV2,
+    index: &mut PostTurnGovernanceScopeIndexV3,
+    before_job: &PostTurnGovernanceJobV3,
+    after_job: &PostTurnGovernanceJobV3,
     stage: &'static str,
 ) -> Result<()> {
     let reference = index
@@ -1617,13 +2519,13 @@ fn replace_scope_index_ref(
             "scope index job revision differs from job authority",
         ));
     }
-    *reference = PostTurnGovernanceJobRefV1::from_job(after_job);
+    *reference = PostTurnGovernanceJobRefV2::from_job(after_job);
     Ok(())
 }
 
 fn append_terminal_ref(
-    index: &mut PostTurnGovernanceScopeIndexV2,
-    job: &PostTurnGovernanceJobV2,
+    index: &mut PostTurnGovernanceScopeIndexV3,
+    job: &PostTurnGovernanceJobV3,
     stage: &'static str,
 ) -> Result<()> {
     if !job.status.is_terminal() {
@@ -1650,7 +2552,7 @@ fn append_terminal_ref(
     }
     index
         .recent_terminal_jobs
-        .push(PostTurnGovernanceJobRefV1::from_job(job));
+        .push(PostTurnGovernanceJobRefV2::from_job(job));
     index.recent_terminal_jobs.sort_by(|left, right| {
         right
             .updated_at
@@ -1698,16 +2600,19 @@ mod tests {
     use crate::store_internal::{StoreBackendConfig, StoreCapacityBudget, StorePlatform};
     use crate::{MemoryStoreEventKind, ProfileId, StoreEventScope, StoreMutation};
     use bm_core::memory::{
-        PostTurnGovernanceAttemptAuthorityV2, PostTurnGovernanceIdentityV2,
-        PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV2, SubjectSoulReadOutcomeV1,
-        SubjectSoulReadRequestV1, SubjectSoulReadSelectorV1, SubjectSoulReadViewV1,
+        PostTurnGovernanceAttemptAuthorityV3, PostTurnGovernanceBindingSnapshotV1,
+        PostTurnGovernanceDecisionSummaryV1, PostTurnGovernanceExecutionBindingV1,
+        PostTurnGovernanceIdentityV2, PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV3,
+        PostTurnGovernancePrivacyAuthorityV1, PostTurnGovernanceProviderProtocolV1,
+        PostTurnSemanticGovernanceReport, SubjectSoulReadOutcomeV1, SubjectSoulReadRequestV1,
+        SubjectSoulReadSelectorV1, SubjectSoulReadViewV1,
         POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
     };
 
     use super::{
         claim_governance_job, complete_governance_job_with_memory_plan,
-        complete_governance_job_with_subject_soul_plan, ensure_governance_intent, read_job,
-        read_scope_index,
+        complete_governance_job_with_subject_soul_plan, ensure_binding_snapshot,
+        ensure_governance_intent, read_job, read_scope_index,
     };
 
     fn now_secs() -> u64 {
@@ -1717,8 +2622,8 @@ mod tests {
             .as_secs()
     }
 
-    fn pending_job(now_secs: u64) -> PostTurnGovernanceJobV2 {
-        PostTurnGovernanceJobV2::pending(
+    fn pending_job(now_secs: u64) -> PostTurnGovernanceJobV3 {
+        PostTurnGovernanceJobV3::pending(
             PostTurnGovernanceIdentityV2::new(
                 "space:atomic",
                 "subject:atomic",
@@ -1731,9 +2636,13 @@ mod tests {
             1,
             "sha256:1111111111111111111111111111111111111111111111111111111111111111",
             "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-            1,
-            1,
-            "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            PostTurnGovernanceExecutionBindingV1::Unbound,
+            PostTurnGovernancePrivacyAuthorityV1 {
+                policy_schema_version: 1,
+                exact_policy_digest:
+                    "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+                        .to_string(),
+            },
             Vec::new(),
             0,
             3,
@@ -1749,20 +2658,50 @@ mod tests {
             .with_conversation("conversation:atomic")
     }
 
-    fn authority() -> PostTurnGovernanceAttemptAuthorityV2 {
-        PostTurnGovernanceAttemptAuthorityV2 {
-            binding_id: "governance-model:atomic".to_string(),
-            config_revision: 1,
-            model_id: "model:atomic".to_string(),
-            privacy_revision: 1,
-            privacy_digest:
-                "sha256:4444444444444444444444444444444444444444444444444444444444444444"
-                    .to_string(),
+    fn authority(
+        platform: &StorePlatform,
+        budget: &crate::RuntimeBudgetReport,
+        now_secs: u64,
+    ) -> PostTurnGovernanceAttemptAuthorityV3 {
+        let snapshot = PostTurnGovernanceBindingSnapshotV1::new(
+            "owner:atomic",
+            "config:atomic",
+            1,
+            PostTurnGovernanceProviderProtocolV1::OpenAiCompatible,
+            "https://governance.invalid/v1",
+            "model:atomic",
+            None,
+            30_000,
+            4_096,
+            1_024,
+            1,
+            now_secs,
+        )
+        .expect("binding snapshot");
+        let snapshot = ensure_binding_snapshot(platform, scope(), budget, &snapshot, now_secs)
+            .expect("install binding snapshot");
+        PostTurnGovernanceAttemptAuthorityV3 {
+            binding_id: snapshot.binding_id,
+            binding_revision: snapshot.binding_revision,
+            model_id: snapshot.model_id,
+            privacy_authority: PostTurnGovernancePrivacyAuthorityV1 {
+                policy_schema_version: 1,
+                exact_policy_digest:
+                    "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+                        .to_string(),
+            },
             transcript_lifecycle_revision: 1,
             disclosure_authority_digest:
                 "sha256:5555555555555555555555555555555555555555555555555555555555555555"
                     .to_string(),
         }
+    }
+
+    fn decision_summary() -> PostTurnGovernanceDecisionSummaryV1 {
+        PostTurnGovernanceDecisionSummaryV1::from_semantic_report(
+            &PostTurnSemanticGovernanceReport::skipped("synthetic no-candidate completion"),
+        )
+        .expect("decision summary")
     }
 
     #[test]
@@ -1784,7 +2723,7 @@ mod tests {
             &pending.job_id,
             "worker:atomic",
             now_secs + 60,
-            authority(),
+            authority(&platform, &budget, now_secs),
             now_secs,
         )
         .expect("claim");
@@ -1808,6 +2747,7 @@ mod tests {
             &leased.job_id,
             "worker:atomic",
             leased.lease_epoch,
+            decision_summary(),
             mutations.clone(),
             preconditions.clone(),
             Vec::new(),
@@ -1839,6 +2779,7 @@ mod tests {
             &completed.job_id,
             "worker:atomic",
             leased.lease_epoch,
+            decision_summary(),
             mutations,
             preconditions,
             Vec::new(),
@@ -1877,7 +2818,7 @@ mod tests {
             &pending.job_id,
             "worker:atomic-soul",
             now_secs + 60,
-            authority(),
+            authority(&platform, &budget, now_secs),
             now_secs,
         )
         .expect("claim");
@@ -1906,6 +2847,7 @@ mod tests {
             &leased.job_id,
             "worker:atomic-soul",
             leased.lease_epoch,
+            decision_summary(),
             soul_plan,
             vec![StoreMutation::AppendEvent {
                 event: Box::new(additional_event.clone()),
@@ -1949,6 +2891,7 @@ mod tests {
             &leased.job_id,
             "worker:atomic-soul",
             leased.lease_epoch,
+            decision_summary(),
             replay_plan,
             vec![StoreMutation::AppendEvent {
                 event: Box::new(additional_event),
@@ -1993,7 +2936,7 @@ mod tests {
             &pending.job_id,
             "worker:atomic-soul-budget",
             now_secs + 60,
-            authority(),
+            authority(&platform, &budget, now_secs),
             now_secs,
         )
         .expect("claim");
@@ -2016,6 +2959,7 @@ mod tests {
             &leased.job_id,
             "worker:atomic-soul-budget",
             leased.lease_epoch,
+            decision_summary(),
             soul_plan,
             Vec::new(),
             Vec::new(),
@@ -2052,7 +2996,7 @@ mod tests {
             &pending.job_id,
             "worker:atomic-soul-protected",
             now_secs + 60,
-            authority(),
+            authority(&platform, &budget, now_secs),
             now_secs,
         )
         .expect("claim");
@@ -2075,6 +3019,7 @@ mod tests {
             &leased.job_id,
             "worker:atomic-soul-protected",
             leased.lease_epoch,
+            decision_summary(),
             soul_plan,
             vec![StoreMutation::PutJson {
                 namespace: "private_garden".to_string(),

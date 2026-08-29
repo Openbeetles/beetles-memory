@@ -30,7 +30,7 @@ After the crates are published:
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.4.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.6.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 Use exactly one profile feature for a build. Linux desktop, Linux device, and Linux server are distinct deployment targets; do not substitute one for another.
@@ -194,27 +194,27 @@ runtime.write(MemoryWriteRequest::Candidates {
 })?;
 ```
 
-If post-turn LLM services are unavailable, `finalize_turn` still
-commits the transcript and atomically creates a V2 intent in the StorePlatform
-`post_turn_governance_jobs` and `post_turn_governance_scope_indexes` typed
-namespaces. Once services recover, the SDK first acquires an exact lease through
-`MemoryRuntime::claim_governance_job`, then calls
-`MemoryRuntime::run_claimed_governance`. The latter revalidates transcript and
-privacy authority before the first network byte and commits the memory
-post-image, `succeeded` job, scope index, and receipt in one backend transaction.
-The legacy `memory/governance_jobs/pending.json` payload is never read or
-migrated; a non-empty legacy file fails with
-`legacy_governance_queue_reset_required` and requires explicit operator action.
-Hosts must not reimplement the queue, assemble memory mutations, or retry with
-host-owned semantics.
-If a canonical transcript commit exists but intent admission was interrupted,
-call `MemoryRuntime::reconcile_governance_intents` with a bounded page of 1 to
-32 turns for the current exact conversation. Its cursor and repaired intents
-advance in one CAS and never scan another subject or conversation.
-Operator surfaces should use `MemoryRuntime::deferred_governance_report()` or
-`inspect.deferred_governance` for pending / retrying / failed / terminal counts,
-recent jobs, scope, subject, turn, reason, and last error for the current runtime
-scope.
+If post-turn LLM services are unavailable, `finalize_turn` still commits the
+transcript and atomically creates an exact Job V3 governance intent. The durable
+intent is the recovery truth; a wake signal is only a hint.
+
+Production hosts attach the official `bm-entry::MemoryLearningService` to the
+existing `Arc<MemoryRuntime>`. The service consumes the SDK-owned
+`MemoryLearningEngine`, which alone performs bounded discovery, reconciliation,
+lease/CAS fencing, current transcript/subject/privacy admission, minimum
+Provider disclosure, strict candidate validation, retry classification, memory
+mutation, and terminal receipt/audit closure. Additional runtimes may be
+attached only when Store, Subject Registry, and MemorySpace authority match.
+Credential or Provider changes are sent as typed notifications that re-read the
+same host-owned source; raw credentials are never persisted.
+
+Hosts must not claim jobs, run governance transitions, assemble memory
+mutations, or implement a second queue/worker/retry policy. Operator and
+attachment status reads must use the SDK-minted typed inspection authority;
+unauthorized or cross-subject requests fail before job identity or reason detail
+is returned. Store schemas older than v12 are rejected and must be reset by the
+operator; v0.6.0 does not provide an automatic migration or compatibility
+reader.
 
 `project()` returns `MemoryProjectionReport.audit` as the projection diagnostic
 source of truth. It includes source planes, selected ids, section chars,

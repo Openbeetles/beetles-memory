@@ -772,9 +772,9 @@ fn run_archive_restore_reseed_delete_reopen(config: StoreBackendConfig) {
 }
 
 #[test]
-fn store_schema_v11_is_the_only_current_schema() {
-    assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v11");
-    assert_eq!(STORE_SCHEMA_VERSION, 11);
+fn store_schema_v12_is_the_only_current_schema() {
+    assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v12");
+    assert_eq!(STORE_SCHEMA_VERSION, 12);
 }
 
 #[test]

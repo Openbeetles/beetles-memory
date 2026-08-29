@@ -126,6 +126,8 @@ struct PersistentBindingPaths {
 pub(crate) struct EntryGovernanceModelStore {
     paths: Option<PersistentBindingPaths>,
     binding_id: String,
+    source_owner_id: String,
+    source_config_id: String,
     state: Mutex<Option<StoredGovernanceModelBinding>>,
     ephemeral_revisions: Mutex<BTreeMap<u64, StoredGovernanceModelBinding>>,
 }
@@ -133,19 +135,11 @@ pub(crate) struct EntryGovernanceModelStore {
 impl EntryGovernanceModelStore {
     pub(crate) fn open(
         store: &StoreBackendConfig,
-        memory_space_id: &str,
-        mounted_subject_id: &str,
-        channel: &str,
-        chat_id: &str,
+        source_owner_id: &str,
+        source_config_id: &str,
         profile: &str,
     ) -> Result<Self> {
-        let binding_id = binding_id(
-            memory_space_id,
-            mounted_subject_id,
-            channel,
-            chat_id,
-            profile,
-        );
+        let binding_id = binding_id(source_owner_id, source_config_id, profile);
         let paths = governance_model_paths(store, &binding_id);
         if paths
             .as_ref()
@@ -168,6 +162,8 @@ impl EntryGovernanceModelStore {
         Ok(Self {
             paths,
             binding_id,
+            source_owner_id: source_owner_id.to_string(),
+            source_config_id: source_config_id.to_string(),
             state: Mutex::new(binding),
             ephemeral_revisions: Mutex::new(ephemeral_revisions),
         })
@@ -378,16 +374,6 @@ impl EntryGovernanceModelStore {
         execution_binding_from_stored(&binding)
     }
 
-    pub(crate) fn current_policy_revision(&self) -> Result<u64> {
-        self.refresh_latest_binding()?;
-        Ok(self
-            .state
-            .lock()
-            .expect("governance model config lock")
-            .as_ref()
-            .map_or(1, |binding| binding.config_revision))
-    }
-
     fn persistence_label(&self) -> &'static str {
         if self.paths.is_some() {
             "durable"
@@ -403,6 +389,26 @@ impl EntryGovernanceModelStore {
         let latest = read_latest_binding(&paths.binding_dir, &self.binding_id)?;
         *self.state.lock().expect("governance model config lock") = latest;
         Ok(())
+    }
+
+    pub(crate) fn current_provider_binding(&self) -> Result<crate::GovernanceProviderBinding> {
+        let binding = crate::GovernanceProviderBinding::from_entry_binding(
+            self.execution_binding()?,
+            self.source_owner_id.clone(),
+            self.source_config_id.clone(),
+        );
+        binding.validate()?;
+        Ok(binding)
+    }
+}
+
+impl crate::GovernanceBindingSource for EntryGovernanceModelStore {
+    fn current_binding(&self) -> Result<Option<crate::GovernanceProviderBinding>> {
+        let view = self.view();
+        if !view.configured || !view.enabled {
+            return Ok(None);
+        }
+        self.current_provider_binding().map(Some)
     }
 }
 
@@ -434,22 +440,10 @@ fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-fn binding_id(
-    memory_space_id: &str,
-    mounted_subject_id: &str,
-    channel: &str,
-    chat_id: &str,
-    profile: &str,
-) -> String {
+fn binding_id(source_owner_id: &str, source_config_id: &str, profile: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"bm.entry.memory-governance-model-binding.v2\0");
-    for value in [
-        memory_space_id,
-        mounted_subject_id,
-        channel,
-        chat_id,
-        profile,
-    ] {
+    for value in [source_owner_id, source_config_id, profile] {
         hasher.update((value.len() as u64).to_be_bytes());
         hasher.update(value.as_bytes());
     }

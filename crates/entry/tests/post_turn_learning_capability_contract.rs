@@ -5,9 +5,30 @@ mod support;
 use std::time::{Duration, Instant};
 
 use bm_entry::{
-    EntryAuthConfig, EntryGovernanceCoordinatorState, EntryIdempotencyConfig, EntryIdentity,
-    EntryRuntime, EntryRuntimeConfig, EntryScope, EntryTransportConfig,
+    EntryAuthConfig, EntryGovernanceModelAuthMode, EntryGovernanceModelConfigUpdate,
+    EntryGovernanceModelProtocol, EntryIdempotencyConfig, EntryIdentity, EntryRuntime,
+    EntryRuntimeConfig, EntryScope, EntryTransportConfig, MemoryLearningAttachmentStatusRequest,
+    MemoryLearningServiceStatusRequest,
 };
+
+fn service_report(runtime: &EntryRuntime) -> bm_entry::MemoryLearningServiceReport {
+    let authority = runtime
+        .learning_service_status_authority()
+        .expect("service status authority");
+    runtime
+        .memory_learning_service_report(MemoryLearningServiceStatusRequest { authority })
+        .expect("service status")
+}
+
+fn attachment_report(runtime: &EntryRuntime) -> bm_entry::MemoryLearningAttachmentReport {
+    let authority = runtime
+        .runtime()
+        .learning_attachment_status_authority()
+        .expect("attachment status authority");
+    runtime
+        .memory_learning_attachment_report(MemoryLearningAttachmentStatusRequest { authority })
+        .expect("attachment status")
+}
 use bm_sdk::{
     CanonicalTurnDelta, ConversationScope, MemoryCapabilityPolicy, MemoryPrivacyPolicy,
     MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource,
@@ -79,15 +100,24 @@ fn finalize_request() -> MemoryTurnFinalizeRequest {
 #[test]
 fn missing_compiled_model_client_durably_blocks_the_job_without_hot_looping() {
     let runtime = runtime_without_model_client();
+    runtime
+        .console_update_governance_model(EntryGovernanceModelConfigUpdate {
+            enabled: true,
+            protocol: EntryGovernanceModelProtocol::OllamaNative,
+            endpoint: "http://127.0.0.1:11434/api".to_string(),
+            model: "synthetic-local-model".to_string(),
+            auth_mode: EntryGovernanceModelAuthMode::LocalUnauthenticated,
+            request_timeout_ms: 5_000,
+            max_input_tokens: 4_096,
+            max_output_tokens: 512,
+        })
+        .expect("configure immutable local binding");
     let finalized = runtime
         .runtime()
         .finalize_turn(finalize_request())
         .expect("queued finalize");
     let job_id = finalized.memory_consolidation.job_id.expect("job id");
-    // This test calls the SDK facade directly, so it intentionally exercises the
-    // coordinator's bounded five-second reconciliation poll rather than Entry's
-    // request-path wake signal.
-    let deadline = Instant::now() + Duration::from_secs(7);
+    let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         let job = runtime
             .runtime()
@@ -99,21 +129,18 @@ fn missing_compiled_model_client_durably_blocks_the_job_without_hot_looping() {
         if job.status == PostTurnGovernanceJobStatusV2::BlockedCapability {
             assert_eq!(
                 job.blocking_reason.as_deref(),
-                Some("governance_model_client_not_compiled")
+                Some("governance_execution_capability_unavailable")
             );
             break;
         }
         assert!(Instant::now() < deadline, "job remained {:?}", job.status);
         std::thread::sleep(Duration::from_millis(10));
     }
-    let blocked = runtime.governance_coordinator_report();
-    assert_eq!(
-        blocked.state,
-        EntryGovernanceCoordinatorState::BlockedCapability
-    );
+    let blocked = service_report(&runtime);
     assert_eq!(blocked.blocked_jobs, 1);
+    assert_eq!(attachment_report(&runtime).state, "blocked");
     std::thread::sleep(Duration::from_millis(200));
-    let settled = runtime.governance_coordinator_report();
+    let settled = service_report(&runtime);
     assert_eq!(settled.blocked_jobs, blocked.blocked_jobs);
     assert!(settled.cycles <= blocked.cycles.saturating_add(1));
 }

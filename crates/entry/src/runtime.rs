@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
+use std::time::Instant;
 
 use bm_adapter::{
     dispatch_adapter_command_with_services, project_adapter_report, AdapterCommand,
@@ -12,19 +13,18 @@ use bm_replay::{load_memory_benchmark_fixture_dir, run_memory_benchmark_wall};
 use bm_sdk::{
     default_agent_subject_id, resolve_memory_capabilities, AgentSkillDirConfig, Error,
     MemoryArchiveScope, MemoryCapabilityPolicy, MemoryCloseRequest, MemoryFacetRecallIndexReport,
-    MemoryIdentity, MemoryInspectionRequest, MemoryPrivacyPolicy, MemoryProjectionRequest,
-    MemoryRecallRequest, MemoryRuntime, MemoryScope, MemorySpaceExportRequest,
-    MemorySpacePrivateMaterialPolicy, MemoryStoreHandle, NoopMemoryAuditSink, PressureLevel,
-    ProfileId, Result, RuntimeBudgetLease, RuntimeBudgetReport, RuntimeLifecycleModeInput,
-    RuntimeMetricsQuery, RuntimeSkillDetailRequest, RuntimeSkillEditRequest,
-    RuntimeSkillListRequest, RuntimeSkillOwnerLocator, RuntimeSkillOwningScope,
-    RuntimeSkillRetireRequest, RuntimeSkillSetEnabledRequest, StoreBackendConfig, StoreOpenReport,
-    WorkbenchApiMap, WorkbenchSurface,
+    MemoryIdentity, MemoryInspectionRequest, MemoryLearningAttachmentIdentity,
+    MemoryLearningEngine, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest,
+    MemoryRuntime, MemoryScope, MemorySpaceExportRequest, MemorySpacePrivateMaterialPolicy,
+    MemoryStoreHandle, NoopMemoryAuditSink, PressureLevel, ProfileId, Result, RuntimeBudgetLease,
+    RuntimeBudgetReport, RuntimeLifecycleModeInput, RuntimeMetricsQuery, RuntimeSkillDetailRequest,
+    RuntimeSkillEditRequest, RuntimeSkillListRequest, RuntimeSkillOwnerLocator,
+    RuntimeSkillOwningScope, RuntimeSkillRetireRequest, RuntimeSkillSetEnabledRequest,
+    StoreBackendConfig, StoreOpenReport, WorkbenchApiMap, WorkbenchSurface,
 };
 use sha2::{Digest, Sha256};
 
 use crate::config::{enabled_capability_policy, privacy_policy};
-use crate::governance_coordinator::EntryGovernanceCoordinator;
 use crate::governance_model::EntryGovernanceModelStore;
 #[cfg(feature = "nonproduction-replay-harness")]
 use crate::EntryConsoleMemoryBenchmarkReport;
@@ -97,12 +97,24 @@ impl EntryRuntimeConfig {
 pub struct EntryRuntimeFactory {
     base: EntryRuntimeBaseConfig,
     store: MemoryStoreHandle,
+    learning_services: Mutex<Vec<EntryLearningServiceGroup>>,
+}
+
+struct EntryLearningServiceGroup {
+    source_owner_id: String,
+    identity: MemoryLearningAttachmentIdentity,
+    governance_model: Arc<EntryGovernanceModelStore>,
+    service: crate::MemoryLearningService,
 }
 
 impl EntryRuntimeFactory {
     pub fn open(base: EntryRuntimeBaseConfig) -> Result<Self> {
         let store = MemoryStoreHandle::open(base.store.clone())?;
-        Ok(Self { base, store })
+        Ok(Self {
+            base,
+            store,
+            learning_services: Mutex::new(Vec::new()),
+        })
     }
 
     pub fn runtime_for_scope(&self, scope: EntryRuntimeScope) -> Result<EntryRuntime> {
@@ -116,7 +128,7 @@ impl EntryRuntimeFactory {
             privacy: self.base.privacy.clone(),
             capability: self.base.capability.clone(),
         };
-        EntryRuntime::from_store_handle(config, self.store.clone())
+        EntryRuntime::from_store_handle(config, self.store.clone(), &self.learning_services)
     }
 
     pub fn runtime_budget(&self) -> RuntimeBudgetReport {
@@ -289,7 +301,9 @@ impl EntryRuntimeManagerState {
 
 fn close_entry_runtimes(runtimes: Vec<Arc<EntryRuntime>>) -> Result<()> {
     for runtime in runtimes {
-        runtime.governance_coordinator.shutdown();
+        if let Some(attachment) = runtime.learning_attachment.as_ref() {
+            attachment.detach()?;
+        }
         runtime.runtime.close(MemoryCloseRequest {
             reason: "entry_runtime_manager_evicted".to_string(),
         })?;
@@ -297,8 +311,40 @@ fn close_entry_runtimes(runtimes: Vec<Arc<EntryRuntime>>) -> Result<()> {
     Ok(())
 }
 
+fn governor_control_runtime(
+    runtime: &MemoryRuntime,
+    store: MemoryStoreHandle,
+) -> Result<MemoryRuntime> {
+    let governor = runtime
+        .subject_registry()
+        .system_governor()
+        .ok_or_else(|| {
+            Error::config(
+                "memory_learning_service",
+                "SystemGovernor is not registered",
+            )
+        })?;
+    let mut scoped_runtime = runtime.scoped_runtime().clone();
+    scoped_runtime.actor_subject_id = governor.subject_id.clone();
+    MemoryRuntime::builder()
+        .identity(runtime.identity().clone())
+        .scope(runtime.scope().clone())
+        .store(store)
+        .subject_registry(runtime.subject_registry().clone())
+        .subject_relationship_graph(runtime.config().subject_relationship_graph.clone())
+        .subject_id(runtime.subject_id().to_string())
+        .scoped_runtime(scoped_runtime)
+        .clock(Arc::clone(&runtime.config().clock))
+        .capability_policy(runtime.config().capability_policy.clone())
+        .privacy_policy(runtime.config().privacy_policy.clone())
+        .audit_sink(Arc::clone(&runtime.config().audit_sink))
+        .build()
+}
+
 pub struct EntryRuntime {
-    governance_coordinator: EntryGovernanceCoordinator,
+    learning_service: Option<crate::MemoryLearningService>,
+    learning_attachment: Option<crate::MemoryLearningAttachment>,
+    learning_service_status_authority: Option<bm_sdk::MemoryLearningServiceStatusAuthority>,
     config: EntryRuntimeConfig,
     store: MemoryStoreHandle,
     runtime: Arc<MemoryRuntime>,
@@ -335,7 +381,11 @@ impl EntryRuntime {
         factory.runtime_for_scope(config.runtime_scope())
     }
 
-    fn from_store_handle(config: EntryRuntimeConfig, store: MemoryStoreHandle) -> Result<Self> {
+    fn from_store_handle(
+        config: EntryRuntimeConfig,
+        store: MemoryStoreHandle,
+        learning_services: &Mutex<Vec<EntryLearningServiceGroup>>,
+    ) -> Result<Self> {
         let capability_policy = enabled_capability_policy(config.capability.clone());
         let privacy = privacy_policy(config.privacy.clone());
         let runtime = Arc::new(
@@ -364,20 +414,79 @@ impl EntryRuntime {
         )?;
         let idempotency = EntryIdempotencyCache::new(config.idempotency.max_keys);
         let console = EntryConsoleState::new(&config, &runtime_budget);
-        let governance_model = Arc::new(EntryGovernanceModelStore::open(
-            &config.store,
-            runtime.memory_space_id(),
-            runtime.subject_id(),
-            &runtime.scope().channel,
-            &runtime.scope().chat_id,
-            runtime_budget.profile.as_str(),
-        )?);
-        runtime
-            .set_governance_model_policy_revision(governance_model.current_policy_revision()?)?;
-        let governance_coordinator =
-            EntryGovernanceCoordinator::start(Arc::clone(&runtime), Arc::clone(&governance_model));
+        let (
+            governance_model,
+            learning_service,
+            learning_attachment,
+            learning_service_status_authority,
+        ) = if runtime.capabilities().maintenance.visible {
+            let governor_runtime = governor_control_runtime(&runtime, store.clone())?;
+            let control_authorities = governor_runtime.learning_service_control_authorities()?;
+            let service_status_authority = governor_runtime.learning_service_status_authority()?;
+            let learning_identity =
+                MemoryLearningEngine::attach(Arc::clone(&runtime))?.attachment_identity()?;
+            let mut groups = learning_services
+                .lock()
+                .expect("entry learning service groups poisoned");
+            if let Some(group) = groups.iter().find(|group| {
+                group.source_owner_id == config.identity.owner_id
+                    && learning_identity.shares_store_and_registry_with(&group.identity)
+            }) {
+                let attachment = group
+                    .service
+                    .attach_runtime(Arc::clone(&runtime), control_authorities)?;
+                (
+                    Arc::clone(&group.governance_model),
+                    Some(group.service.clone()),
+                    Some(attachment),
+                    Some(service_status_authority),
+                )
+            } else {
+                let governance_model = Arc::new(EntryGovernanceModelStore::open(
+                    &config.store,
+                    &config.identity.owner_id,
+                    "primary-governance-provider",
+                    runtime_budget.profile.as_str(),
+                )?);
+                let (service, attachment) =
+                    crate::MemoryLearningService::builder(Arc::clone(&runtime))
+                        .control_authorities(control_authorities)
+                        .binding_source(Arc::clone(&governance_model)
+                            as Arc<dyn crate::GovernanceBindingSource>)
+                        .credential_resolver(Arc::new(
+                            crate::EnvironmentGovernanceCredentialResolver,
+                        ))
+                        .start()?;
+                groups.push(EntryLearningServiceGroup {
+                    source_owner_id: config.identity.owner_id.clone(),
+                    identity: learning_identity,
+                    governance_model: Arc::clone(&governance_model),
+                    service: service.clone(),
+                });
+                (
+                    governance_model,
+                    Some(service),
+                    Some(attachment),
+                    Some(service_status_authority),
+                )
+            }
+        } else {
+            (
+                Arc::new(EntryGovernanceModelStore::open(
+                    &config.store,
+                    &config.identity.owner_id,
+                    "primary-governance-provider",
+                    runtime_budget.profile.as_str(),
+                )?),
+                None,
+                None,
+                None,
+            )
+        };
         Ok(Self {
-            governance_coordinator,
+            learning_service,
+            learning_attachment,
+            learning_service_status_authority,
             config,
             store,
             runtime,
@@ -392,12 +501,59 @@ impl EntryRuntime {
         &self.runtime
     }
 
-    pub fn governance_coordinator_report(&self) -> crate::EntryGovernanceCoordinatorReport {
-        self.governance_coordinator.report()
+    pub fn memory_learning_service_report(
+        &self,
+        request: crate::MemoryLearningServiceStatusRequest,
+    ) -> Result<crate::MemoryLearningServiceReport> {
+        self.learning_service()?.status(request)
     }
 
-    pub fn shutdown_governance_coordinator(&self) {
-        self.governance_coordinator.shutdown();
+    pub fn learning_service_status_authority(
+        &self,
+    ) -> Result<bm_sdk::MemoryLearningServiceStatusAuthority> {
+        self.learning_service_status_authority
+            .clone()
+            .ok_or_else(|| {
+                Error::config(
+                    "memory_learning_service",
+                    "memory learning is not visible for current profile",
+                )
+            })
+    }
+
+    pub fn memory_learning_attachment_report(
+        &self,
+        request: crate::MemoryLearningAttachmentStatusRequest,
+    ) -> Result<crate::MemoryLearningAttachmentReport> {
+        self.learning_attachment()?.status(request)
+    }
+
+    pub fn shutdown_memory_learning_service(&self, deadline: Instant) -> Result<()> {
+        self.learning_service()?.shutdown(deadline).map(|_| ())
+    }
+
+    pub fn governance_credential_changed(
+        &self,
+        credential_reference: &str,
+        generation: u64,
+        operation_id: &str,
+    ) -> Result<()> {
+        self.learning_service()?
+            .credential_changed(credential_reference, generation, operation_id)
+    }
+
+    pub fn governance_provider_permission_changed(
+        &self,
+        source_revision: u64,
+        new_generation: u64,
+        operation_id: &str,
+    ) -> Result<()> {
+        self.learning_service()?.provider_permission_changed(
+            "primary-governance-provider",
+            source_revision,
+            new_generation,
+            operation_id,
+        )
     }
 
     pub fn runtime_budget(&self) -> RuntimeBudgetReport {
@@ -924,10 +1080,14 @@ impl EntryRuntime {
         &self,
         update: EntryGovernanceModelConfigUpdate,
     ) -> Result<EntryGovernanceModelConfigView> {
+        let learning_service = self.learning_service()?;
         let view = self.governance_model.update(update)?;
-        self.runtime
-            .set_governance_model_policy_revision(view.config_revision.unwrap_or(1))?;
-        self.governance_coordinator.wake();
+        let binding = self.governance_model.current_provider_binding()?;
+        learning_service.provider_config_changed(
+            &binding.source_config_id,
+            binding.source_revision,
+            &format!("entry-governance-model-update-{}", binding.source_revision),
+        )?;
         Ok(view)
     }
 
@@ -1133,9 +1293,6 @@ impl EntryRuntime {
         services: AdapterRuntimeServices<'_>,
         lease: &EntryRuntimeBudgetLease,
     ) -> Result<EntryResponse> {
-        self.runtime.set_governance_model_policy_revision(
-            self.governance_model.current_policy_revision()?,
-        )?;
         if context.operation() != command.operation() {
             return Ok(EntryResponse::from_adapter(
                 AdapterResponse::Rejected {
@@ -1259,8 +1416,28 @@ impl EntryRuntime {
                 .map(|adapter| EntryResponse::from_adapter(adapter, lease.report().clone()))?;
         self.console
             .record_adapter_response(operation, &response.adapter);
-        self.governance_coordinator.wake();
+        if let Some(attachment) = self.learning_attachment.as_ref() {
+            attachment.wake()?;
+        }
         Ok(response)
+    }
+
+    fn learning_service(&self) -> Result<&crate::MemoryLearningService> {
+        self.learning_service.as_ref().ok_or_else(|| {
+            Error::config(
+                "memory_learning_service",
+                "memory learning is not visible for current profile",
+            )
+        })
+    }
+
+    fn learning_attachment(&self) -> Result<&crate::MemoryLearningAttachment> {
+        self.learning_attachment.as_ref().ok_or_else(|| {
+            Error::config(
+                "memory_learning_attachment",
+                "memory learning is not visible for current profile",
+            )
+        })
     }
 }
 

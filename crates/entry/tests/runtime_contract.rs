@@ -2,7 +2,7 @@ use bm_adapter::{AdapterCommand, AdapterOperation, AdapterResponse, AdapterSdkRe
 use bm_entry::{
     EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
     EntryRuntimeFactory, EntryRuntimeManager, EntryRuntimeScope, EntryScope, EntryTransportConfig,
-    EntryTransportContext,
+    EntryTransportContext, MemoryLearningServiceStatusRequest,
 };
 use bm_sdk::{
     LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateSemanticDecision,
@@ -13,6 +13,15 @@ use bm_sdk::{
 };
 
 mod support;
+
+fn service_report(runtime: &EntryRuntime) -> bm_entry::MemoryLearningServiceReport {
+    let authority = runtime
+        .learning_service_status_authority()
+        .expect("service status authority");
+    runtime
+        .memory_learning_service_report(MemoryLearningServiceStatusRequest { authority })
+        .expect("service status")
+}
 
 fn config() -> EntryRuntimeConfig {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
@@ -224,6 +233,8 @@ fn entry_runtime_factory_builds_scoped_runtimes_on_shared_store() {
         runtime_a.runtime().subject_id(),
         runtime_b.runtime().subject_id()
     );
+    assert_eq!(service_report(&runtime_a).attachment_count, 2);
+    assert_eq!(service_report(&runtime_b).attachment_count, 2);
 
     let write = runtime_a
         .handle(

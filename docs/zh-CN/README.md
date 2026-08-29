@@ -15,7 +15,8 @@ Beetle Memory 通过 `bm-sdk` 集成，或通过 `bm-entry` 加协议 adapter �
 - [回放与归档](replay-and-archive.md)
 - [运维与检查](operator-guide.md)
 - [发布清单](release-checklist.md)
-- [0.5.0 源码候选说明](release-notes-0.5.0.md)
+- [0.6.0 源码候选说明](release-notes-0.6.0.md)
+- [0.5.0 发布说明](release-notes-0.5.0.md)
 - [0.4.0 发布说明](release-notes-0.4.0.md)
 - [0.3.0 发布说明](release-notes-0.3.0.md)
 

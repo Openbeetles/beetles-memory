@@ -43,6 +43,21 @@ cargo doc --locked --no-deps --no-default-features \
   -p bm-mcp \
   -p bm-a2a
 cargo test --locked -p bm-store-contract-tests
+# PL2 feature-gated 发布矩阵；workspace 默认得到的 0-test 结果不是证据。
+cargo test --locked -p bm-core --test post_turn_memory_governance_contract
+cargo test --locked -p bm-sdk --test post_turn_deferred_governance_contract \
+  --no-default-features --features nonproduction-replay-harness,sqlite-store
+cargo test --locked -p bm-entry --no-default-features \
+  --features governance-model-client-std,nonproduction-replay-harness
+cargo test --locked -p bm-entry --no-default-features \
+  --test post_turn_learning_capability_contract
+cargo test --locked -p bm-store-contract-tests --no-default-features \
+  --features sqlite-store
+cargo clippy --locked -p bm-core --all-targets -- -D warnings
+cargo clippy --locked -p bm-sdk --all-targets --no-default-features \
+  --features nonproduction-replay-harness,sqlite-store -- -D warnings
+cargo clippy --locked -p bm-entry --all-targets --no-default-features \
+  --features governance-model-client-std,nonproduction-replay-harness -- -D warnings
 bash scripts/check_platform_compile_gates.sh
 bash scripts/check_deployment_runtime_contract.sh
 bash scripts/check_next_gen_memory_plan.sh

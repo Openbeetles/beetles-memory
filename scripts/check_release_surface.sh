@@ -45,6 +45,7 @@ required_docs=(
   "docs/en/cli-usage.md"
   "docs/en/deployment.md"
   "docs/en/getting-started.md"
+  "docs/en/integration.md"
   "docs/en/llm-gateway-integrations.md"
   "docs/en/profiles.md"
   "docs/en/store-backends.md"
@@ -52,12 +53,14 @@ required_docs=(
   "docs/en/adapters.md"
   "docs/en/operator-guide.md"
   "docs/en/release-checklist.md"
+  "docs/en/release-notes-0.6.0.md"
   "docs/en/release-notes-0.5.0.md"
   "docs/en/release-notes-0.4.0.md"
   "docs/zh-CN/api.md"
   "docs/zh-CN/cli-usage.md"
   "docs/zh-CN/deployment.md"
   "docs/zh-CN/getting-started.md"
+  "docs/zh-CN/integration.md"
   "docs/zh-CN/llm-gateway-integrations.md"
   "docs/zh-CN/profiles.md"
   "docs/zh-CN/store-backends.md"
@@ -65,6 +68,7 @@ required_docs=(
   "docs/zh-CN/adapters.md"
   "docs/zh-CN/operator-guide.md"
   "docs/zh-CN/release-checklist.md"
+  "docs/zh-CN/release-notes-0.6.0.md"
   "docs/zh-CN/release-notes-0.5.0.md"
   "docs/zh-CN/release-notes-0.4.0.md"
   "dev-docs/deployment-runtime-plan.md"
@@ -84,7 +88,7 @@ for doc in "${required_docs[@]}"; do
   fi
 done
 
-release_version="0.5.0"
+release_version="0.6.0"
 version_manifests=(
   "crates/core/Cargo.toml"
   "crates/store-contract-tests/Cargo.toml"
@@ -171,13 +175,46 @@ for desktop_identity in apps/desktop/package.json apps/desktop/package-lock.json
   }
 done
 
-for doc in docs/en/release-notes-0.5.0.md docs/zh-CN/release-notes-0.5.0.md; do
-  for marker in 'Store v11' 'material v5' 'Adapter V2' 'automatic migration' 'operation identity' 'CTQ1' 'TranscriptQueryCursor' 'HostUi'; do
+for doc in docs/en/release-notes-0.6.0.md docs/zh-CN/release-notes-0.6.0.md; do
+  for marker in 'Store v12' 'material v5' 'Adapter V2' 'automatic migration' 'Job V3' 'MemoryLearningEngine' 'MemoryLearningService' 'operation-aware' 'typed inspection authority'; do
     rg -F -q "$marker" "$doc" || {
-      echo "0.5.0 source candidate notes omit required compatibility marker: doc=$doc marker=$marker" >&2
+      echo "0.6.0 source candidate notes omit required compatibility marker: doc=$doc marker=$marker" >&2
       exit 1
     }
   done
+done
+
+current_version_docs=(
+  "docs/en/getting-started.md"
+  "docs/en/integration.md"
+  "docs/zh-CN/getting-started.md"
+  "docs/zh-CN/integration.md"
+)
+for doc in "${current_version_docs[@]}"; do
+  rg -F -q "bm-sdk = { version = \"$release_version\"" "$doc" || {
+    echo "current integration document is not on the release version: $doc" >&2
+    exit 1
+  }
+done
+
+for doc in docs/en/api.md docs/zh-CN/api.md; do
+  rg -F -q "\`bm-sdk\` $release_version" "$doc" || {
+    echo "current API document is not on the release version: $doc" >&2
+    exit 1
+  }
+done
+
+for doc in docs/en/integration.md docs/zh-CN/integration.md; do
+  for marker in 'Job V3' 'MemoryLearningService' 'MemoryLearningEngine' 'typed inspection authority'; do
+    rg -F -q "$marker" "$doc" || {
+      echo "current integration document omits the production learning owner: doc=$doc marker=$marker" >&2
+      exit 1
+    }
+  done
+  if rg -n 'V2 intent|claim_governance_job|run_claimed_governance|legacy_governance_queue_reset_required|reconcile_governance_intents' "$doc"; then
+    echo "current integration document exposes a removed or internal learning-worker path: $doc" >&2
+    exit 1
+  fi
 done
 
 current_persistence_truth_docs=(
@@ -474,6 +511,23 @@ cargo test --locked -p bm-sdk --test subject_soul_public_contract \
   --no-default-features --features sqlite-store
 cargo test --locked -p bm-store-contract-tests --test subject_soul_store_contract \
   --features sqlite-store
+
+# PL2 is feature-gated and must not disappear behind a default-workspace 0-test result.
+cargo test --locked -p bm-core --test post_turn_memory_governance_contract
+cargo test --locked -p bm-sdk --test post_turn_deferred_governance_contract \
+  --no-default-features --features nonproduction-replay-harness,sqlite-store
+cargo test --locked -p bm-entry --no-default-features \
+  --features governance-model-client-std,nonproduction-replay-harness
+cargo test --locked -p bm-entry --no-default-features \
+  --test post_turn_learning_capability_contract
+cargo test --locked -p bm-store-contract-tests --no-default-features \
+  --features sqlite-store
+
+cargo clippy --locked -p bm-core --all-targets -- -D warnings
+cargo clippy --locked -p bm-sdk --all-targets --no-default-features \
+  --features nonproduction-replay-harness,sqlite-store -- -D warnings
+cargo clippy --locked -p bm-entry --all-targets --no-default-features \
+  --features governance-model-client-std,nonproduction-replay-harness -- -D warnings
 
 bash scripts/emit_platform_capability_snapshots.sh --check
 bash scripts/check_entry_runtime_contract.sh

@@ -30,7 +30,7 @@ crates 发布后：
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.4.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.6.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 每次构建只使用一个 profile feature。Linux desktop、Linux device 与 Linux server 是三个不同部署目标，禁止相互替代。
@@ -193,20 +193,21 @@ runtime.write(MemoryWriteRequest::Candidates {
 })?;
 ```
 
-如果 post-turn LLM 服务暂时不可用，`finalize_turn` 仍会先提交会话，
-并在 StorePlatform 的 `post_turn_governance_jobs` 与
-`post_turn_governance_scope_indexes` typed namespace 中原子建立 V2 intent。服务恢复后，SDK
-先通过 `MemoryRuntime::claim_governance_job` 取得 exact lease，再调用
-`MemoryRuntime::run_claimed_governance`；后者在首个网络字节前复核 transcript/privacy
-authority，并把 memory post-image、job=`succeeded`、scope index 与 receipt 放入同一 backend
-transaction。旧 `memory/governance_jobs/pending.json` 不再读取或迁移；检测到非空旧文件时会
-返回 `legacy_governance_queue_reset_required`，必须由 operator 显式处理。宿主不能自己重做队列、
-拼装 memory mutation 或用宿主语义重试。
-若 canonical transcript 已提交但 intent admission 曾中断，调用
-`MemoryRuntime::reconcile_governance_intents` 以 1 到 32 条的有界页修复当前 exact conversation；
-cursor 与新建 intent 在同一 CAS 前进，不会扫描其他主体或会话。
-运维面使用 `MemoryRuntime::deferred_governance_report()` 或 `inspect.deferred_governance`
-查看当前 runtime scope 下的 pending / retrying / failed / terminal 计数、recent jobs、scope、subject、turn、reason 和 last error。
+如果 post-turn LLM 服务暂时不可用，`finalize_turn` 仍会先提交会话，并原子建立 exact Job V3
+governance intent。durable intent 是恢复真源，wake signal 只是一条可丢失提示。
+
+生产宿主应把官方 `bm-entry::MemoryLearningService` attach 到已有
+`Arc<MemoryRuntime>`。service 只消费 SDK-owned `MemoryLearningEngine`；bounded discovery、
+reconciliation、lease/CAS fencing、当前 transcript/subject/privacy 准入、最小 Provider 外发、
+候选严格验证、retry classification、memory mutation 与 terminal receipt/audit closure 全部只由
+Engine 拥有。只有 Store、Subject Registry 与 MemorySpace authority 完全一致的其他 Runtime 才能
+attach。Credential 或 Provider 变化必须使用 typed notification 重新读取同一份宿主配置真源；
+raw credential 永不持久化。
+
+宿主不得自行 claim job、运行 governance transition、拼装 memory mutation，也不得维护第二套
+queue/worker/retry policy。Operator 与 attachment status read 必须携带 SDK 铸造的 typed inspection authority；
+无权或跨主体请求必须在返回 job identity 或 reason detail 前失败。早于 v12
+的 Store schema 直接拒绝，由 operator 清空重建；v0.6.0 不提供自动迁移或兼容 reader。
 
 `project()` 返回的 `MemoryProjectionReport.audit` 是投影诊断真源，包含 source plane、selected ids、
 section chars、source/render budget、scope 和 private gate decision。宿主可以展示这些字段，

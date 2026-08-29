@@ -51,6 +51,7 @@ pub use mutation::{
     StoreBlobPrecondition, StoreJsonPrecondition, StoreMutation, StoreMutationBatch,
     StoreMutationBatchReport, StoreMutationBudgetReport,
 };
+pub use platform::StorePlatform;
 #[cfg(feature = "nonproduction-replay-harness")]
 pub(crate) use platform::StorePlatformPreparation;
 pub(crate) use platform::{
@@ -62,7 +63,6 @@ pub(crate) use platform::{
     StoreMutationOperationPreflight, StoreOwnerMutationPlan, GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE,
     GOVERNED_EVIDENCE_SOURCE_REF_NAMESPACE,
 };
-pub use platform::{StoreMigrationReport, StorePlatform};
 pub(crate) use schema::{
     governed_evidence_source_claim_manifest_key,
     validate_governed_evidence_source_claim_scope_closure, GovernedEvidenceOwnerClaimBinding,

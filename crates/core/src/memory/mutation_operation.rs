@@ -102,6 +102,8 @@ pub enum MemoryMutationOperationKind {
     SoulReseed,
     SoulDelete,
     RelationshipControl,
+    GovernanceCredentialRecovery,
+    GovernanceProviderPermissionRecovery,
 }
 
 impl MemoryMutationOperationKind {
@@ -120,6 +122,10 @@ impl MemoryMutationOperationKind {
             Self::SoulReseed => "soul_reseed".to_string(),
             Self::SoulDelete => "soul_delete".to_string(),
             Self::RelationshipControl => "relationship_control".to_string(),
+            Self::GovernanceCredentialRecovery => "governance_credential_recovery".to_string(),
+            Self::GovernanceProviderPermissionRecovery => {
+                "governance_provider_permission_recovery".to_string()
+            }
         }
     }
 }

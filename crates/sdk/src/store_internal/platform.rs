@@ -495,17 +495,6 @@ pub(crate) struct StorePlatformPreparation {
     consumption: Arc<AtomicU8>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StoreMigrationReport {
-    pub backend: StoreBackendKind,
-    pub from_schema_id: String,
-    pub from_schema_version: u32,
-    pub to_schema_id: String,
-    pub to_schema_version: u32,
-    pub migrated: bool,
-    pub migration_event_id: String,
-}
-
 impl StorePlatformPreparation {
     fn prepare(
         config: StoreBackendConfig,
@@ -654,68 +643,6 @@ impl StorePlatform {
         StorePlatformPreparation::prepare(config, None)?
             .open()
             .map(|(platform, _report)| platform)
-    }
-
-    pub(crate) fn migrate_v10_to_v11(config: StoreBackendConfig) -> Result<StoreMigrationReport> {
-        let preparation = StorePlatformPreparation::prepare(config.clone(), None)?;
-        preparation.consume()?;
-        let capacity = resolve_store_capacity(&preparation.runtime_budget_authority)?;
-        let migration_event =
-            build_runtime_event(&config, "store.migration.v10_to_v11", current_unix_secs())
-                .with_plane("store_schema")
-                .with_record_key(STORE_SCHEMA_ID)
-                .with_payload("from_schema_id", "beetle_memory_store_schema_v10")
-                .with_payload("from_schema_version", "10")
-                .with_payload("to_schema_id", STORE_SCHEMA_ID)
-                .with_payload("to_schema_version", STORE_SCHEMA_VERSION.to_string());
-        let migration_event_id = migration_event.event_id.clone();
-        let open_preflight = StoreOpenPreflight::new(
-            capacity,
-            &preparation.runtime_budget.governed_state_budget,
-            build_runtime_event(&config, "open", current_unix_secs()),
-        );
-        match config.backend {
-            StoreBackendKind::File => {
-                crate::store_internal::file::FileStoreEngine::migrate_v10_to_v11_explicit(
-                    &config,
-                    capacity,
-                    StoreAdmissionAuthority::new(),
-                    &open_preflight,
-                    migration_event,
-                )?
-            }
-            #[cfg(feature = "sqlite-store")]
-            StoreBackendKind::Sqlite => {
-                crate::store_internal::sqlite::migrate_sqlite_v10_to_v11_explicit(
-                    &config,
-                    capacity,
-                    &open_preflight,
-                    migration_event,
-                )?;
-            }
-            #[cfg(not(feature = "sqlite-store"))]
-            StoreBackendKind::Sqlite => {
-                return Err(Error::config(
-                    "store_migration_not_supported",
-                    "SQLite migration requires the sqlite-store feature",
-                ));
-            }
-            StoreBackendKind::InMemory | StoreBackendKind::Embedded => {
-                return Err(Error::config(
-                    "store_migration_not_supported",
-                    "v10 to v11 migration requires a persistent File or SQLite backend",
-                ));
-            }
-        }
-        Ok(StoreMigrationReport {
-            backend: config.backend,
-            from_schema_id: "beetle_memory_store_schema_v10".to_string(),
-            from_schema_version: 10,
-            to_schema_id: STORE_SCHEMA_ID.to_string(),
-            to_schema_version: STORE_SCHEMA_VERSION,
-            migrated: true,
-            migration_event_id,
-        })
     }
 
     pub fn open_with_firmware_resource_probe(
@@ -977,6 +904,9 @@ impl StorePlatform {
         validate_transcript_query_engine_open_closure(platform.engine.as_ref()).map_err(
             |error| Error::config("store_transcript_query_open_closure", error.to_string()),
         )?;
+        validate_post_turn_governance_engine_open_closure(platform.engine.as_ref()).map_err(
+            |error| Error::config("store_governance_job_open_closure", error.to_string()),
+        )?;
         platform.append_validated_event(open_event)?;
         Ok((platform, report))
     }
@@ -1104,6 +1034,30 @@ impl StorePlatform {
 
     pub fn config(&self) -> &StoreBackendConfig {
         &self.config
+    }
+
+    pub(crate) fn learning_store_authority_digest(&self) -> String {
+        let backend_identity = match self.config.backend {
+            StoreBackendKind::InMemory | StoreBackendKind::Embedded => {
+                format!("process:{:p}", Arc::as_ptr(&self.engine))
+            }
+            StoreBackendKind::File | StoreBackendKind::Sqlite => self
+                .config
+                .data_path
+                .as_deref()
+                .map(|path| path.as_os_str().as_encoded_bytes().to_vec())
+                .map(|bytes| format!("path:sha256:{:x}", Sha256::digest(bytes)))
+                .unwrap_or_else(|| "path:missing".to_string()),
+        };
+        format!(
+            "sha256:{:x}",
+            Sha256::digest(format!(
+                "learning_store_authority_v1\0{}\0{}\0{}",
+                self.config.backend.as_str(),
+                self.config.schema_id,
+                backend_identity
+            ))
+        )
     }
 
     pub const fn capacity(&self) -> StoreCapacityBudget {
@@ -4265,6 +4219,8 @@ fn validate_protected_json_mutation_preconditions(
         ACTIVE_TASK_RUN_BY_CHAT_INDEX_NAMESPACE,
         TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE,
         RECALL_OWNER_SCOPE_BINDING_NAMESPACE,
+        bm_core::memory::POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE,
+        bm_core::memory::POST_TURN_GOVERNANCE_BINDING_REVISION_INDEX_NAMESPACE,
         POST_TURN_GOVERNANCE_JOB_NAMESPACE,
         POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
         MEMORY_MUTATION_RECEIPT_NAMESPACE,
@@ -5489,6 +5445,13 @@ pub(crate) fn validate_governed_transaction_post_image(
     governed_runtime_skill_owner_limit: Option<usize>,
     operation_capacity: StoreCapacityBudget,
 ) -> Result<()> {
+    if batch_mutates_namespace(batch, POST_TURN_GOVERNANCE_JOB_NAMESPACE)
+        || batch_mutates_namespace(batch, POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE)
+        || batch_mutates_namespace(batch, POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE)
+        || batch_mutates_namespace(batch, POST_TURN_GOVERNANCE_BINDING_REVISION_INDEX_NAMESPACE)
+    {
+        validate_post_turn_governance_transaction_closure(&before.json, &after.json)?;
+    }
     validate_confirmation_evidence_post_image(batch, before, after)?;
     validate_evidence_source_ref_post_image(
         batch,
@@ -10977,7 +10940,7 @@ impl ConversationTranscriptStore for StorePlatform {
         if head.is_some() && previous_catalog_head.is_none() {
             return Err(Error::config(
                 "conversation_transcript_query_migration_required",
-                "existing transcript head has no v11 catalog closure",
+                "existing transcript head has no current catalog closure",
             ));
         }
         let catalog_head = Self::transcript_catalog_head_after_append(
@@ -14139,374 +14102,642 @@ fn validate_transcript_query_engine_open_closure(engine: &dyn StoreEngine) -> Re
     validate_transcript_query_snapshot_closure(&json)
 }
 
-pub(crate) fn migrate_v10_snapshot_to_v11(
-    snapshot: &StoreSnapshot,
-    now_secs: u64,
-) -> Result<StoreSnapshot> {
-    const V10_SCHEMA_ID: &str = "beetle_memory_store_schema_v10";
-    if snapshot.schema_id != V10_SCHEMA_ID
-        || snapshot.schema_manifest.schema_id != V10_SCHEMA_ID
-        || snapshot.schema_manifest.schema_version != 10
-    {
-        return Err(Error::config(
-            "conversation_transcript_query_migration",
-            "only an exact Store v10 snapshot may migrate to v11",
-        ));
-    }
-    let query_namespaces = [
-        TRANSCRIPT_CATALOG_ROOT_NAMESPACE,
-        TRANSCRIPT_CATALOG_PAGE_NAMESPACE,
-        TRANSCRIPT_TIME_ROOT_NAMESPACE,
-        TRANSCRIPT_TIME_POSTING_NAMESPACE,
-        TRANSCRIPT_SEARCH_ROOT_NAMESPACE,
-        TRANSCRIPT_SEARCH_POSTING_NAMESPACE,
-        TRANSCRIPT_SEARCH_MESSAGE_MANIFEST_NAMESPACE,
-        TRANSCRIPT_QUERY_KEYRING_NAMESPACE,
-    ];
-    if snapshot
-        .json_docs
-        .iter()
-        .any(|doc| query_namespaces.contains(&doc.namespace.as_str()))
-    {
-        return Err(Error::config(
-            "conversation_transcript_query_migration",
-            "v10 migration source contains partial or foreign v11 query state",
-        ));
-    }
-    let mut manifests =
-        BTreeMap::<(String, String, String, String), ConversationRecallManifest>::new();
-    let mut records =
-        BTreeMap::<(String, String, String, String), Vec<TranscriptTurnRecord>>::new();
-    for doc in &snapshot.json_docs {
-        if doc.namespace == CONVERSATION_RECALL_MANIFEST_NAMESPACE {
-            let manifest = serde_json::from_value::<ConversationRecallManifest>(doc.value.clone())
-                .map_err(|error| {
-                    Error::config("conversation_transcript_query_migration", error.to_string())
-                })?;
-            manifests.insert(
-                (
-                    manifest.memory_space_id.clone(),
-                    manifest.mounted_subject_id.clone(),
-                    manifest.channel_id.clone(),
-                    manifest.conversation_id.clone(),
-                ),
-                manifest,
-            );
-        } else if doc.namespace == "conversation_transcript" {
-            let record = serde_json::from_value::<TranscriptTurnRecord>(doc.value.clone())
-                .map_err(|error| {
-                    Error::config("conversation_transcript_query_migration", error.to_string())
-                })?;
-            records
-                .entry((
-                    record.key.memory_space_id.clone(),
-                    record.subject.clone(),
-                    record.key.channel_id.clone(),
-                    record.key.conversation_id.clone(),
-                ))
-                .or_default()
-                .push(record);
+fn validate_post_turn_governance_engine_open_closure(engine: &dyn StoreEngine) -> Result<()> {
+    let mut json = BTreeMap::new();
+    for namespace in [
+        POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE,
+        POST_TURN_GOVERNANCE_BINDING_REVISION_INDEX_NAMESPACE,
+        POST_TURN_GOVERNANCE_JOB_NAMESPACE,
+        POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
+    ] {
+        for key in engine.list_json_keys(namespace)? {
+            let value = engine.get_json_value(namespace, &key)?.ok_or_else(|| {
+                Error::config(
+                    "post_turn_governance_open_closure",
+                    "listed governance owner disappeared during open closure read",
+                )
+            })?;
+            json.insert((namespace.to_string(), key), value);
         }
     }
-    if manifests.len() != records.len() {
-        return Err(Error::config(
-            "conversation_transcript_query_migration",
-            "v10 transcript heads and owner groups are not a closed set",
-        ));
-    }
+    validate_post_turn_governance_snapshot_closure(&json)
+}
 
-    let mut catalog_groups =
-        BTreeMap::<(String, String, Option<String>), Vec<ConversationCatalogHead>>::new();
-    let mut time_groups =
-        BTreeMap::<(String, String, String, String, u64), Vec<TranscriptPostingLocatorV1>>::new();
-    let mut search_groups =
-        BTreeMap::<(String, String, String), Vec<TranscriptPostingLocatorV1>>::new();
-    let mut message_manifests = Vec::<(String, TranscriptMessageSearchManifestV1)>::new();
-    let mut memory_spaces = BTreeSet::new();
-    for (identity, owner_records) in &mut records {
-        owner_records.sort_by_key(|record| record.sequence);
-        let manifest = manifests.get(identity).ok_or_else(|| {
-            Error::config(
-                "conversation_transcript_query_migration",
-                "v10 transcript owner group has no exact head",
-            )
-        })?;
-        let head = StorePlatform::transcript_catalog_head_from_records(manifest, owner_records)?;
-        memory_spaces.insert(head.key.memory_space_id.clone());
-        catalog_groups
-            .entry((
-                head.key.memory_space_id.clone(),
-                head.mounted_subject_id.clone(),
-                None,
-            ))
-            .or_default()
-            .push(head.clone());
-        catalog_groups
-            .entry((
-                head.key.memory_space_id.clone(),
-                head.mounted_subject_id.clone(),
-                Some(head.key.channel_id.clone()),
-            ))
-            .or_default()
-            .push(head);
-        for record in owner_records {
-            for (locator, content) in message_locators(record) {
-                let posting = TranscriptPostingLocatorV1 {
-                    locator: locator.clone(),
-                    lifecycle_state: record.lifecycle_state,
-                    redaction_state: record.redaction_state,
-                };
-                time_groups
-                    .entry((
-                        record.key.memory_space_id.clone(),
-                        record.subject.clone(),
-                        record.key.channel_id.clone(),
-                        record.key.conversation_id.clone(),
-                        locator.observed_at / 86_400,
+fn validate_post_turn_governance_transaction_closure(
+    before: &BTreeMap<(String, String), serde_json::Value>,
+    after: &BTreeMap<(String, String), serde_json::Value>,
+) -> Result<()> {
+    let stage = "post_turn_governance_closure";
+    let changed_keys = before
+        .keys()
+        .chain(after.keys())
+        .filter(|key| before.get(*key) != after.get(*key))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    for (namespace, key) in &changed_keys {
+        if namespace == POST_TURN_GOVERNANCE_JOB_NAMESPACE {
+            let before_job = before
+                .get(&(namespace.clone(), key.clone()))
+                .map(|value| serde_json::from_value::<PostTurnGovernanceJobV3>(value.clone()))
+                .transpose()
+                .map_err(|error| Error::config(stage, error.to_string()))?;
+            let after_job = after
+                .get(&(namespace.clone(), key.clone()))
+                .map(|value| serde_json::from_value::<PostTurnGovernanceJobV3>(value.clone()))
+                .transpose()
+                .map_err(|error| Error::config(stage, error.to_string()))?;
+            if let Some(job) = after_job.as_ref() {
+                job.validate()?;
+                let index_value = after
+                    .get(&(
+                        POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE.to_string(),
+                        job.scope_index_key.clone(),
                     ))
-                    .or_default()
-                    .push(posting.clone());
-                let mut digests = TranscriptSearchNormalizerV1::index_terms(
-                    content,
-                    MAX_TRANSCRIPT_INDEX_TERMS_PER_MESSAGE,
-                )?
-                .iter()
-                .map(|term| term_digest(term))
-                .collect::<Vec<_>>();
-                digests.sort();
-                digests.dedup();
-                for digest in &digests {
-                    search_groups
-                        .entry((
-                            record.key.memory_space_id.clone(),
-                            record.subject.clone(),
-                            digest.clone(),
-                        ))
-                        .or_default()
-                        .push(posting.clone());
+                    .ok_or_else(|| {
+                        Error::config(
+                            stage,
+                            "mutated governance job lacks its exact index post-image",
+                        )
+                    })?;
+                let index =
+                    serde_json::from_value::<PostTurnGovernanceScopeIndexV3>(index_value.clone())
+                        .map_err(|error| Error::config(stage, error.to_string()))?;
+                let expected = PostTurnGovernanceJobRefV2::from_job(job);
+                let refs = index
+                    .active_jobs
+                    .iter()
+                    .chain(index.recent_terminal_jobs.iter())
+                    .filter(|reference| reference.job_id == job.job_id)
+                    .collect::<Vec<_>>();
+                if refs.len() != 1 || refs[0] != &expected {
+                    return Err(Error::config(
+                        stage,
+                        "mutated governance job differs from its exact index post-image",
+                    ));
                 }
-                message_manifests.push((
-                    search_message_manifest_key(&locator),
-                    TranscriptMessageSearchManifestV1 {
-                        locator,
-                        term_set_digest: term_set_digest(&digests),
-                    },
-                ));
+                if before_job.as_ref().map(|job| &job.execution_binding)
+                    != Some(&job.execution_binding)
+                {
+                    validate_touched_bound_job_authority(job, after)?;
+                }
+            } else if let Some(job) = before_job.as_ref() {
+                let index_value = after
+                    .get(&(
+                        POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE.to_string(),
+                        job.scope_index_key.clone(),
+                    ))
+                    .ok_or_else(|| {
+                        Error::config(
+                            stage,
+                            "deleted governance job lacks its exact index post-image",
+                        )
+                    })?;
+                let index =
+                    serde_json::from_value::<PostTurnGovernanceScopeIndexV3>(index_value.clone())
+                        .map_err(|error| Error::config(stage, error.to_string()))?;
+                if index
+                    .active_jobs
+                    .iter()
+                    .chain(index.recent_terminal_jobs.iter())
+                    .any(|reference| reference.job_id == job.job_id)
+                {
+                    return Err(Error::config(
+                        stage,
+                        "deleted governance job remains referenced by its index",
+                    ));
+                }
             }
         }
     }
 
-    let mut docs = snapshot.json_docs.clone();
-    let mut push_doc = |namespace: &str, key: String, value: serde_json::Value| {
-        docs.push(StoreSnapshotJsonDoc {
-            namespace: namespace.to_string(),
-            key,
-            value,
-        });
+    for (namespace, key) in &changed_keys {
+        if namespace != POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE {
+            continue;
+        }
+        let before_refs = before
+            .get(&(namespace.clone(), key.clone()))
+            .map(|value| governance_index_refs(value, stage))
+            .transpose()?
+            .unwrap_or_default();
+        let after_refs = after
+            .get(&(namespace.clone(), key.clone()))
+            .map(|value| governance_index_refs(value, stage))
+            .transpose()?
+            .unwrap_or_default();
+        for job_id in before_refs
+            .keys()
+            .chain(after_refs.keys())
+            .collect::<BTreeSet<_>>()
+        {
+            if before_refs.get(job_id) == after_refs.get(job_id) {
+                continue;
+            }
+            match after_refs.get(job_id) {
+                Some(reference) => {
+                    let value = after
+                        .get(&(
+                            POST_TURN_GOVERNANCE_JOB_NAMESPACE.to_string(),
+                            job_id.to_string(),
+                        ))
+                        .ok_or_else(|| {
+                            Error::config(
+                                stage,
+                                "new or changed governance index ref points to a missing job",
+                            )
+                        })?;
+                    let job = serde_json::from_value::<PostTurnGovernanceJobV3>(value.clone())
+                        .map_err(|error| Error::config(stage, error.to_string()))?;
+                    if reference != &PostTurnGovernanceJobRefV2::from_job(&job) {
+                        return Err(Error::config(
+                            stage,
+                            "new or changed governance index ref differs from its job",
+                        ));
+                    }
+                }
+                None => {
+                    let job_address = (
+                        POST_TURN_GOVERNANCE_JOB_NAMESPACE.to_string(),
+                        job_id.to_string(),
+                    );
+                    if !changed_keys.contains(&job_address)
+                        || !before.contains_key(&job_address)
+                        || after.contains_key(&job_address)
+                    {
+                        return Err(Error::config(
+                            stage,
+                            "removed governance index ref requires the exact job deletion in the same transaction",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    let binding_changed = changed_keys.iter().any(|(namespace, _)| {
+        namespace == POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE
+            || namespace == POST_TURN_GOVERNANCE_BINDING_REVISION_INDEX_NAMESPACE
+    });
+    if binding_changed {
+        validate_touched_binding_authority(before, after)?;
+    }
+    Ok(())
+}
+
+fn governance_index_refs(
+    value: &serde_json::Value,
+    stage: &'static str,
+) -> Result<BTreeMap<String, PostTurnGovernanceJobRefV2>> {
+    let index = serde_json::from_value::<PostTurnGovernanceScopeIndexV3>(value.clone())
+        .map_err(|error| Error::config(stage, error.to_string()))?;
+    index.validate()?;
+    Ok(index
+        .active_jobs
+        .into_iter()
+        .chain(index.recent_terminal_jobs)
+        .map(|reference| (reference.job_id.clone(), reference))
+        .collect())
+}
+
+fn validate_touched_bound_job_authority(
+    job: &PostTurnGovernanceJobV3,
+    after: &BTreeMap<(String, String), serde_json::Value>,
+) -> Result<()> {
+    let PostTurnGovernanceExecutionBindingV1::Bound {
+        binding_id,
+        binding_revision,
+    } = &job.execution_binding
+    else {
+        return Ok(());
     };
-    for ((space, subject, channel), heads) in &mut catalog_groups {
-        heads.sort_by(|left, right| {
-            right
-                .updated_at
-                .cmp(&left.updated_at)
-                .then_with(|| right.key.conversation_id.cmp(&left.key.conversation_id))
-        });
-        let page_count =
-            u64::try_from(heads.len().div_ceil(TRANSCRIPT_QUERY_PAGE_CAPACITY)).unwrap_or(u64::MAX);
-        push_doc(
-            TRANSCRIPT_CATALOG_ROOT_NAMESPACE,
-            catalog_root_key(space, subject, channel.as_deref()),
-            serde_json::to_value(TranscriptCatalogRootV1 {
-                schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
-                memory_space_id: space.clone(),
-                mounted_subject_id: subject.clone(),
-                channel_id: channel.clone(),
-                revision: 1,
-                page_count,
-                entry_count: u64::try_from(heads.len()).unwrap_or(u64::MAX),
-            })
-            .map_err(|error| {
-                Error::config("conversation_transcript_query_migration", error.to_string())
-            })?,
-        );
-        for (page_id, chunk) in heads.chunks(TRANSCRIPT_QUERY_PAGE_CAPACITY).enumerate() {
-            let page_id = u64::try_from(page_id).unwrap_or(u64::MAX);
-            push_doc(
-                TRANSCRIPT_CATALOG_PAGE_NAMESPACE,
-                catalog_page_key(space, subject, channel.as_deref(), page_id),
-                serde_json::to_value(TranscriptCatalogPageV1 {
-                    schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
-                    memory_space_id: space.clone(),
-                    mounted_subject_id: subject.clone(),
-                    channel_id: channel.clone(),
-                    page_id,
-                    revision: 1,
-                    heads: chunk.to_vec(),
-                })
-                .map_err(|error| {
-                    Error::config("conversation_transcript_query_migration", error.to_string())
-                })?,
-            );
-        }
+    let stage = "post_turn_governance_closure";
+    let snapshot_value = after
+        .get(&(
+            POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE.to_string(),
+            format!("{binding_id}:{binding_revision}"),
+        ))
+        .ok_or_else(|| Error::config(stage, "newly bound job lacks exact binding snapshot"))?;
+    let snapshot =
+        serde_json::from_value::<PostTurnGovernanceBindingSnapshotV1>(snapshot_value.clone())
+            .map_err(|error| Error::config(stage, error.to_string()))?;
+    snapshot.validate()?;
+    let index_value = after
+        .get(&(
+            POST_TURN_GOVERNANCE_BINDING_REVISION_INDEX_NAMESPACE.to_string(),
+            binding_id.clone(),
+        ))
+        .ok_or_else(|| Error::config(stage, "newly bound job lacks binding revision index"))?;
+    let index =
+        serde_json::from_value::<PostTurnGovernanceBindingRevisionIndexV1>(index_value.clone())
+            .map_err(|error| Error::config(stage, error.to_string()))?;
+    if !index.revisions.iter().any(|revision| {
+        revision.binding_revision == *binding_revision
+            && revision.canonical_digest == snapshot.canonical_digest
+            && revision.referenced
+    }) {
+        return Err(Error::config(
+            stage,
+            "newly bound job differs from binding revision authority",
+        ));
     }
-    for ((space, subject, channel, conversation, day), locators) in &mut time_groups {
-        locators.sort_by_key(|entry| {
-            (
-                entry.locator.observed_at,
-                entry.locator.turn_sequence,
-                entry.locator.message_id.clone(),
+    Ok(())
+}
+
+fn validate_touched_binding_authority(
+    before: &BTreeMap<(String, String), serde_json::Value>,
+    after: &BTreeMap<(String, String), serde_json::Value>,
+) -> Result<()> {
+    let stage = "post_turn_governance_closure";
+    let changed_keys = before
+        .keys()
+        .chain(after.keys())
+        .filter(|key| before.get(*key) != after.get(*key))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    for (namespace, key) in &changed_keys {
+        if namespace == POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE
+            && !after.contains_key(&(namespace.clone(), key.clone()))
+        {
+            let before_snapshot = before
+                .get(&(namespace.clone(), key.clone()))
+                .ok_or_else(|| Error::config(stage, "deleted binding snapshot lacks pre-image"))?;
+            let snapshot = serde_json::from_value::<PostTurnGovernanceBindingSnapshotV1>(
+                before_snapshot.clone(),
             )
-        });
-        let key = ConversationKey::new(space.clone(), channel.clone(), conversation.clone())?;
-        let page_count = u64::try_from(locators.len().div_ceil(TRANSCRIPT_QUERY_PAGE_CAPACITY))
-            .unwrap_or(u64::MAX);
-        push_doc(
-            TRANSCRIPT_TIME_ROOT_NAMESPACE,
-            time_root_key(&key, subject, *day),
-            serde_json::to_value(TranscriptTimePostingRootV1 {
-                schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
-                key: key.clone(),
-                mounted_subject_id: subject.clone(),
-                utc_day: *day,
-                revision: 1,
-                page_count,
-                entry_count: u64::try_from(locators.len()).unwrap_or(u64::MAX),
-            })
-            .map_err(|error| {
-                Error::config("conversation_transcript_query_migration", error.to_string())
-            })?,
-        );
-        for (page_id, chunk) in locators.chunks(TRANSCRIPT_QUERY_PAGE_CAPACITY).enumerate() {
-            let page_id = u64::try_from(page_id).unwrap_or(u64::MAX);
-            push_doc(
-                TRANSCRIPT_TIME_POSTING_NAMESPACE,
-                time_posting_key(&key, subject, *day, page_id),
-                serde_json::to_value(TranscriptTimePostingPageV1 {
-                    schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
-                    key: key.clone(),
-                    mounted_subject_id: subject.clone(),
-                    utc_day: *day,
-                    page_id,
-                    revision: 1,
-                    locators: chunk.to_vec(),
-                })
-                .map_err(|error| {
-                    Error::config("conversation_transcript_query_migration", error.to_string())
-                })?,
+            .map_err(|error| Error::config(stage, error.to_string()))?;
+            let index_address = (
+                POST_TURN_GOVERNANCE_BINDING_REVISION_INDEX_NAMESPACE.to_string(),
+                snapshot.binding_id.clone(),
             );
+            if !changed_keys.contains(&index_address) {
+                return Err(Error::config(
+                    stage,
+                    "deleted binding snapshot requires its revision index mutation in the same transaction",
+                ));
+            }
+            if let Some(index_value) = after.get(&index_address) {
+                let index = serde_json::from_value::<PostTurnGovernanceBindingRevisionIndexV1>(
+                    index_value.clone(),
+                )
+                .map_err(|error| Error::config(stage, error.to_string()))?;
+                if index
+                    .revisions
+                    .iter()
+                    .any(|revision| revision.binding_revision == snapshot.binding_revision)
+                {
+                    return Err(Error::config(
+                        stage,
+                        "deleted binding snapshot remains referenced by its revision index",
+                    ));
+                }
+            }
         }
-    }
-    for ((space, subject, digest), locators) in &mut search_groups {
-        locators.sort_by_key(|entry| {
-            (
-                entry.locator.observed_at,
-                entry.locator.turn_sequence,
-                entry.locator.message_id.clone(),
+
+        if namespace == POST_TURN_GOVERNANCE_BINDING_REVISION_INDEX_NAMESPACE
+            && !after.contains_key(&(namespace.clone(), key.clone()))
+        {
+            let before_index = before
+                .get(&(namespace.clone(), key.clone()))
+                .ok_or_else(|| Error::config(stage, "deleted binding index lacks pre-image"))?;
+            let index = serde_json::from_value::<PostTurnGovernanceBindingRevisionIndexV1>(
+                before_index.clone(),
             )
-        });
-        let page_count = u64::try_from(locators.len().div_ceil(TRANSCRIPT_QUERY_PAGE_CAPACITY))
-            .unwrap_or(u64::MAX);
-        push_doc(
-            TRANSCRIPT_SEARCH_ROOT_NAMESPACE,
-            search_root_key(space, subject, digest),
-            serde_json::to_value(TranscriptSearchPostingRootV1 {
-                schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
-                memory_space_id: space.clone(),
-                mounted_subject_id: subject.clone(),
-                term_digest: digest.clone(),
-                revision: 1,
-                page_count,
-                entry_count: u64::try_from(locators.len()).unwrap_or(u64::MAX),
-            })
-            .map_err(|error| {
-                Error::config("conversation_transcript_query_migration", error.to_string())
-            })?,
-        );
-        for (page_id, chunk) in locators.chunks(TRANSCRIPT_QUERY_PAGE_CAPACITY).enumerate() {
-            let page_id = u64::try_from(page_id).unwrap_or(u64::MAX);
-            push_doc(
-                TRANSCRIPT_SEARCH_POSTING_NAMESPACE,
-                search_posting_key(space, subject, digest, page_id),
-                serde_json::to_value(TranscriptSearchPostingPageV1 {
-                    schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
-                    memory_space_id: space.clone(),
-                    mounted_subject_id: subject.clone(),
-                    term_digest: digest.clone(),
-                    page_id,
-                    revision: 1,
-                    locators: chunk.to_vec(),
-                })
-                .map_err(|error| {
-                    Error::config("conversation_transcript_query_migration", error.to_string())
-                })?,
-            );
+            .map_err(|error| Error::config(stage, error.to_string()))?;
+            for revision in &index.revisions {
+                if revision.referenced {
+                    return Err(Error::config(
+                        stage,
+                        "referenced binding revision index cannot be deleted",
+                    ));
+                }
+                let snapshot_address = (
+                    POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE.to_string(),
+                    format!("{}:{}", index.binding_id, revision.binding_revision),
+                );
+                if !changed_keys.contains(&snapshot_address)
+                    || !before.contains_key(&snapshot_address)
+                    || after.contains_key(&snapshot_address)
+                {
+                    return Err(Error::config(
+                        stage,
+                        "deleted binding index requires every exact snapshot deletion in the same transaction",
+                    ));
+                }
+            }
         }
     }
-    for (key, manifest) in message_manifests {
-        push_doc(
-            TRANSCRIPT_SEARCH_MESSAGE_MANIFEST_NAMESPACE,
-            key,
-            serde_json::to_value(manifest).map_err(|error| {
-                Error::config("conversation_transcript_query_migration", error.to_string())
-            })?,
-        );
+
+    for ((namespace, key), value) in after {
+        if namespace != POST_TURN_GOVERNANCE_BINDING_REVISION_INDEX_NAMESPACE {
+            continue;
+        }
+        let index =
+            serde_json::from_value::<PostTurnGovernanceBindingRevisionIndexV1>(value.clone())
+                .map_err(|error| Error::config(stage, error.to_string()))?;
+        index.validate()?;
+        if index.binding_id != *key {
+            return Err(Error::config(
+                stage,
+                "binding revision index key is non-canonical",
+            ));
+        }
+        let before_index = before
+            .get(&(namespace.clone(), key.clone()))
+            .map(|value| {
+                serde_json::from_value::<PostTurnGovernanceBindingRevisionIndexV1>(value.clone())
+            })
+            .transpose()
+            .map_err(|error| Error::config(stage, error.to_string()))?;
+        for revision in &index.revisions {
+            let unchanged = before_index
+                .as_ref()
+                .is_some_and(|before| before.revisions.iter().any(|old| old == revision));
+            if unchanged {
+                continue;
+            }
+            let snapshot_value = after
+                .get(&(
+                    POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE.to_string(),
+                    format!("{}:{}", index.binding_id, revision.binding_revision),
+                ))
+                .ok_or_else(|| {
+                    Error::config(stage, "binding revision index points to a missing snapshot")
+                })?;
+            let snapshot = serde_json::from_value::<PostTurnGovernanceBindingSnapshotV1>(
+                snapshot_value.clone(),
+            )
+            .map_err(|error| Error::config(stage, error.to_string()))?;
+            if snapshot.canonical_digest != revision.canonical_digest {
+                return Err(Error::config(
+                    stage,
+                    "binding revision index digest differs from snapshot",
+                ));
+            }
+            if before_index.as_ref().is_some_and(|before| {
+                before.revisions.iter().any(|old| {
+                    old.binding_revision == revision.binding_revision
+                        && old.referenced
+                        && !revision.referenced
+                })
+            }) {
+                return Err(Error::config(
+                    stage,
+                    "referenced binding revision cannot be downgraded",
+                ));
+            }
+        }
+        if let Some(before_index) = before_index.as_ref() {
+            for old in &before_index.revisions {
+                if index
+                    .revisions
+                    .iter()
+                    .any(|revision| revision.binding_revision == old.binding_revision)
+                {
+                    continue;
+                }
+                if old.referenced {
+                    return Err(Error::config(
+                        stage,
+                        "referenced binding revision cannot be removed",
+                    ));
+                }
+                let address = (
+                    POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE.to_string(),
+                    format!("{}:{}", index.binding_id, old.binding_revision),
+                );
+                let before_snapshot = before.get(&address).ok_or_else(|| {
+                    Error::config(
+                        stage,
+                        "removed binding revision lacks its exact snapshot pre-image",
+                    )
+                })?;
+                let before_snapshot =
+                    serde_json::from_value::<PostTurnGovernanceBindingSnapshotV1>(
+                        before_snapshot.clone(),
+                    )
+                    .map_err(|error| Error::config(stage, error.to_string()))?;
+                if before_snapshot.canonical_digest != old.canonical_digest
+                    || after.contains_key(&address)
+                {
+                    return Err(Error::config(
+                        stage,
+                        "removed binding revision differs from its deleted snapshot",
+                    ));
+                }
+            }
+        }
     }
-    for memory_space_id in memory_spaces {
-        let mut secret = [0u8; 32];
-        getrandom::fill(&mut secret).map_err(|error| {
+    for ((namespace, key), value) in after {
+        if namespace != POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE {
+            continue;
+        }
+        let snapshot = serde_json::from_value::<PostTurnGovernanceBindingSnapshotV1>(value.clone())
+            .map_err(|error| Error::config(stage, error.to_string()))?;
+        if snapshot.storage_key() != *key {
+            return Err(Error::config(
+                stage,
+                "binding snapshot key is non-canonical",
+            ));
+        }
+        let index_value = after
+            .get(&(
+                POST_TURN_GOVERNANCE_BINDING_REVISION_INDEX_NAMESPACE.to_string(),
+                snapshot.binding_id.clone(),
+            ))
+            .ok_or_else(|| Error::config(stage, "binding snapshot lacks revision index"))?;
+        let index =
+            serde_json::from_value::<PostTurnGovernanceBindingRevisionIndexV1>(index_value.clone())
+                .map_err(|error| Error::config(stage, error.to_string()))?;
+        if !index.revisions.iter().any(|revision| {
+            revision.binding_revision == snapshot.binding_revision
+                && revision.canonical_digest == snapshot.canonical_digest
+        }) {
+            return Err(Error::config(
+                stage,
+                "binding snapshot differs from revision index",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_post_turn_governance_snapshot_closure(
+    json: &BTreeMap<(String, String), serde_json::Value>,
+) -> Result<()> {
+    let mut jobs = BTreeMap::<String, PostTurnGovernanceJobV3>::new();
+    let mut indexes = BTreeMap::<String, PostTurnGovernanceScopeIndexV3>::new();
+    let mut snapshots = BTreeMap::<(String, u64), PostTurnGovernanceBindingSnapshotV1>::new();
+    let mut binding_indexes = BTreeMap::<String, PostTurnGovernanceBindingRevisionIndexV1>::new();
+    for ((namespace, key), value) in json {
+        match namespace.as_str() {
+            POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE => {
+                let snapshot =
+                    serde_json::from_value::<PostTurnGovernanceBindingSnapshotV1>(value.clone())
+                        .map_err(|error| {
+                            Error::config("post_turn_governance_closure", error.to_string())
+                        })?;
+                snapshot.validate()?;
+                if snapshot.storage_key() != *key
+                    || snapshots
+                        .insert(
+                            (snapshot.binding_id.clone(), snapshot.binding_revision),
+                            snapshot,
+                        )
+                        .is_some()
+                {
+                    return Err(Error::config(
+                        "post_turn_governance_closure",
+                        "binding snapshot key is non-canonical or duplicated",
+                    ));
+                }
+            }
+            POST_TURN_GOVERNANCE_BINDING_REVISION_INDEX_NAMESPACE => {
+                let index = serde_json::from_value::<PostTurnGovernanceBindingRevisionIndexV1>(
+                    value.clone(),
+                )
+                .map_err(|error| {
+                    Error::config("post_turn_governance_closure", error.to_string())
+                })?;
+                index.validate()?;
+                if index.binding_id != *key || binding_indexes.insert(key.clone(), index).is_some()
+                {
+                    return Err(Error::config(
+                        "post_turn_governance_closure",
+                        "binding revision index key is non-canonical or duplicated",
+                    ));
+                }
+            }
+            POST_TURN_GOVERNANCE_JOB_NAMESPACE => {
+                let job = serde_json::from_value::<PostTurnGovernanceJobV3>(value.clone())
+                    .map_err(|error| {
+                        Error::config("post_turn_governance_closure", error.to_string())
+                    })?;
+                job.validate()?;
+                if job.job_id != *key || jobs.insert(key.clone(), job).is_some() {
+                    return Err(Error::config(
+                        "post_turn_governance_closure",
+                        "governance job key is non-canonical or duplicated",
+                    ));
+                }
+            }
+            POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE => {
+                let index = serde_json::from_value::<PostTurnGovernanceScopeIndexV3>(value.clone())
+                    .map_err(|error| {
+                        Error::config("post_turn_governance_closure", error.to_string())
+                    })?;
+                index.validate()?;
+                if index.scope_index_key != *key || indexes.insert(key.clone(), index).is_some() {
+                    return Err(Error::config(
+                        "post_turn_governance_closure",
+                        "governance scope index key is non-canonical or duplicated",
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    for job in jobs.values() {
+        let index = indexes.get(&job.scope_index_key).ok_or_else(|| {
             Error::config(
-                "conversation_transcript_query_migration_entropy",
-                error.to_string(),
+                "post_turn_governance_closure",
+                "governance job is missing its authoritative scope index",
             )
         })?;
-        let key_hex = secret
+        let expected = PostTurnGovernanceJobRefV2::from_job(job);
+        let references = index
+            .active_jobs
             .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        let key_id = format!(
-            "sha256:{:x}",
-            Sha256::digest(format!("key-id:{key_hex}").as_bytes())
-        );
-        push_doc(
-            TRANSCRIPT_QUERY_KEYRING_NAMESPACE,
-            keyring_key(&memory_space_id),
-            serde_json::to_value(TranscriptQueryKeyringV1 {
-                schema_version: TRANSCRIPT_QUERY_INDEX_SCHEMA_VERSION,
-                memory_space_id: memory_space_id.clone(),
-                incarnation: format!(
-                    "sha256:{:x}",
-                    Sha256::digest(format!("incarnation:{key_hex}").as_bytes())
-                ),
-                current: crate::store_internal::transcript_query::TranscriptQuerySigningKeyV1 {
-                    key_id,
-                    key_hex,
-                    created_at: now_secs.max(1),
-                    expires_at: now_secs.max(1).saturating_add(7_776_000),
-                },
-                previous: None,
-            })
-            .map_err(|error| {
-                Error::config("conversation_transcript_query_migration", error.to_string())
-            })?,
-        );
+            .chain(index.recent_terminal_jobs.iter())
+            .filter(|reference| reference.job_id == job.job_id)
+            .collect::<Vec<_>>();
+        if references.len() != 1 || references[0] != &expected {
+            return Err(Error::config(
+                "post_turn_governance_closure",
+                "governance job and scope index reference differ",
+            ));
+        }
+        if let PostTurnGovernanceExecutionBindingV1::Bound {
+            binding_id,
+            binding_revision,
+        } = &job.execution_binding
+        {
+            let snapshot = snapshots
+                .get(&(binding_id.clone(), *binding_revision))
+                .ok_or_else(|| {
+                    Error::config(
+                        "post_turn_governance_closure",
+                        "bound governance job is missing its immutable binding snapshot",
+                    )
+                })?;
+            let binding_index = binding_indexes.get(binding_id).ok_or_else(|| {
+                Error::config(
+                    "post_turn_governance_closure",
+                    "bound governance job is missing its binding revision index",
+                )
+            })?;
+            if !binding_index.revisions.iter().any(|revision| {
+                revision.binding_revision == *binding_revision
+                    && revision.canonical_digest == snapshot.canonical_digest
+                    && revision.referenced
+            }) {
+                return Err(Error::config(
+                    "post_turn_governance_closure",
+                    "bound governance job differs from binding revision authority",
+                ));
+            }
+        }
     }
-    let mut schema_manifest = snapshot.schema_manifest.clone();
-    schema_manifest.schema_id = STORE_SCHEMA_ID.to_string();
-    schema_manifest.schema_version = STORE_SCHEMA_VERSION;
-    schema_manifest.last_opened_at_unix_secs = now_secs;
-    let migrated = StoreSnapshot::new(
-        schema_manifest,
-        docs,
-        snapshot.blobs.clone(),
-        snapshot.events.clone(),
-    );
-    let json = migrated
-        .json_docs
-        .iter()
-        .map(|doc| ((doc.namespace.clone(), doc.key.clone()), doc.value.clone()))
-        .collect::<BTreeMap<_, _>>();
-    validate_transcript_query_snapshot_closure(&json)?;
-    Ok(migrated)
+    for index in indexes.values() {
+        for reference in index
+            .active_jobs
+            .iter()
+            .chain(index.recent_terminal_jobs.iter())
+        {
+            let Some(job) = jobs.get(&reference.job_id) else {
+                return Err(Error::config(
+                    "post_turn_governance_closure",
+                    "governance scope index references a missing job",
+                ));
+            };
+            if job.scope_index_key != index.scope_index_key
+                || reference != &PostTurnGovernanceJobRefV2::from_job(job)
+            {
+                return Err(Error::config(
+                    "post_turn_governance_closure",
+                    "governance scope index references a divergent job authority",
+                ));
+            }
+        }
+    }
+    for ((binding_id, binding_revision), snapshot) in &snapshots {
+        let index = binding_indexes.get(binding_id).ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_closure",
+                "binding snapshot is missing its revision index",
+            )
+        })?;
+        if !index.revisions.iter().any(|revision| {
+            revision.binding_revision == *binding_revision
+                && revision.canonical_digest == snapshot.canonical_digest
+        }) {
+            return Err(Error::config(
+                "post_turn_governance_closure",
+                "binding snapshot differs from its revision index",
+            ));
+        }
+    }
+    for index in binding_indexes.values() {
+        for revision in &index.revisions {
+            if !snapshots.contains_key(&(index.binding_id.clone(), revision.binding_revision)) {
+                return Err(Error::config(
+                    "post_turn_governance_closure",
+                    "binding revision index references a missing snapshot",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_transcript_query_snapshot_closure(
@@ -14709,7 +14940,7 @@ fn validate_transcript_query_snapshot_closure_with_keyring(
             let catalog = catalog_heads.get(&identity).ok_or_else(|| {
                 Error::config(
                     "conversation_transcript_query_migration_required",
-                    "transcript head has no v11 catalog closure",
+                    "transcript head has no current catalog closure",
                 )
             })?;
             if catalog.revision != head.revision || catalog.head_digest != head.head_digest {
@@ -15019,6 +15250,7 @@ fn validate_snapshot_import_contract(
         }
     }
     validate_transcript_query_snapshot_closure(&snapshot_json)?;
+    validate_post_turn_governance_snapshot_closure(&snapshot_json)?;
     let typed_state = BackendTransactionState {
         json: snapshot_json.clone(),
         blobs: BTreeMap::new(),
@@ -15622,6 +15854,182 @@ mod transaction_error_contract_tests {
         return ProfileId::DesktopLinuxEmbeddedSdk;
         #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         compile_error!("store preparation tests require a supported host target");
+    }
+
+    fn governance_job_and_index(
+        now_secs: u64,
+    ) -> (PostTurnGovernanceJobV3, PostTurnGovernanceScopeIndexV3) {
+        let identity = PostTurnGovernanceIdentityV2::new(
+            "space:closure",
+            "subject:closure",
+            "channel",
+            "chat",
+            "conversation",
+            "turn",
+        )
+        .expect("governance identity");
+        let job = PostTurnGovernanceJobV3::pending(
+            identity.clone(),
+            1,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            PostTurnGovernanceExecutionBindingV1::Unbound,
+            PostTurnGovernancePrivacyAuthorityV1 {
+                policy_schema_version: 1,
+                exact_policy_digest:
+                    "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                        .to_string(),
+            },
+            Vec::new(),
+            0,
+            5,
+            now_secs,
+        )
+        .expect("governance job");
+        let mut index = PostTurnGovernanceScopeIndexV3::empty(&identity, now_secs);
+        index
+            .active_jobs
+            .push(PostTurnGovernanceJobRefV2::from_job(&job));
+        index.validate().expect("governance index");
+        (job, index)
+    }
+
+    fn governance_binding_and_index(
+        now_secs: u64,
+    ) -> (
+        PostTurnGovernanceBindingSnapshotV1,
+        PostTurnGovernanceBindingRevisionIndexV1,
+    ) {
+        let snapshot = PostTurnGovernanceBindingSnapshotV1::new(
+            "test-owner",
+            "primary-provider",
+            1,
+            PostTurnGovernanceProviderProtocolV1::OllamaNative,
+            "http://127.0.0.1:11434/api",
+            "qwen3:8b",
+            None,
+            30_000,
+            4096,
+            1024,
+            1,
+            now_secs,
+        )
+        .expect("binding snapshot");
+        let mut index = PostTurnGovernanceBindingRevisionIndexV1::empty(&snapshot);
+        index
+            .revisions
+            .push(PostTurnGovernanceBindingRevisionRefV1::from_snapshot(
+                &snapshot,
+            ));
+        index.validate().expect("binding index");
+        (snapshot, index)
+    }
+
+    #[test]
+    fn governance_transaction_rejects_new_ghost_index_reference() {
+        let (_, index) = governance_job_and_index(1_800_000_000);
+        let before = BTreeMap::new();
+        let after = BTreeMap::from([(
+            (
+                POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE.to_string(),
+                index.scope_index_key.clone(),
+            ),
+            serde_json::to_value(index).expect("index json"),
+        )]);
+        let error = validate_post_turn_governance_transaction_closure(&before, &after)
+            .expect_err("new index reference without exact job post-image must fail closed");
+        assert_eq!(error.stage(), "post_turn_governance_closure");
+        assert!(error.to_string().contains("missing job"));
+    }
+
+    #[test]
+    fn governance_transaction_accepts_exact_job_and_index_post_image() {
+        let (job, index) = governance_job_and_index(1_800_000_000);
+        let before = BTreeMap::new();
+        let after = BTreeMap::from([
+            (
+                (
+                    POST_TURN_GOVERNANCE_JOB_NAMESPACE.to_string(),
+                    job.job_id.clone(),
+                ),
+                serde_json::to_value(job).expect("job json"),
+            ),
+            (
+                (
+                    POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE.to_string(),
+                    index.scope_index_key.clone(),
+                ),
+                serde_json::to_value(index).expect("index json"),
+            ),
+        ]);
+        validate_post_turn_governance_transaction_closure(&before, &after)
+            .expect("exact job/index post-image");
+    }
+
+    #[test]
+    fn governance_transaction_rejects_index_only_job_deletion() {
+        let (job, index) = governance_job_and_index(1_800_000_000);
+        let mut empty_index = PostTurnGovernanceScopeIndexV3::empty(&job.identity, 1_800_000_001);
+        empty_index.index_revision = index.index_revision + 1;
+        empty_index.validate().expect("empty governance index");
+        let address = (
+            POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE.to_string(),
+            index.scope_index_key.clone(),
+        );
+        let before = BTreeMap::from([(
+            address.clone(),
+            serde_json::to_value(index).expect("before index"),
+        )]);
+        let after = BTreeMap::from([(
+            address,
+            serde_json::to_value(empty_index).expect("after index"),
+        )]);
+        let error = validate_post_turn_governance_transaction_closure(&before, &after)
+            .expect_err("index-only deletion must not hide a durable job");
+        assert!(error.to_string().contains("exact job deletion"));
+    }
+
+    #[test]
+    fn governance_transaction_rejects_half_deleted_binding_authority() {
+        let (snapshot, index) = governance_binding_and_index(1_800_000_000);
+        let snapshot_address = (
+            POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE.to_string(),
+            snapshot.storage_key(),
+        );
+        let index_address = (
+            POST_TURN_GOVERNANCE_BINDING_REVISION_INDEX_NAMESPACE.to_string(),
+            index.binding_id.clone(),
+        );
+        let before = BTreeMap::from([
+            (
+                snapshot_address.clone(),
+                serde_json::to_value(&snapshot).expect("snapshot json"),
+            ),
+            (
+                index_address.clone(),
+                serde_json::to_value(&index).expect("index json"),
+            ),
+        ]);
+
+        let snapshot_only_after = BTreeMap::from([(
+            index_address.clone(),
+            serde_json::to_value(&index).expect("retained index json"),
+        )]);
+        assert!(
+            validate_post_turn_governance_transaction_closure(&before, &snapshot_only_after)
+                .is_err()
+        );
+
+        let index_only_after = BTreeMap::from([(
+            snapshot_address,
+            serde_json::to_value(snapshot).expect("retained snapshot json"),
+        )]);
+        assert!(
+            validate_post_turn_governance_transaction_closure(&before, &index_only_after).is_err()
+        );
+
+        validate_post_turn_governance_transaction_closure(&before, &BTreeMap::new())
+            .expect("unreferenced binding snapshot and index delete together");
     }
 
     #[cfg(feature = "nonproduction-replay-harness")]

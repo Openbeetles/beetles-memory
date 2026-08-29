@@ -30,18 +30,13 @@ impl GovernanceModelConnectionProbe for ReqwestGovernanceModelConnectionProbe {
         &self,
         plan: &EntryGovernanceModelProbePlan,
     ) -> bm_sdk::Result<GovernanceModelConnectionReport> {
-        use std::io::Read as _;
-
         let started = std::time::Instant::now();
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_millis(plan.request_timeout_ms))
-            .build()
-            .map_err(|error| bm_sdk::Error::config("governance_model_probe", error.to_string()))?;
-        let mut request = client
-            .post(&plan.url)
-            .header("content-type", "application/json")
-            .body(plan.body.clone());
-        let credential_used = match &plan.auth_mode {
+        let mut http = ReqwestGovernanceLlmHttpClient::for_endpoint(
+            &plan.url,
+            plan.request_timeout_ms,
+            plan.response_max_bytes,
+        )?;
+        let bearer = match &plan.auth_mode {
             EntryGovernanceModelAuthMode::CredentialEnv { credential_env } => {
                 let token = std::env::var(credential_env).map_err(|_| {
                     bm_sdk::Error::config(
@@ -49,39 +44,21 @@ impl GovernanceModelConnectionProbe for ReqwestGovernanceModelConnectionProbe {
                         format!("credential environment variable is unset: {credential_env}"),
                     )
                 })?;
-                request = request.bearer_auth(token);
-                true
+                Some(format!("Bearer {token}"))
             }
-            EntryGovernanceModelAuthMode::LocalUnauthenticated => false,
+            EntryGovernanceModelAuthMode::LocalUnauthenticated => None,
         };
-        let response = request.send().map_err(|error| {
-            bm_sdk::Error::config("governance_model_probe", error.without_url().to_string())
-        })?;
-        let status = response.status().as_u16();
+        let mut headers = vec![("content-type", "application/json")];
+        if let Some(bearer) = bearer.as_deref() {
+            headers.push(("authorization", bearer));
+        }
+        let (status, response) =
+            bm_sdk::LlmHttpClient::do_post(&mut http, &plan.url, &headers, &plan.body)?;
         if !(200..300).contains(&status) {
             return Err(bm_sdk::Error::http("governance_model_probe", status));
         }
-        if response
-            .content_length()
-            .is_some_and(|length| length > plan.response_max_bytes as u64)
-        {
-            return Err(bm_sdk::Error::config(
-                "governance_model_probe",
-                "model probe response exceeds the configured budget",
-            ));
-        }
-        let mut bytes = Vec::new();
-        response
-            .take((plan.response_max_bytes as u64).saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(|error| bm_sdk::Error::config("governance_model_probe", error.to_string()))?;
-        if bytes.len() > plan.response_max_bytes {
-            return Err(bm_sdk::Error::config(
-                "governance_model_probe",
-                "model probe response exceeds the configured budget",
-            ));
-        }
-        let value: serde_json::Value = serde_json::from_slice(&bytes)
+        let bytes = response.as_ref();
+        let value: serde_json::Value = serde_json::from_slice(bytes)
             .map_err(|error| bm_sdk::Error::config("governance_model_probe", error.to_string()))?;
         let content = match plan.protocol {
             EntryGovernanceModelProtocol::OpenAiCompatible => value
@@ -106,7 +83,7 @@ impl GovernanceModelConnectionProbe for ReqwestGovernanceModelConnectionProbe {
             status: "ready".to_string(),
             protocol: plan.protocol,
             model: plan.model.clone(),
-            credential_used,
+            credential_used: bearer.is_some(),
             response_bytes: bytes.len(),
             duration_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
             reason: "model_protocol_probe_succeeded".to_string(),
@@ -118,11 +95,36 @@ impl GovernanceModelConnectionProbe for ReqwestGovernanceModelConnectionProbe {
 pub struct ReqwestGovernanceLlmHttpClient {
     client: reqwest::blocking::Client,
     response_max_bytes: usize,
+    expected_origin: Option<(String, String, u16)>,
 }
 
 #[cfg(feature = "governance-model-client-std")]
 impl ReqwestGovernanceLlmHttpClient {
     pub fn new(request_timeout_ms: u64, response_max_bytes: usize) -> bm_sdk::Result<Self> {
+        Self::build(request_timeout_ms, response_max_bytes, None)
+    }
+
+    pub fn for_endpoint(
+        endpoint: &str,
+        request_timeout_ms: u64,
+        response_max_bytes: usize,
+    ) -> bm_sdk::Result<Self> {
+        let endpoint = url::Url::parse(endpoint).map_err(|error| {
+            bm_sdk::Error::invalid_input("governance_model_http", error.to_string())
+        })?;
+        let expected_origin = exact_origin(&endpoint)?;
+        Self::build(
+            request_timeout_ms,
+            response_max_bytes,
+            Some(expected_origin),
+        )
+    }
+
+    fn build(
+        request_timeout_ms: u64,
+        response_max_bytes: usize,
+        expected_origin: Option<(String, String, u16)>,
+    ) -> bm_sdk::Result<Self> {
         if response_max_bytes == 0 {
             return Err(bm_sdk::Error::invalid_input(
                 "governance_model_http",
@@ -131,13 +133,54 @@ impl ReqwestGovernanceLlmHttpClient {
         }
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_millis(request_timeout_ms))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .tls_backend_rustls()
             .build()
             .map_err(|error| bm_sdk::Error::config("governance_model_http", error.to_string()))?;
         Ok(Self {
             client,
             response_max_bytes,
+            expected_origin,
         })
     }
+}
+
+#[cfg(feature = "governance-model-client-std")]
+fn exact_origin(url: &url::Url) -> bm_sdk::Result<(String, String, u16)> {
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(bm_sdk::Error::invalid_input(
+            "governance_model_http",
+            "governance endpoint must not contain userinfo, query, or fragment",
+        ));
+    }
+    let host = url.host_str().ok_or_else(|| {
+        bm_sdk::Error::invalid_input(
+            "governance_model_http",
+            "governance endpoint host is missing",
+        )
+    })?;
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
+        return Err(bm_sdk::Error::invalid_input(
+            "governance_model_http",
+            "non-loopback governance endpoint must use HTTPS",
+        ));
+    }
+    let port = url.port_or_known_default().ok_or_else(|| {
+        bm_sdk::Error::invalid_input(
+            "governance_model_http",
+            "governance endpoint port is missing",
+        )
+    })?;
+    Ok((url.scheme().to_string(), host.to_ascii_lowercase(), port))
 }
 
 #[cfg(feature = "governance-model-client-std")]
@@ -149,6 +192,21 @@ impl bm_sdk::LlmHttpClient for ReqwestGovernanceLlmHttpClient {
         body: &[u8],
     ) -> bm_sdk::Result<(u16, bm_sdk::ResponseBody)> {
         use std::io::Read as _;
+
+        let target = url::Url::parse(url).map_err(|error| {
+            bm_sdk::Error::invalid_input("governance_model_http", error.to_string())
+        })?;
+        let target_origin = exact_origin(&target)?;
+        if self
+            .expected_origin
+            .as_ref()
+            .is_some_and(|expected| expected != &target_origin)
+        {
+            return Err(bm_sdk::Error::conflict(
+                "governance_model_http",
+                "governance request origin differs from the immutable binding",
+            ));
+        }
 
         let mut request = self.client.post(url).body(body.to_vec());
         for (name, value) in headers {

@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::store_internal::recall_index::{
@@ -129,8 +129,10 @@ use bm_core::memory::{
     MemorySubjectVisibilityPolicy, MemoryUpdateLineageReport, MemoryWriteAuthority,
     MemoryWriteCandidate, MemoryWriteDomain, MentalPrivacyState, MentalPrivacyStore, OuterVoice,
     OuterVoiceStore, ParsedLongTermMemoryExtraction, PostReplyMemoryMaintenanceContext,
-    PostReplyMemoryMaintenanceInput, PostTurnGovernanceAttemptAuthorityV2,
-    PostTurnGovernanceIdentityV2, PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV2,
+    PostReplyMemoryMaintenanceInput, PostTurnGovernanceAttemptAuthorityV3,
+    PostTurnGovernanceBindingSnapshotV1, PostTurnGovernanceDecisionSummaryV1,
+    PostTurnGovernanceExecutionBindingV1, PostTurnGovernanceIdentityV2,
+    PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV3, PostTurnGovernancePrivacyAuthorityV1,
     PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport, PremiseTypedSource,
     PrivateDocStore, PrivateDocWorkspace, PrivateGardenDoc, PrivateGardenDocRecord,
     PrivateGardenGovernanceContext, PrivateGardenGovernanceInput,
@@ -242,9 +244,11 @@ use crate::store_internal::post_turn_governance::{
     block_claimed_governance_job, block_governance_job, cancel_governance_job,
     claim_governance_job, complete_governance_job_with_memory_plan,
     complete_governance_job_with_subject_soul_plan, dead_letter_governance_job,
-    ensure_governance_intent, governance_completion_transaction_id,
+    ensure_binding_snapshot, ensure_governance_intent, governance_completion_transaction_id,
+    governance_recovery_operation_was_committed, read_binding_snapshot,
     read_job as read_governance_job, read_scope_index as read_governance_scope_index,
     reconcile_governance_intents, renew_governance_job_lease, resume_governance_job,
+    resume_governance_job_for_credential, resume_governance_job_for_provider_permission,
     retry_governance_job, GovernanceIntentEnsureOutcome,
 };
 use crate::{
@@ -1495,7 +1499,8 @@ pub struct MemoryRuntime {
     lifecycle: RuntimeLifecycleEngine,
     agent_tool_registries: Mutex<Vec<AgentToolRegistrySnapshot>>,
     last_conversation_id: Mutex<Option<String>>,
-    governance_model_policy_revision: Mutex<u64>,
+    governance_current_binding: Mutex<Option<PostTurnGovernanceExecutionBindingV1>>,
+    learning_wake_sinks: Mutex<Vec<Weak<dyn crate::MemoryLearningWakeSink>>>,
 }
 
 struct GovernedLongTermMemoryReadView<'a> {
@@ -18424,6 +18429,7 @@ impl MemoryRuntime {
             &job,
             now_secs,
         )?;
+        self.notify_learning_wake_sinks();
         Ok(MemoryConsolidationReport {
             state: MemoryConsolidationState::Queued,
             job_id: Some(job.job_id),
@@ -18444,7 +18450,7 @@ impl MemoryRuntime {
         tool_calls: u32,
         blocking_reason: &str,
         now_secs: u64,
-    ) -> Result<PostTurnGovernanceJobV2> {
+    ) -> Result<PostTurnGovernanceJobV3> {
         if record.key.memory_space_id != self.config.memory_space_id
             || record.key.channel_id != self.config.scope.channel
             || record.subject != self.config.subject_id
@@ -18464,23 +18470,28 @@ impl MemoryRuntime {
             &record.turn_id,
         )?;
         let runtime_binding_digest = self.current_runtime_binding_digest();
-        let mut job = PostTurnGovernanceJobV2::pending(
+        let execution_binding = self
+            .governance_current_binding
+            .lock()
+            .expect("governance current binding lock")
+            .clone()
+            .unwrap_or(PostTurnGovernanceExecutionBindingV1::Unbound);
+        let job = PostTurnGovernanceJobV3::pending(
             identity,
             record.sequence,
             post_turn_governance_transcript_digest(record)?,
             runtime_binding_digest,
-            1,
-            *self
-                .governance_model_policy_revision
-                .lock()
-                .expect("governance model policy revision lock"),
-            self.current_privacy_digest(),
+            execution_binding,
+            PostTurnGovernancePrivacyAuthorityV1 {
+                policy_schema_version: 1,
+                exact_policy_digest: self.current_privacy_digest(),
+            },
             record.candidate_ids.clone(),
             tool_calls,
             5,
             now_secs,
         )?;
-        job.blocking_reason = Some(blocking_reason.to_string());
+        let _ = blocking_reason;
         job.validate()?;
         Ok(job)
     }
@@ -18509,18 +18520,125 @@ impl MemoryRuntime {
         sha256_field_digest(&[&privacy_flags])
     }
 
-    pub fn set_governance_model_policy_revision(&self, revision: u64) -> Result<()> {
-        if revision == 0 {
-            return Err(Error::invalid_input(
-                "post_turn_governance_policy_revision",
-                "governance model policy revision must be greater than zero",
-            ));
-        }
+    pub fn install_governance_binding(
+        &self,
+        request: crate::MemoryGovernanceBindingInstallRequest,
+    ) -> Result<crate::MemoryGovernanceBindingInstallReport> {
+        self.ensure_visible("maintain", self.capabilities.maintenance)?;
+        let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_binding_snapshot",
+                "binding installation requires StorePlatform-backed runtime",
+            )
+        })?;
+        let now_secs = self.config.clock.now_secs();
+        let snapshot = PostTurnGovernanceBindingSnapshotV1::new(
+            request.source_owner_id,
+            request.source_config_id,
+            request.source_revision,
+            request.protocol,
+            request.endpoint,
+            request.model_id,
+            request.credential_reference,
+            request.request_timeout_ms,
+            request.max_input_tokens,
+            request.max_output_tokens,
+            request.provider_permission_generation,
+            now_secs,
+        )?;
+        let snapshot = ensure_binding_snapshot(
+            store_platform,
+            self.memory_write_transaction_scope(),
+            &self.runtime_budget(),
+            &snapshot,
+            now_secs,
+        )?;
         *self
-            .governance_model_policy_revision
+            .governance_current_binding
             .lock()
-            .expect("governance model policy revision lock") = revision;
-        Ok(())
+            .expect("governance current binding lock") =
+            Some(PostTurnGovernanceExecutionBindingV1::Bound {
+                binding_id: snapshot.binding_id.clone(),
+                binding_revision: snapshot.binding_revision,
+            });
+        self.notify_learning_wake_sinks();
+        Ok(crate::MemoryGovernanceBindingInstallReport { binding: snapshot })
+    }
+
+    pub(crate) fn governance_binding_snapshot_for_job(
+        &self,
+        job: &PostTurnGovernanceJobV3,
+    ) -> Result<PostTurnGovernanceBindingSnapshotV1> {
+        let binding = match &job.execution_binding {
+            PostTurnGovernanceExecutionBindingV1::Bound {
+                binding_id,
+                binding_revision,
+            } => PostTurnGovernanceExecutionBindingV1::Bound {
+                binding_id: binding_id.clone(),
+                binding_revision: *binding_revision,
+            },
+            PostTurnGovernanceExecutionBindingV1::Unbound => self
+                .governance_current_binding
+                .lock()
+                .expect("governance current binding lock")
+                .clone()
+                .ok_or_else(|| {
+                    Error::config(
+                        "post_turn_governance_binding_snapshot",
+                        "current governance binding is unavailable",
+                    )
+                })?,
+        };
+        let PostTurnGovernanceExecutionBindingV1::Bound {
+            binding_id,
+            binding_revision,
+        } = binding
+        else {
+            return Err(Error::config(
+                "post_turn_governance_binding_snapshot",
+                "resolved governance binding remains unbound",
+            ));
+        };
+        read_binding_snapshot(
+            self.config.store_platform.as_ref().ok_or_else(|| {
+                Error::config(
+                    "post_turn_governance_binding_snapshot",
+                    "binding resolution requires StorePlatform-backed runtime",
+                )
+            })?,
+            &binding_id,
+            binding_revision,
+        )?
+        .ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_binding_snapshot",
+                "durable immutable binding snapshot is missing",
+            )
+        })
+    }
+
+    pub fn register_learning_wake_sink(&self, sink: Arc<dyn crate::MemoryLearningWakeSink>) {
+        let mut sinks = self
+            .learning_wake_sinks
+            .lock()
+            .expect("memory learning wake sink lock");
+        sinks.retain(|registered| registered.strong_count() > 0);
+        sinks.push(Arc::downgrade(&sink));
+    }
+
+    fn notify_learning_wake_sinks(&self) {
+        let live = {
+            let mut sinks = self
+                .learning_wake_sinks
+                .lock()
+                .expect("memory learning wake sink lock");
+            let live = sinks.iter().filter_map(Weak::upgrade).collect::<Vec<_>>();
+            sinks.retain(|registered| registered.strong_count() > 0);
+            live
+        };
+        for sink in live {
+            sink.wake();
+        }
     }
 
     pub fn deferred_governance_report(&self) -> Result<DeferredGovernanceQueueReport> {
@@ -18689,7 +18807,7 @@ impl MemoryRuntime {
             .config
             .privacy_policy
             .governance_model_disclosure_allowed
-            || current_privacy_digest != job.pinned_privacy_digest
+            || current_privacy_digest != job.privacy_authority.exact_policy_digest
         {
             return Err(Error::conflict(
                 "post_turn_governance_attempt_authority",
@@ -18697,20 +18815,29 @@ impl MemoryRuntime {
             ));
         }
         let transcript = self.load_governance_transcript(&job)?;
-        let authority = PostTurnGovernanceAttemptAuthorityV2 {
+        if job
+            .execution_binding
+            .revision()
+            .is_some_and(|revision| request.binding_revision != revision)
+        {
+            return Err(Error::conflict(
+                "post_turn_governance_attempt_authority",
+                "requested execution binding revision differs from durable job authority",
+            ));
+        }
+        let authority = PostTurnGovernanceAttemptAuthorityV3 {
             binding_id: request.binding_id.trim().to_string(),
-            config_revision: request.config_revision,
+            binding_revision: request.binding_revision,
             model_id: request.model_id.trim().to_string(),
-            privacy_revision: job.pinned_privacy_revision,
-            privacy_digest: current_privacy_digest,
+            privacy_authority: job.privacy_authority.clone(),
             transcript_lifecycle_revision: transcript.updated_at.max(1),
             disclosure_authority_digest: sha256_field_digest(&[
                 job.job_id.as_bytes(),
                 job.transcript_digest.as_bytes(),
                 request.binding_id.trim().as_bytes(),
-                request.config_revision.to_string().as_bytes(),
+                request.binding_revision.to_string().as_bytes(),
                 request.model_id.trim().as_bytes(),
-                job.pinned_privacy_digest.as_bytes(),
+                job.privacy_authority.exact_policy_digest.as_bytes(),
                 transcript.updated_at.to_string().as_bytes(),
             ]),
         };
@@ -18759,6 +18886,7 @@ impl MemoryRuntime {
             &before.job_id,
             status,
             &request.reason,
+            request.execution_block_authority,
             self.config.clock.now_secs(),
         )?;
         Ok(MemoryGovernanceJobBlockReport { job })
@@ -18789,6 +18917,265 @@ impl MemoryRuntime {
             self.config.clock.now_secs(),
         )?;
         Ok(MemoryGovernanceJobResumeReport { job })
+    }
+
+    pub fn governance_credential_changed(
+        &self,
+        request: crate::MemoryGovernanceCredentialChangedRequest,
+    ) -> Result<crate::MemoryGovernanceCredentialChangedReport> {
+        self.ensure_visible("maintain", self.capabilities.maintenance)?;
+        if request.new_generation == 0
+            || request.operation_id.trim().is_empty()
+            || request.operation_id.trim() != request.operation_id
+            || request.credential_ref_safe_id.len() != 71
+            || !request.credential_ref_safe_id.starts_with("sha256:")
+            || !request.credential_ref_safe_id[7..]
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(Error::invalid_input(
+                "post_turn_governance_credential_resume",
+                "canonical safe credential identity, generation, and operation id are required",
+            ));
+        }
+        let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_credential_resume",
+                "credential recovery requires StorePlatform-backed runtime",
+            )
+        })?;
+        let identity = PostTurnGovernanceIdentityV2::new(
+            &self.config.memory_space_id,
+            &self.config.subject_id,
+            &self.config.scope.channel,
+            &self.config.scope.chat_id,
+            "runtime-scope-credential-resume",
+            "runtime-scope-credential-resume",
+        )?;
+        let Some(index) = read_governance_scope_index(store_platform, &identity.scope_id())? else {
+            return Ok(crate::MemoryGovernanceCredentialChangedReport {
+                resumed_jobs: 0,
+                already_applied_jobs: 0,
+            });
+        };
+        let mut resumed_jobs = 0usize;
+        let mut already_applied_jobs = 0usize;
+        let recovery_actor_subject_id = self.governance_recovery_actor_subject_id(
+            &request.authority,
+            crate::MemoryLearningServiceControlOperation::CredentialRecovery,
+        )?;
+        for reference in index
+            .active_jobs
+            .into_iter()
+            .chain(index.recent_terminal_jobs)
+        {
+            let Some(job) = read_governance_job(store_platform, &reference.job_id)? else {
+                return Err(Error::config(
+                    "post_turn_governance_credential_resume",
+                    "scope index references a missing governance job",
+                ));
+            };
+            self.validate_governance_job_runtime_scope(&job)?;
+            if job.status != PostTurnGovernanceJobStatusV2::BlockedConfiguration {
+                if governance_recovery_operation_was_committed(
+                    store_platform,
+                    &job,
+                    &request.operation_id,
+                    &recovery_actor_subject_id,
+                    MemoryMutationOperationKind::GovernanceCredentialRecovery,
+                    &request.credential_ref_safe_id,
+                    request.new_generation,
+                )? {
+                    already_applied_jobs = already_applied_jobs.saturating_add(1);
+                }
+                continue;
+            }
+            if job.status != PostTurnGovernanceJobStatusV2::BlockedConfiguration
+                || job.execution_block_authority.as_ref().is_none_or(|block| {
+                    !block.typed_block_reason.is_credential_scoped()
+                        || block.credential_ref_safe_id.as_deref()
+                            != Some(&request.credential_ref_safe_id)
+                })
+            {
+                continue;
+            }
+            let outcome = resume_governance_job_for_credential(
+                store_platform,
+                self.memory_write_transaction_scope()
+                    .with_conversation(job.identity.conversation_id.clone()),
+                &self.runtime_budget(),
+                &job.job_id,
+                &request.credential_ref_safe_id,
+                request.new_generation,
+                &request.operation_id,
+                &recovery_actor_subject_id,
+                self.config.clock.now_secs(),
+            )?;
+            if outcome.replayed {
+                already_applied_jobs = already_applied_jobs.saturating_add(1);
+            } else {
+                resumed_jobs = resumed_jobs.saturating_add(1);
+            }
+        }
+        if resumed_jobs > 0 {
+            self.notify_learning_wake_sinks();
+        }
+        Ok(crate::MemoryGovernanceCredentialChangedReport {
+            resumed_jobs,
+            already_applied_jobs,
+        })
+    }
+
+    pub fn governance_provider_permission_changed(
+        &self,
+        request: crate::MemoryGovernanceProviderPermissionChangedRequest,
+    ) -> Result<crate::MemoryGovernanceProviderPermissionChangedReport> {
+        self.ensure_visible("maintain", self.capabilities.maintenance)?;
+        if request.binding_id.trim().is_empty()
+            || request.binding_id.trim() != request.binding_id
+            || request.binding_revision == 0
+            || request.new_generation == 0
+            || request.operation_id.trim().is_empty()
+            || request.operation_id.trim() != request.operation_id
+        {
+            return Err(Error::invalid_input(
+                "post_turn_governance_permission_resume",
+                "exact binding, advanced permission generation, and operation id are required",
+            ));
+        }
+        let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_permission_resume",
+                "permission recovery requires StorePlatform-backed runtime",
+            )
+        })?;
+        let identity = PostTurnGovernanceIdentityV2::new(
+            &self.config.memory_space_id,
+            &self.config.subject_id,
+            &self.config.scope.channel,
+            &self.config.scope.chat_id,
+            "runtime-scope-permission-resume",
+            "runtime-scope-permission-resume",
+        )?;
+        let Some(index) = read_governance_scope_index(store_platform, &identity.scope_id())? else {
+            return Ok(crate::MemoryGovernanceProviderPermissionChangedReport {
+                resumed_jobs: 0,
+                already_applied_jobs: 0,
+            });
+        };
+        let mut resumed_jobs = 0usize;
+        let mut already_applied_jobs = 0usize;
+        let recovery_actor_subject_id = self.governance_recovery_actor_subject_id(
+            &request.authority,
+            crate::MemoryLearningServiceControlOperation::ProviderPermissionRecovery,
+        )?;
+        for reference in index
+            .active_jobs
+            .into_iter()
+            .chain(index.recent_terminal_jobs)
+        {
+            let Some(job) = read_governance_job(store_platform, &reference.job_id)? else {
+                return Err(Error::config(
+                    "post_turn_governance_permission_resume",
+                    "scope index references a missing governance job",
+                ));
+            };
+            self.validate_governance_job_runtime_scope(&job)?;
+            if job.status != PostTurnGovernanceJobStatusV2::BlockedPolicy {
+                if governance_recovery_operation_was_committed(
+                    store_platform,
+                    &job,
+                    &request.operation_id,
+                    &recovery_actor_subject_id,
+                    MemoryMutationOperationKind::GovernanceProviderPermissionRecovery,
+                    &request.binding_id,
+                    request.new_generation,
+                )? {
+                    already_applied_jobs = already_applied_jobs.saturating_add(1);
+                }
+                continue;
+            }
+            if job.status != PostTurnGovernanceJobStatusV2::BlockedPolicy
+                || job.execution_block_authority.as_ref().is_none_or(|block| {
+                    block.typed_block_reason
+                        != crate::PostTurnGovernanceExecutionBlockReasonV1::ProviderPermissionDenied
+                        || block.binding_id.as_deref() != Some(&request.binding_id)
+                        || block.binding_revision != Some(request.binding_revision)
+                })
+            {
+                continue;
+            }
+            let outcome = resume_governance_job_for_provider_permission(
+                store_platform,
+                self.memory_write_transaction_scope()
+                    .with_conversation(job.identity.conversation_id.clone()),
+                &self.runtime_budget(),
+                &job.job_id,
+                &request.binding_id,
+                request.binding_revision,
+                request.new_generation,
+                &request.operation_id,
+                &recovery_actor_subject_id,
+                self.config.clock.now_secs(),
+            )?;
+            if outcome.replayed {
+                already_applied_jobs = already_applied_jobs.saturating_add(1);
+            } else {
+                resumed_jobs = resumed_jobs.saturating_add(1);
+            }
+        }
+        if resumed_jobs > 0 {
+            self.notify_learning_wake_sinks();
+        }
+        Ok(crate::MemoryGovernanceProviderPermissionChangedReport {
+            resumed_jobs,
+            already_applied_jobs,
+        })
+    }
+
+    fn governance_recovery_actor_subject_id(
+        &self,
+        authority: &crate::MemoryLearningServiceControlAuthority,
+        operation: crate::MemoryLearningServiceControlOperation,
+    ) -> Result<String> {
+        let registry = &self.config.subject_registry;
+        let graph = &self.config.subject_relationship_graph;
+        if !registry.validate_contract().accepted
+            || !graph.validate_against_registry(registry).accepted
+        {
+            return Err(Error::config(
+                "post_turn_governance_recovery_authority",
+                "subject registry or relationship graph requires repair",
+            ));
+        }
+        let governor = registry.system_governor().ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_recovery_authority",
+                "active SystemGovernor authority is required",
+            )
+        })?;
+        if governor.lifecycle_state != SubjectLifecycleState::Active
+            || !graph.edges.iter().any(|edge| {
+                edge.kind == SubjectRelationshipKind::Governs
+                    && edge.from_subject_id == governor.subject_id
+                    && edge.to_subject_id == self.config.scoped_runtime.mounted_subject_id
+            })
+        {
+            return Err(Error::config(
+                "post_turn_governance_recovery_authority",
+                "SystemGovernor does not govern the mounted subject",
+            ));
+        }
+        let identity = self.governance_attachment_identity()?;
+        if authority.system_governor_subject_id() != governor.subject_id
+            || !authority.authorizes(&identity, operation)
+        {
+            return Err(Error::config(
+                "post_turn_governance_recovery_authority",
+                "exact SystemGovernor service control authority is required",
+            ));
+        }
+        Ok(governor.subject_id.clone())
     }
 
     pub fn block_claimed_governance_job(
@@ -18829,6 +19216,7 @@ impl MemoryRuntime {
             request.lease_epoch,
             status,
             &request.reason,
+            request.execution_block_authority,
             self.config.clock.now_secs(),
         )?;
         Ok(MemoryGovernanceClaimedJobBlockReport { job })
@@ -19288,6 +19676,9 @@ impl MemoryRuntime {
             mutation_plan.merge(autonomous_additional)?;
             None
         };
+        let semantic_governance = semantic_report_from_atomic_refresh(long_term_refresh.as_ref());
+        let decision_summary =
+            PostTurnGovernanceDecisionSummaryV1::from_semantic_report(&semantic_governance)?;
         let completed = if let Some(soul_plan) = soul_plan {
             let completed = complete_governance_job_with_subject_soul_plan(
                 store_platform,
@@ -19296,6 +19687,7 @@ impl MemoryRuntime {
                 &leased.job_id,
                 &request.lease_owner,
                 request.lease_epoch,
+                decision_summary.clone(),
                 soul_plan,
                 mutation_plan.mutations,
                 mutation_plan.preconditions,
@@ -19312,6 +19704,7 @@ impl MemoryRuntime {
                 &leased.job_id,
                 &request.lease_owner,
                 request.lease_epoch,
+                decision_summary,
                 mutation_plan.mutations,
                 mutation_plan.preconditions,
                 mutation_plan.blob_preconditions,
@@ -19321,11 +19714,11 @@ impl MemoryRuntime {
         Ok(MemoryGovernanceJobRunReport {
             job: completed,
             private_garden_self_work,
-            semantic_governance: semantic_report_from_atomic_refresh(long_term_refresh.as_ref()),
+            semantic_governance,
         })
     }
 
-    fn validate_governance_job_runtime_scope(&self, job: &PostTurnGovernanceJobV2) -> Result<()> {
+    fn validate_governance_job_runtime_scope(&self, job: &PostTurnGovernanceJobV3) -> Result<()> {
         if job.identity.memory_space_id != self.config.memory_space_id
             || job.identity.mounted_subject_id != self.config.subject_id
             || job.identity.channel_id != self.config.scope.channel
@@ -19339,9 +19732,149 @@ impl MemoryRuntime {
         Ok(())
     }
 
+    pub(crate) fn governance_now_secs(&self) -> u64 {
+        self.config.clock.now_secs()
+    }
+
+    pub(crate) fn governance_attachment_identity(
+        &self,
+    ) -> Result<crate::MemoryLearningAttachmentIdentity> {
+        let store = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "memory_learning_attachment",
+                "StorePlatform authority is unavailable",
+            )
+        })?;
+        let registry = serde_json::to_vec(&self.config.subject_registry)
+            .map_err(|error| Error::config("memory_learning_attachment", error.to_string()))?;
+        Ok(crate::MemoryLearningAttachmentIdentity::new(
+            store.learning_store_authority_digest(),
+            format!("sha256:{:x}", Sha256::digest(registry)),
+            self.config.memory_space_id.clone(),
+            self.config.subject_id.clone(),
+            self.config.scope.channel.clone(),
+            self.config.scope.chat_id.clone(),
+        ))
+    }
+
+    pub fn learning_service_status_authority(
+        &self,
+    ) -> Result<crate::MemoryLearningServiceStatusAuthority> {
+        self.ensure_visible("inspect.learning_service", self.capabilities.inspection)?;
+        self.exact_system_governor_actor("memory_learning_status_authority")?;
+        Ok(crate::MemoryLearningServiceStatusAuthority::new(
+            self.governance_attachment_identity()?,
+        ))
+    }
+
+    pub fn learning_service_control_authorities(
+        &self,
+    ) -> Result<crate::MemoryLearningServiceControlAuthorities> {
+        self.ensure_visible("maintain", self.capabilities.maintenance)?;
+        let governor = self.exact_system_governor_actor("memory_learning_control_authority")?;
+        let identity = self.governance_attachment_identity()?;
+        Ok(crate::MemoryLearningServiceControlAuthorities::new(
+            crate::MemoryLearningServiceControlAuthority::new(
+                identity.clone(),
+                crate::MemoryLearningServiceControlOperation::CredentialRecovery,
+                governor.clone(),
+            ),
+            crate::MemoryLearningServiceControlAuthority::new(
+                identity,
+                crate::MemoryLearningServiceControlOperation::ProviderPermissionRecovery,
+                governor,
+            ),
+        ))
+    }
+
+    fn exact_system_governor_actor(&self, stage: &'static str) -> Result<String> {
+        let registry = &self.config.subject_registry;
+        let graph = &self.config.subject_relationship_graph;
+        if !registry.validate_contract().accepted
+            || !graph.validate_against_registry(registry).accepted
+        {
+            return Err(Error::config(
+                stage,
+                "subject registry or relationship graph requires repair",
+            ));
+        }
+        let governor = registry
+            .system_governor()
+            .ok_or_else(|| Error::config(stage, "SystemGovernor is not registered"))?;
+        if governor.lifecycle_state != SubjectLifecycleState::Active
+            || self.config.scoped_runtime.actor_subject_id != governor.subject_id
+            || !graph.edges.iter().any(|edge| {
+                edge.kind == SubjectRelationshipKind::Governs
+                    && edge.from_subject_id == governor.subject_id
+                    && edge.to_subject_id == self.config.scoped_runtime.mounted_subject_id
+            })
+        {
+            return Err(Error::config(
+                stage,
+                "exact active governing SystemGovernor actor is required",
+            ));
+        }
+        Ok(governor.subject_id.clone())
+    }
+
+    pub fn learning_attachment_status_authority(
+        &self,
+    ) -> Result<crate::MemoryLearningAttachmentStatusAuthority> {
+        self.ensure_visible("inspect.learning_attachment", self.capabilities.inspection)?;
+        let actor = self
+            .config
+            .subject_registry
+            .subject(&self.config.scoped_runtime.actor_subject_id)
+            .ok_or_else(|| {
+                Error::config(
+                    "memory_learning_status_authority",
+                    "inspection actor is not registered",
+                )
+            })?;
+        if actor.lifecycle_state != SubjectLifecycleState::Active
+            || actor.subject_id != self.config.scoped_runtime.mounted_subject_id
+        {
+            return Err(Error::config(
+                "memory_learning_status_authority",
+                "exact active mounted-subject inspection authority is required",
+            ));
+        }
+        Ok(crate::MemoryLearningAttachmentStatusAuthority::new(
+            self.governance_attachment_identity()?,
+        ))
+    }
+
+    pub(crate) fn revalidate_governance_egress_authority(
+        &self,
+        job_id: &str,
+        lease_owner: &str,
+        lease_epoch: u64,
+    ) -> Result<()> {
+        let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "post_turn_governance_disclosure",
+                "StorePlatform authority is unavailable",
+            )
+        })?;
+        let job = read_governance_job(store_platform, job_id)?.ok_or_else(|| {
+            Error::not_found(
+                "post_turn_governance_disclosure",
+                "governance job not found",
+            )
+        })?;
+        self.validate_governance_job_runtime_scope(&job)?;
+        if job.lease_owner.as_deref() != Some(lease_owner) || job.lease_epoch != lease_epoch {
+            return Err(Error::conflict(
+                "post_turn_governance_disclosure",
+                "network disclosure lease is stale",
+            ));
+        }
+        self.ensure_governance_disclosure_authority(store_platform, &job)
+    }
+
     fn load_governance_transcript(
         &self,
-        job: &PostTurnGovernanceJobV2,
+        job: &PostTurnGovernanceJobV3,
     ) -> Result<TranscriptTurnRecord> {
         let key = ConversationKey::new(
             &job.identity.memory_space_id,
@@ -19367,7 +19900,7 @@ impl MemoryRuntime {
     fn ensure_governance_disclosure_authority(
         &self,
         store_platform: &StorePlatform,
-        leased: &PostTurnGovernanceJobV2,
+        leased: &PostTurnGovernanceJobV3,
     ) -> Result<()> {
         let current = read_governance_job(store_platform, &leased.job_id)?.ok_or_else(|| {
             Error::not_found(
@@ -19394,9 +19927,8 @@ impl MemoryRuntime {
                 "leased governance job is missing attempt authority",
             )
         })?;
-        if authority.privacy_revision < current.pinned_privacy_revision
-            || authority.privacy_digest != current.pinned_privacy_digest
-            || authority.privacy_digest != self.current_privacy_digest()
+        if authority.privacy_authority != current.privacy_authority
+            || authority.privacy_authority.exact_policy_digest != self.current_privacy_digest()
             || !self
                 .config
                 .privacy_policy
@@ -19413,7 +19945,7 @@ impl MemoryRuntime {
     fn ensure_governance_transcript_claimable(
         &self,
         store_platform: &StorePlatform,
-        job: &PostTurnGovernanceJobV2,
+        job: &PostTurnGovernanceJobV3,
     ) -> Result<()> {
         let key = ConversationKey::new(
             &job.identity.memory_space_id,
@@ -21442,7 +21974,7 @@ impl LlmHttpClient for GovernanceDisclosureHttpClient<'_> {
 }
 
 fn canonical_turn_delta_from_transcript(
-    job: &PostTurnGovernanceJobV2,
+    job: &PostTurnGovernanceJobV3,
     record: &TranscriptTurnRecord,
 ) -> Result<CanonicalTurnDelta> {
     if record.key.memory_space_id != job.identity.memory_space_id
@@ -31284,7 +31816,8 @@ impl MemoryRuntimeBuilder {
             lifecycle: RuntimeLifecycleEngine,
             agent_tool_registries: Mutex::new(self.agent_tool_registries),
             last_conversation_id: Mutex::new(None),
-            governance_model_policy_revision: Mutex::new(1),
+            governance_current_binding: Mutex::new(None),
+            learning_wake_sinks: Mutex::new(Vec::new()),
         };
         let lifecycle = runtime.start_lifecycle(
             RuntimeLifecycleOperation::Open,

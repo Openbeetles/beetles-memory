@@ -9,10 +9,30 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bm_entry::{
-    EntryAuthConfig, EntryGovernanceCoordinatorState, EntryGovernanceModelAuthMode,
-    EntryGovernanceModelConfigUpdate, EntryGovernanceModelProtocol, EntryIdempotencyConfig,
-    EntryIdentity, EntryRuntime, EntryRuntimeConfig, EntryScope, EntryTransportConfig,
+    EntryAuthConfig, EntryGovernanceModelAuthMode, EntryGovernanceModelConfigUpdate,
+    EntryGovernanceModelProtocol, EntryIdempotencyConfig, EntryIdentity, EntryRuntime,
+    EntryRuntimeConfig, EntryScope, EntryTransportConfig, MemoryLearningAttachmentStatusRequest,
+    MemoryLearningServiceStatusRequest,
 };
+
+fn service_report(runtime: &EntryRuntime) -> bm_entry::MemoryLearningServiceReport {
+    let authority = runtime
+        .learning_service_status_authority()
+        .expect("service status authority");
+    runtime
+        .memory_learning_service_report(MemoryLearningServiceStatusRequest { authority })
+        .expect("service status")
+}
+
+fn attachment_report(runtime: &EntryRuntime) -> bm_entry::MemoryLearningAttachmentReport {
+    let authority = runtime
+        .runtime()
+        .learning_attachment_status_authority()
+        .expect("attachment status authority");
+    runtime
+        .memory_learning_attachment_report(MemoryLearningAttachmentStatusRequest { authority })
+        .expect("attachment status")
+}
 use bm_sdk::{
     CanonicalTurnDelta, ConversationScope, MemoryCapabilityPolicy, MemoryPrivacyPolicy,
     MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource,
@@ -113,14 +133,14 @@ fn wait_for_completed_job_reports(runtimes: &[&EntryRuntime], expected: u64) {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         let completed = runtimes.iter().fold(0_u64, |total, runtime| {
-            total.saturating_add(runtime.governance_coordinator_report().completed_jobs)
+            total.saturating_add(service_report(runtime).completed_jobs)
         });
         if completed >= expected {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "durable success was not reflected by the coordinator report"
+            "durable success was not reflected by the learning service report"
         );
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -129,6 +149,7 @@ fn wait_for_completed_job_reports(runtimes: &[&EntryRuntime], expected: u64) {
 struct FakeOpenAiServer {
     address: String,
     calls: Arc<AtomicUsize>,
+    response_status: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -150,6 +171,12 @@ impl FakeOpenAiServer {
         Self::start_with_options(0, Duration::ZERO, false, true)
     }
 
+    fn start_with_permission_denial() -> Self {
+        let server = Self::start_with_options(0, Duration::ZERO, false, false);
+        server.response_status.store(403, Ordering::Release);
+        server
+    }
+
     fn start_with_options(
         failures: usize,
         response_delay: Duration,
@@ -162,8 +189,10 @@ impl FakeOpenAiServer {
             .expect("nonblocking fake model");
         let address = listener.local_addr().expect("fake address").to_string();
         let calls = Arc::new(AtomicUsize::new(0));
+        let response_status = Arc::new(AtomicUsize::new(if auth_rejected { 401 } else { 0 }));
         let stop = Arc::new(AtomicBool::new(false));
         let thread_calls = Arc::clone(&calls);
+        let thread_response_status = Arc::clone(&response_status);
         let thread_stop = Arc::clone(&stop);
         let failures_remaining = Arc::new(AtomicUsize::new(failures));
         let thread_failures = Arc::clone(&failures_remaining);
@@ -176,11 +205,19 @@ impl FakeOpenAiServer {
                         if response_delay != Duration::ZERO {
                             std::thread::sleep(response_delay);
                         }
-                        if auth_rejected {
-                            let response = "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+                        let forced_status = thread_response_status.load(Ordering::Acquire);
+                        if matches!(forced_status, 401 | 403) {
+                            let reason = if forced_status == 401 {
+                                "Unauthorized"
+                            } else {
+                                "Forbidden"
+                            };
+                            let response = format!(
+                                "HTTP/1.1 {forced_status} {reason}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                            );
                             stream
                                 .write_all(response.as_bytes())
-                                .expect("fake auth rejection");
+                                .expect("fake authorization rejection");
                             continue;
                         }
                         let should_fail = thread_failures
@@ -226,6 +263,7 @@ impl FakeOpenAiServer {
         Self {
             address,
             calls,
+            response_status,
             stop,
             handle: Some(handle),
         }
@@ -234,16 +272,32 @@ impl FakeOpenAiServer {
     fn endpoint(&self) -> String {
         format!("http://{}/v1", self.address)
     }
+
+    fn allow_requests(&self) {
+        self.response_status.store(0, Ordering::Release);
+    }
 }
 
 fn configure_model(runtime: &EntryRuntime, fake: &FakeOpenAiServer) {
+    configure_model_with_auth(
+        runtime,
+        fake,
+        EntryGovernanceModelAuthMode::LocalUnauthenticated,
+    );
+}
+
+fn configure_model_with_auth(
+    runtime: &EntryRuntime,
+    fake: &FakeOpenAiServer,
+    auth_mode: EntryGovernanceModelAuthMode,
+) {
     runtime
         .console_update_governance_model(EntryGovernanceModelConfigUpdate {
             enabled: true,
             protocol: EntryGovernanceModelProtocol::OpenAiCompatible,
             endpoint: fake.endpoint(),
             model: "fixture-memory-model".to_string(),
-            auth_mode: EntryGovernanceModelAuthMode::LocalUnauthenticated,
+            auth_mode,
             request_timeout_ms: 5_000,
             max_input_tokens: 8_192,
             max_output_tokens: 512,
@@ -305,7 +359,15 @@ fn authentication_rejection_blocks_configuration_without_retrying() {
     let root = temp_store("auth-rejected");
     let runtime = runtime(&root);
     let fake = FakeOpenAiServer::start_with_auth_rejection();
-    configure_model(&runtime, &fake);
+    const CREDENTIAL_ENV: &str = "BM_TEST_PL2_AUTH_REJECTED_TOKEN";
+    std::env::set_var(CREDENTIAL_ENV, "synthetic-secret-never-logged");
+    configure_model_with_auth(
+        &runtime,
+        &fake,
+        EntryGovernanceModelAuthMode::CredentialEnv {
+            credential_env: CREDENTIAL_ENV.to_string(),
+        },
+    );
     let finalized = runtime
         .runtime()
         .finalize_turn(finalize_request("conversation-auth", "turn-auth"))
@@ -326,25 +388,165 @@ fn authentication_rejection_blocks_configuration_without_retrying() {
         .job;
     assert_eq!(
         job.blocking_reason.as_deref(),
-        Some("governance_model_authentication_rejected")
+        Some("governance_credential_rejected")
     );
+    let block = job
+        .execution_block_authority
+        .as_ref()
+        .expect("credential rejection must persist exact recovery authority");
+    assert_eq!(
+        block.typed_block_reason,
+        bm_sdk::PostTurnGovernanceExecutionBlockReasonV1::CredentialRejected
+    );
+    assert_eq!(block.credential_generation, Some(1));
+    assert!(block.credential_ref_safe_id.is_some());
     assert!(job.receipt.is_none());
     assert!(job.next_attempt_at.is_none());
-    let report = runtime.governance_coordinator_report();
-    assert_eq!(
-        report.state,
-        EntryGovernanceCoordinatorState::BlockedConfiguration
-    );
-    assert!(!report.service_ready);
-    assert_eq!(report.retried_jobs, 0);
-    assert_eq!(report.last_job_id.as_deref(), Some(job_id.as_str()));
+    let report = service_report(&runtime);
+    let attachment = attachment_report(&runtime);
+    assert_eq!(report.blocked_jobs, 1);
+    assert_eq!(report.retrying_jobs, 0);
+    assert_eq!(attachment.state, "blocked");
+    assert_eq!(attachment.last_job_id.as_deref(), Some(job_id.as_str()));
     let calls = fake.calls.load(Ordering::SeqCst);
     std::thread::sleep(Duration::from_millis(200));
     assert_eq!(fake.calls.load(Ordering::SeqCst), calls);
+    std::env::remove_var(CREDENTIAL_ENV);
 }
 
 #[test]
-fn coordinator_blocks_without_config_then_recovers_and_completes_the_same_job() {
+fn provider_permission_change_resumes_only_the_exact_blocked_binding_generation() {
+    let root = temp_store("permission-recovery");
+    let runtime = runtime(&root);
+    let fake = FakeOpenAiServer::start_with_permission_denial();
+    configure_model(&runtime, &fake);
+    let finalized = runtime
+        .runtime()
+        .finalize_turn(finalize_request(
+            "conversation-permission-recovery",
+            "turn-permission-recovery",
+        ))
+        .expect("queued finalize");
+    let job_id = finalized.memory_consolidation.job_id.expect("job id");
+
+    wait_for_job(
+        &runtime,
+        &job_id,
+        PostTurnGovernanceJobStatusV2::BlockedPolicy,
+    );
+    let blocked = runtime
+        .runtime()
+        .governance_job_status(bm_sdk::MemoryGovernanceJobStatusRequest {
+            job_id: job_id.clone(),
+        })
+        .expect("permission blocked status")
+        .job;
+    let block = blocked
+        .execution_block_authority
+        .as_ref()
+        .expect("permission block authority");
+    assert_eq!(
+        block.typed_block_reason,
+        bm_sdk::PostTurnGovernanceExecutionBlockReasonV1::ProviderPermissionDenied
+    );
+    assert_eq!(block.provider_permission_generation, Some(1));
+    assert!(runtime
+        .governance_provider_permission_changed(1, 1, "permission-operation-stale")
+        .is_err());
+    assert_eq!(
+        runtime
+            .runtime()
+            .governance_job_status(bm_sdk::MemoryGovernanceJobStatusRequest {
+                job_id: job_id.clone(),
+            })
+            .expect("still blocked")
+            .job
+            .status,
+        PostTurnGovernanceJobStatusV2::BlockedPolicy
+    );
+
+    fake.allow_requests();
+    runtime
+        .governance_provider_permission_changed(1, 2, "permission-operation-2")
+        .expect("advanced permission generation resumes exact job");
+    wait_for_job(&runtime, &job_id, PostTurnGovernanceJobStatusV2::Succeeded);
+    let succeeded = runtime
+        .runtime()
+        .governance_job_status(bm_sdk::MemoryGovernanceJobStatusRequest { job_id })
+        .expect("permission recovered status")
+        .job;
+    assert_eq!(
+        succeeded.last_provider_permission_recovery_generation,
+        Some(2)
+    );
+    assert!(succeeded.receipt.is_some());
+}
+
+#[test]
+fn missing_credential_has_zero_network_and_changed_generation_resumes_same_job() {
+    let root = temp_store("credential-recovery");
+    let runtime = runtime(&root);
+    let fake = FakeOpenAiServer::start();
+    const CREDENTIAL_ENV: &str = "BM_TEST_PL2_MISSING_TOKEN";
+    const GENERATION_ENV: &str = "BM_TEST_PL2_MISSING_TOKEN_GENERATION";
+    std::env::remove_var(CREDENTIAL_ENV);
+    std::env::remove_var(GENERATION_ENV);
+    configure_model_with_auth(
+        &runtime,
+        &fake,
+        EntryGovernanceModelAuthMode::CredentialEnv {
+            credential_env: CREDENTIAL_ENV.to_string(),
+        },
+    );
+    let finalized = runtime
+        .runtime()
+        .finalize_turn(finalize_request(
+            "conversation-credential-recovery",
+            "turn-credential-recovery",
+        ))
+        .expect("queued finalize");
+    let job_id = finalized.memory_consolidation.job_id.expect("job id");
+
+    wait_for_job(
+        &runtime,
+        &job_id,
+        PostTurnGovernanceJobStatusV2::BlockedConfiguration,
+    );
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
+    let blocked = runtime
+        .runtime()
+        .governance_job_status(bm_sdk::MemoryGovernanceJobStatusRequest {
+            job_id: job_id.clone(),
+        })
+        .expect("blocked status")
+        .job;
+    assert_eq!(
+        blocked
+            .execution_block_authority
+            .as_ref()
+            .map(|authority| authority.typed_block_reason),
+        Some(bm_sdk::PostTurnGovernanceExecutionBlockReasonV1::CredentialMissing)
+    );
+
+    std::env::set_var(CREDENTIAL_ENV, "synthetic-recovered-secret");
+    std::env::set_var(GENERATION_ENV, "1");
+    runtime
+        .governance_credential_changed(CREDENTIAL_ENV, 1, "credential-recovery-operation-1")
+        .expect("credential generation resumes exact blocked job");
+    wait_for_job(&runtime, &job_id, PostTurnGovernanceJobStatusV2::Succeeded);
+    assert!(fake.calls.load(Ordering::SeqCst) >= 1);
+    let succeeded = runtime
+        .runtime()
+        .governance_job_status(bm_sdk::MemoryGovernanceJobStatusRequest { job_id })
+        .expect("succeeded status")
+        .job;
+    assert!(succeeded.receipt.is_some());
+    std::env::remove_var(CREDENTIAL_ENV);
+    std::env::remove_var(GENERATION_ENV);
+}
+
+#[test]
+fn learning_service_blocks_without_config_then_recovers_and_completes_the_same_job() {
     let root = temp_store("recover-config");
     let runtime = runtime(&root);
     let finalized = runtime
@@ -360,18 +562,18 @@ fn coordinator_blocks_without_config_then_recovers_and_completes_the_same_job() 
     );
     let report_deadline = Instant::now() + Duration::from_secs(2);
     let blocked_report = loop {
-        let report = runtime.governance_coordinator_report();
+        let report = service_report(&runtime);
         if report.blocked_jobs > 0 {
             break report;
         }
         assert!(
             Instant::now() < report_deadline,
-            "coordinator report did not observe the durable blocked transition"
+            "learning service report did not observe the durable blocked transition"
         );
         std::thread::sleep(Duration::from_millis(5));
     };
     std::thread::sleep(Duration::from_millis(200));
-    let settled_report = runtime.governance_coordinator_report();
+    let settled_report = service_report(&runtime);
     assert!(
         settled_report.cycles <= blocked_report.cycles.saturating_add(1),
         "an unchanged blocked job must not create a hot loop"
@@ -382,15 +584,15 @@ fn coordinator_blocks_without_config_then_recovers_and_completes_the_same_job() 
 
     wait_for_job(&runtime, &job_id, PostTurnGovernanceJobStatusV2::Succeeded);
     wait_for_completed_job_reports(&[&runtime], 1);
-    let report = runtime.governance_coordinator_report();
+    let report = service_report(&runtime);
+    let attachment = attachment_report(&runtime);
     assert_eq!(report.completed_jobs, 1);
-    assert_eq!(report.last_job_id.as_deref(), Some(job_id.as_str()));
+    assert_eq!(attachment.last_job_id.as_deref(), Some(job_id.as_str()));
     assert!(fake.calls.load(Ordering::SeqCst) >= 1);
-    runtime.shutdown_governance_coordinator();
-    assert!(matches!(
-        runtime.governance_coordinator_report().state,
-        EntryGovernanceCoordinatorState::Stopped | EntryGovernanceCoordinatorState::Stopping
-    ));
+    runtime
+        .shutdown_memory_learning_service(Instant::now() + Duration::from_secs(2))
+        .expect("bounded shutdown");
+    assert_eq!(service_report(&runtime).state, "stopped");
 }
 
 #[test]
@@ -419,7 +621,7 @@ fn transient_model_failure_uses_durable_backoff_before_retrying() {
     );
     wait_for_job(&runtime, &job_id, PostTurnGovernanceJobStatusV2::Succeeded);
     assert!(fake.calls.load(Ordering::SeqCst) > calls_after_failure);
-    assert_eq!(runtime.governance_coordinator_report().retried_jobs, 1);
+    assert_eq!(service_report(&runtime).retrying_jobs, 1);
 }
 
 #[test]
@@ -453,7 +655,7 @@ fn malformed_long_term_output_is_retryable_instead_of_false_success() {
 }
 
 #[test]
-fn two_entry_coordinators_share_one_backend_claim_and_one_terminal_receipt() {
+fn two_entry_learning_services_share_one_backend_claim_and_one_terminal_receipt() {
     let root = temp_store("single-winner");
     let first = runtime(&root);
     let fake = FakeOpenAiServer::start();
@@ -468,15 +670,18 @@ fn two_entry_coordinators_share_one_backend_claim_and_one_terminal_receipt() {
     wait_for_job(&first, &job_id, PostTurnGovernanceJobStatusV2::Succeeded);
     wait_for_completed_job_reports(&[&first, &second], 1);
     assert_eq!(
-        first
-            .governance_coordinator_report()
+        service_report(&first)
             .completed_jobs
-            .saturating_add(second.governance_coordinator_report().completed_jobs),
+            .saturating_add(service_report(&second).completed_jobs),
         1,
-        "backend CAS must leave only one coordinator completion winner"
+        "backend CAS must leave only one learning service completion winner"
     );
-    first.shutdown_governance_coordinator();
-    second.shutdown_governance_coordinator();
+    first
+        .shutdown_memory_learning_service(Instant::now() + Duration::from_secs(2))
+        .expect("first shutdown");
+    second
+        .shutdown_memory_learning_service(Instant::now() + Duration::from_secs(2))
+        .expect("second shutdown");
     drop(first);
     drop(second);
 
@@ -508,9 +713,18 @@ fn shutdown_during_model_call_prevents_post_shutdown_memory_completion() {
     }
 
     let shutdown_started = Instant::now();
-    runtime.shutdown_governance_coordinator();
+    let shutdown =
+        runtime.shutdown_memory_learning_service(Instant::now() + Duration::from_millis(100));
+    assert!(
+        shutdown.is_err(),
+        "active call must honor the short deadline"
+    );
     assert!(shutdown_started.elapsed() < Duration::from_secs(3));
-    std::thread::sleep(Duration::from_secs(2));
+    wait_for_job(
+        &runtime,
+        &job_id,
+        PostTurnGovernanceJobStatusV2::RetryWaiting,
+    );
     let status = runtime
         .runtime()
         .governance_job_status(bm_sdk::MemoryGovernanceJobStatusRequest { job_id })
@@ -518,13 +732,8 @@ fn shutdown_during_model_call_prevents_post_shutdown_memory_completion() {
         .job;
     assert_eq!(status.status, PostTurnGovernanceJobStatusV2::RetryWaiting);
     assert!(status.receipt.is_none());
-    let stopped_deadline = Instant::now() + Duration::from_secs(10);
-    while runtime.governance_coordinator_report().state != EntryGovernanceCoordinatorState::Stopped
-    {
-        assert!(
-            Instant::now() < stopped_deadline,
-            "coordinator reaper did not reach stopped"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    runtime
+        .shutdown_memory_learning_service(Instant::now() + Duration::from_secs(10))
+        .expect("worker joins after in-flight response is fenced");
+    assert_eq!(service_report(&runtime).state, "stopped");
 }

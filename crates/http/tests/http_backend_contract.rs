@@ -125,7 +125,7 @@ fn real_http_socket_finalize_queues_then_reports_durable_configuration_block() {
         if job.status == bm_sdk::PostTurnGovernanceJobStatusV2::BlockedConfiguration {
             assert_eq!(
                 job.blocking_reason.as_deref(),
-                Some("governance_model_binding_unavailable")
+                Some("governance_execution_binding_unavailable")
             );
             break;
         }

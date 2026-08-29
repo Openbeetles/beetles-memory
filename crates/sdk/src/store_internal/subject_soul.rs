@@ -147,7 +147,11 @@ impl SubjectSoulStoreFailure {
     }
 
     pub(crate) fn into_store_error(self) -> Error {
-        Error::config(self.stage.as_str(), self.detail)
+        if self.stage == SubjectSoulStoreFailureStage::ExpectedState {
+            Error::conflict(self.stage.as_str(), self.detail)
+        } else {
+            Error::config(self.stage.as_str(), self.detail)
+        }
     }
 }
 

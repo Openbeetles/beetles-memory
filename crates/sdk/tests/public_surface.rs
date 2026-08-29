@@ -17,27 +17,28 @@ use bm_sdk::{
     MemoryConversationListRequest, MemoryGovernancePolicyMutation,
     MemoryGovernancePolicyMutationReport, MemoryGovernanceSelector,
     MemoryGovernanceSuppressionDuration, MemoryGraphEvidence, MemoryGraphNodeKind, MemoryIdentity,
+    MemoryLearningCycleOutcome, MemoryLearningCycleRequest, MemoryLearningEngine,
     MemoryLongTermControlView, MemoryLongTermDetailReport, MemoryLongTermDetailRequest,
     MemoryLongTermGovernancePolicy, MemoryLongTermListReport, MemoryLongTermListRequest,
     MemoryLongTermMutation, MemoryLongTermMutationReport, MemoryLongTermMutationRequest,
     MemoryLongTermPolicyRequest, MemoryLongTermSelector, MemoryLongTermTarget, MemoryPrivacyClass,
     MemoryProfile, MemoryProjectionOutput, MemoryProjectionReport, MemoryProjectionSafeAuditReport,
-    MemoryRuntime, MemoryRuntimeSystemKind, MemoryScope, MemoryStoreHandle,
-    MemorySubjectVisibilityPolicy, MemoryTranscriptActivityRequest, MemoryTranscriptCommitRequest,
-    MemoryTranscriptExportRequest, MemoryTranscriptLifecycleRequest, MemoryTranscriptRepairRequest,
-    MemoryTranscriptReplayRequest, MemoryTranscriptSearchRequest, MemoryTranscriptSearchScope,
-    MemoryTranscriptTimelineRequest, MemoryWriteRequest, PostReplyMemoryMaintenanceContext,
-    PrivateMaterialRedactionReport, ProceduralMemoryPromotionInput,
-    ProceduralMemoryPromotionPolicy, ProfileId, ProjectedAgentSkillHint, PromptMemoryContextParams,
-    PromptParticipationPlan, ProviderProjectionPayload, RedactedTranscriptSlice,
-    RuntimeSkillRecallTransport, StoreBackendConfig, StoreMigrationReport, SubjectKind,
-    SubjectRegistry, SubjectRelationshipGraph, SubjectScopedRuntime, TranscriptCatalogLifecycle,
-    TranscriptEvidenceRef, TranscriptLifecycleTransition, TranscriptRedactionReason,
-    TranscriptRedactionReportItem, TranscriptRepairIssue, TranscriptRepairIssueKind,
-    TranscriptRepairReport, TranscriptReplayAudit, TranscriptReplayView, TranscriptSearchLifecycle,
-    TranscriptSearchSort, TranscriptTimelineAnchor, TranscriptTurnPage, TranscriptTurnRecord,
-    TranscriptUtcRange, VaultManifest, AGENT_TOOL_NO_EXPERIENCE_REASON,
-    AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH, AGENT_TOOL_REGISTRY_FORBIDDEN_BY_PROFILE,
+    MemoryRuntime, MemoryRuntimeSystemKind, MemoryScope, MemorySubjectVisibilityPolicy,
+    MemoryTranscriptActivityRequest, MemoryTranscriptCommitRequest, MemoryTranscriptExportRequest,
+    MemoryTranscriptLifecycleRequest, MemoryTranscriptRepairRequest, MemoryTranscriptReplayRequest,
+    MemoryTranscriptSearchRequest, MemoryTranscriptSearchScope, MemoryTranscriptTimelineRequest,
+    MemoryWriteRequest, PostReplyMemoryMaintenanceContext, PrivateMaterialRedactionReport,
+    ProceduralMemoryPromotionInput, ProceduralMemoryPromotionPolicy, ProfileId,
+    ProjectedAgentSkillHint, PromptMemoryContextParams, PromptParticipationPlan,
+    ProviderProjectionPayload, RedactedTranscriptSlice, RuntimeSkillRecallTransport,
+    StoreBackendConfig, SubjectKind, SubjectRegistry, SubjectRelationshipGraph,
+    SubjectScopedRuntime, TranscriptCatalogLifecycle, TranscriptEvidenceRef,
+    TranscriptLifecycleTransition, TranscriptRedactionReason, TranscriptRedactionReportItem,
+    TranscriptRepairIssue, TranscriptRepairIssueKind, TranscriptRepairReport,
+    TranscriptReplayAudit, TranscriptReplayView, TranscriptSearchLifecycle, TranscriptSearchSort,
+    TranscriptTimelineAnchor, TranscriptTurnPage, TranscriptTurnRecord, TranscriptUtcRange,
+    VaultManifest, AGENT_TOOL_NO_EXPERIENCE_REASON, AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH,
+    AGENT_TOOL_REGISTRY_FORBIDDEN_BY_PROFILE,
 };
 
 fn p8_contract_types_are_sdk_importable(
@@ -90,6 +91,13 @@ fn post_reply_context_contract_is_sdk_importable<'a>(
     ctx: PostReplyMemoryMaintenanceContext<'a>,
 ) -> PostReplyMemoryMaintenanceContext<'a> {
     ctx
+}
+
+fn memory_learning_engine_contract_is_sdk_importable(
+    _engine: Option<MemoryLearningEngine>,
+    _request: Option<MemoryLearningCycleRequest>,
+    _outcome: Option<MemoryLearningCycleOutcome>,
+) {
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -323,6 +331,31 @@ fn public_skill_surface_does_not_expose_memory_owned_agent_skill_crud() {
 }
 
 #[test]
+fn production_sdk_surface_does_not_reexport_composable_worker_primitives() {
+    let sdk_lib = include_str!("../src/lib.rs");
+    let production_exports = sdk_lib
+        .split("#[cfg(feature = \"nonproduction-replay-harness\")]\npub use ops::{")
+        .next()
+        .expect("production export section");
+    for forbidden in [
+        "MemoryGovernanceJobClaimRequest",
+        "MemoryGovernanceJobRetryRequest",
+        "MemoryGovernanceJobRenewRequest",
+        "MemoryGovernanceJobRunRequest",
+        "MemoryGovernanceJobBlockRequest",
+        "MemoryGovernanceClaimedJobBlockRequest",
+        "MemoryGovernanceJobResumeRequest",
+        "MemoryGovernanceJobFailRequest",
+        "MemoryGovernanceReconcileRequest",
+    ] {
+        assert!(
+            !production_exports.contains(forbidden),
+            "production SDK re-exported composable worker primitive: {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn profile_and_system_kind_aliases_are_unambiguous() {
     let runtime_kind: MemoryRuntimeSystemKind = MemoryProfile::Embedded.memory_system_kind();
     assert_eq!(runtime_kind, MemoryRuntimeSystemKind::EspCompact);
@@ -364,12 +397,6 @@ fn sdk_runtime_uses_opaque_memory_store_handle_as_public_store_entry() {
 }
 
 #[test]
-fn exact_v10_to_v11_migration_is_an_explicit_public_store_operation() {
-    let _migrate: fn(StoreBackendConfig) -> bm_sdk::Result<StoreMigrationReport> =
-        MemoryStoreHandle::migrate_v10_to_v11;
-}
-
-#[test]
 fn runtime_skill_operation_authority_stays_out_of_the_sdk_public_surface() {
     let sdk_root = include_str!("../src/lib.rs");
     for private_type in [
@@ -384,6 +411,28 @@ fn runtime_skill_operation_authority_stays_out_of_the_sdk_public_surface() {
             !sdk_root.contains(private_type),
             "{private_type} must remain core-private operational authority"
         );
+    }
+}
+
+#[test]
+fn clean_break_removes_the_old_store_migration_surface() {
+    let public_store = include_str!("../src/store.rs");
+    let public_exports = include_str!("../src/lib.rs");
+    let platform = include_str!("../src/store_internal/platform.rs");
+    let file = include_str!("../src/store_internal/file.rs");
+    let sqlite = include_str!("../src/store_internal/sqlite.rs");
+    for source in [public_store, public_exports, platform, file, sqlite] {
+        for forbidden in [
+            "StoreMigrationReport",
+            "migrate_v10_to_v11",
+            "migrate_v10_snapshot_to_v11",
+            "migrate_sqlite_v10_to_v11_explicit",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "clean-break source still contains {forbidden}"
+            );
+        }
     }
 }
 

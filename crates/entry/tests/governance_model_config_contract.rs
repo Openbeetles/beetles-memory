@@ -167,7 +167,7 @@ fn file_and_sqlite_configs_use_immutable_per_binding_revisions() {
 }
 
 #[test]
-fn exact_runtime_bindings_keep_subject_scope_and_privacy_configs_isolated() {
+fn deployment_provider_config_is_shared_across_subject_chat_and_privacy_scopes() {
     let path = temp_store("binding-isolation");
     let revision_root = append_suffix(&path, ".memory-governance-model");
     let store = StoreBackendConfig::file(&path, support::host_production_profile())
@@ -203,7 +203,7 @@ fn exact_runtime_bindings_keep_subject_scope_and_privacy_configs_isolated() {
         ))
         .expect("subject b config");
 
-    assert_ne!(saved_a.binding_id, saved_b.binding_id);
+    assert_eq!(saved_a.binding_id, saved_b.binding_id);
     assert_eq!(
         saved_a.endpoint.as_deref(),
         Some("https://a.example.test/v1")
@@ -212,6 +212,8 @@ fn exact_runtime_bindings_keep_subject_scope_and_privacy_configs_isolated() {
         saved_b.endpoint.as_deref(),
         Some("https://b.example.test/v1")
     );
+    assert_eq!(saved_a.config_revision, Some(1));
+    assert_eq!(saved_b.config_revision, Some(2));
     assert_eq!(revision_files(&revision_root).len(), 2);
 
     drop((subject_a, subject_b));
@@ -222,7 +224,7 @@ fn exact_runtime_bindings_keep_subject_scope_and_privacy_configs_isolated() {
         "chat-a",
         MemoryPrivacyPolicy::standard_private_boundary(),
     );
-    assert_eq!(reopened_a.console_governance_model(), saved_a);
+    assert_eq!(reopened_a.console_governance_model(), saved_b);
 
     drop(reopened_a);
     let _ = fs::remove_dir_all(&revision_root);

@@ -15,7 +15,8 @@ use bm_core::memory::{
     MemoryGraphEdge, MemoryGraphEdgeMembership, MemoryGraphNode, MemoryGraphNodeMembership,
     MemoryGraphRecallIndexDoc, MemoryGraphRevisionDoc, MemoryGraphScopeManifest,
     MemoryLongTermGovernancePolicy, MemoryMutationAuditRecord, MemoryMutationOperationIdentity,
-    MemoryMutationReceipt, PostTurnGovernanceJobV2, PostTurnGovernanceScopeIndexV2,
+    MemoryMutationReceipt, PostTurnGovernanceBindingRevisionIndexV1,
+    PostTurnGovernanceBindingSnapshotV1, PostTurnGovernanceJobV3, PostTurnGovernanceScopeIndexV3,
     RelationshipSourceConstitutionV1, RelationshipSourceControlOutcomeV1,
     RelationshipSourceControlReportV1, RelationshipSourceScopeManifestV1,
     SubjectSoulGenerationTombstoneV1, SubjectSoulLifecycleHeadV1, SubjectSoulMutationOutcomeV1,
@@ -31,7 +32,8 @@ use bm_core::memory::{
     MEMORY_GRAPH_INDEX_NAMESPACE, MEMORY_GRAPH_MANIFEST_NAMESPACE,
     MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE, MEMORY_GRAPH_NODE_NAMESPACE,
     MEMORY_GRAPH_REVISION_NAMESPACE, MEMORY_GRAPH_SCHEMA_VERSION, MEMORY_MUTATION_AUDIT_NAMESPACE,
-    MEMORY_MUTATION_RECEIPT_NAMESPACE, POST_TURN_GOVERNANCE_JOB_NAMESPACE,
+    MEMORY_MUTATION_RECEIPT_NAMESPACE, POST_TURN_GOVERNANCE_BINDING_REVISION_INDEX_NAMESPACE,
+    POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE, POST_TURN_GOVERNANCE_JOB_NAMESPACE,
     POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
 };
 use bm_core::platform::MemorySystemKind;
@@ -57,8 +59,8 @@ use crate::store_internal::recall_index::{
     TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE,
 };
 
-pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema_v11";
-pub const STORE_SCHEMA_VERSION: u32 = 11;
+pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema_v12";
+pub const STORE_SCHEMA_VERSION: u32 = 12;
 pub(crate) const LONG_TERM_VERSION_MATERIAL_NAMESPACE: &str = "long_term_version_materials";
 pub(crate) const LONG_TERM_HEAD_MANIFEST_NAMESPACE: &str = "long_term_head_manifests";
 pub(crate) const LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE: &str =
@@ -247,6 +249,8 @@ pub(crate) enum StoreJsonDecoderKind {
     ActiveTaskRunByChatIndex,
     TaskLearningByChatIndex,
     RecallOwnerScopeBinding,
+    PostTurnGovernanceBindingSnapshot,
+    PostTurnGovernanceBindingRevisionIndex,
     PostTurnGovernanceJob,
     PostTurnGovernanceScopeIndex,
     MemoryMutationReceipt,
@@ -483,6 +487,14 @@ pub(crate) const STORE_JSON_NAMESPACE_REGISTRY: &[StoreJsonNamespaceContract] = 
     typed_json_namespace(
         RECALL_OWNER_SCOPE_BINDING_NAMESPACE,
         StoreJsonDecoderKind::RecallOwnerScopeBinding,
+    ),
+    typed_json_namespace(
+        POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE,
+        StoreJsonDecoderKind::PostTurnGovernanceBindingSnapshot,
+    ),
+    typed_json_namespace(
+        POST_TURN_GOVERNANCE_BINDING_REVISION_INDEX_NAMESPACE,
+        StoreJsonDecoderKind::PostTurnGovernanceBindingRevisionIndex,
     ),
     typed_json_namespace(
         POST_TURN_GOVERNANCE_JOB_NAMESPACE,
@@ -1451,8 +1463,28 @@ fn validate_store_json_value(
             }
             Ok(())
         }
+        StoreJsonDecoderKind::PostTurnGovernanceBindingSnapshot => {
+            let snapshot = decode_json::<PostTurnGovernanceBindingSnapshotV1>(value, invalid)?;
+            if snapshot.storage_key() != key || snapshot.validate().is_err() {
+                return Err(invalid(
+                    "post-turn governance binding snapshot contract or physical key mismatch"
+                        .to_string(),
+                ));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::PostTurnGovernanceBindingRevisionIndex => {
+            let index = decode_json::<PostTurnGovernanceBindingRevisionIndexV1>(value, invalid)?;
+            if index.binding_id != key || index.validate().is_err() {
+                return Err(invalid(
+                    "post-turn governance binding revision index contract or physical key mismatch"
+                        .to_string(),
+                ));
+            }
+            Ok(())
+        }
         StoreJsonDecoderKind::PostTurnGovernanceJob => {
-            let job = decode_json::<PostTurnGovernanceJobV2>(value, invalid)?;
+            let job = decode_json::<PostTurnGovernanceJobV3>(value, invalid)?;
             if job.job_id != key || job.identity.job_key() != key || job.validate().is_err() {
                 return Err(invalid(
                     "post-turn governance job contract or physical key mismatch".to_string(),
@@ -1461,7 +1493,7 @@ fn validate_store_json_value(
             Ok(())
         }
         StoreJsonDecoderKind::PostTurnGovernanceScopeIndex => {
-            let index = decode_json::<PostTurnGovernanceScopeIndexV2>(value, invalid)?;
+            let index = decode_json::<PostTurnGovernanceScopeIndexV3>(value, invalid)?;
             if index.scope_index_key != key || index.validate().is_err() {
                 return Err(invalid(
                     "post-turn governance scope index contract or physical key mismatch"
@@ -2886,6 +2918,11 @@ impl StoreSchemaManifest {
 mod tests {
     use std::collections::BTreeSet;
 
+    use bm_core::memory::{
+        PostTurnGovernanceExecutionBindingV1, PostTurnGovernanceIdentityV2,
+        PostTurnGovernanceJobRefV2, PostTurnGovernancePrivacyAuthorityV1,
+    };
+
     use super::*;
 
     fn binding(owner: &str, claim: &str, revision: u64) -> GovernedEvidenceOwnerClaimBinding {
@@ -2976,19 +3013,95 @@ mod tests {
     }
 
     #[test]
-    fn store_schema_identity_is_exactly_v11_and_rejects_v10() {
-        assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v11");
-        assert_eq!(STORE_SCHEMA_VERSION, 11);
+    fn store_schema_identity_is_exactly_v12_and_rejects_v11() {
+        assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v12");
+        assert_eq!(STORE_SCHEMA_VERSION, 12);
         assert!(
             validate_store_schema_identity(STORE_SCHEMA_ID, STORE_SCHEMA_VERSION, "test").is_ok()
         );
         assert!(
-            validate_store_schema_identity("beetle_memory_store_schema_v10", 10, "test").is_err()
+            validate_store_schema_identity("beetle_memory_store_schema_v11", 11, "test").is_err()
         );
         assert!(
             validate_store_schema_identity("unknown_memory_store_schema_v999", 999, "test")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn store_v12_rejects_v2_governance_job_and_scope_payloads() {
+        let identity = PostTurnGovernanceIdentityV2::new(
+            "space:v2-reject",
+            "subject:v2-reject",
+            "llm.gateway",
+            "chat:v2-reject",
+            "conversation:v2-reject",
+            "turn:v2-reject",
+        )
+        .unwrap();
+        let job = PostTurnGovernanceJobV3::pending(
+            identity.clone(),
+            1,
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            PostTurnGovernanceExecutionBindingV1::Unbound,
+            PostTurnGovernancePrivacyAuthorityV1 {
+                policy_schema_version: 1,
+                exact_policy_digest:
+                    "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+                        .to_string(),
+            },
+            Vec::new(),
+            0,
+            3,
+            1_800_000_000,
+        )
+        .unwrap();
+        let mut v2_job = serde_json::to_value(&job).unwrap();
+        let object = v2_job.as_object_mut().unwrap();
+        object.insert("schemaVersion".to_string(), serde_json::json!(2));
+        object.insert(
+            "governanceContractVersion".to_string(),
+            serde_json::json!(2),
+        );
+        object.remove("executionBinding");
+        object.remove("privacyAuthority");
+        object.insert(
+            "governanceModelPolicyRevision".to_string(),
+            serde_json::json!(1),
+        );
+        object.insert("pinnedPrivacyRevision".to_string(), serde_json::json!(1));
+        object.insert(
+            "pinnedPrivacyDigest".to_string(),
+            serde_json::json!(
+                "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+            ),
+        );
+        assert!(admit_store_json_document(
+            POST_TURN_GOVERNANCE_JOB_NAMESPACE,
+            &job.job_id,
+            &v2_job,
+            "test",
+        )
+        .is_err());
+
+        let mut index = PostTurnGovernanceScopeIndexV3::empty(&identity, 1_800_000_000);
+        index
+            .active_jobs
+            .push(PostTurnGovernanceJobRefV2::from_job(&job));
+        let mut v2_index = serde_json::to_value(&index).unwrap();
+        v2_index["schemaVersion"] = serde_json::json!(2);
+        v2_index["activeJobs"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("jobSchemaVersion");
+        assert!(admit_store_json_document(
+            POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
+            &index.scope_index_key,
+            &v2_index,
+            "test",
+        )
+        .is_err());
     }
 
     #[test]

@@ -222,7 +222,7 @@ pub struct DeferredGovernanceJobSummary {
 }
 
 impl DeferredGovernanceJobSummary {
-    pub fn from_job(job: &PostTurnGovernanceJobV2) -> Self {
+    pub fn from_job(job: &PostTurnGovernanceJobV3) -> Self {
         let status = match job.status {
             PostTurnGovernanceJobStatusV2::Pending
             | PostTurnGovernanceJobStatusV2::BlockedConfiguration
@@ -250,7 +250,7 @@ impl DeferredGovernanceJobSummary {
             reason: job
                 .blocking_reason
                 .clone()
-                .unwrap_or_else(|| "v2_durable_governance_intent".to_string()),
+                .unwrap_or_else(|| "v3_durable_governance_intent".to_string()),
             retry_policy: "bounded_exponential_backoff".to_string(),
             created_at: job.created_at,
             attempts: job.attempt_count,
@@ -273,7 +273,7 @@ pub struct DeferredGovernanceQueueReport {
 }
 
 pub fn build_deferred_governance_queue_report(
-    jobs: &[PostTurnGovernanceJobV2],
+    jobs: &[PostTurnGovernanceJobV3],
     recent_limit: usize,
 ) -> DeferredGovernanceQueueReport {
     let mut report = DeferredGovernanceQueueReport {
@@ -324,8 +324,9 @@ pub fn build_deferred_governance_queue_report(
     report
 }
 
-pub const POST_TURN_GOVERNANCE_JOB_SCHEMA_VERSION: u32 = 2;
-pub const POST_TURN_GOVERNANCE_SCOPE_INDEX_SCHEMA_VERSION: u32 = 2;
+pub const POST_TURN_GOVERNANCE_JOB_SCHEMA_VERSION: u32 = 3;
+pub const POST_TURN_GOVERNANCE_SCOPE_INDEX_SCHEMA_VERSION: u32 = 3;
+pub const POST_TURN_GOVERNANCE_PRIVACY_AUTHORITY_SCHEMA_VERSION: u32 = 1;
 pub const POST_TURN_GOVERNANCE_JOB_NAMESPACE: &str = "post_turn_governance_jobs";
 pub const POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE: &str = "post_turn_governance_scope_indexes";
 pub const MAX_POST_TURN_GOVERNANCE_ACTIVE_JOBS: usize = 256;
@@ -487,29 +488,187 @@ impl PostTurnGovernanceJobStatusV2 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PostTurnGovernanceAttemptAuthorityV2 {
-    pub binding_id: String,
-    pub config_revision: u64,
-    pub model_id: String,
-    pub privacy_revision: u64,
-    pub privacy_digest: String,
-    pub transcript_lifecycle_revision: u64,
-    pub disclosure_authority_digest: String,
+pub enum PostTurnGovernanceExecutionBindingV1 {
+    Unbound,
+    Bound {
+        binding_id: String,
+        binding_revision: u64,
+    },
 }
 
-impl PostTurnGovernanceAttemptAuthorityV2 {
+pub const POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE: &str =
+    "post_turn_governance_binding_snapshots";
+pub const POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+pub const POST_TURN_GOVERNANCE_BINDING_REVISION_INDEX_NAMESPACE: &str =
+    "post_turn_governance_binding_revision_indexes";
+pub const POST_TURN_GOVERNANCE_BINDING_REVISION_INDEX_SCHEMA_VERSION: u32 = 1;
+pub const MAX_POST_TURN_GOVERNANCE_BINDING_REVISIONS: usize = 256;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PostTurnGovernanceProviderProtocolV1 {
+    OpenAiCompatible,
+    OllamaNative,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PostTurnGovernanceBindingSnapshotV1 {
+    pub schema_version: u32,
+    pub binding_id: String,
+    pub binding_revision: u64,
+    pub source_owner_id: String,
+    pub source_config_id: String,
+    pub source_revision: u64,
+    pub protocol: PostTurnGovernanceProviderProtocolV1,
+    pub endpoint: String,
+    pub model_id: String,
+    pub credential_reference: Option<String>,
+    pub request_timeout_ms: u64,
+    pub max_input_tokens: u64,
+    pub max_output_tokens: u64,
+    pub provider_permission_generation: u64,
+    pub canonical_digest: String,
+    pub created_at: u64,
+}
+
+impl PostTurnGovernanceBindingSnapshotV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        source_owner_id: impl Into<String>,
+        source_config_id: impl Into<String>,
+        source_revision: u64,
+        protocol: PostTurnGovernanceProviderProtocolV1,
+        endpoint: impl Into<String>,
+        model_id: impl Into<String>,
+        credential_reference: Option<String>,
+        request_timeout_ms: u64,
+        max_input_tokens: u64,
+        max_output_tokens: u64,
+        provider_permission_generation: u64,
+        created_at: u64,
+    ) -> Result<Self> {
+        let source_owner_id = source_owner_id.into();
+        let source_config_id = source_config_id.into();
+        let endpoint = endpoint.into();
+        let model_id = model_id.into();
+        let binding_id = governance_binding_id(&source_owner_id, &source_config_id)?;
+        let mut snapshot = Self {
+            schema_version: POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_SCHEMA_VERSION,
+            binding_id,
+            binding_revision: source_revision,
+            source_owner_id,
+            source_config_id,
+            source_revision,
+            protocol,
+            endpoint,
+            model_id,
+            credential_reference,
+            request_timeout_ms,
+            max_input_tokens,
+            max_output_tokens,
+            provider_permission_generation,
+            canonical_digest: String::new(),
+            created_at,
+        };
+        snapshot.canonical_digest = snapshot.compute_canonical_digest()?;
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
+
+    pub fn storage_key(&self) -> String {
+        format!("{}:{}", self.binding_id, self.binding_revision)
+    }
+
     pub fn validate(&self) -> Result<()> {
-        if self.binding_id.trim().is_empty()
-            || self.model_id.trim().is_empty()
-            || self.config_revision == 0
-            || self.privacy_revision == 0
-            || self.transcript_lifecycle_revision == 0
-            || !is_sha256_digest(&self.privacy_digest)
-            || !is_sha256_digest(&self.disclosure_authority_digest)
+        if self.schema_version != POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_SCHEMA_VERSION
+            || self.binding_id
+                != governance_binding_id(&self.source_owner_id, &self.source_config_id)?
+            || self.binding_revision == 0
+            || self.binding_revision != self.source_revision
+            || !is_canonical_governance_text(&self.endpoint)
+            || !is_canonical_governance_text(&self.model_id)
+            || self
+                .credential_reference
+                .as_deref()
+                .is_some_and(|value| !is_canonical_governance_text(value))
+            || self.request_timeout_ms == 0
+            || self.max_input_tokens == 0
+            || self.max_output_tokens == 0
+            || self.provider_permission_generation == 0
+            || self.created_at == 0
+            || self.canonical_digest != self.compute_canonical_digest()?
         {
             return Err(Error::invalid_input(
-                "post_turn_governance_attempt_authority",
-                "attempt authority is incomplete or invalid",
+                "post_turn_governance_binding_snapshot",
+                "binding snapshot identity, source, budgets, or digest is invalid",
+            ));
+        }
+        Ok(())
+    }
+
+    fn compute_canonical_digest(&self) -> Result<String> {
+        if !is_canonical_governance_text(&self.source_owner_id)
+            || !is_canonical_governance_text(&self.source_config_id)
+        {
+            return Err(Error::invalid_input(
+                "post_turn_governance_binding_snapshot",
+                "binding source identity must be canonical",
+            ));
+        }
+        let mut payload = b"bm-governance-binding-snapshot-v1\0".to_vec();
+        for value in [
+            self.source_owner_id.as_bytes(),
+            self.source_config_id.as_bytes(),
+            self.endpoint.as_bytes(),
+            self.model_id.as_bytes(),
+            self.credential_reference
+                .as_deref()
+                .unwrap_or("")
+                .as_bytes(),
+        ] {
+            push_receipt_field(&mut payload, value);
+        }
+        payload.extend_from_slice(&self.source_revision.to_be_bytes());
+        payload.push(match self.protocol {
+            PostTurnGovernanceProviderProtocolV1::OpenAiCompatible => 1,
+            PostTurnGovernanceProviderProtocolV1::OllamaNative => 2,
+        });
+        payload.extend_from_slice(&self.request_timeout_ms.to_be_bytes());
+        payload.extend_from_slice(&self.max_input_tokens.to_be_bytes());
+        payload.extend_from_slice(&self.max_output_tokens.to_be_bytes());
+        payload.extend_from_slice(&self.provider_permission_generation.to_be_bytes());
+        Ok(format!("sha256:{:x}", Sha256::digest(payload)))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PostTurnGovernanceBindingRevisionRefV1 {
+    pub binding_revision: u64,
+    pub canonical_digest: String,
+    pub created_at: u64,
+    pub referenced: bool,
+}
+
+impl PostTurnGovernanceBindingRevisionRefV1 {
+    pub fn from_snapshot(snapshot: &PostTurnGovernanceBindingSnapshotV1) -> Self {
+        Self {
+            binding_revision: snapshot.binding_revision,
+            canonical_digest: snapshot.canonical_digest.clone(),
+            created_at: snapshot.created_at,
+            referenced: false,
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.binding_revision == 0
+            || !is_sha256_digest(&self.canonical_digest)
+            || self.created_at == 0
+        {
+            return Err(Error::invalid_input(
+                "post_turn_governance_binding_revision_ref",
+                "binding revision reference is invalid",
             ));
         }
         Ok(())
@@ -518,16 +677,505 @@ impl PostTurnGovernanceAttemptAuthorityV2 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PostTurnGovernanceReceiptV2 {
-    pub semantic_transaction_id: String,
-    pub mutation_plan_digest: String,
-    pub memory_post_image_digest: String,
-    pub completed_at: u64,
+pub struct PostTurnGovernanceBindingRevisionIndexV1 {
+    pub schema_version: u32,
+    pub binding_id: String,
+    pub source_owner_id: String,
+    pub source_config_id: String,
+    pub revisions: Vec<PostTurnGovernanceBindingRevisionRefV1>,
+    pub index_revision: u64,
+    pub updated_at: u64,
+}
+
+impl PostTurnGovernanceBindingRevisionIndexV1 {
+    pub fn empty(snapshot: &PostTurnGovernanceBindingSnapshotV1) -> Self {
+        Self {
+            schema_version: POST_TURN_GOVERNANCE_BINDING_REVISION_INDEX_SCHEMA_VERSION,
+            binding_id: snapshot.binding_id.clone(),
+            source_owner_id: snapshot.source_owner_id.clone(),
+            source_config_id: snapshot.source_config_id.clone(),
+            revisions: Vec::new(),
+            index_revision: 1,
+            updated_at: snapshot.created_at,
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != POST_TURN_GOVERNANCE_BINDING_REVISION_INDEX_SCHEMA_VERSION
+            || self.binding_id
+                != governance_binding_id(&self.source_owner_id, &self.source_config_id)?
+            || self.revisions.is_empty()
+            || self.revisions.len() > MAX_POST_TURN_GOVERNANCE_BINDING_REVISIONS
+            || self.index_revision == 0
+            || self.updated_at == 0
+        {
+            return Err(Error::invalid_input(
+                "post_turn_governance_binding_revision_index",
+                "binding revision index identity, capacity, or revision is invalid",
+            ));
+        }
+        let mut previous = 0_u64;
+        for revision in &self.revisions {
+            revision.validate()?;
+            if revision.binding_revision <= previous {
+                return Err(Error::invalid_input(
+                    "post_turn_governance_binding_revision_index",
+                    "binding revisions must be unique and ascending",
+                ));
+            }
+            previous = revision.binding_revision;
+        }
+        Ok(())
+    }
+}
+
+fn governance_binding_id(source_owner_id: &str, source_config_id: &str) -> Result<String> {
+    if !is_canonical_governance_text(source_owner_id)
+        || !is_canonical_governance_text(source_config_id)
+    {
+        return Err(Error::invalid_input(
+            "post_turn_governance_binding_snapshot",
+            "binding source identity must be canonical",
+        ));
+    }
+    let mut payload = b"bm-governance-binding-owner-v1\0".to_vec();
+    push_receipt_field(&mut payload, source_owner_id.as_bytes());
+    push_receipt_field(&mut payload, source_config_id.as_bytes());
+    Ok(format!("govbind1:{:x}", Sha256::digest(payload)))
+}
+
+fn is_canonical_governance_text(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.chars().count() <= 2048
+        && !value.chars().any(char::is_control)
+}
+
+impl PostTurnGovernanceExecutionBindingV1 {
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::Unbound => Ok(()),
+            Self::Bound {
+                binding_id,
+                binding_revision,
+            } if !binding_id.trim().is_empty()
+                && binding_id.trim() == binding_id
+                && *binding_revision > 0 =>
+            {
+                Ok(())
+            }
+            _ => Err(Error::invalid_input(
+                "post_turn_governance_execution_binding",
+                "execution binding identity or revision is invalid",
+            )),
+        }
+    }
+
+    pub const fn revision(&self) -> Option<u64> {
+        match self {
+            Self::Unbound => None,
+            Self::Bound {
+                binding_revision, ..
+            } => Some(*binding_revision),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PostTurnGovernanceExecutionBlockReasonV1 {
+    BindingUnavailable,
+    CredentialMissing,
+    CredentialLocked,
+    CredentialRejected,
+    ProviderPermissionDenied,
+}
+
+impl PostTurnGovernanceExecutionBlockReasonV1 {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BindingUnavailable => "governance_execution_binding_unavailable",
+            Self::CredentialMissing => "governance_credential_missing",
+            Self::CredentialLocked => "governance_credential_locked",
+            Self::CredentialRejected => "governance_credential_rejected",
+            Self::ProviderPermissionDenied => "governance_provider_permission_denied",
+        }
+    }
+
+    pub const fn blocked_status(self) -> PostTurnGovernanceJobStatusV2 {
+        match self {
+            Self::BindingUnavailable
+            | Self::CredentialMissing
+            | Self::CredentialLocked
+            | Self::CredentialRejected => PostTurnGovernanceJobStatusV2::BlockedConfiguration,
+            Self::ProviderPermissionDenied => PostTurnGovernanceJobStatusV2::BlockedPolicy,
+        }
+    }
+
+    pub const fn is_credential_scoped(self) -> bool {
+        matches!(
+            self,
+            Self::CredentialMissing | Self::CredentialLocked | Self::CredentialRejected
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PostTurnGovernanceJobV2 {
+pub struct PostTurnGovernanceExecutionBlockAuthorityV1 {
+    pub binding_id: Option<String>,
+    pub binding_revision: Option<u64>,
+    pub credential_ref_safe_id: Option<String>,
+    pub typed_block_reason: PostTurnGovernanceExecutionBlockReasonV1,
+    pub credential_generation: Option<u64>,
+    pub provider_permission_generation: Option<u64>,
+    pub blocked_at: u64,
+}
+
+impl PostTurnGovernanceExecutionBlockAuthorityV1 {
+    pub fn binding_unavailable(blocked_at: u64) -> Self {
+        Self {
+            binding_id: None,
+            binding_revision: None,
+            credential_ref_safe_id: None,
+            typed_block_reason: PostTurnGovernanceExecutionBlockReasonV1::BindingUnavailable,
+            credential_generation: None,
+            provider_permission_generation: None,
+            blocked_at,
+        }
+    }
+
+    pub fn exact_binding_block(
+        execution_binding: &PostTurnGovernanceExecutionBindingV1,
+        credential_ref_safe_id: Option<String>,
+        typed_block_reason: PostTurnGovernanceExecutionBlockReasonV1,
+        credential_generation: Option<u64>,
+        provider_permission_generation: Option<u64>,
+        blocked_at: u64,
+    ) -> Result<Self> {
+        let (binding_id, binding_revision) = match execution_binding {
+            PostTurnGovernanceExecutionBindingV1::Unbound => (None, None),
+            PostTurnGovernanceExecutionBindingV1::Bound {
+                binding_id,
+                binding_revision,
+            } => (Some(binding_id.clone()), Some(*binding_revision)),
+        };
+        let authority = Self {
+            binding_id,
+            binding_revision,
+            credential_ref_safe_id,
+            typed_block_reason,
+            credential_generation,
+            provider_permission_generation,
+            blocked_at,
+        };
+        authority.validate()?;
+        Ok(authority)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.blocked_at == 0
+            || self
+                .binding_id
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty() || value.trim() != value)
+            || self.binding_revision.is_some_and(|revision| revision == 0)
+            || self
+                .credential_ref_safe_id
+                .as_deref()
+                .is_some_and(|value| !is_sha256_digest(value))
+            || self
+                .credential_generation
+                .is_some_and(|generation| generation == 0)
+            || self
+                .provider_permission_generation
+                .is_some_and(|generation| generation == 0)
+            || self.binding_id.is_some() != self.binding_revision.is_some()
+        {
+            return Err(Error::invalid_input(
+                "post_turn_governance_execution_block_authority",
+                "execution block authority is incomplete or invalid",
+            ));
+        }
+        match self.typed_block_reason {
+            PostTurnGovernanceExecutionBlockReasonV1::BindingUnavailable => {
+                if self.credential_ref_safe_id.is_some()
+                    || self.credential_generation.is_some()
+                    || self.provider_permission_generation.is_some()
+                {
+                    return Err(Error::invalid_input(
+                        "post_turn_governance_execution_block_authority",
+                        "unbound authority must not invent binding or generation state",
+                    ));
+                }
+            }
+            reason @ (PostTurnGovernanceExecutionBlockReasonV1::CredentialMissing
+            | PostTurnGovernanceExecutionBlockReasonV1::CredentialLocked
+            | PostTurnGovernanceExecutionBlockReasonV1::CredentialRejected) => {
+                if self.binding_id.is_none()
+                    || self.credential_ref_safe_id.is_none()
+                    || self.provider_permission_generation.is_some()
+                    || (reason == PostTurnGovernanceExecutionBlockReasonV1::CredentialRejected
+                        && self.credential_generation.is_none())
+                {
+                    return Err(Error::invalid_input(
+                        "post_turn_governance_execution_block_authority",
+                        "credential block requires exact binding and safe credential authority",
+                    ));
+                }
+            }
+            PostTurnGovernanceExecutionBlockReasonV1::ProviderPermissionDenied => {
+                if self.binding_id.is_none()
+                    || self.credential_generation.is_some()
+                    || self.provider_permission_generation.is_none()
+                {
+                    return Err(Error::invalid_input(
+                        "post_turn_governance_execution_block_authority",
+                        "permission block requires exact binding and permission generation",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PostTurnGovernancePrivacyAuthorityV1 {
+    pub policy_schema_version: u32,
+    pub exact_policy_digest: String,
+}
+
+impl PostTurnGovernancePrivacyAuthorityV1 {
+    pub fn validate(&self) -> Result<()> {
+        if self.policy_schema_version == 0 || !is_sha256_digest(&self.exact_policy_digest) {
+            return Err(Error::invalid_input(
+                "post_turn_governance_privacy_authority",
+                "privacy authority schema or digest is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PostTurnGovernanceAttemptAuthorityV3 {
+    pub binding_id: String,
+    pub binding_revision: u64,
+    pub model_id: String,
+    pub privacy_authority: PostTurnGovernancePrivacyAuthorityV1,
+    pub transcript_lifecycle_revision: u64,
+    pub disclosure_authority_digest: String,
+}
+
+impl PostTurnGovernanceAttemptAuthorityV3 {
+    pub fn validate(&self) -> Result<()> {
+        if self.binding_id.trim().is_empty()
+            || self.model_id.trim().is_empty()
+            || self.binding_revision == 0
+            || self.transcript_lifecycle_revision == 0
+            || !is_sha256_digest(&self.disclosure_authority_digest)
+        {
+            return Err(Error::invalid_input(
+                "post_turn_governance_attempt_authority",
+                "attempt authority is incomplete or invalid",
+            ));
+        }
+        self.privacy_authority.validate()?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PostTurnGovernanceDecisionDispositionV1 {
+    Accepted,
+    Rejected,
+    Deferred,
+    Mixed,
+    NoCandidates,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PostTurnGovernanceDecisionSummaryV1 {
+    pub accepted_count: u32,
+    pub rejected_count: u32,
+    pub deferred_count: u32,
+    pub disposition: PostTurnGovernanceDecisionDispositionV1,
+    pub plane_count: u32,
+    pub plane_digest: String,
+}
+
+impl PostTurnGovernanceDecisionSummaryV1 {
+    pub fn from_semantic_report(report: &PostTurnSemanticGovernanceReport) -> Result<Self> {
+        let accepted_count = u32::try_from(report.accepted_count).map_err(|_| {
+            Error::invalid_input(
+                "post_turn_governance_decision_summary",
+                "accepted decision count exceeds the durable contract",
+            )
+        })?;
+        let rejected_count = u32::try_from(report.rejected_count).map_err(|_| {
+            Error::invalid_input(
+                "post_turn_governance_decision_summary",
+                "rejected decision count exceeds the durable contract",
+            )
+        })?;
+        let deferred_count = u32::try_from(report.deferred_count).map_err(|_| {
+            Error::invalid_input(
+                "post_turn_governance_decision_summary",
+                "deferred decision count exceeds the durable contract",
+            )
+        })?;
+        let plane_count = u32::try_from(report.plane_reports.len()).map_err(|_| {
+            Error::invalid_input(
+                "post_turn_governance_decision_summary",
+                "plane decision count exceeds the durable contract",
+            )
+        })?;
+        let present = [accepted_count > 0, rejected_count > 0, deferred_count > 0]
+            .into_iter()
+            .filter(|value| *value)
+            .count();
+        let disposition = match present {
+            0 => PostTurnGovernanceDecisionDispositionV1::NoCandidates,
+            1 if accepted_count > 0 => PostTurnGovernanceDecisionDispositionV1::Accepted,
+            1 if rejected_count > 0 => PostTurnGovernanceDecisionDispositionV1::Rejected,
+            1 => PostTurnGovernanceDecisionDispositionV1::Deferred,
+            _ => PostTurnGovernanceDecisionDispositionV1::Mixed,
+        };
+        let plane_payload = serde_json::to_vec(&report.plane_reports).map_err(|error| {
+            Error::config("post_turn_governance_decision_summary", error.to_string())
+        })?;
+        let summary = Self {
+            accepted_count,
+            rejected_count,
+            deferred_count,
+            disposition,
+            plane_count,
+            plane_digest: format!("sha256:{:x}", Sha256::digest(plane_payload)),
+        };
+        summary.validate()?;
+        Ok(summary)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let total = self
+            .accepted_count
+            .checked_add(self.rejected_count)
+            .and_then(|value| value.checked_add(self.deferred_count))
+            .ok_or_else(|| {
+                Error::invalid_input(
+                    "post_turn_governance_decision_summary",
+                    "decision counts overflow",
+                )
+            })?;
+        let disposition_matches = match self.disposition {
+            PostTurnGovernanceDecisionDispositionV1::Accepted => {
+                self.accepted_count > 0 && self.rejected_count == 0 && self.deferred_count == 0
+            }
+            PostTurnGovernanceDecisionDispositionV1::Rejected => {
+                self.rejected_count > 0 && self.accepted_count == 0 && self.deferred_count == 0
+            }
+            PostTurnGovernanceDecisionDispositionV1::Deferred => {
+                self.deferred_count > 0 && self.accepted_count == 0 && self.rejected_count == 0
+            }
+            PostTurnGovernanceDecisionDispositionV1::Mixed => {
+                total > 0
+                    && [
+                        self.accepted_count > 0,
+                        self.rejected_count > 0,
+                        self.deferred_count > 0,
+                    ]
+                    .into_iter()
+                    .filter(|present| *present)
+                    .count()
+                        > 1
+            }
+            PostTurnGovernanceDecisionDispositionV1::NoCandidates => total == 0,
+        };
+        if !disposition_matches || !is_sha256_digest(&self.plane_digest) {
+            return Err(Error::invalid_input(
+                "post_turn_governance_decision_summary",
+                "decision disposition, counts, or plane digest is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PostTurnGovernanceReceiptV3 {
+    pub receipt_id: String,
+    pub semantic_transaction_id: String,
+    pub mutation_plan_digest: String,
+    pub memory_post_image_digest: String,
+    pub completed_at: u64,
+    pub decision_summary: PostTurnGovernanceDecisionSummaryV1,
+}
+
+impl PostTurnGovernanceReceiptV3 {
+    pub fn new(
+        job_id: &str,
+        semantic_transaction_id: impl Into<String>,
+        mutation_plan_digest: impl Into<String>,
+        memory_post_image_digest: impl Into<String>,
+        completed_at: u64,
+        decision_summary: PostTurnGovernanceDecisionSummaryV1,
+    ) -> Result<Self> {
+        let mut receipt = Self {
+            receipt_id: String::new(),
+            semantic_transaction_id: semantic_transaction_id.into(),
+            mutation_plan_digest: mutation_plan_digest.into(),
+            memory_post_image_digest: memory_post_image_digest.into(),
+            completed_at,
+            decision_summary,
+        };
+        receipt.receipt_id = receipt.canonical_receipt_id(job_id)?;
+        Ok(receipt)
+    }
+
+    pub fn canonical_receipt_id(&self, job_id: &str) -> Result<String> {
+        if job_id.trim().is_empty()
+            || self.semantic_transaction_id.trim().is_empty()
+            || !is_sha256_digest(&self.mutation_plan_digest)
+            || !is_sha256_digest(&self.memory_post_image_digest)
+            || self.completed_at == 0
+        {
+            return Err(Error::invalid_input(
+                "post_turn_governance_receipt",
+                "receipt identity payload is incomplete or invalid",
+            ));
+        }
+        self.decision_summary.validate()?;
+        let mut payload = b"bm-receipt-v3-id\0".to_vec();
+        push_receipt_field(&mut payload, job_id.as_bytes());
+        push_receipt_field(&mut payload, self.semantic_transaction_id.as_bytes());
+        push_receipt_field(&mut payload, self.mutation_plan_digest.as_bytes());
+        push_receipt_field(&mut payload, self.memory_post_image_digest.as_bytes());
+        payload.extend_from_slice(&self.completed_at.to_be_bytes());
+        payload.extend_from_slice(&self.decision_summary.accepted_count.to_be_bytes());
+        payload.extend_from_slice(&self.decision_summary.rejected_count.to_be_bytes());
+        payload.extend_from_slice(&self.decision_summary.deferred_count.to_be_bytes());
+        payload.push(match self.decision_summary.disposition {
+            PostTurnGovernanceDecisionDispositionV1::Accepted => 1,
+            PostTurnGovernanceDecisionDispositionV1::Rejected => 2,
+            PostTurnGovernanceDecisionDispositionV1::Deferred => 3,
+            PostTurnGovernanceDecisionDispositionV1::Mixed => 4,
+            PostTurnGovernanceDecisionDispositionV1::NoCandidates => 5,
+        });
+        payload.extend_from_slice(&self.decision_summary.plane_count.to_be_bytes());
+        push_receipt_field(&mut payload, self.decision_summary.plane_digest.as_bytes());
+        Ok(format!("sha256:{:x}", Sha256::digest(payload)))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PostTurnGovernanceJobV3 {
     pub schema_version: u32,
     pub job_id: String,
     pub idempotency_key: String,
@@ -537,9 +1185,8 @@ pub struct PostTurnGovernanceJobV2 {
     pub transcript_digest: String,
     pub runtime_binding_digest: String,
     pub governance_contract_version: u32,
-    pub governance_model_policy_revision: u64,
-    pub pinned_privacy_revision: u64,
-    pub pinned_privacy_digest: String,
+    pub execution_binding: PostTurnGovernanceExecutionBindingV1,
+    pub privacy_authority: PostTurnGovernancePrivacyAuthorityV1,
     pub candidate_ids: Vec<String>,
     pub tool_call_count: u32,
     pub status: PostTurnGovernanceJobStatusV2,
@@ -550,31 +1197,33 @@ pub struct PostTurnGovernanceJobV2 {
     pub lease_owner: Option<String>,
     pub lease_until: Option<u64>,
     pub lease_epoch: u64,
-    pub attempt_authority: Option<PostTurnGovernanceAttemptAuthorityV2>,
+    pub attempt_authority: Option<PostTurnGovernanceAttemptAuthorityV3>,
+    pub execution_block_authority: Option<PostTurnGovernanceExecutionBlockAuthorityV1>,
+    pub last_provider_permission_recovery_generation: Option<u64>,
     pub blocking_reason: Option<String>,
     pub last_error_class: Option<PostTurnGovernanceErrorClassV2>,
-    pub receipt: Option<PostTurnGovernanceReceiptV2>,
+    pub receipt: Option<PostTurnGovernanceReceiptV3>,
     pub created_at: u64,
     pub updated_at: u64,
     pub terminal_at: Option<u64>,
 }
 
-impl PostTurnGovernanceJobV2 {
+impl PostTurnGovernanceJobV3 {
     #[allow(clippy::too_many_arguments)]
     pub fn pending(
         identity: PostTurnGovernanceIdentityV2,
         transcript_sequence: u64,
         transcript_digest: impl Into<String>,
         runtime_binding_digest: impl Into<String>,
-        governance_model_policy_revision: u64,
-        pinned_privacy_revision: u64,
-        pinned_privacy_digest: impl Into<String>,
+        execution_binding: PostTurnGovernanceExecutionBindingV1,
+        privacy_authority: PostTurnGovernancePrivacyAuthorityV1,
         candidate_ids: Vec<String>,
         tool_call_count: u32,
         max_attempts: u32,
         now_secs: u64,
     ) -> Result<Self> {
         let job_id = identity.job_id();
+        let unbound = execution_binding == PostTurnGovernanceExecutionBindingV1::Unbound;
         let job = Self {
             schema_version: POST_TURN_GOVERNANCE_JOB_SCHEMA_VERSION,
             idempotency_key: job_id.clone(),
@@ -585,21 +1234,32 @@ impl PostTurnGovernanceJobV2 {
             transcript_digest: transcript_digest.into(),
             runtime_binding_digest: runtime_binding_digest.into(),
             governance_contract_version: POST_TURN_GOVERNANCE_JOB_SCHEMA_VERSION,
-            governance_model_policy_revision,
-            pinned_privacy_revision,
-            pinned_privacy_digest: pinned_privacy_digest.into(),
+            execution_binding,
+            privacy_authority,
             candidate_ids,
             tool_call_count,
-            status: PostTurnGovernanceJobStatusV2::Pending,
+            status: if unbound {
+                PostTurnGovernanceJobStatusV2::BlockedConfiguration
+            } else {
+                PostTurnGovernanceJobStatusV2::Pending
+            },
             state_revision: 1,
             attempt_count: 0,
             max_attempts,
-            next_attempt_at: Some(now_secs),
+            next_attempt_at: (!unbound).then_some(now_secs),
             lease_owner: None,
             lease_until: None,
             lease_epoch: 0,
             attempt_authority: None,
-            blocking_reason: None,
+            execution_block_authority: unbound.then(|| {
+                PostTurnGovernanceExecutionBlockAuthorityV1::binding_unavailable(now_secs)
+            }),
+            last_provider_permission_recovery_generation: None,
+            blocking_reason: unbound.then(|| {
+                PostTurnGovernanceExecutionBlockReasonV1::BindingUnavailable
+                    .as_str()
+                    .to_string()
+            }),
             last_error_class: None,
             receipt: None,
             created_at: now_secs,
@@ -620,9 +1280,6 @@ impl PostTurnGovernanceJobV2 {
             || self.transcript_sequence == 0
             || !is_sha256_digest(&self.transcript_digest)
             || !is_sha256_digest(&self.runtime_binding_digest)
-            || self.governance_model_policy_revision == 0
-            || self.pinned_privacy_revision == 0
-            || !is_sha256_digest(&self.pinned_privacy_digest)
             || self.state_revision == 0
             || self.max_attempts == 0
             || self.attempt_count > self.max_attempts
@@ -634,6 +1291,28 @@ impl PostTurnGovernanceJobV2 {
                 "job identity, authority, revision, or timing is invalid",
             ));
         }
+        self.execution_binding.validate()?;
+        self.privacy_authority.validate()?;
+        if let Some(authority) = &self.execution_block_authority {
+            authority.validate()?;
+            if self.status != authority.typed_block_reason.blocked_status()
+                || self.blocking_reason.as_deref() != Some(authority.typed_block_reason.as_str())
+            {
+                return Err(Error::invalid_input(
+                    "post_turn_governance_job",
+                    "execution block authority differs from blocked job state",
+                ));
+            }
+        } else if matches!(
+            self.status,
+            PostTurnGovernanceJobStatusV2::BlockedConfiguration
+                | PostTurnGovernanceJobStatusV2::BlockedPolicy
+        ) {
+            return Err(Error::invalid_input(
+                "post_turn_governance_job",
+                "configuration or policy block requires execution block authority",
+            ));
+        }
         if self.candidate_ids.len() > MAX_POST_TURN_GOVERNANCE_ACTIVE_JOBS
             || self
                 .candidate_ids
@@ -643,6 +1322,9 @@ impl PostTurnGovernanceJobV2 {
                 value.trim().is_empty()
                     || value.chars().count() > MAX_POST_TURN_GOVERNANCE_ERROR_CHARS
             })
+            || self
+                .last_provider_permission_recovery_generation
+                .is_some_and(|generation| generation == 0)
         {
             return Err(Error::invalid_input(
                 "post_turn_governance_job",
@@ -662,6 +1344,36 @@ impl PostTurnGovernanceJobV2 {
         }
         if let Some(authority) = &self.attempt_authority {
             authority.validate()?;
+            match &self.execution_binding {
+                PostTurnGovernanceExecutionBindingV1::Bound {
+                    binding_id,
+                    binding_revision,
+                } if binding_id == &authority.binding_id
+                    && binding_revision == &authority.binding_revision => {}
+                _ => {
+                    return Err(Error::invalid_input(
+                        "post_turn_governance_job",
+                        "attempt authority differs from the bound execution authority",
+                    ));
+                }
+            }
+            if authority.privacy_authority != self.privacy_authority {
+                return Err(Error::invalid_input(
+                    "post_turn_governance_job",
+                    "attempt privacy authority differs from the pinned policy",
+                ));
+            }
+        }
+        if self.attempt_authority.is_some()
+            && !matches!(
+                self.execution_binding,
+                PostTurnGovernanceExecutionBindingV1::Bound { .. }
+            )
+        {
+            return Err(Error::invalid_input(
+                "post_turn_governance_job",
+                "attempt authority requires one bound execution authority",
+            ));
         }
         if self.status.is_terminal()
             != (self.terminal_at.is_some()
@@ -680,7 +1392,8 @@ impl PostTurnGovernanceJobV2 {
             ));
         }
         if let Some(receipt) = &self.receipt {
-            if receipt.semantic_transaction_id.trim().is_empty()
+            if !is_sha256_digest(&receipt.receipt_id)
+                || receipt.semantic_transaction_id.trim().is_empty()
                 || !is_sha256_digest(&receipt.mutation_plan_digest)
                 || !is_sha256_digest(&receipt.memory_post_image_digest)
                 || receipt.completed_at == 0
@@ -690,6 +1403,13 @@ impl PostTurnGovernanceJobV2 {
                     "completion receipt is invalid",
                 ));
             }
+            receipt.decision_summary.validate()?;
+            if receipt.receipt_id != receipt.canonical_receipt_id(&self.job_id)? {
+                return Err(Error::invalid_input(
+                    "post_turn_governance_job",
+                    "completion receipt identity differs from its canonical payload",
+                ));
+            }
         }
         Ok(())
     }
@@ -697,7 +1417,8 @@ impl PostTurnGovernanceJobV2 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PostTurnGovernanceJobRefV1 {
+pub struct PostTurnGovernanceJobRefV2 {
+    pub job_schema_version: u32,
     pub job_id: String,
     pub job_key: String,
     pub state_revision: u64,
@@ -708,9 +1429,10 @@ pub struct PostTurnGovernanceJobRefV1 {
     pub updated_at: u64,
 }
 
-impl PostTurnGovernanceJobRefV1 {
-    pub fn from_job(job: &PostTurnGovernanceJobV2) -> Self {
+impl PostTurnGovernanceJobRefV2 {
+    pub fn from_job(job: &PostTurnGovernanceJobV3) -> Self {
         Self {
+            job_schema_version: POST_TURN_GOVERNANCE_JOB_SCHEMA_VERSION,
             job_id: job.job_id.clone(),
             job_key: job.job_id.clone(),
             state_revision: job.state_revision,
@@ -750,7 +1472,7 @@ impl PostTurnGovernanceReconciliationCursorV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PostTurnGovernanceScopeIndexV2 {
+pub struct PostTurnGovernanceScopeIndexV3 {
     pub schema_version: u32,
     pub scope_index_key: String,
     pub memory_space_id: String,
@@ -758,13 +1480,13 @@ pub struct PostTurnGovernanceScopeIndexV2 {
     pub channel_id: String,
     pub chat_id: String,
     pub index_revision: u64,
-    pub active_jobs: Vec<PostTurnGovernanceJobRefV1>,
-    pub recent_terminal_jobs: Vec<PostTurnGovernanceJobRefV1>,
+    pub active_jobs: Vec<PostTurnGovernanceJobRefV2>,
+    pub recent_terminal_jobs: Vec<PostTurnGovernanceJobRefV2>,
     pub reconciliation_cursors: Vec<PostTurnGovernanceReconciliationCursorV1>,
     pub updated_at: u64,
 }
 
-impl PostTurnGovernanceScopeIndexV2 {
+impl PostTurnGovernanceScopeIndexV3 {
     pub fn empty(identity: &PostTurnGovernanceIdentityV2, now_secs: u64) -> Self {
         Self {
             schema_version: POST_TURN_GOVERNANCE_SCOPE_INDEX_SCHEMA_VERSION,
@@ -843,13 +1565,15 @@ impl PostTurnGovernanceScopeIndexV2 {
             || self.active_jobs.len() > MAX_POST_TURN_GOVERNANCE_ACTIVE_JOBS
             || self.recent_terminal_jobs.len() > MAX_POST_TURN_GOVERNANCE_RECENT_TERMINAL_JOBS
             || self.active_jobs.iter().any(|job| {
-                !job.status.is_active()
+                job.job_schema_version != POST_TURN_GOVERNANCE_JOB_SCHEMA_VERSION
+                    || !job.status.is_active()
                     || job.job_id != job.job_key
                     || job.state_revision == 0
                     || job.updated_at < job.created_at
             })
             || self.recent_terminal_jobs.iter().any(|job| {
-                !job.status.is_terminal()
+                job.job_schema_version != POST_TURN_GOVERNANCE_JOB_SCHEMA_VERSION
+                    || !job.status.is_terminal()
                     || job.job_id != job.job_key
                     || job.state_revision == 0
                     || job.updated_at < job.created_at
@@ -885,6 +1609,11 @@ impl PostTurnGovernanceScopeIndexV2 {
         }
         Ok(())
     }
+}
+
+fn push_receipt_field(payload: &mut Vec<u8>, field: &[u8]) {
+    payload.extend_from_slice(&(field.len() as u64).to_be_bytes());
+    payload.extend_from_slice(field);
 }
 
 fn governance_digest(fields: &[&[u8]]) -> String {

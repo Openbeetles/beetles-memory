@@ -3104,9 +3104,13 @@ fn apply_forget_by_query(
     selector: &MemoryLongTermSelector,
     confirmation_token: Option<&str>,
 ) -> Result<MemoryLongTermMutationReport> {
-    let target = MemoryLongTermTarget::Query(selector.clone());
+    // Forget is a terminal owner-control operation, not a recall query. A memory
+    // becoming stale must never make it escape a user-requested bulk forget.
+    let mut governed_selector = selector.clone();
+    governed_selector.query.include_stale = true;
+    let target = MemoryLongTermTarget::Query(governed_selector.clone());
     let resolved = resolve_target(store, control_store, &target, true)?;
-    let required_token = confirmation_token_for(selector, &resolved.record_ids);
+    let required_token = confirmation_token_for(&governed_selector, &resolved.record_ids);
     if request.dry_run {
         return Ok(rejected_report(
             "forget_by_query",

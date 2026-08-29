@@ -15,7 +15,8 @@ Beetle Memory is integrated through `bm-sdk` or deployed through `bm-entry` plus
 - [Replay and Archive](replay-and-archive.md)
 - [Operator Guide](operator-guide.md)
 - [Release Checklist](release-checklist.md)
-- [0.5.0 Source Candidate Notes](release-notes-0.5.0.md)
+- [0.6.0 Source Candidate Notes](release-notes-0.6.0.md)
+- [0.5.0 Release Notes](release-notes-0.5.0.md)
 - [0.4.0 Release Notes](release-notes-0.4.0.md)
 - [0.3.0 Release Notes](release-notes-0.3.0.md)
 

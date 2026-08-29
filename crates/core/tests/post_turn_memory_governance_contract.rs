@@ -3,11 +3,12 @@ use std::sync::Mutex;
 use bm_core::memory::{
     commit_canonical_turn_delta, CanonicalTurnDelta, ConversationScope, GovernedWriteDecision,
     MemoryEvidenceAuthority, MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource,
-    MemoryWriteAuthority, PostTurnGovernanceIdentityV2, PostTurnGovernanceJobRefV1,
-    PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV2,
-    PostTurnGovernanceReconciliationCursorV1, PostTurnGovernanceScopeIndexV2,
-    PostTurnPrivateGardenReport, PrivateGardenAdmissionDecision, SessionStore,
-    TranscriptInputMessage, MAX_POST_TURN_GOVERNANCE_ACTIVE_JOBS,
+    MemoryWriteAuthority, PostTurnGovernanceExecutionBindingV1,
+    PostTurnGovernanceExecutionBlockReasonV1, PostTurnGovernanceIdentityV2,
+    PostTurnGovernanceJobRefV2, PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV3,
+    PostTurnGovernancePrivacyAuthorityV1, PostTurnGovernanceReconciliationCursorV1,
+    PostTurnGovernanceScopeIndexV3, PostTurnPrivateGardenReport, PrivateGardenAdmissionDecision,
+    SessionStore, TranscriptInputMessage, MAX_POST_TURN_GOVERNANCE_ACTIVE_JOBS,
 };
 use bm_core::memory::{SessionMessage, SessionMessageRecord};
 use bm_core::Result;
@@ -281,8 +282,8 @@ fn private_garden_freeform_report_is_not_governed_write_decision() {
     );
 }
 
-fn governance_job(conversation_id: &str) -> PostTurnGovernanceJobV2 {
-    PostTurnGovernanceJobV2::pending(
+fn governance_job(conversation_id: &str) -> PostTurnGovernanceJobV3 {
+    PostTurnGovernanceJobV3::pending(
         PostTurnGovernanceIdentityV2::new(
             "space:owner-default",
             "agent:governance",
@@ -295,15 +296,46 @@ fn governance_job(conversation_id: &str) -> PostTurnGovernanceJobV2 {
         1,
         "sha256:1111111111111111111111111111111111111111111111111111111111111111",
         "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-        1,
-        1,
-        "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        PostTurnGovernanceExecutionBindingV1::Unbound,
+        PostTurnGovernancePrivacyAuthorityV1 {
+            policy_schema_version: 1,
+            exact_policy_digest:
+                "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+                    .to_string(),
+        },
         vec!["candidate-1".to_string()],
         0,
         5,
         1_800_000_000,
     )
     .expect("pending job")
+}
+
+#[test]
+fn unbound_job_is_durably_blocked_without_inventing_a_binding_revision() {
+    let job = governance_job("conversation-unbound");
+
+    assert_eq!(
+        job.execution_binding,
+        PostTurnGovernanceExecutionBindingV1::Unbound
+    );
+    assert_eq!(
+        job.status,
+        PostTurnGovernanceJobStatusV2::BlockedConfiguration
+    );
+    let block = job
+        .execution_block_authority
+        .as_ref()
+        .expect("unbound job must carry durable block authority");
+    assert_eq!(
+        block.typed_block_reason,
+        PostTurnGovernanceExecutionBlockReasonV1::BindingUnavailable
+    );
+    assert_eq!(block.binding_id, None);
+    assert_eq!(block.binding_revision, None);
+    assert_eq!(block.credential_ref_safe_id, None);
+    assert_eq!(job.next_attempt_at, None);
+    job.validate().expect("unbound blocked job is canonical");
 }
 
 #[test]
@@ -343,10 +375,10 @@ fn governance_job_validator_rejects_lease_and_terminal_state_drift() {
 #[test]
 fn governance_scope_index_is_exact_bounded_and_active_only() {
     let job = governance_job("conversation-a");
-    let mut index = PostTurnGovernanceScopeIndexV2::empty(&job.identity, 1_800_000_000);
+    let mut index = PostTurnGovernanceScopeIndexV3::empty(&job.identity, 1_800_000_000);
     index
         .active_jobs
-        .push(PostTurnGovernanceJobRefV1::from_job(&job));
+        .push(PostTurnGovernanceJobRefV2::from_job(&job));
     assert!(index.validate().is_ok());
     index
         .set_reconciliation_cursor(PostTurnGovernanceReconciliationCursorV1 {
@@ -366,12 +398,12 @@ fn governance_scope_index_is_exact_bounded_and_active_only() {
 
     index
         .active_jobs
-        .push(PostTurnGovernanceJobRefV1::from_job(&job));
+        .push(PostTurnGovernanceJobRefV2::from_job(&job));
     assert!(index.validate().is_err());
 
     index.active_jobs.clear();
     for sequence in 0..=MAX_POST_TURN_GOVERNANCE_ACTIVE_JOBS {
-        let mut reference = PostTurnGovernanceJobRefV1::from_job(&job);
+        let mut reference = PostTurnGovernanceJobRefV2::from_job(&job);
         reference.job_id = format!("ptgj2:{sequence:056x}");
         reference.job_key.clone_from(&reference.job_id);
         index.active_jobs.push(reference);

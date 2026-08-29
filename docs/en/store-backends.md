@@ -38,11 +38,11 @@ let config = StoreBackendConfig::file("/var/lib/beetle-memory", profile)?
     .with_fsync(true);
 ```
 
-## 0.5.0 Source Candidate Schema Admission
+## 0.6.0 Source Candidate Schema Admission
 
-The 0.5.0 source candidate accepts Store v11 and immutable long-term material v5 only. Normal `MemoryStoreHandle::open` never rewrites an exact-v10 Store: it fails closed with `store_migration_required`. Store v9 and older, partial v11 query state, and foreign schemas are not opened, guessed, or rewritten.
+The 0.6.0 source candidate accepts Store v12 and immutable long-term material v5 only. Store v12 adds the exact Post-Turn Governance Job V3 / Scope Index V3 / Job Ref V2 closure plus Store-owned immutable binding snapshots and a bounded binding revision index. File, SQLite, and in-memory admission verify Job/Index/Binding ownership during every changed transaction; persistent reopen and snapshot import verify the complete closure.
 
-After closing every handle and backing up the exact Store outside its data path, an operator can call `MemoryStoreHandle::migrate_v10_to_v11(config)`. Only persistent File and SQLite backends are admitted. File migration builds and verifies a sibling v11 Store before an atomic directory swap; SQLite migration commits schema, transcript query closure, and migration event in one database transaction. Success returns `StoreMigrationReport`; any rejected or failed migration preserves the exact v10 source. Archive export/import is not schema migration, and this synthetic contract evidence is not proof that real user Stores were migrated.
+There is no v11-to-v12 migration API, compatibility reader, dual write, or automatic migration. Store v11, governance V2, partial v12 state, orphaned binding/job/index documents, and foreign schemas fail closed. Older development data must be explicitly discarded and recreated by its owner. Archive export/import is not schema migration or a compatibility path, and no real user Store migration is claimed.
 
 ## File Path Budget
 

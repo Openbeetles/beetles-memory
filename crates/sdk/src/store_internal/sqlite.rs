@@ -27,7 +27,7 @@ use crate::store_internal::transaction::{
 use crate::StoreSnapshotReplaceReport;
 use crate::{
     enforce_logical_key_budget, store_budget_error,
-    store_internal::platform::{migrate_v10_snapshot_to_v11, StoreOpenPreflight},
+    store_internal::platform::StoreOpenPreflight,
     store_internal::transaction::{
         apply_transaction, read_bounded_known_keys_from_parts,
         scoped_projection_dependency_addresses, scoped_projection_root_addresses,
@@ -43,152 +43,6 @@ use crate::{
     STORE_SCHEMA_VERSION,
 };
 
-fn exact_v10_sqlite_manifest(
-    connection: &Connection,
-    config: &StoreBackendConfig,
-) -> Result<Option<StoreSchemaManifest>> {
-    let row = connection
-        .query_row(
-            "SELECT schema_id, schema_version, manifest_json FROM bm_schema",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, u32>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|error| Error::storage("sqlite_store_v10_migration", error))?;
-    let Some((schema_id, schema_version, raw)) = row else {
-        return Ok(None);
-    };
-    if schema_id != "beetle_memory_store_schema_v10" || schema_version != 10 {
-        return Ok(None);
-    }
-    let manifest = serde_json::from_str::<StoreSchemaManifest>(&raw)
-        .map_err(|error| Error::config("sqlite_store_v10_migration", error.to_string()))?;
-    if manifest.schema_id != schema_id
-        || manifest.schema_version != schema_version
-        || manifest.backend != config.backend().as_str()
-        || manifest.profile != config.profile().as_str()
-        || manifest.memory_system_kind != config.memory_system_kind().as_str()
-    {
-        return Err(Error::config(
-            "sqlite_store_v10_migration",
-            "v10 schema authority does not match the configured Store identity",
-        ));
-    }
-    Ok(Some(manifest))
-}
-
-fn sqlite_path_has_exact_v10_manifest(path: &Path, config: &StoreBackendConfig) -> Result<bool> {
-    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| Error::storage("sqlite_store_v10_migration", error))?;
-    let schema_table_exists: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bm_schema')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|error| Error::storage("sqlite_store_v10_migration", error))?;
-    if !schema_table_exists {
-        return Ok(false);
-    }
-    exact_v10_sqlite_manifest(&connection, config).map(|manifest| manifest.is_some())
-}
-
-pub(crate) fn migrate_sqlite_v10_to_v11_explicit(
-    config: &StoreBackendConfig,
-    capacity: StoreCapacityBudget,
-    open_preflight: &StoreOpenPreflight,
-    migration_event: MemoryStoreEvent,
-) -> Result<()> {
-    let path = config
-        .data_path
-        .as_deref()
-        .ok_or_else(|| Error::config("store_migration_required", "SQLite path is required"))?;
-    validate_sqlite_physical_open_preflight(path)?;
-    if !sqlite_path_has_exact_v10_manifest(path, config)? {
-        return Err(Error::config(
-            "store_migration_not_required",
-            "Store is not an exact v10 SQLite Store",
-        ));
-    }
-    if !migrate_sqlite_v10_in_place(
-        path,
-        config,
-        capacity,
-        Some(open_preflight),
-        migration_event,
-    )? {
-        return Err(Error::config(
-            "store_migration_conflict",
-            "SQLite Store changed before the migration transaction acquired authority",
-        ));
-    }
-    validate_sqlite_physical_open_preflight(path)
-}
-
-fn migrate_sqlite_v10_in_place(
-    path: &Path,
-    config: &StoreBackendConfig,
-    capacity: StoreCapacityBudget,
-    open_preflight: Option<&StoreOpenPreflight>,
-    migration_event: MemoryStoreEvent,
-) -> Result<bool> {
-    let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
-        .map_err(|error| Error::storage("sqlite_store_v10_migration", error))?;
-    connection
-        .busy_timeout(config.lock_timeout)
-        .map_err(|error| Error::storage("sqlite_store_v10_migration", error))?;
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| Error::storage("sqlite_store_v10_migration", error))?;
-    let Some(manifest) = exact_v10_sqlite_manifest(&transaction, config)? else {
-        transaction
-            .rollback()
-            .map_err(|error| Error::storage("sqlite_store_v10_migration", error))?;
-        return Ok(false);
-    };
-    validate_sqlite_schema_inventory(&transaction)?;
-    let mut source = read_existing_sqlite_snapshot_read_only(&transaction, manifest, capacity)?;
-    source.schema_id = "beetle_memory_store_schema_v10".to_string();
-    source.schema_manifest.schema_id = source.schema_id.clone();
-    source.schema_manifest.schema_version = 10;
-    let mut migrated = migrate_v10_snapshot_to_v11(&source, current_unix_secs())?;
-    migrated.events.push(migration_event);
-    if let Some(open_preflight) = open_preflight {
-        open_preflight.admit_snapshot(&migrated, "sqlite_store_v10_migration")?;
-    }
-    for doc in &migrated.json_docs {
-        let raw = serde_json::to_string(&doc.value)
-            .map_err(|error| Error::config("sqlite_store_v10_migration", error.to_string()))?;
-        transaction
-            .execute(
-                "INSERT INTO bm_kv(namespace, key, value_json) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(namespace, key) DO UPDATE SET value_json = excluded.value_json",
-                params![doc.namespace, doc.key, raw],
-            )
-            .map_err(|error| Error::storage("sqlite_store_v10_migration", error))?;
-    }
-    let raw = serde_json::to_string(&migrated.schema_manifest)
-        .map_err(|error| Error::config("sqlite_store_v10_migration", error.to_string()))?;
-    transaction
-        .execute("DELETE FROM bm_schema", [])
-        .map_err(|error| Error::storage("sqlite_store_v10_migration", error))?;
-    transaction
-        .execute(
-            "INSERT INTO bm_schema(schema_id, schema_version, manifest_json) VALUES (?1, ?2, ?3)",
-            params![STORE_SCHEMA_ID, STORE_SCHEMA_VERSION, raw],
-        )
-        .map_err(|error| Error::storage("sqlite_store_v10_migration", error))?;
-    transaction
-        .commit()
-        .map_err(|error| Error::storage("sqlite_store_v10_migration", error))?;
-    Ok(true)
-}
 #[cfg(feature = "nonproduction-replay-harness")]
 use crate::{StoreConsistentReadRequest, StoreConsistentReadResult};
 
@@ -528,6 +382,12 @@ fn validate_existing_sqlite_schema_connection(
         ));
     }
     let (schema_id, schema_version, manifest_json) = entries.pop().expect("checked one row");
+    if schema_id != STORE_SCHEMA_ID || schema_version != STORE_SCHEMA_VERSION {
+        return Err(Error::config(
+            "store_rebuild_required",
+            "persistent SQLite Store schema differs from this clean-break runtime; delete and recreate the Store",
+        ));
+    }
     let manifest: StoreSchemaManifest = serde_json::from_str(&manifest_json)
         .map_err(|error| Error::config("sqlite_store_schema", error.to_string()))?;
     if schema_id != manifest.schema_id || schema_version != manifest.schema_version {
@@ -1177,13 +1037,6 @@ impl SqliteStoreEngine {
                 .map_err(|error| Error::io("sqlite_store_open", error))?;
         }
         validate_sqlite_physical_open_preflight(&path)?;
-        let initial_identity = sqlite_file_identity(&path)?;
-        if initial_identity.is_some() && sqlite_path_has_exact_v10_manifest(&path, config)? {
-            return Err(Error::config(
-                "store_migration_required",
-                "exact v10 SQLite Store requires explicit offline migration to v11",
-            ));
-        }
         let initial_identity = sqlite_file_identity(&path)?;
         let existing_store = initial_identity.is_some();
         let mut fresh_placeholder = if existing_store {

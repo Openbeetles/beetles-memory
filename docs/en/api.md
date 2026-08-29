@@ -38,9 +38,33 @@ The SDK API is the primary entry point. Host projects should enter through `bm-s
 | Memory-Space Export / Import | `MemoryRuntime::export_memory_space` / `MemoryRuntime::import_memory_space` | Export an opaque archive and atomically replace the same exact `MemoryArchiveScope` under an explicit private-material policy. |
 | Recover / Close | `MemoryRuntime::recover` / `MemoryRuntime::close` | Control runtime lifecycle and emit lifecycle reports. |
 
+## Universal Long-Term Learning
+
+`finalize_turn` commits the delivered canonical turn and one durable governance intent. `bm-sdk::MemoryLearningEngine` then owns the complete due-job cycle: exact scope discovery, lease/CAS, current transcript/subject/privacy admission, minimum provider disclosure, strict candidate validation, accepted long-term mutation, receipt/audit, retry, blocking, cancellation, and terminal completion. Production hosts must not compose the former low-level worker transitions into a second worker.
+
+`bm-entry::MemoryLearningService` is the official process owner for asynchronous execution. Build it with an existing `Arc<MemoryRuntime>`, one `GovernanceBindingSource`, and one `GovernanceCredentialResolver`; attach additional runtimes only when they share the exact Store authority, Subject Registry, and MemorySpace. `EntryRuntime` consumes the same service internally, so server and embedded consumers do not have separate governance state machines.
+
+```rust,ignore
+let control_authorities = governor_runtime.learning_service_control_authorities()?;
+let (service, attachment) = MemoryLearningService::builder(runtime.clone())
+    .control_authorities(control_authorities)
+    .binding_source(binding_source)
+    .credential_resolver(credential_resolver)
+    .start()?;
+
+let another_control = another_governor_runtime.learning_service_control_authorities()?;
+let another = service.attach_runtime(another_runtime, another_control)?;
+service.wake();
+service.credential_changed("product.primary-key", 2, "credential-op-2")?;
+```
+
+Product Provider configuration remains host-owned. Beetle persists immutable non-secret execution binding snapshots as historical job authority; it never persists a raw credential. `provider_config_changed`, `credential_changed`, and `provider_permission_changed` are typed notifications that re-read the same source and use operation-aware Store receipts. They are not a second configuration payload.
+
+Status and recovery controls require opaque SDK-minted capabilities. `MemoryRuntime::learning_service_status_authority` and `MemoryRuntime::learning_service_control_authorities` require the Runtime actor itself to be the exact active governing `SystemGovernor`; the per-operation recovery authorities are bound to the exact Store, registry, MemorySpace, mounted subject, scope, and recovery kind. `MemoryRuntime::learning_attachment_status_authority` requires the exact active mounted-subject actor. Cross-subject, cross-operation, or foreign Store/registry authorities fail before job identity, reason detail, or mutation is returned.
+
 ## Subject Soul Provisioning
 
-`bm-sdk` 0.4.0 exposes a host-neutral Subject Soul provisioning and lifecycle contract. Hosts submit typed intent only; Core, SDK, and Store own Soul revisions, generations, material, manifests, ledgers, audit records, events, and durable operation receipts in one transaction. Adapters, HTTP, MCP, Console, and host databases must not maintain a second Soul state or create a default personality and overwrite it later.
+`bm-sdk` 0.6.0 exposes a host-neutral Subject Soul provisioning and lifecycle contract. Hosts submit typed intent only; Core, SDK, and Store own Soul revisions, generations, material, manifests, ledgers, audit records, events, and durable operation receipts in one transaction. Adapters, HTTP, MCP, Console, and host databases must not maintain a second Soul state or create a default personality and overwrite it later.
 
 | Operation | SDK surface | Contract |
 | --- | --- | --- |
@@ -89,11 +113,11 @@ CTQ1 query surfaces use the Store-owned `TranscriptQueryCursor`. Treat it as opa
 
 `HostUi` is only the host-presentable redacted disclosure view. It is not a chat-window API, pagination direction, product name, transcript index owner, or authorization token. Catalog, timeline, search, and activity return only candidates that remain visible after Runtime hydration and redaction for the requested view. Search hits contain a governed Unicode-safe excerpt and durable `TranscriptAnchor`; pass that anchor to `TranscriptTimelineAnchor::Around` instead of asking the host UI to scan or re-match transcript text.
 
-Store v10 to v11 is an explicit offline operator operation, not part of runtime open. Close all handles, back up the exact persistent Store, then call `MemoryStoreHandle::migrate_v10_to_v11(StoreBackendConfig)` and retain its `StoreMigrationReport`. Normal open performs zero migration writes and returns `store_migration_required`; in-memory/embedded backends, partial states, and non-v10 schemas are rejected.
+Store v12 is the only accepted Store generation in 0.6.0. There is no public Store migration API, compatibility reader, dual write, or automatic migration. Store v11, governance V2, partial v12 closure, and foreign schema payloads fail closed. Development data from an older generation must be explicitly discarded and recreated by its owner; archive export/import is not schema migration.
 
 Timeline supports latest, before, after, around-anchor, around-sequence, around-time, and first-visible-in-range queries. Page turns stay in sequence order and reports may carry opaque older/newer cursors. Calendar conversion stays with the host: resolve the user's IANA time zone and local date into a canonical UTC `[start_inclusive, end_exclusive)` range before calling Memory. Do not assume every local day is 86,400 seconds; DST days can be 23 or 25 hours. Beetle Memory does not store or guess the host time zone.
 
-CTQ1 engineering is complete in the local 0.5.0 source candidate: public Core/SDK query shapes, capability snapshot v4, Store v11 atomic query-index closure, InMemory/File/SQLite reopen, explicit synthetic v10-to-v11 migration, repair/archive closure, privacy exact-zero, and strict contract evidence are present. This is an engineering closeout claim only; it is not a Git tag, crates.io publication, hosted Release, real-data migration, or runtime/UAT receipt.
+The 0.6.0 source candidate keeps the CTQ1 public query shapes and capability snapshot v4 while moving the Store to v12 for PL2 Job/Index/Binding closure. InMemory/File/SQLite contracts cover query and learning persistence, reopen, repair/archive closure, and privacy exact-zero. This engineering claim is not a real-data, Provider, GUI/UAT, crates.io, or hosted Release receipt.
 
 Transcript attrs are Memory-owned transcript metadata, not a host business object store. Every attr has a `TranscriptAttrTarget`, namespaced key, `TranscriptAttrValueKind`, JSON value, `HostRefVisibility`, `TranscriptAttrSource`, `TranscriptAttrGovernance`, and optional `TranscriptAttrLink` refs. `HostUi` replay returns only HostUi-visible attrs, `ModelContext` returns only model-context attrs, `OperatorAudit` returns audit-visible attrs, and `Export` returns only export-visible attrs with `export_allowed=true`. `RawOwnerOnly` remains internal. Store repair reports missing target turns/messages, mismatched attr source keys, invalid keys, oversized values, and corrupt attr records as fail-closed issues. `DeleteRaw` hides attrs by default; `OperatorAuditOnlyAfterMask` may leave only redacted audit metadata and never returns the original attr value after raw deletion.
 

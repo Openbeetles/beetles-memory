@@ -38,11 +38,11 @@ let config = StoreBackendConfig::file("/var/lib/beetle-memory", profile)?
     .with_fsync(true);
 ```
 
-## 0.5.0 源码候选 Schema Admission
+## 0.6.0 源码候选 Schema Admission
 
-0.5.0 源码候选只接受 Store v11 与 immutable long-term material v5。普通 `MemoryStoreHandle::open` 绝不重写 exact-v10 Store，而是以 `store_migration_required` fail closed；Store v9 及更早版本、部分 v11 query state 和外来 schema 都不会被打开、猜测或重写。
+0.6.0 源码候选只接受 Store v12 与 immutable long-term material v5。Store v12 增加 exact Post-Turn Governance Job V3 / Scope Index V3 / Job Ref V2 closure，以及 Store-owned immutable binding snapshot 和有界 binding revision index。File、SQLite 与 in-memory admission 会在每个相关 transaction 内验证变更的 Job/Index/Binding owner；持久 reopen 与 snapshot import 会验证全量 closure。
 
-Operator 必须先关闭目标 Store 的全部 handle，并在数据路径之外备份 exact Store，之后才能调用 `MemoryStoreHandle::migrate_v10_to_v11(config)`。该操作只接受持久 File 与 SQLite backend：File migration 先在 sibling 目录完整构建并验证 v11 Store，再原子交换目录；SQLite migration 在单个数据库事务内提交 schema、transcript query closure 与 migration event。成功返回 `StoreMigrationReport`；任何拒绝或失败都必须保留 exact v10 source。Archive export/import 不是 schema migration；当前合成合同证据也不等于真实用户 Store 已完成迁移。
+不提供 v11→v12 migration API、compatibility reader、双写或 automatic migration。Store v11、governance V2、partial v12 state、orphaned binding/job/index document 与 foreign schema 都会 fail closed。旧代开发数据只能由其 owner 明确删除并重建。Archive export/import 不是 schema migration 或 compatibility path，本版本也不声明任何真实用户 Store migration。
 
 ## File Path Budget
 

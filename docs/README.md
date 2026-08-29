@@ -22,7 +22,8 @@ English topics:
 - [Replay and Archive](en/replay-and-archive.md)
 - [Operator Guide](en/operator-guide.md)
 - [Release Checklist](en/release-checklist.md)
-- [0.5.0 Source Candidate Notes](en/release-notes-0.5.0.md)
+- [0.6.0 Source Candidate Notes](en/release-notes-0.6.0.md)
+- [0.5.0 Release Notes](en/release-notes-0.5.0.md)
 - [0.4.0 Release Notes](en/release-notes-0.4.0.md)
 - [0.3.0 Release Notes](en/release-notes-0.3.0.md)
 
@@ -41,6 +42,7 @@ English topics:
 - [回放与归档](zh-CN/replay-and-archive.md)
 - [运维与检查](zh-CN/operator-guide.md)
 - [发布清单](zh-CN/release-checklist.md)
-- [0.5.0 源码候选说明](zh-CN/release-notes-0.5.0.md)
+- [0.6.0 源码候选说明](zh-CN/release-notes-0.6.0.md)
+- [0.5.0 发布说明](zh-CN/release-notes-0.5.0.md)
 - [0.4.0 发布说明](zh-CN/release-notes-0.4.0.md)
 - [0.3.0 发布说明](zh-CN/release-notes-0.3.0.md)

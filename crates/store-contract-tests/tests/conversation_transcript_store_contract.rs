@@ -18,8 +18,8 @@ use bm_core::platform::Platform;
 use bm_sdk::nonproduction_replay_harness::{
     StoreBackendConfig, StoreCapacityBudget, StoreEventScope,
 };
-use bm_sdk::MemoryStoreHandle;
 use serde_json::json;
+use std::collections::BTreeMap;
 
 fn temp_root(name: &str) -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!(
@@ -30,33 +30,40 @@ fn temp_root(name: &str) -> std::path::PathBuf {
     root
 }
 
-const TRANSCRIPT_QUERY_NAMESPACES: &[&str] = &[
-    "conversation_transcript_catalog_pages",
-    "conversation_transcript_catalog_roots",
-    "conversation_transcript_time_postings",
-    "conversation_transcript_time_roots",
-    "conversation_transcript_search_postings",
-    "conversation_transcript_search_roots",
-    "conversation_transcript_search_message_manifests",
-    "conversation_transcript_query_keyring_private",
-];
-
-fn downgrade_file_transcript_query_to_v10(root: &std::path::Path, keep_partial: Option<&str>) {
-    for namespace in TRANSCRIPT_QUERY_NAMESPACES {
-        if keep_partial == Some(*namespace) {
-            continue;
-        }
-        let path = root.join("kv").join(namespace);
-        if path.exists() {
-            std::fs::remove_dir_all(path).unwrap();
-        }
-    }
+fn rewrite_file_manifest_as_v11(root: &std::path::Path) {
     let manifest_path = root.join("manifest.json");
     let mut manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
-    manifest["schema_id"] = json!("beetle_memory_store_schema_v10");
-    manifest["schema_version"] = json!(10);
+    manifest["schema_id"] = json!("beetle_memory_store_schema_v11");
+    manifest["schema_version"] = json!(11);
     std::fs::write(manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+}
+
+fn file_tree_bytes(root: &std::path::Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
+    fn visit(
+        root: &std::path::Path,
+        path: &std::path::Path,
+        files: &mut BTreeMap<std::path::PathBuf, Vec<u8>>,
+    ) {
+        let mut entries = std::fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        entries.sort();
+        for entry in entries {
+            if entry.is_dir() {
+                visit(root, &entry, files);
+            } else {
+                files.insert(
+                    entry.strip_prefix(root).unwrap().to_path_buf(),
+                    std::fs::read(entry).unwrap(),
+                );
+            }
+        }
+    }
+    let mut files = BTreeMap::new();
+    visit(root, root, &mut files);
+    files
 }
 
 #[test]
@@ -789,6 +796,11 @@ fn transcript_append_and_tail_read_scale_past_legacy_manifest_ceiling() {
     let key = ConversationKey::new("space-scale", "llm.gateway", "conversation-store").unwrap();
 
     for sequence in 1..=1_000 {
+        if sequence % 200 == 1 {
+            platform
+                .refresh_runtime_resource_snapshot_for_nonproduction_harness()
+                .unwrap();
+        }
         let mut record = transcript_record(
             &key,
             &format!("turn-{sequence:04}"),
@@ -1946,258 +1958,67 @@ fn sqlite_store_reopens_with_transcript_catalog_timeline_search_and_activity() {
 
 #[cfg(feature = "sqlite-store")]
 #[test]
-fn sqlite_store_requires_explicit_v10_to_v11_migration_and_preserves_source_on_open() {
-    let root = temp_root("query-sqlite-v10-migration");
+fn sqlite_store_v11_is_rejected_read_only_by_v12_clean_break() {
+    let root = temp_root("query-sqlite-v11-clean-break");
     let path = root.join("memory.sqlite3");
     let config = StoreBackendConfig::sqlite(&path, support::native_persistent_profile()).unwrap();
-    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
     {
         let platform = support::open_store(config.clone()).unwrap();
-        let store = platform.conversation_transcript_store();
-        let mut record = transcript_record(&key, "turn-v10", "private cobalt 迁移");
-        record.input_messages[0].authority = MemoryEvidenceAuthority::PrivateGardenInternal;
-        record.assistant_message.as_mut().unwrap().content = "public amber migration".to_string();
-        store.append_turn(&record).unwrap();
+        let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+        platform
+            .conversation_transcript_store()
+            .append_turn(&transcript_record(&key, "turn-v11", "preserved v11 state"))
+            .unwrap();
     }
     {
         let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .execute(
-                "DELETE FROM bm_kv WHERE namespace IN (
-                    'conversation_transcript_catalog_pages',
-                    'conversation_transcript_catalog_roots',
-                    'conversation_transcript_time_postings',
-                    'conversation_transcript_time_roots',
-                    'conversation_transcript_search_postings',
-                    'conversation_transcript_search_roots',
-                    'conversation_transcript_search_message_manifests',
-                    'conversation_transcript_query_keyring_private'
-                )",
-                [],
-            )
-            .unwrap();
         let raw: String = connection
             .query_row("SELECT manifest_json FROM bm_schema", [], |row| row.get(0))
             .unwrap();
         let mut manifest: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        manifest["schema_id"] = json!("beetle_memory_store_schema_v10");
-        manifest["schema_version"] = json!(10);
+        manifest["schema_id"] = json!("beetle_memory_store_schema_v11");
+        manifest["schema_version"] = json!(11);
         connection.execute("DELETE FROM bm_schema", []).unwrap();
         connection
             .execute(
                 "INSERT INTO bm_schema(schema_id, schema_version, manifest_json) VALUES (?1, ?2, ?3)",
                 rusqlite::params![
-                    "beetle_memory_store_schema_v10",
-                    10,
+                    "beetle_memory_store_schema_v11",
+                    11,
                     serde_json::to_string(&manifest).unwrap()
                 ],
             )
             .unwrap();
     }
-
-    let before_identity = {
-        let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .query_row(
-                "SELECT schema_id, schema_version FROM bm_schema",
-                [],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)),
-            )
-            .unwrap()
-    };
-    let open_error = match support::open_store(config.clone()) {
-        Ok(_) => panic!("normal open must not migrate exact v10"),
+    let before = file_tree_bytes(&root);
+    let error = match support::open_store(config) {
+        Ok(_) => panic!("v12 clean break must reject a v11 SQLite Store"),
         Err(error) => error,
     };
-    assert_eq!(open_error.stage(), "store_migration_required");
-    let after_rejected_open = {
-        let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .query_row(
-                "SELECT schema_id, schema_version FROM bm_schema",
-                [],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)),
-            )
-            .unwrap()
-    };
-    assert_eq!(after_rejected_open, before_identity);
-
-    let report = MemoryStoreHandle::migrate_v10_to_v11(config.clone()).unwrap();
-    assert!(report.migrated);
-    assert_eq!(report.from_schema_version, 10);
-    assert_eq!(report.to_schema_version, 11);
-    assert!(!report.migration_event_id.is_empty());
-
-    let migrated = support::open_store(config).unwrap();
-    let store = migrated.conversation_transcript_store();
-    let catalog = store
-        .list_conversation_catalog(
-            "subject-store",
-            &TranscriptCatalogQuery {
-                memory_space_id: "space-store".to_string(),
-                governance_context_digest: governance_context_digest("sqlite-v10-migration"),
-                channel_id: None,
-                lifecycle: TranscriptCatalogLifecycle::ActiveOnly,
-                limit: 8,
-                cursor: None,
-            },
-        )
-        .unwrap();
-    assert_eq!(catalog.heads.len(), 1);
-    let search = store
-        .search_transcript(
-            "subject-store",
-            &TranscriptSearchQuery {
-                scope: TranscriptSearchScope::ExactConversation { key: key.clone() },
-                governance_context_digest: governance_context_digest("sqlite-v10-search"),
-                query: TranscriptSearchNormalizerV1::normalize("amber").unwrap(),
-                sort: TranscriptSearchSort::RelevanceThenObservedAt,
-                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
-                limit: 8,
-                cursor: None,
-            },
-        )
-        .unwrap();
-    assert_eq!(search.candidates.len(), 1);
-    let private = store
-        .search_transcript(
-            "subject-store",
-            &TranscriptSearchQuery {
-                scope: TranscriptSearchScope::ExactConversation { key: key.clone() },
-                governance_context_digest: governance_context_digest("sqlite-v10-private"),
-                query: TranscriptSearchNormalizerV1::normalize("cobalt").unwrap(),
-                sort: TranscriptSearchSort::RelevanceThenObservedAt,
-                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
-                limit: 8,
-                cursor: None,
-            },
-        )
-        .unwrap();
-    assert!(private.candidates.is_empty());
-    let connection = rusqlite::Connection::open(&path).unwrap();
-    let identity: (String, u32) = connection
-        .query_row(
-            "SELECT schema_id, schema_version FROM bm_schema",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(identity, ("beetle_memory_store_schema_v11".to_string(), 11));
+    assert_eq!(error.stage(), "store_rebuild_required");
+    assert_eq!(file_tree_bytes(&root), before);
 }
 
 #[test]
-fn file_store_requires_explicit_v10_to_v11_sibling_migration_with_reopen_queries() {
-    let root = temp_root("query-file-v10-migration");
+fn file_store_v11_is_rejected_read_only_by_v12_clean_break() {
+    let root = temp_root("query-file-v11-clean-break");
     let config = StoreBackendConfig::file(&root, support::native_persistent_profile()).unwrap();
-    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
     {
         let platform = support::open_store(config.clone()).unwrap();
-        let mut record = transcript_record(&key, "turn-v10", "private cobalt 迁移");
-        record.input_messages[0].authority = MemoryEvidenceAuthority::SoulGovernance;
-        record.assistant_message.as_mut().unwrap().content = "public amber migration".to_string();
+        let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
         platform
             .conversation_transcript_store()
-            .append_turn(&record)
+            .append_turn(&transcript_record(&key, "turn-v11", "preserved v11 state"))
             .unwrap();
     }
-    downgrade_file_transcript_query_to_v10(&root, None);
-
-    let manifest_path = root.join("manifest.json");
-    let before = std::fs::read(&manifest_path).unwrap();
-    let open_error = match support::open_store(config.clone()) {
-        Ok(_) => panic!("normal open must not migrate exact v10"),
+    rewrite_file_manifest_as_v11(&root);
+    let before = file_tree_bytes(&root);
+    let error = match support::open_store(config) {
+        Ok(_) => panic!("v12 clean break must reject a v11 File Store"),
         Err(error) => error,
     };
-    assert_eq!(open_error.stage(), "store_migration_required");
-    assert_eq!(std::fs::read(&manifest_path).unwrap(), before);
-
-    let report = MemoryStoreHandle::migrate_v10_to_v11(config.clone()).unwrap();
-    assert!(report.migrated);
-    assert_eq!(report.from_schema_version, 10);
-    assert_eq!(report.to_schema_version, 11);
-    assert!(!report.migration_event_id.is_empty());
-
-    let migrated = support::open_store(config).unwrap();
-    let store = migrated.conversation_transcript_store();
-    let catalog = store
-        .list_conversation_catalog(
-            "subject-store",
-            &TranscriptCatalogQuery {
-                memory_space_id: "space-store".to_string(),
-                governance_context_digest: governance_context_digest("file-v10-migration"),
-                channel_id: None,
-                lifecycle: TranscriptCatalogLifecycle::ActiveOnly,
-                limit: 8,
-                cursor: None,
-            },
-        )
-        .unwrap();
-    assert_eq!(catalog.heads.len(), 1);
-    let search = store
-        .search_transcript(
-            "subject-store",
-            &TranscriptSearchQuery {
-                scope: TranscriptSearchScope::ExactConversation { key: key.clone() },
-                governance_context_digest: governance_context_digest("file-v10-search"),
-                query: TranscriptSearchNormalizerV1::normalize("amber").unwrap(),
-                sort: TranscriptSearchSort::RelevanceThenObservedAt,
-                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
-                limit: 8,
-                cursor: None,
-            },
-        )
-        .unwrap();
-    assert_eq!(search.candidates.len(), 1);
-    let private = store
-        .search_transcript(
-            "subject-store",
-            &TranscriptSearchQuery {
-                scope: TranscriptSearchScope::ExactConversation { key: key.clone() },
-                governance_context_digest: governance_context_digest("file-v10-private"),
-                query: TranscriptSearchNormalizerV1::normalize("cobalt").unwrap(),
-                sort: TranscriptSearchSort::RelevanceThenObservedAt,
-                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
-                limit: 8,
-                cursor: None,
-            },
-        )
-        .unwrap();
-    assert!(private.candidates.is_empty());
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
-    assert_eq!(
-        manifest["schema_id"],
-        json!("beetle_memory_store_schema_v11")
-    );
-    assert_eq!(manifest["schema_version"], json!(11));
-}
-
-#[test]
-fn file_store_rejects_partial_v11_state_and_preserves_v10_authority() {
-    let root = temp_root("query-file-v10-partial");
-    let config = StoreBackendConfig::file(&root, support::native_persistent_profile()).unwrap();
-    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
-    {
-        let platform = support::open_store(config.clone()).unwrap();
-        platform
-            .conversation_transcript_store()
-            .append_turn(&transcript_record(&key, "turn-v10", "partial migration"))
-            .unwrap();
-    }
-    downgrade_file_transcript_query_to_v10(&root, Some("conversation_transcript_catalog_roots"));
-    let manifest_path = root.join("manifest.json");
-    let before = std::fs::read(&manifest_path).unwrap();
-    let error = match support::open_store(config.clone()) {
-        Ok(_) => panic!("partial v11 state must fail closed"),
-        Err(error) => error,
-    };
-    assert_eq!(error.stage(), "store_migration_required");
-    assert_eq!(std::fs::read(&manifest_path).unwrap(), before);
-    let migration_error = MemoryStoreHandle::migrate_v10_to_v11(config).unwrap_err();
-    assert!(migration_error
-        .to_string()
-        .contains("partial or foreign v11 query state"));
-    assert_eq!(std::fs::read(manifest_path).unwrap(), before);
+    assert_eq!(error.stage(), "store_rebuild_required");
+    assert_eq!(file_tree_bytes(&root), before);
 }
 
 #[test]
@@ -2224,74 +2045,6 @@ fn file_store_open_fails_closed_when_transcript_query_closure_is_missing() {
     assert!(error
         .to_string()
         .contains("transcript message has no search manifest"));
-}
-
-#[cfg(feature = "sqlite-store")]
-#[test]
-fn sqlite_store_rejects_partial_v11_state_and_rolls_back_to_v10() {
-    let root = temp_root("query-sqlite-v10-partial");
-    let path = root.join("memory.sqlite3");
-    let config = StoreBackendConfig::sqlite(&path, support::native_persistent_profile()).unwrap();
-    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
-    {
-        let platform = support::open_store(config.clone()).unwrap();
-        platform
-            .conversation_transcript_store()
-            .append_turn(&transcript_record(&key, "turn-v10", "partial migration"))
-            .unwrap();
-    }
-    {
-        let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .execute(
-                "DELETE FROM bm_kv WHERE namespace IN (
-                    'conversation_transcript_catalog_pages',
-                    'conversation_transcript_time_postings',
-                    'conversation_transcript_time_roots',
-                    'conversation_transcript_search_postings',
-                    'conversation_transcript_search_roots',
-                    'conversation_transcript_search_message_manifests',
-                    'conversation_transcript_query_keyring_private'
-                )",
-                [],
-            )
-            .unwrap();
-        let raw: String = connection
-            .query_row("SELECT manifest_json FROM bm_schema", [], |row| row.get(0))
-            .unwrap();
-        let mut manifest: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        manifest["schema_id"] = json!("beetle_memory_store_schema_v10");
-        manifest["schema_version"] = json!(10);
-        connection.execute("DELETE FROM bm_schema", []).unwrap();
-        connection
-            .execute(
-                "INSERT INTO bm_schema(schema_id, schema_version, manifest_json) VALUES (?1, ?2, ?3)",
-                rusqlite::params![
-                    "beetle_memory_store_schema_v10",
-                    10,
-                    serde_json::to_string(&manifest).unwrap()
-                ],
-            )
-            .unwrap();
-    }
-    let error = match support::open_store(config.clone()) {
-        Ok(_) => panic!("partial v11 state must fail closed"),
-        Err(error) => error,
-    };
-    assert_eq!(error.stage(), "store_migration_required");
-    let migration_error = MemoryStoreHandle::migrate_v10_to_v11(config).unwrap_err();
-    assert!(migration_error
-        .to_string()
-        .contains("partial or foreign v11 query state"));
-    let connection = rusqlite::Connection::open(&path).unwrap();
-    let identity: (String, u32) = connection
-        .query_row(
-            "SELECT schema_id, schema_version FROM bm_schema",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(identity, ("beetle_memory_store_schema_v10".to_string(), 10));
 }
 
 #[cfg(feature = "sqlite-store")]

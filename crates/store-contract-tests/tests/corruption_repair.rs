@@ -143,7 +143,7 @@ fn sqlite_store_rejects_unknown_schema_and_duplicate_events() {
         Ok(_) => panic!("unknown sqlite schema must be rejected"),
         Err(error) => error,
     };
-    assert_eq!(err.stage(), "sqlite_store_schema");
+    assert_eq!(err.stage(), "store_rebuild_required");
 
     let valid_path = root.join("valid.sqlite3");
     let platform = support::open_store(

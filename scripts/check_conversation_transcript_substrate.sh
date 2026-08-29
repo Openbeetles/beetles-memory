@@ -91,7 +91,8 @@ require_fixed "TranscriptUtcRange" dev-docs/conversation-transcript-substrate-pl
 require_fixed "beetle-memory.platform.capability.v4" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md crates/sdk/src/capability_snapshot.rs
 require_fixed "transcript_search" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md crates/sdk/src/capability.rs crates/sdk/src/capability_snapshot.rs
 require_fixed "transcript_activity" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md crates/sdk/src/capability.rs crates/sdk/src/capability_snapshot.rs
-require_fixed "beetle_memory_store_schema_v11" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md crates/sdk/src/store_internal/schema.rs
+require_fixed "beetle_memory_store_schema_v11" dev-docs/conversation-transcript-substrate-plan.md
+require_fixed "beetle_memory_store_schema_v12" docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md crates/sdk/src/store_internal/schema.rs
 require_fixed "MemoryTranscriptLifecycleRequest" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md
 require_fixed "MemoryTranscriptExportRequest" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md
 require_fixed "MemoryTranscriptRepairRequest" docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/sdk/src/lib.rs

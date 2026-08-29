@@ -9,24 +9,30 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bm_core::platform::Platform as _;
 use bm_sdk::{
     default_agent_subject_id, default_memory_space_id, primary_human_subject_id,
-    CanonicalTurnDelta, ConversationScope, MemoryClock, MemoryConsolidationState,
+    AuthorizedGovernanceEnvelope, CanonicalTurnDelta, ConversationScope, GovernanceEgressAuthority,
+    GovernanceExecutionOperation, GovernanceExecutionPort, GovernanceExecutionPortFailure,
+    ImmutableGovernanceExecutionBinding, MemoryClock, MemoryConsolidationState,
     MemoryGovernanceActiveJobsRequest, MemoryGovernanceAttemptAuthorityRequest,
+    MemoryGovernanceBindingInstallRequest, MemoryGovernanceCredentialChangedRequest,
     MemoryGovernanceJobClaimRequest, MemoryGovernanceJobRenewRequest,
     MemoryGovernanceJobRetryRequest, MemoryGovernanceJobRunRequest,
-    MemoryGovernanceJobStatusRequest, MemoryGovernanceReconcileRequest, MemoryIdentity,
-    MemoryPrivacyPolicy, MemoryScope, MemoryStoreHandle, MemoryTranscriptCommitRequest,
-    MemoryTranscriptLifecycleRequest, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest,
-    MemoryTurnProtocol, MemoryTurnSource, Message, PostTurnGovernanceAttemptAuthorityV2,
-    PostTurnGovernanceErrorClassV2, PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV2,
-    PressureLevel, RelationshipAccessConstraintV1, RelationshipDisclosureCeilingV1,
-    RelationshipSourceClausesV1, RelationshipSourceControlAuthorityV1,
-    RelationshipSourceControlIntentActionV1, RelationshipSourceControlIntentV1, ResponseBody,
-    RuntimeLifecycleModeInput, StopReason, StoreBackendConfig, SubjectRegistry,
-    SubjectRelationshipGraph, SubjectRelationshipKind, SubjectScopedRuntime,
-    SubjectSoulFoundingCharterSeedV1, SubjectSoulLifecycleStateV1, SubjectSoulProvisionIntentV1,
-    SubjectSoulReadOutcomeV1, SubjectSoulReadRequestV1, SubjectSoulReadSelectorV1,
-    SubjectSoulReadViewV1, ToolChoicePolicy, ToolSpec, TranscriptInputMessage,
-    TranscriptLifecycleTransition,
+    MemoryGovernanceJobStatusRequest, MemoryGovernanceProviderPermissionChangedRequest,
+    MemoryGovernanceReconcileRequest, MemoryIdentity, MemoryLearningCycleOutcome,
+    MemoryLearningCycleRequest, MemoryLearningEngine, MemoryMutationOperationKind,
+    MemoryMutationReceipt, MemoryPrivacyPolicy, MemoryScope, MemoryStoreHandle,
+    MemoryTranscriptCommitRequest, MemoryTranscriptLifecycleRequest, MemoryTurnDeliveryStatus,
+    MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, Message,
+    PostTurnGovernanceAttemptAuthorityV3, PostTurnGovernanceErrorClassV2,
+    PostTurnGovernanceExecutionBindingV1, PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV3,
+    PostTurnGovernancePrivacyAuthorityV1, PostTurnGovernanceProviderProtocolV1, PressureLevel,
+    RelationshipAccessConstraintV1, RelationshipDisclosureCeilingV1, RelationshipSourceClausesV1,
+    RelationshipSourceControlAuthorityV1, RelationshipSourceControlIntentActionV1,
+    RelationshipSourceControlIntentV1, ResponseBody, RuntimeLifecycleModeInput, StopReason,
+    StoreBackendConfig, SubjectRegistry, SubjectRelationshipGraph, SubjectRelationshipKind,
+    SubjectScopedRuntime, SubjectSoulFoundingCharterSeedV1, SubjectSoulLifecycleStateV1,
+    SubjectSoulProvisionIntentV1, SubjectSoulReadOutcomeV1, SubjectSoulReadRequestV1,
+    SubjectSoulReadSelectorV1, SubjectSoulReadViewV1, ToolChoicePolicy, ToolSpec,
+    TranscriptInputMessage, TranscriptLifecycleTransition,
 };
 use bm_sdk::{LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MemoryRuntime, Result};
 
@@ -84,14 +90,40 @@ fn finalize_request(
     }
 }
 
-fn attempt_authority() -> PostTurnGovernanceAttemptAuthorityV2 {
-    PostTurnGovernanceAttemptAuthorityV2 {
+fn system_governor_control_runtime(
+    runtime: &MemoryRuntime,
+    store: MemoryStoreHandle,
+) -> MemoryRuntime {
+    let mut scoped_runtime = runtime.scoped_runtime().clone();
+    scoped_runtime.actor_subject_id =
+        bm_sdk::system_governor_subject_id(&runtime.identity().owner_id);
+    MemoryRuntime::builder()
+        .identity(runtime.identity().clone())
+        .scope(runtime.scope().clone())
+        .store(store)
+        .subject_registry(runtime.subject_registry().clone())
+        .subject_relationship_graph(runtime.config().subject_relationship_graph.clone())
+        .subject_id(runtime.subject_id().to_string())
+        .scoped_runtime(scoped_runtime)
+        .clock(Arc::clone(&runtime.config().clock))
+        .capability_policy(runtime.config().capability_policy.clone())
+        .privacy_policy(runtime.config().privacy_policy.clone())
+        .audit_sink(Arc::clone(&runtime.config().audit_sink))
+        .build()
+        .expect("SystemGovernor control runtime")
+}
+
+fn attempt_authority() -> PostTurnGovernanceAttemptAuthorityV3 {
+    PostTurnGovernanceAttemptAuthorityV3 {
         binding_id: "governance-model:test".to_string(),
-        config_revision: 1,
+        binding_revision: 1,
         model_id: "qwen3:8b".to_string(),
-        privacy_revision: 1,
-        privacy_digest: "sha256:3333333333333333333333333333333333333333333333333333333333333333"
-            .to_string(),
+        privacy_authority: PostTurnGovernancePrivacyAuthorityV1 {
+            policy_schema_version: 1,
+            exact_policy_digest:
+                "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+                    .to_string(),
+        },
         transcript_lifecycle_revision: 1,
         disclosure_authority_digest:
             "sha256:4444444444444444444444444444444444444444444444444444444444444444".to_string(),
@@ -99,11 +131,19 @@ fn attempt_authority() -> PostTurnGovernanceAttemptAuthorityV2 {
 }
 
 fn attempt_authority_for_job(
-    job: &PostTurnGovernanceJobV2,
-) -> PostTurnGovernanceAttemptAuthorityV2 {
-    PostTurnGovernanceAttemptAuthorityV2 {
-        privacy_revision: job.pinned_privacy_revision,
-        privacy_digest: job.pinned_privacy_digest.clone(),
+    job: &PostTurnGovernanceJobV3,
+) -> PostTurnGovernanceAttemptAuthorityV3 {
+    let PostTurnGovernanceExecutionBindingV1::Bound {
+        binding_id,
+        binding_revision,
+    } = &job.execution_binding
+    else {
+        panic!("claim fixture requires an installed immutable binding snapshot")
+    };
+    PostTurnGovernanceAttemptAuthorityV3 {
+        binding_id: binding_id.clone(),
+        binding_revision: *binding_revision,
+        privacy_authority: job.privacy_authority.clone(),
         ..attempt_authority()
     }
 }
@@ -447,6 +487,20 @@ fn persistent_test_root(label: &str) -> std::path::PathBuf {
     ))
 }
 
+fn binding_runtime_with_clock(store: MemoryStoreHandle, now_secs: u64) -> MemoryRuntime {
+    MemoryRuntime::builder()
+        .identity(MemoryIdentity::new("agent-main", "owner-default").expect("identity"))
+        .subject_id("subject-default")
+        .scope(MemoryScope::new("llm.gateway", "chat-a").expect("scope"))
+        .store(store)
+        .clock(Arc::new(AdjustableMemoryClock::new(now_secs)))
+        .capability_policy(bm_sdk::MemoryCapabilityPolicy::strict_profile())
+        .privacy_policy(MemoryPrivacyPolicy::standard_private_boundary())
+        .audit_sink(Arc::new(bm_sdk::NoopMemoryAuditSink))
+        .build()
+        .expect("binding runtime")
+}
+
 fn assert_independent_open_claim(config: StoreBackendConfig) {
     let profile = support::host_test_profile();
     let first_store = support::open_memory_store(config.clone()).expect("first open");
@@ -465,6 +519,7 @@ fn assert_independent_open_claim(config: StoreBackendConfig) {
         "chat-a",
         "subject-default",
     ));
+    install_learning_binding(&first, 1);
     let finalized = first
         .finalize_turn_with_inline_governance(
             None,
@@ -473,13 +528,21 @@ fn assert_independent_open_claim(config: StoreBackendConfig) {
         )
         .expect("finalize");
     let job_id = finalized.memory_consolidation.job_id.expect("job id");
+    let authority = attempt_authority_for_job(
+        &first
+            .governance_job_status(MemoryGovernanceJobStatusRequest {
+                job_id: job_id.clone(),
+            })
+            .expect("pending job")
+            .job,
+    );
     let barrier = Arc::new(Barrier::new(3));
     let workers = [
-        (first, "persistent-worker-a"),
-        (second, "persistent-worker-b"),
+        (first, "persistent-worker-a", authority.clone()),
+        (second, "persistent-worker-b", authority),
     ]
     .into_iter()
-    .map(|(runtime, worker)| {
+    .map(|(runtime, worker, authority)| {
         let barrier = Arc::clone(&barrier);
         let job_id = job_id.clone();
         std::thread::spawn(move || {
@@ -488,7 +551,7 @@ fn assert_independent_open_claim(config: StoreBackendConfig) {
                 job_id,
                 lease_owner: worker.to_string(),
                 lease_until: 1_800_000_060,
-                authority: attempt_authority(),
+                authority,
             })
         })
     })
@@ -502,6 +565,123 @@ fn assert_independent_open_claim(config: StoreBackendConfig) {
     assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
 }
 
+fn assert_independent_open_binding_install(config: StoreBackendConfig) {
+    let first_store = support::open_memory_store(config.clone()).expect("first open");
+    let second_store = support::open_memory_store(config).expect("second open");
+    let first = Arc::new(binding_runtime_with_clock(
+        first_store.clone(),
+        1_800_000_000,
+    ));
+    let second = Arc::new(binding_runtime_with_clock(second_store, 1_800_000_001));
+    let barrier = Arc::new(Barrier::new(3));
+    let workers = [first, second]
+        .into_iter()
+        .map(|runtime| {
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                runtime.install_governance_binding(learning_binding_request(1))
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    let results = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("binding worker"))
+        .collect::<Vec<_>>();
+    assert!(results.iter().all(Result::is_ok));
+    let bindings = results
+        .into_iter()
+        .map(|result| result.expect("idempotent binding install").binding)
+        .collect::<Vec<_>>();
+    assert_eq!(bindings[0], bindings[1]);
+    let snapshot = first_store
+        .export_replay_snapshot()
+        .expect("binding install snapshot");
+    assert_eq!(
+        snapshot
+            .json_docs
+            .iter()
+            .filter(|doc| doc.namespace == "post_turn_governance_binding_snapshots")
+            .count(),
+        1
+    );
+    assert_eq!(
+        snapshot
+            .json_docs
+            .iter()
+            .filter(|doc| doc.namespace == "post_turn_governance_binding_revision_indexes")
+            .count(),
+        1
+    );
+    let binding_doc = snapshot
+        .json_docs
+        .iter()
+        .find(|doc| doc.namespace == "post_turn_governance_binding_snapshots")
+        .expect("winner binding snapshot");
+    let index_doc = snapshot
+        .json_docs
+        .iter()
+        .find(|doc| doc.namespace == "post_turn_governance_binding_revision_indexes")
+        .expect("winner binding revision index");
+    let revision_ref = index_doc.value["revisions"]
+        .as_array()
+        .and_then(|revisions| revisions.first())
+        .expect("winner revision ref");
+    assert_eq!(
+        revision_ref["bindingRevision"],
+        binding_doc.value["bindingRevision"]
+    );
+    assert_eq!(
+        revision_ref["canonicalDigest"],
+        binding_doc.value["canonicalDigest"]
+    );
+    assert_eq!(revision_ref["createdAt"], binding_doc.value["createdAt"]);
+}
+
+fn assert_independent_open_conflicting_binding_install(config: StoreBackendConfig) {
+    let first_store = support::open_memory_store(config.clone()).expect("first open");
+    let second_store = support::open_memory_store(config).expect("second open");
+    let first = Arc::new(binding_runtime_with_clock(
+        first_store.clone(),
+        1_800_000_000,
+    ));
+    let second = Arc::new(binding_runtime_with_clock(second_store, 1_800_000_001));
+    let mut divergent = learning_binding_request(1);
+    divergent.model_id = "another-model".to_string();
+    let barrier = Arc::new(Barrier::new(3));
+    let workers = [(first, learning_binding_request(1)), (second, divergent)]
+        .into_iter()
+        .map(|(runtime, request)| {
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                runtime.install_governance_binding(request)
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    let results = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("binding worker"))
+        .collect::<Vec<_>>();
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+    let loser = results.into_iter().find_map(Result::err).expect("loser");
+    assert_eq!(loser.stage(), "post_turn_governance_binding_snapshot");
+    let snapshot = first_store
+        .export_replay_snapshot()
+        .expect("binding conflict snapshot");
+    assert_eq!(
+        snapshot
+            .json_docs
+            .iter()
+            .filter(|doc| doc.namespace == "post_turn_governance_binding_snapshots")
+            .count(),
+        1
+    );
+}
+
 fn assert_persistent_atomic_completion(config: StoreBackendConfig) {
     let profile = support::host_test_profile();
     let first_store = support::open_memory_store(config.clone()).expect("first open");
@@ -512,6 +692,7 @@ fn assert_persistent_atomic_completion(config: StoreBackendConfig) {
         "chat-a",
         "subject-default",
     );
+    install_learning_binding(&first, 1);
     let finalized = first
         .finalize_turn_with_inline_governance(
             None,
@@ -1195,7 +1376,7 @@ fn production_autonomous_bootstrap_survives_sqlite_reopen() {
 }
 
 #[test]
-fn maintenance_unavailable_commits_transcript_and_durable_v2_intent_without_raw_copy() {
+fn maintenance_unavailable_commits_transcript_and_durable_v3_intent_without_raw_copy() {
     let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
@@ -1237,7 +1418,10 @@ fn maintenance_unavailable_commits_transcript_and_durable_v2_intent_without_raw_
             job_id: job_id.to_string(),
         })
         .expect("exact job status");
-    assert_eq!(status.job.status, PostTurnGovernanceJobStatusV2::Pending);
+    assert_eq!(
+        status.job.status,
+        PostTurnGovernanceJobStatusV2::BlockedConfiguration
+    );
     assert_eq!(status.job.identity.conversation_id, "window-a");
 
     let snapshot = platform
@@ -1259,6 +1443,688 @@ fn maintenance_unavailable_commits_transcript_and_durable_v2_intent_without_raw_
     assert!(!encoded.contains("叫我青川"));
     assert!(!encoded.contains("不得复制进任务"));
     assert!(!encoded.contains("inputMessages"));
+}
+
+#[test]
+fn finalize_pins_current_model_revision_without_reusing_it_as_privacy_revision() {
+    let profile = support::host_test_profile();
+    let platform = empty_store_platform(profile);
+    let runtime = test_runtime_with_scope_and_subject(
+        platform,
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    let binding = install_learning_binding(&runtime, 2);
+
+    let report = runtime
+        .finalize_turn_with_inline_governance(
+            None,
+            None,
+            finalize_request(
+                "subject-default",
+                "window-revision",
+                "turn-revision-2",
+                "合成的 revision 绑定测试",
+            ),
+        )
+        .expect("finalize");
+    let job_id = report.memory_consolidation.job_id.expect("durable job id");
+    let job = runtime
+        .governance_job_status(MemoryGovernanceJobStatusRequest { job_id })
+        .expect("job status")
+        .job;
+
+    assert_eq!(
+        job.execution_binding,
+        PostTurnGovernanceExecutionBindingV1::Bound {
+            binding_id: binding.binding_id,
+            binding_revision: 2,
+        }
+    );
+    assert_eq!(job.status, PostTurnGovernanceJobStatusV2::Pending);
+    assert_eq!(job.privacy_authority.policy_schema_version, 1);
+    assert!(job
+        .privacy_authority
+        .exact_policy_digest
+        .starts_with("sha256:"));
+}
+
+struct SyntheticLearningPort<'a, H: LlmHttpClient + Send> {
+    http: &'a mut H,
+    llm: &'a (dyn LlmClient + Send + Sync),
+}
+
+fn install_learning_binding(
+    runtime: &MemoryRuntime,
+    source_revision: u64,
+) -> bm_sdk::PostTurnGovernanceBindingSnapshotV1 {
+    runtime
+        .install_governance_binding(learning_binding_request(source_revision))
+        .expect("install Store-owned binding snapshot")
+        .binding
+}
+
+fn learning_binding_request(source_revision: u64) -> MemoryGovernanceBindingInstallRequest {
+    MemoryGovernanceBindingInstallRequest {
+        source_owner_id: "test-deployment".to_string(),
+        source_config_id: "primary-governance-provider".to_string(),
+        source_revision,
+        protocol: PostTurnGovernanceProviderProtocolV1::OllamaNative,
+        endpoint: "http://127.0.0.1:11434/api".to_string(),
+        model_id: "qwen3:8b".to_string(),
+        credential_reference: None,
+        request_timeout_ms: 30_000,
+        max_input_tokens: 4096,
+        max_output_tokens: 1024,
+        provider_permission_generation: 1,
+    }
+}
+
+impl<H: LlmHttpClient + Send> GovernanceExecutionPort for SyntheticLearningPort<'_, H> {
+    fn execute(
+        &mut self,
+        envelope: &AuthorizedGovernanceEnvelope,
+        binding: &ImmutableGovernanceExecutionBinding,
+        egress: &GovernanceEgressAuthority,
+        operation: &mut dyn GovernanceExecutionOperation,
+    ) -> std::result::Result<(), GovernanceExecutionPortFailure> {
+        assert_eq!(envelope.binding_revision, binding.binding_revision);
+        egress
+            .revalidate_before_egress()
+            .map_err(GovernanceExecutionPortFailure::Other)?;
+        operation
+            .run(self.http, self.llm)
+            .map_err(GovernanceExecutionPortFailure::Other)
+    }
+}
+
+struct SuccessfulThenErrorLearningPort<'a, H: LlmHttpClient + Send> {
+    http: &'a mut H,
+    llm: &'a (dyn LlmClient + Send + Sync),
+}
+
+struct ObservedLearningPort<'a, H: LlmHttpClient + Send> {
+    http: &'a mut H,
+    llm: &'a (dyn LlmClient + Send + Sync),
+    error: &'a mut Option<(&'static str, String)>,
+}
+
+impl<H: LlmHttpClient + Send> GovernanceExecutionPort for ObservedLearningPort<'_, H> {
+    fn execute(
+        &mut self,
+        _envelope: &AuthorizedGovernanceEnvelope,
+        _binding: &ImmutableGovernanceExecutionBinding,
+        egress: &GovernanceEgressAuthority,
+        operation: &mut dyn GovernanceExecutionOperation,
+    ) -> std::result::Result<(), GovernanceExecutionPortFailure> {
+        egress
+            .revalidate_before_egress()
+            .map_err(GovernanceExecutionPortFailure::Other)?;
+        operation.run(self.http, self.llm).map_err(|error| {
+            *self.error = Some((error.stage(), error.to_string()));
+            GovernanceExecutionPortFailure::Other(error)
+        })
+    }
+}
+
+impl<H: LlmHttpClient + Send> GovernanceExecutionPort for SuccessfulThenErrorLearningPort<'_, H> {
+    fn execute(
+        &mut self,
+        _envelope: &AuthorizedGovernanceEnvelope,
+        _binding: &ImmutableGovernanceExecutionBinding,
+        egress: &GovernanceEgressAuthority,
+        operation: &mut dyn GovernanceExecutionOperation,
+    ) -> std::result::Result<(), GovernanceExecutionPortFailure> {
+        egress
+            .revalidate_before_egress()
+            .map_err(GovernanceExecutionPortFailure::Other)?;
+        operation
+            .run(self.http, self.llm)
+            .map_err(GovernanceExecutionPortFailure::Other)?;
+        Err(GovernanceExecutionPortFailure::Other(bm_sdk::Error::Http {
+            status_code: 503,
+            stage: "synthetic_post_completion_error",
+        }))
+    }
+}
+
+struct NoopLearningPort;
+
+impl GovernanceExecutionPort for NoopLearningPort {
+    fn execute(
+        &mut self,
+        _envelope: &AuthorizedGovernanceEnvelope,
+        _binding: &ImmutableGovernanceExecutionBinding,
+        _egress: &GovernanceEgressAuthority,
+        _operation: &mut dyn GovernanceExecutionOperation,
+    ) -> std::result::Result<(), GovernanceExecutionPortFailure> {
+        Ok(())
+    }
+}
+
+struct BindingCapturingPort<'a, H: LlmHttpClient + Send> {
+    http: &'a mut H,
+    llm: &'a (dyn LlmClient + Send + Sync),
+    observed: &'a mut Option<(String, u64, String, String)>,
+}
+
+impl<H: LlmHttpClient + Send> GovernanceExecutionPort for BindingCapturingPort<'_, H> {
+    fn execute(
+        &mut self,
+        _envelope: &AuthorizedGovernanceEnvelope,
+        binding: &ImmutableGovernanceExecutionBinding,
+        egress: &GovernanceEgressAuthority,
+        operation: &mut dyn GovernanceExecutionOperation,
+    ) -> std::result::Result<(), GovernanceExecutionPortFailure> {
+        *self.observed = Some((
+            binding.binding_id.clone(),
+            binding.binding_revision,
+            binding.model_id.clone(),
+            binding.canonical_digest.clone(),
+        ));
+        egress
+            .revalidate_before_egress()
+            .map_err(GovernanceExecutionPortFailure::Other)?;
+        operation
+            .run(self.http, self.llm)
+            .map_err(GovernanceExecutionPortFailure::Other)
+    }
+}
+
+struct HttpFailureLearningPort {
+    status_code: u16,
+}
+
+impl GovernanceExecutionPort for HttpFailureLearningPort {
+    fn execute(
+        &mut self,
+        _envelope: &AuthorizedGovernanceEnvelope,
+        _binding: &ImmutableGovernanceExecutionBinding,
+        egress: &GovernanceEgressAuthority,
+        _operation: &mut dyn GovernanceExecutionOperation,
+    ) -> std::result::Result<(), GovernanceExecutionPortFailure> {
+        egress
+            .revalidate_before_egress()
+            .map_err(GovernanceExecutionPortFailure::Other)?;
+        match self.status_code {
+            401 => Err(GovernanceExecutionPortFailure::CredentialRejected {
+                credential_ref_safe_id:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_string(),
+                credential_generation: 1,
+            }),
+            403 => Err(GovernanceExecutionPortFailure::ProviderPermissionDenied {
+                provider_permission_generation: 1,
+            }),
+            status_code => Err(GovernanceExecutionPortFailure::Other(bm_sdk::Error::Http {
+                status_code,
+                stage: "synthetic_learning_transport",
+            })),
+        }
+    }
+}
+
+fn learning_cycle_request(_binding_revision: u64) -> MemoryLearningCycleRequest {
+    MemoryLearningCycleRequest {
+        lease_owner: "learning-engine:test".to_string(),
+        lease_duration_secs: 60,
+    }
+}
+
+#[test]
+fn learning_engine_owns_due_claim_governance_and_atomic_completion() {
+    let profile = support::host_test_profile();
+    let runtime = Arc::new(test_runtime_with_scope_and_subject(
+        empty_store_platform(profile),
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    ));
+    install_learning_binding(&runtime, 1);
+    runtime
+        .finalize_turn_with_inline_governance(
+            None,
+            None,
+            finalize_request(
+                "subject-default",
+                "window-engine",
+                "turn-engine",
+                "请记住我的长期偏好",
+            ),
+        )
+        .expect("finalize");
+    let engine = MemoryLearningEngine::attach(Arc::clone(&runtime)).expect("attach engine");
+    let mut http = StaticHttpClient;
+    let llm = PlaneAwareStaticLlm {
+        long_term_content: r#"[
+            {
+                "plane": "factual",
+                "op": "upsert",
+                "kind": "preference",
+                "source_authority": "user_asserted",
+                "topic": "learning_engine_owner",
+                "content": "用户偏好由 Learning Engine 原子沉淀。",
+                "keywords": ["learning", "engine"]
+            }
+        ]"#,
+    };
+    let mut port = SyntheticLearningPort {
+        http: &mut http,
+        llm: &llm,
+    };
+    let outcome = engine
+        .run_due_cycle(learning_cycle_request(1), &mut port)
+        .expect("learning cycle");
+    let MemoryLearningCycleOutcome::Completed(report) = outcome else {
+        panic!("due cycle must complete one exact job")
+    };
+    assert_eq!(report.job.status, PostTurnGovernanceJobStatusV2::Succeeded);
+    let receipt = report.job.receipt.expect("decision receipt");
+    assert_eq!(receipt.decision_summary.accepted_count, 1);
+    assert_eq!(receipt.decision_summary.rejected_count, 0);
+}
+
+#[test]
+fn learning_engine_zero_candidate_completion_remains_authoritative_after_port_error() {
+    let profile = support::host_test_profile();
+    let runtime = Arc::new(test_runtime_with_scope_and_subject(
+        empty_store_platform(profile),
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    ));
+    install_learning_binding(&runtime, 1);
+    let mut request = finalize_request(
+        "subject-default",
+        "window-engine-zero",
+        "turn-engine-zero",
+        "这一轮没有可接受的长期记忆",
+    );
+    request.turn.candidate_ids.clear();
+    runtime
+        .finalize_turn_with_inline_governance(None, None, request)
+        .expect("finalize zero candidate turn");
+    let engine = MemoryLearningEngine::attach(Arc::clone(&runtime)).expect("attach engine");
+    let mut http = StaticHttpClient;
+    let llm = PlaneAwareStaticLlm {
+        long_term_content: "[]",
+    };
+    let mut port = SuccessfulThenErrorLearningPort {
+        http: &mut http,
+        llm: &llm,
+    };
+    let outcome = engine
+        .run_due_cycle(learning_cycle_request(1), &mut port)
+        .expect("authoritative completion");
+    let MemoryLearningCycleOutcome::Completed(report) = outcome else {
+        panic!("completed Store state must outrank a later port error")
+    };
+    let receipt = report.job.receipt.expect("zero-candidate receipt");
+    assert_eq!(receipt.decision_summary.accepted_count, 0);
+    assert_eq!(receipt.decision_summary.rejected_count, 0);
+}
+
+#[test]
+fn learning_engine_dead_letters_port_that_skips_governed_operation() {
+    let profile = support::host_test_profile();
+    let runtime = Arc::new(test_runtime_with_scope_and_subject(
+        empty_store_platform(profile),
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    ));
+    install_learning_binding(&runtime, 1);
+    runtime
+        .finalize_turn_with_inline_governance(
+            None,
+            None,
+            finalize_request(
+                "subject-default",
+                "window-engine-skip",
+                "turn-engine-skip",
+                "执行端不得伪造完成",
+            ),
+        )
+        .expect("finalize");
+    let engine = MemoryLearningEngine::attach(Arc::clone(&runtime)).expect("attach engine");
+    let outcome = engine
+        .run_due_cycle(learning_cycle_request(1), &mut NoopLearningPort)
+        .expect("cycle result");
+    let MemoryLearningCycleOutcome::Failed(report) = outcome else {
+        panic!("a port that skips the governed operation must fail terminally")
+    };
+    assert_eq!(report.job.status, PostTurnGovernanceJobStatusV2::DeadLetter);
+    assert_eq!(
+        report.job.last_error_class,
+        Some(PostTurnGovernanceErrorClassV2::SchemaViolation)
+    );
+    assert!(report.job.receipt.is_none());
+}
+
+#[test]
+fn learning_engine_owns_retry_and_provider_authority_transitions() {
+    for (status_code, expected_status, expected_error) in [
+        (
+            429,
+            PostTurnGovernanceJobStatusV2::RetryWaiting,
+            Some(PostTurnGovernanceErrorClassV2::RateLimited),
+        ),
+        (
+            401,
+            PostTurnGovernanceJobStatusV2::BlockedConfiguration,
+            None,
+        ),
+        (403, PostTurnGovernanceJobStatusV2::BlockedPolicy, None),
+    ] {
+        let profile = support::host_test_profile();
+        let runtime = Arc::new(test_runtime_with_scope_and_subject(
+            empty_store_platform(profile),
+            profile,
+            "llm.gateway",
+            "chat-a",
+            "subject-default",
+        ));
+        install_learning_binding(&runtime, 1);
+        runtime
+            .finalize_turn_with_inline_governance(
+                None,
+                None,
+                finalize_request(
+                    "subject-default",
+                    &format!("window-engine-http-{status_code}"),
+                    &format!("turn-engine-http-{status_code}"),
+                    "合成 Provider 失败分类",
+                ),
+            )
+            .expect("finalize");
+        let engine = MemoryLearningEngine::attach(Arc::clone(&runtime)).expect("attach engine");
+        let mut port = HttpFailureLearningPort { status_code };
+        let outcome = engine
+            .run_due_cycle(learning_cycle_request(1), &mut port)
+            .expect("classified cycle");
+        let job = match outcome {
+            MemoryLearningCycleOutcome::Retrying(report)
+            | MemoryLearningCycleOutcome::Blocked(report) => report.job,
+            _ => panic!("HTTP status must become the exact durable retry/block state"),
+        };
+        assert_eq!(job.status, expected_status);
+        assert_eq!(job.last_error_class, expected_error);
+        assert!(job.receipt.is_none());
+    }
+}
+
+#[test]
+fn governance_recovery_is_actor_kind_and_intent_bound_with_one_receipt_audit_pair() {
+    for (status_code, operation_kind) in [
+        (
+            401,
+            MemoryMutationOperationKind::GovernanceCredentialRecovery,
+        ),
+        (
+            403,
+            MemoryMutationOperationKind::GovernanceProviderPermissionRecovery,
+        ),
+    ] {
+        let profile = support::host_test_profile();
+        let platform = empty_store_platform(profile);
+        let runtime = Arc::new(test_runtime_with_scope_and_subject(
+            platform.clone(),
+            profile,
+            "llm.gateway",
+            "chat-a",
+            "subject-default",
+        ));
+        assert!(runtime.learning_service_status_authority().is_err());
+        assert!(runtime.learning_service_control_authorities().is_err());
+        let governor_runtime = system_governor_control_runtime(&runtime, platform.clone());
+        let control_authorities = governor_runtime
+            .learning_service_control_authorities()
+            .expect("exact SystemGovernor recovery authorities");
+        let binding = install_learning_binding(&runtime, 1);
+        runtime
+            .finalize_turn_with_inline_governance(
+                None,
+                None,
+                finalize_request(
+                    "subject-default",
+                    &format!("window-recovery-operation-{status_code}"),
+                    &format!("turn-recovery-operation-{status_code}"),
+                    "恢复操作必须具备持久幂等证据",
+                ),
+            )
+            .expect("finalize recovery operation");
+        let engine = MemoryLearningEngine::attach(Arc::clone(&runtime)).expect("attach engine");
+        let outcome = engine
+            .run_due_cycle(
+                learning_cycle_request(1),
+                &mut HttpFailureLearningPort { status_code },
+            )
+            .expect("persist exact blocked authority");
+        let blocked = match outcome {
+            MemoryLearningCycleOutcome::Blocked(report) => report.job,
+            _ => panic!("401/403 must become an exact blocked job"),
+        };
+        let operation_id = format!("recovery-operation-{status_code}");
+        match status_code {
+            401 => {
+                let credential_ref_safe_id = blocked
+                    .execution_block_authority
+                    .as_ref()
+                    .and_then(|authority| authority.credential_ref_safe_id.clone())
+                    .expect("credential safe identity");
+                let request = MemoryGovernanceCredentialChangedRequest {
+                    authority: control_authorities.credential_recovery(),
+                    credential_ref_safe_id,
+                    new_generation: 2,
+                    operation_id: operation_id.clone(),
+                };
+                assert!(runtime
+                    .governance_credential_changed(MemoryGovernanceCredentialChangedRequest {
+                        authority: control_authorities.provider_permission_recovery(),
+                        ..request.clone()
+                    })
+                    .is_err());
+                let committed = runtime
+                    .governance_credential_changed(request.clone())
+                    .expect("commit credential recovery");
+                assert_eq!(committed.resumed_jobs, 1);
+                assert_eq!(committed.already_applied_jobs, 0);
+                let replayed = runtime
+                    .governance_credential_changed(request.clone())
+                    .expect("replay exact credential recovery");
+                assert_eq!(replayed.resumed_jobs, 0);
+                assert_eq!(replayed.already_applied_jobs, 1);
+                assert!(runtime
+                    .governance_credential_changed(MemoryGovernanceCredentialChangedRequest {
+                        new_generation: 3,
+                        ..request
+                    })
+                    .is_err());
+            }
+            403 => {
+                let request = MemoryGovernanceProviderPermissionChangedRequest {
+                    authority: control_authorities.provider_permission_recovery(),
+                    binding_id: binding.binding_id.clone(),
+                    binding_revision: binding.binding_revision,
+                    new_generation: 2,
+                    operation_id: operation_id.clone(),
+                };
+                assert!(runtime
+                    .governance_provider_permission_changed(
+                        MemoryGovernanceProviderPermissionChangedRequest {
+                            authority: control_authorities.credential_recovery(),
+                            ..request.clone()
+                        }
+                    )
+                    .is_err());
+                let committed = runtime
+                    .governance_provider_permission_changed(request.clone())
+                    .expect("commit permission recovery");
+                assert_eq!(committed.resumed_jobs, 1);
+                assert_eq!(committed.already_applied_jobs, 0);
+                let replayed = runtime
+                    .governance_provider_permission_changed(request.clone())
+                    .expect("replay exact permission recovery");
+                assert_eq!(replayed.resumed_jobs, 0);
+                assert_eq!(replayed.already_applied_jobs, 1);
+                assert!(runtime
+                    .governance_provider_permission_changed(
+                        MemoryGovernanceProviderPermissionChangedRequest {
+                            new_generation: 3,
+                            ..request
+                        },
+                    )
+                    .is_err());
+            }
+            _ => unreachable!(),
+        }
+
+        let snapshot = platform
+            .replay_harness()
+            .export_store_snapshot()
+            .expect("recovery operation snapshot");
+        let receipts = snapshot
+            .json_docs
+            .iter()
+            .filter(|doc| doc.namespace == "memory_mutation_receipts")
+            .filter_map(|doc| {
+                serde_json::from_value::<MemoryMutationReceipt>(doc.value.clone()).ok()
+            })
+            .filter(|receipt| receipt.identity.operation_kind() == operation_kind)
+            .collect::<Vec<_>>();
+        assert_eq!(receipts.len(), 1, "one recovery operation has one receipt");
+        let receipt = &receipts[0];
+        assert_eq!(
+            receipt.identity.actor_subject_id(),
+            bm_sdk::system_governor_subject_id("owner-default")
+        );
+        let audits = snapshot
+            .json_docs
+            .iter()
+            .filter(|doc| {
+                doc.namespace == "memory_mutation_audits"
+                    && doc.key == receipt.identity.storage_key()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(audits.len(), 1, "one recovery operation has one audit");
+        assert_eq!(audits[0].value["intent_digest"], receipt.intent_digest);
+        assert_eq!(audits[0].value["transaction_id"], receipt.transaction_id);
+    }
+}
+
+#[test]
+fn learning_engine_transcript_revocation_cancels_before_first_network_byte() {
+    let profile = support::host_test_profile();
+    let platform = empty_store_platform(profile);
+    let runtime = Arc::new(test_runtime_with_scope_and_subject(
+        platform.clone(),
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    ));
+    install_learning_binding(&runtime, 1);
+    runtime
+        .finalize_turn_with_inline_governance(
+            None,
+            None,
+            finalize_request(
+                "subject-default",
+                "window-a",
+                "turn-egress-revoked",
+                "这段内容在首个网络字节前撤销",
+            ),
+        )
+        .expect("finalize");
+    let engine = MemoryLearningEngine::attach(Arc::clone(&runtime)).expect("attach engine");
+    let llm = LifecycleRevokingLlm {
+        runtime: Arc::clone(&runtime),
+        revoked: AtomicBool::new(false),
+    };
+    let mut http = CountingHttpClient::default();
+    let mut port = SyntheticLearningPort {
+        http: &mut http,
+        llm: &llm,
+    };
+    let outcome = engine
+        .run_due_cycle(learning_cycle_request(1), &mut port)
+        .expect("cancelled cycle");
+    let MemoryLearningCycleOutcome::Cancelled(report) = outcome else {
+        panic!("revoked transcript must be represented by its authoritative cancelled state")
+    };
+    assert_eq!(report.job.status, PostTurnGovernanceJobStatusV2::Cancelled);
+    assert_eq!(http.calls.load(Ordering::SeqCst), 0);
+    let snapshot = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("snapshot");
+    assert!(snapshot
+        .json_docs
+        .iter()
+        .all(|doc| doc.namespace != "private_garden" && doc.namespace != "long_term"));
+}
+
+#[test]
+fn learning_engine_cas_conflict_keeps_claim_and_semantic_post_image_atomic() {
+    let profile = support::host_test_profile();
+    let platform = empty_store_platform(profile);
+    let runtime = Arc::new(test_runtime_with_scope_and_subject(
+        platform.clone(),
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    ));
+    install_learning_binding(&runtime, 1);
+    let finalized = runtime
+        .finalize_turn_with_inline_governance(
+            None,
+            None,
+            finalize_request(
+                "subject-default",
+                "window-a",
+                "turn-atomic-conflict",
+                "验证 Learning Engine 原子冲突",
+            ),
+        )
+        .expect("finalize");
+    let job_id = finalized.memory_consolidation.job_id.expect("job id");
+    let engine = MemoryLearningEngine::attach(Arc::clone(&runtime)).expect("attach engine");
+    let llm = ConflictInjectingLlm {
+        store: platform.clone(),
+        calls: AtomicUsize::new(0),
+    };
+    let mut http = StaticHttpClient;
+    let mut observed_error = None;
+    let mut port = ObservedLearningPort {
+        http: &mut http,
+        llm: &llm,
+        error: &mut observed_error,
+    };
+    let result = engine.run_due_cycle(learning_cycle_request(1), &mut port);
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("unexpected classified outcome; execution error was {observed_error:?}"),
+    };
+    assert_eq!(error.stage(), "subject_soul_store_expected_state");
+    let current = runtime
+        .governance_job_status(MemoryGovernanceJobStatusRequest { job_id })
+        .expect("leased status")
+        .job;
+    assert_eq!(current.status, PostTurnGovernanceJobStatusV2::Leased);
+    assert!(current.receipt.is_none());
+    let snapshot = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("snapshot");
+    let encoded = serde_json::to_string(&snapshot.json_docs).expect("snapshot json");
+    assert!(encoded.contains("concurrent winner"));
+    assert!(!encoded.contains("This semantic write must not partially commit."));
 }
 
 #[test]
@@ -1323,6 +2189,7 @@ fn active_lease_renewal_is_fenced_by_owner_epoch_and_strict_deadline() {
         "chat-a",
         "subject-default",
     );
+    install_learning_binding(&runtime, 1);
     let finalized = runtime
         .finalize_turn_with_inline_governance(
             None,
@@ -1600,6 +2467,7 @@ fn concurrent_claim_has_one_winner_and_pins_first_attempt_authority() {
         "chat-a",
         "subject-default",
     ));
+    install_learning_binding(&first, 1);
     let finalized = first
         .finalize_turn_with_inline_governance(
             None,
@@ -1608,23 +2476,34 @@ fn concurrent_claim_has_one_winner_and_pins_first_attempt_authority() {
         )
         .expect("finalize");
     let job_id = finalized.memory_consolidation.job_id.expect("job id");
+    let authority = attempt_authority_for_job(
+        &first
+            .governance_job_status(MemoryGovernanceJobStatusRequest {
+                job_id: job_id.clone(),
+            })
+            .expect("pending job")
+            .job,
+    );
     let barrier = Arc::new(Barrier::new(3));
-    let workers = [(first, "worker-a"), (second, "worker-b")]
-        .into_iter()
-        .map(|(runtime, worker)| {
-            let barrier = Arc::clone(&barrier);
-            let job_id = job_id.clone();
-            std::thread::spawn(move || {
-                barrier.wait();
-                runtime.claim_governance_job(MemoryGovernanceJobClaimRequest {
-                    job_id,
-                    lease_owner: worker.to_string(),
-                    lease_until: 1_800_000_060,
-                    authority: attempt_authority(),
-                })
+    let workers = [
+        (first, "worker-a", authority.clone()),
+        (second, "worker-b", authority.clone()),
+    ]
+    .into_iter()
+    .map(|(runtime, worker, authority)| {
+        let barrier = Arc::clone(&barrier);
+        let job_id = job_id.clone();
+        std::thread::spawn(move || {
+            barrier.wait();
+            runtime.claim_governance_job(MemoryGovernanceJobClaimRequest {
+                job_id,
+                lease_owner: worker.to_string(),
+                lease_until: 1_800_000_060,
+                authority,
             })
         })
-        .collect::<Vec<_>>();
+    })
+    .collect::<Vec<_>>();
     barrier.wait();
     let results = workers
         .into_iter()
@@ -1636,7 +2515,7 @@ fn concurrent_claim_has_one_winner_and_pins_first_attempt_authority() {
     assert_eq!(winner.job.status, PostTurnGovernanceJobStatusV2::Leased);
     assert_eq!(winner.job.attempt_count, 1);
     assert_eq!(winner.job.lease_epoch, 1);
-    assert_eq!(winner.job.attempt_authority, Some(attempt_authority()));
+    assert_eq!(winner.job.attempt_authority, Some(authority));
 }
 
 #[test]
@@ -1648,6 +2527,330 @@ fn independent_file_opens_still_allow_only_one_claim_winner() {
         assert_independent_open_claim(config);
     }
     std::fs::remove_dir_all(&root).expect("remove file claim store");
+}
+
+#[test]
+fn independent_file_opens_idempotently_install_the_same_first_binding() {
+    let profile = support::host_test_profile();
+    let root = persistent_test_root("file-binding-install");
+    {
+        let config = StoreBackendConfig::file(&root, profile).expect("file config");
+        assert_independent_open_binding_install(config);
+    }
+    std::fs::remove_dir_all(&root).expect("remove file binding Store");
+}
+
+#[test]
+fn independent_file_opens_reject_divergent_first_binding_identity() {
+    let profile = support::host_test_profile();
+    let root = persistent_test_root("file-binding-conflict");
+    {
+        let config = StoreBackendConfig::file(&root, profile).expect("file config");
+        assert_independent_open_conflicting_binding_install(config);
+    }
+    std::fs::remove_dir_all(&root).expect("remove file binding conflict Store");
+}
+
+fn assert_binding_snapshot_survives_runtime_reopen(
+    first_store: MemoryStoreHandle,
+    reopened_store: MemoryStoreHandle,
+) {
+    let profile = support::host_test_profile();
+    let (job_id, revision_one) = {
+        let runtime = test_runtime_with_scope_and_subject(
+            first_store,
+            profile,
+            "llm.gateway",
+            "chat-a",
+            "subject-default",
+        );
+        let revision_one = install_learning_binding(&runtime, 1);
+        let finalized = runtime
+            .finalize_turn_with_inline_governance(
+                None,
+                None,
+                finalize_request(
+                    "subject-default",
+                    "window-binding-reopen",
+                    "turn-binding-reopen",
+                    "绑定重开合同",
+                ),
+            )
+            .expect("finalize revision-one binding job");
+        (
+            finalized.memory_consolidation.job_id.expect("job id"),
+            revision_one,
+        )
+    };
+
+    let runtime = Arc::new(test_runtime_with_scope_and_subject(
+        reopened_store,
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    ));
+    let revision_two = install_learning_binding(&runtime, 2);
+    assert_ne!(revision_one.canonical_digest, revision_two.canonical_digest);
+    let reopened_job = runtime
+        .governance_job_status(MemoryGovernanceJobStatusRequest {
+            job_id: job_id.clone(),
+        })
+        .expect("reopened job")
+        .job;
+    assert_eq!(
+        reopened_job.execution_binding,
+        PostTurnGovernanceExecutionBindingV1::Bound {
+            binding_id: revision_one.binding_id.clone(),
+            binding_revision: 1,
+        }
+    );
+
+    let engine = MemoryLearningEngine::attach(Arc::clone(&runtime)).expect("reopened engine");
+    let mut http = StaticHttpClient;
+    let llm = PlaneAwareStaticLlm {
+        long_term_content: "[]",
+    };
+    let mut observed = None;
+    let mut port = BindingCapturingPort {
+        http: &mut http,
+        llm: &llm,
+        observed: &mut observed,
+    };
+    let outcome = engine
+        .run_due_cycle(learning_cycle_request(1), &mut port)
+        .expect("execute reopened exact binding");
+    assert!(matches!(outcome, MemoryLearningCycleOutcome::Completed(_)));
+    assert_eq!(
+        observed,
+        Some((
+            revision_one.binding_id,
+            1,
+            revision_one.model_id,
+            revision_one.canonical_digest,
+        ))
+    );
+    assert_eq!(
+        runtime
+            .governance_job_status(MemoryGovernanceJobStatusRequest { job_id })
+            .expect("completed reopened job")
+            .job
+            .status,
+        PostTurnGovernanceJobStatusV2::Succeeded
+    );
+}
+
+#[test]
+fn in_memory_runtime_recreation_preserves_exact_binding_snapshot() {
+    let config = StoreBackendConfig::in_memory(support::host_test_profile())
+        .expect("in-memory binding config");
+    let store = MemoryStoreHandle::open(config).expect("in-memory Store");
+    assert_binding_snapshot_survives_runtime_reopen(store.clone(), store);
+}
+
+#[test]
+fn file_reopen_preserves_exact_binding_snapshot() {
+    let root = persistent_test_root("file-binding-reopen");
+    let config =
+        StoreBackendConfig::file(&root, support::host_test_profile()).expect("file binding config");
+    let first = MemoryStoreHandle::open(config.clone()).expect("first file Store");
+    let reopened = MemoryStoreHandle::open(config).expect("reopened file Store");
+    assert_binding_snapshot_survives_runtime_reopen(first, reopened);
+    std::fs::remove_dir_all(root).expect("remove file binding Store");
+}
+
+#[cfg(feature = "sqlite-store")]
+#[test]
+fn sqlite_reopen_preserves_exact_binding_snapshot() {
+    let root = persistent_test_root("sqlite-binding-reopen");
+    std::fs::create_dir_all(&root).expect("create sqlite binding root");
+    let config =
+        StoreBackendConfig::sqlite(root.join("memory.sqlite3"), support::host_test_profile())
+            .expect("sqlite binding config");
+    let first = MemoryStoreHandle::open(config.clone()).expect("first sqlite Store");
+    let reopened = MemoryStoreHandle::open(config).expect("reopened sqlite Store");
+    assert_binding_snapshot_survives_runtime_reopen(first, reopened);
+    std::fs::remove_dir_all(root).expect("remove sqlite binding Store");
+}
+
+#[test]
+fn binding_retention_prunes_only_the_oldest_unreferenced_revision() {
+    let profile = support::host_test_profile();
+    let store = MemoryStoreHandle::open(
+        StoreBackendConfig::in_memory(profile).expect("binding retention Store config"),
+    )
+    .expect("binding retention Store");
+    let runtime = test_runtime_with_scope_and_subject(
+        store.clone(),
+        profile,
+        "llm.gateway",
+        "chat-binding-retention",
+        "subject-default",
+    );
+    let first = install_learning_binding(&runtime, 1);
+    for revision in 2..=257 {
+        install_learning_binding(&runtime, revision);
+    }
+    let snapshot = store
+        .export_replay_snapshot()
+        .expect("binding retention snapshot");
+    let revisions = snapshot
+        .json_docs
+        .iter()
+        .filter(|doc| doc.namespace == "post_turn_governance_binding_snapshots")
+        .map(|doc| doc.key.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(revisions.len(), 256);
+    assert!(!revisions.contains(&format!("{}:1", first.binding_id)));
+    assert!(revisions.contains(&format!("{}:257", first.binding_id)));
+}
+
+#[test]
+fn binding_retention_preserves_referenced_revision_and_backpressures_when_all_are_pinned() {
+    let profile = support::host_test_profile();
+    let source = MemoryStoreHandle::open(
+        StoreBackendConfig::in_memory(profile).expect("binding source Store config"),
+    )
+    .expect("binding source Store");
+    let runtime = test_runtime_with_scope_and_subject(
+        source.clone(),
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    let first = install_learning_binding(&runtime, 1);
+    runtime
+        .finalize_turn_with_inline_governance(
+            None,
+            None,
+            finalize_request(
+                "subject-default",
+                "binding-pinned-conversation",
+                "binding-pinned-turn",
+                "绑定保留合同",
+            ),
+        )
+        .expect("create job that pins revision one");
+    for revision in 2..=256 {
+        install_learning_binding(&runtime, revision);
+    }
+    install_learning_binding(&runtime, 257);
+    let retained = source.export_replay_snapshot().expect("retained snapshot");
+    let keys = retained
+        .json_docs
+        .iter()
+        .filter(|doc| doc.namespace == "post_turn_governance_binding_snapshots")
+        .map(|doc| doc.key.clone())
+        .collect::<Vec<_>>();
+    assert!(keys.contains(&format!("{}:1", first.binding_id)));
+    assert!(!keys.contains(&format!("{}:2", first.binding_id)));
+
+    let mut all_pinned = retained;
+    for doc in &mut all_pinned.json_docs {
+        if doc.namespace == "post_turn_governance_binding_revision_indexes" {
+            for revision in doc.value["revisions"]
+                .as_array_mut()
+                .expect("binding revisions")
+            {
+                revision["referenced"] = serde_json::Value::Bool(true);
+            }
+        }
+    }
+    let pinned_store = MemoryStoreHandle::open(
+        StoreBackendConfig::in_memory(profile).expect("all-pinned Store config"),
+    )
+    .expect("all-pinned Store");
+    pinned_store
+        .import_replay_snapshot(&all_pinned)
+        .expect("import all-pinned binding authority");
+    let pinned_runtime = test_runtime_with_scope_and_subject(
+        pinned_store.clone(),
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    let before = pinned_store
+        .export_replay_snapshot()
+        .expect("before exhausted write");
+    let error = pinned_runtime
+        .install_governance_binding(MemoryGovernanceBindingInstallRequest {
+            source_owner_id: "test-deployment".to_string(),
+            source_config_id: "primary-governance-provider".to_string(),
+            source_revision: 258,
+            protocol: PostTurnGovernanceProviderProtocolV1::OllamaNative,
+            endpoint: "http://127.0.0.1:11434/api".to_string(),
+            model_id: "qwen3:8b".to_string(),
+            credential_reference: None,
+            request_timeout_ms: 30_000,
+            max_input_tokens: 4096,
+            max_output_tokens: 1024,
+            provider_permission_generation: 1,
+        })
+        .expect_err("all referenced binding revisions must backpressure");
+    assert_eq!(
+        error.stage(),
+        "post_turn_governance_binding_retention_exhausted"
+    );
+    let after = pinned_store
+        .export_replay_snapshot()
+        .expect("after exhausted write");
+    assert_eq!(after.json_docs, before.json_docs);
+    assert_eq!(after.events, before.events);
+}
+
+#[test]
+fn snapshot_import_rejects_bound_job_without_exact_binding_snapshot() {
+    let profile = support::host_test_profile();
+    let source = MemoryStoreHandle::open(
+        StoreBackendConfig::in_memory(profile).expect("binding closure source config"),
+    )
+    .expect("binding closure source");
+    let runtime = test_runtime_with_scope_and_subject(
+        source.clone(),
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    let binding = install_learning_binding(&runtime, 1);
+    runtime
+        .finalize_turn_with_inline_governance(
+            None,
+            None,
+            finalize_request(
+                "subject-default",
+                "binding-closure-conversation",
+                "binding-closure-turn",
+                "绑定闭包合同",
+            ),
+        )
+        .expect("bound governance job");
+    let mut corrupted = source
+        .export_replay_snapshot()
+        .expect("binding closure snapshot");
+    corrupted.json_docs.retain(|doc| {
+        !(doc.namespace == "post_turn_governance_binding_snapshots"
+            && doc.key == format!("{}:1", binding.binding_id))
+    });
+    let target = MemoryStoreHandle::open(
+        StoreBackendConfig::in_memory(profile).expect("binding closure target config"),
+    )
+    .expect("binding closure target");
+    let before = target
+        .export_replay_snapshot()
+        .expect("binding closure target baseline");
+    let error = target
+        .import_replay_snapshot(&corrupted)
+        .expect_err("missing exact binding snapshot must fail closed");
+    assert_eq!(error.stage(), "post_turn_governance_closure");
+    assert!(error.to_string().contains("missing"));
+    let after = target
+        .export_replay_snapshot()
+        .expect("target remains unchanged");
+    assert_eq!(after.json_docs, before.json_docs);
+    assert_eq!(after.events, before.events);
 }
 
 #[test]
@@ -1677,6 +2880,34 @@ fn independent_sqlite_opens_still_allow_only_one_claim_winner() {
 
 #[cfg(feature = "sqlite-store")]
 #[test]
+fn independent_sqlite_opens_idempotently_install_the_same_first_binding() {
+    let profile = support::host_test_profile();
+    let root = persistent_test_root("sqlite-binding-install");
+    std::fs::create_dir_all(&root).expect("create sqlite binding root");
+    {
+        let config = StoreBackendConfig::sqlite(root.join("memory.sqlite3"), profile)
+            .expect("sqlite config");
+        assert_independent_open_binding_install(config);
+    }
+    std::fs::remove_dir_all(&root).expect("remove sqlite binding Store");
+}
+
+#[cfg(feature = "sqlite-store")]
+#[test]
+fn independent_sqlite_opens_reject_divergent_first_binding_identity() {
+    let profile = support::host_test_profile();
+    let root = persistent_test_root("sqlite-binding-conflict");
+    std::fs::create_dir_all(&root).expect("create sqlite binding conflict root");
+    {
+        let config = StoreBackendConfig::sqlite(root.join("memory.sqlite3"), profile)
+            .expect("sqlite config");
+        assert_independent_open_conflicting_binding_install(config);
+    }
+    std::fs::remove_dir_all(&root).expect("remove sqlite binding conflict Store");
+}
+
+#[cfg(feature = "sqlite-store")]
+#[test]
 fn sqlite_reopen_preserves_atomic_memory_and_terminal_receipt() {
     let profile = support::host_test_profile();
     let root = persistent_test_root("sqlite-complete");
@@ -1700,6 +2931,7 @@ fn retry_requires_current_lease_and_enforces_runtime_backoff() {
         "chat-a",
         "subject-default",
     );
+    install_learning_binding(&runtime, 1);
     let finalized = runtime
         .finalize_turn_with_inline_governance(
             None,
@@ -1708,12 +2940,18 @@ fn retry_requires_current_lease_and_enforces_runtime_backoff() {
         )
         .expect("finalize");
     let job_id = finalized.memory_consolidation.job_id.expect("job id");
+    let pending = runtime
+        .governance_job_status(MemoryGovernanceJobStatusRequest {
+            job_id: job_id.clone(),
+        })
+        .expect("pending job")
+        .job;
     let leased = runtime
         .claim_governance_job(MemoryGovernanceJobClaimRequest {
             job_id: job_id.clone(),
             lease_owner: "worker-a".to_string(),
             lease_until: 1_800_000_060,
-            authority: attempt_authority(),
+            authority: attempt_authority_for_job(&pending),
         })
         .expect("claim")
         .job;
@@ -1746,7 +2984,7 @@ fn retry_requires_current_lease_and_enforces_runtime_backoff() {
             job_id,
             lease_owner: "worker-b".to_string(),
             lease_until: 1_800_000_120,
-            authority: attempt_authority(),
+            authority: leased.attempt_authority.clone().expect("attempt authority"),
         })
         .is_err());
 }
@@ -1799,6 +3037,7 @@ fn due_query_does_not_starve_pending_work_behind_future_retries() {
         "chat-a",
         "subject-default",
     );
+    install_learning_binding(&runtime, 1);
     for index in 0..32 {
         let finalized = runtime
             .finalize_turn_with_inline_governance(
@@ -1872,6 +3111,7 @@ fn claimed_governance_commits_memory_and_terminal_receipt_once() {
         "chat-a",
         "subject-default",
     );
+    install_learning_binding(&runtime, 1);
     let finalized = runtime
         .finalize_turn_with_inline_governance(
             None,
@@ -1987,6 +3227,7 @@ fn transcript_revocation_after_prompt_assembly_blocks_first_network_byte_and_mem
         "chat-a",
         "subject-default",
     ));
+    install_learning_binding(&runtime, 1);
     let finalized = runtime
         .finalize_turn_with_inline_governance(
             None,
@@ -2061,6 +3302,7 @@ fn stricter_runtime_privacy_after_claim_blocks_first_network_byte() {
         "chat-a",
         "subject-default",
     );
+    let binding = install_learning_binding(&original, 1);
     let finalized = original
         .finalize_turn_with_inline_governance(
             None,
@@ -2077,8 +3319,8 @@ fn stricter_runtime_privacy_after_claim_blocks_first_network_byte() {
     let authority = original
         .prepare_governance_attempt_authority(MemoryGovernanceAttemptAuthorityRequest {
             job_id: job_id.clone(),
-            binding_id: "governance-model:test".to_string(),
-            config_revision: 1,
+            binding_id: binding.binding_id,
+            binding_revision: binding.binding_revision,
             model_id: "qwen3:8b".to_string(),
         })
         .expect("original privacy authority")
@@ -2136,6 +3378,7 @@ fn memory_precondition_conflict_keeps_job_leased_and_commits_no_semantic_post_im
         "chat-a",
         "subject-default",
     );
+    install_learning_binding(&runtime, 1);
     let finalized = runtime
         .finalize_turn_with_inline_governance(
             None,

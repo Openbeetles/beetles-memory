@@ -147,11 +147,24 @@ fn operator_overview_exposes_deferred_governance_queue_from_sdk_report() {
         .finalize_turn(finalize_request())
         .expect("deferred finalize");
 
-    let response =
-        handle_http_in_process_request(&runtime, HttpRuntimeRequest::get("/console/overview"))
-            .expect("overview");
-    assert_eq!(response.status_code, 200, "{}", response.body);
-    let body: Value = serde_json::from_str(&response.body).expect("json");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let body = loop {
+        let response =
+            handle_http_in_process_request(&runtime, HttpRuntimeRequest::get("/console/overview"))
+                .expect("overview");
+        assert_eq!(response.status_code, 200, "{}", response.body);
+        let body: Value = serde_json::from_str(&response.body).expect("json");
+        if body["overview"]["deferredGovernance"]["recentJobs"][0]["reason"]
+            == "governance_execution_binding_unavailable"
+        {
+            break body;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "governance job did not reach the durable configuration block: {body}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
     let queue = &body["overview"]["deferredGovernance"];
 
     assert_eq!(queue["pending"], 1);
@@ -160,7 +173,7 @@ fn operator_overview_exposes_deferred_governance_queue_from_sdk_report() {
     assert_eq!(queue["terminal"], 0);
     assert_eq!(
         queue["recentJobs"][0]["reason"],
-        "maintenance_http_unavailable"
+        "governance_execution_binding_unavailable"
     );
     assert_eq!(queue["recentJobs"][0]["turnId"], "operator-deferred-turn");
 }
