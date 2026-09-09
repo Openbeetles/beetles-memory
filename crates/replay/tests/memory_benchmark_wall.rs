@@ -2662,7 +2662,7 @@ fn p7_linux_real_publisher_and_verifier_use_sealed_execution_authority() {
 }
 
 #[test]
-fn p7_operator_and_runner_scripts_preserve_immutable_cohort_artifacts() {
+fn p7_operator_scripts_preserve_immutable_cohort_artifacts() {
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(std::path::Path::parent)
@@ -2687,27 +2687,6 @@ fn p7_operator_and_runner_scripts_preserve_immutable_cohort_artifacts() {
             .join("crates/replay/src/bin/bm-w4-external-noisy-wall/p7_frozen_runner_identity.rs"),
     )
     .expect("operator-private frozen runner identity owner");
-    let runner_wall = fs::read_to_string(
-        repo_root
-            .parent()
-            .expect("hardware root")
-            .join(".beetle-memory-external-bench/runner/run_full_p7_wall.sh"),
-    )
-    .expect("external runner wall script");
-    let runner_rss = fs::read_to_string(
-        repo_root
-            .parent()
-            .expect("hardware root")
-            .join(".beetle-memory-external-bench/runner/run_p7_max_rss.sh"),
-    )
-    .expect("external runner maximum RSS script");
-    let runner_main = fs::read_to_string(
-        repo_root
-            .parent()
-            .expect("hardware root")
-            .join(".beetle-memory-external-bench/runner/src/main.rs"),
-    )
-    .expect("external runner release contract");
     let linux_execution_authority =
         fs::read_to_string(repo_root.join("scripts/check_p7_linux_execution_authority.sh"))
             .expect("Linux execution authority gate");
@@ -2748,10 +2727,6 @@ fn p7_operator_and_runner_scripts_preserve_immutable_cohort_artifacts() {
         })
         .expect("final wall verifier body");
     assert!(wall_verifier.contains("verify_p7_wall_cohort_evidence_in_session"));
-    assert!(runner_wall.contains("BM_P7_LAUNCHER_BIN"));
-    assert!(runner_wall.contains("--executable \"$orchestrator\" --"));
-    assert!(runner_rss.contains("BM_P7_LAUNCHER_BIN"));
-    assert!(runner_rss.contains("--executable \"$orchestrator\" --"));
     let cohort_verifier = replay_bench
         .split("fn verify_p7_wall_cohort_evidence_in_session")
         .nth(1)
@@ -2803,20 +2778,17 @@ fn p7_operator_and_runner_scripts_preserve_immutable_cohort_artifacts() {
     assert!(!frozen_identity_owner.contains("validate"));
     assert!(replay_bench.contains("P7_AGENT_MEMORY_RELEASE_GATE_EXCLUDED_DIRECTORIES"));
     assert!(replay_bench.contains("P7_RUNNER_RELEASE_GATE_EXCLUDED_DIRECTORIES"));
-    assert!(runner_main.contains("bm_replay::p7_release_gate_source_manifest"));
-    assert!(runner_main.contains("P7ProcessExecutionAuthority::claim()"));
-    assert!(runner_main.contains("run_with_execution_authority"));
-    assert!(runner_main.contains("execution.verify_retained()?"));
-    assert!(runner_main.contains("AuthorityBoundArtifactTransaction"));
-    assert!(runner_main.contains("AuthorityBoundReleaseTransaction"));
-    assert!(runner_main.contains("--publish-authority-probe"));
-    assert!(runner_main.contains("p7_runner_authority_probe_v1"));
     assert!(linux_execution_authority
         .contains("p7_linux_real_runner_authority_probe_binds_sealed_execution_bytes"));
     assert!(linux_execution_authority.contains("BM_P7_AUTHORITY_PROBE_RUNNER"));
     assert!(linux_execution_authority.contains("BM_P7_AUTHORITY_PROBE_LAUNCHER"));
     assert!(linux_execution_authority
         .contains("cargo build --release --locked --no-default-features --manifest-path"));
+    assert!(linux_execution_authority.contains("BM_P7_RUNNER_SOURCE_ROOT"));
+    assert!(linux_execution_authority.contains("BM_W4_EXTERNAL_BENCH_ROOT"));
+    assert!(linux_execution_authority
+        .contains("p7_external_runner_scripts_preserve_immutable_cohort_artifacts"));
+    assert!(!linux_execution_authority.contains("$(cd .. && pwd)/.beetle-memory-external-bench"));
     for source in recursive_gate_scripts {
         assert!(source.contains("local has_locked=0"));
         assert!(source.contains("local has_no_default_features=0"));
@@ -2843,6 +2815,46 @@ fn p7_operator_and_runner_scripts_preserve_immutable_cohort_artifacts() {
     assert!(secure_fs.contains("open_or_create_p7_runner_authority_probe_store_with_authority"));
     assert!(secure_fs.contains("pub(crate) struct P7CohortArtifactOwner"));
     assert!(!replay_lib.contains("P7CohortArtifactOwner,"));
+    assert!(replay_bench.contains("p7_release_gate_attestation_v2"));
+    assert!(replay_bench.contains("p7_content_addressed_release_metadata_v2"));
+    assert!(replay_bench.contains("p7_release_gate_source_sha256_v3"));
+    for required in ["openat", "linkat", "O_NOFOLLOW", "publish_immutable_bytes"] {
+        assert!(
+            secure_fs.contains(required),
+            "retained cohort publisher is missing {required}"
+        );
+    }
+    assert!(!operator_cli.contains("fs::write(&report_path"));
+    assert!(operator.contains("BM_P7_VERIFY_MAX_RSS"));
+    assert!(operator.contains("--verify-max-rss"));
+}
+
+#[test]
+#[ignore = "requires BM_P7_RUNNER_SOURCE_ROOT pointing at the repo-external runner checkout"]
+fn p7_external_runner_scripts_preserve_immutable_cohort_artifacts() {
+    let runner_root = std::env::var_os("BM_P7_RUNNER_SOURCE_ROOT")
+        .map(std::path::PathBuf::from)
+        .expect("BM_P7_RUNNER_SOURCE_ROOT must point at the external runner checkout");
+    let runner_root = fs::canonicalize(&runner_root).expect("canonical external runner root");
+    let runner_wall = fs::read_to_string(runner_root.join("run_full_p7_wall.sh"))
+        .expect("external runner wall script");
+    let runner_rss = fs::read_to_string(runner_root.join("run_p7_max_rss.sh"))
+        .expect("external runner maximum RSS script");
+    let runner_main = fs::read_to_string(runner_root.join("src/main.rs"))
+        .expect("external runner release contract");
+
+    assert!(runner_wall.contains("BM_P7_LAUNCHER_BIN"));
+    assert!(runner_wall.contains("--executable \"$orchestrator\" --"));
+    assert!(runner_rss.contains("BM_P7_LAUNCHER_BIN"));
+    assert!(runner_rss.contains("--executable \"$orchestrator\" --"));
+    assert!(runner_main.contains("bm_replay::p7_release_gate_source_manifest"));
+    assert!(runner_main.contains("P7ProcessExecutionAuthority::claim()"));
+    assert!(runner_main.contains("run_with_execution_authority"));
+    assert!(runner_main.contains("execution.verify_retained()?"));
+    assert!(runner_main.contains("AuthorityBoundArtifactTransaction"));
+    assert!(runner_main.contains("AuthorityBoundReleaseTransaction"));
+    assert!(runner_main.contains("--publish-authority-probe"));
+    assert!(runner_main.contains("p7_runner_authority_probe_v1"));
     for forbidden in [
         "BM_P7_RETAINED_EXECUTABLE_FD",
         "BM_P7_RETAINED_EXECUTABLE_PATH",
@@ -2857,20 +2869,8 @@ fn p7_operator_and_runner_scripts_preserve_immutable_cohort_artifacts() {
     }
     assert!(runner_main
         .contains("crates/replay/src/bin/bm-w4-external-noisy-wall/p7_frozen_runner_identity.rs"));
-    assert!(replay_bench.contains("p7_release_gate_attestation_v2"));
-    assert!(replay_bench.contains("p7_content_addressed_release_metadata_v2"));
-    assert!(replay_bench.contains("p7_release_gate_source_sha256_v3"));
-    for required in ["openat", "linkat", "O_NOFOLLOW", "publish_immutable_bytes"] {
-        assert!(
-            secure_fs.contains(required),
-            "retained cohort publisher is missing {required}"
-        );
-    }
-    assert!(!operator_cli.contains("fs::write(&report_path"));
     assert!(!runner_wall.contains("--overwrite"));
     assert!(!runner_wall.contains("BM_W4_EXTERNAL_REPORT_PATH"));
-    assert!(operator.contains("BM_P7_VERIFY_MAX_RSS"));
-    assert!(operator.contains("--verify-max-rss"));
     assert!(runner_rss.contains("BM_P7_ORCHESTRATOR_BIN"));
     assert!(runner_rss.contains("--orchestrate-max-rss"));
     assert!(runner_wall.contains("BM_P7_ORCHESTRATOR_BIN"));
@@ -2880,6 +2880,102 @@ fn p7_operator_and_runner_scripts_preserve_immutable_cohort_artifacts() {
     assert!(runner_rss.contains("BM_P7_RUN_ID must match ASCII [A-Za-z0-9._-]+"));
     assert!(!runner_rss.contains("maximum-rss.report"));
     assert!(!runner_rss.contains("/usr/bin/plutil"));
+}
+
+#[test]
+fn external_benchmark_root_is_prepared_only_from_an_explicit_absolute_path() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root");
+    let script = repo_root.join("scripts/prepare_external_benchmark_root.sh");
+    let root = std::env::temp_dir().join(format!(
+        "bm-external-benchmark-root-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+
+    let output = std::process::Command::new("bash")
+        .arg(&script)
+        .env("BM_W4_EXTERNAL_BENCH_ROOT", &root)
+        .output()
+        .expect("prepare external benchmark root");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for relative in [
+        "data",
+        "results/runs",
+        "runner",
+        "releases",
+        "authority-probes",
+        "cache/cargo-home",
+        "cache/cargo-target",
+    ] {
+        assert!(root.join(relative).is_dir(), "missing {relative}");
+    }
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 preparation report");
+    assert!(stdout.contains("BM_W4_EXTERNAL_BENCH_ROOT="));
+    assert!(stdout.contains("BM_P7_RUNNER_SOURCE_ROOT="));
+    assert!(stdout.contains("CARGO_TARGET_DIR="));
+
+    let rejected = std::process::Command::new("bash")
+        .arg(&script)
+        .env("BM_W4_EXTERNAL_BENCH_ROOT", "relative/benchmark-root")
+        .output()
+        .expect("reject relative benchmark root");
+    assert!(!rejected.status.success());
+
+    fs::remove_dir_all(root).expect("remove synthetic benchmark root");
+}
+
+#[test]
+fn external_benchmark_dataset_fetcher_pins_the_trusted_input_bytes() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root");
+    let fetcher =
+        fs::read_to_string(repo_root.join("scripts/fetch_external_benchmark_datasets.sh"))
+            .expect("external benchmark dataset fetcher");
+    let replay_bench = fs::read_to_string(repo_root.join("crates/replay/src/bench.rs"))
+        .expect("trusted benchmark dataset owner");
+
+    for (file_name, sha256) in [
+        (
+            "locomo10.json",
+            "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+        ),
+        (
+            "longmemeval_oracle.json",
+            "821a2034d219ab45846873dd14c14f12cfe7776e73527a483f9dac095d38620c",
+        ),
+        (
+            "longmemeval_s_cleaned.json",
+            "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+        ),
+        (
+            "longmemeval_m_cleaned.json",
+            "9d79e5524794a2e6900a3aa9cb7d9152c5a3e8319c9a87c25494ba1eacee495f",
+        ),
+    ] {
+        assert!(fetcher.contains(file_name), "fetcher missing {file_name}");
+        assert!(fetcher.contains(sha256), "fetcher missing {sha256}");
+        assert!(
+            replay_bench.contains(file_name),
+            "owner missing {file_name}"
+        );
+        assert!(replay_bench.contains(sha256), "owner missing {sha256}");
+    }
+    assert!(fetcher.contains("raw.githubusercontent.com/snap-research/locomo/main"));
+    assert!(fetcher.contains("huggingface.co/datasets/xiaowu0162/longmemeval-cleaned"));
+    assert!(fetcher.contains("--continue-at -"));
+    assert!(fetcher.contains("dataset digest mismatch"));
 }
 
 #[test]

@@ -27,12 +27,24 @@ cargo test --release --locked -p bm-replay --no-default-features --test memory_b
   p7_linux_real_publisher_and_verifier_use_sealed_execution_authority \
   -- --ignored --exact
 
-runner_root="${BM_P7_RUNNER_SOURCE_ROOT:-$(cd .. && pwd)/.beetle-memory-external-bench/runner}"
+if [[ -n "${BM_P7_RUNNER_SOURCE_ROOT:-}" ]]; then
+  runner_root="${BM_P7_RUNNER_SOURCE_ROOT}"
+elif [[ -n "${BM_W4_EXTERNAL_BENCH_ROOT:-}" ]]; then
+  runner_root="${BM_W4_EXTERNAL_BENCH_ROOT}/runner"
+else
+  echo "BM_P7_RUNNER_SOURCE_ROOT or BM_W4_EXTERNAL_BENCH_ROOT is required for the repo-external runner source" >&2
+  exit 2
+fi
 if [[ ! -f "$runner_root/Cargo.toml" || ! -f "$runner_root/src/main.rs" ]]; then
   echo "P7 Linux execution authority gate requires the repo-external runner source" >&2
   exit 1
 fi
 runner_root="$(cd "$runner_root" && pwd -P)"
+BM_P7_RUNNER_SOURCE_ROOT="$runner_root" \
+  cargo test --release --locked -p bm-replay --no-default-features \
+  --test memory_benchmark_wall \
+  p7_external_runner_scripts_preserve_immutable_cohort_artifacts \
+  -- --ignored --exact
 cargo build --release --locked --no-default-features --manifest-path "$runner_root/Cargo.toml"
 cargo build --release --locked -p bm-replay --no-default-features --bin bm-p7-retained-launch
 runner="$runner_root/target/release/beetle-memory-external-bench-runner"
