@@ -20,7 +20,8 @@ pub use learning::{
     TaskLearningKind, TaskLearningMaintenanceContext, TaskLearningMaintenanceInput,
     TaskLearningMaintenanceOutcome, TaskLearningOperatorRecord, TaskLearningOperatorSnapshot,
     TaskLearningRecallBackend, TaskLearningRecord, TaskLearningRoute, TaskLearningRouteCounts,
-    TaskLearningScoreBreakdown, TaskLearningStore, TaskWorkspaceInspection, REL_DIR_TASK_LEARNING,
+    TaskLearningScoreBreakdown, TaskLearningStore, TaskRecallBundle, TaskRecallEntryBinding,
+    TaskWorkspaceInspection, REL_DIR_TASK_LEARNING,
 };
 
 pub const REL_DIR_TASK_RUNS: &str = "memory/task_runs";

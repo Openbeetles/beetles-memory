@@ -1,13 +1,10 @@
+#![cfg(feature = "nonproduction-replay-harness")]
+
 mod support;
 
 use std::sync::{Arc, Mutex};
 
-use bm_sdk::{
-    default_agent_subject_id, default_memory_space_id, MemoryAuditEvent, MemoryAuditSink,
-    MemoryIdentity, MemoryProjectionRequest, MemoryRuntime, MemoryScope, MemoryWriteRequest,
-    NoopMemoryAuditSink, PressureLevel, RuntimeLifecycleModeInput, RuntimeSkillOwningScope,
-    RuntimeSkillWrite, RuntimeSkillWriteSource,
-};
+use bm_sdk::{MemoryAuditEvent, MemoryAuditSink, MemoryIdentity, MemoryScope, NoopMemoryAuditSink};
 
 use support::empty_store_platform;
 
@@ -41,26 +38,41 @@ fn sdk_audit_events_bind_operation_to_memory_identity_and_scope() {
         .build()
         .expect("runtime");
 
-    runtime
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
-                name: "audit_identity_contract".to_string(),
-                topic: "audit identity".to_string(),
-                title: "Audit identity contract".to_string(),
-                summary: "Audit events must carry identity and memory space.".to_string(),
-                content: "Do not collapse SDK audit to system/system.".to_string(),
-                citations: vec!["audit identity contract".to_string()],
-                source_chat_id: Some("chat-a".to_string()),
-                observed_at: 1_800_000_000,
-            })],
-            owning_scope: RuntimeSkillOwningScope::Subject {
-                mounted_subject_id: runtime.subject_id().to_string(),
-            },
-            source: RuntimeSkillWriteSource::Manual,
+    use bm_sdk::*;
+    let target = MemoryCandidateTarget::LongTermMemory {
+        kind: LongTermMemoryKind::Project,
+        topic: "audit identity".into(),
+    };
+    let written = runtime
+        .write(MemoryWriteRequest::Candidates {
+            candidates: vec![MemoryWriteCandidate {
+                candidate_id: "audit-fact".into(),
+                authority: MemoryEvidenceAuthority::UserAsserted,
+                target: target.clone(),
+                long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
+                privacy: MemoryPrivacyClass::SharedWithSubject,
+                content: MemoryCandidateContent::Text {
+                    topic: "audit identity".into(),
+                    body:
+                        "The audit project requires operations to retain agent and owner identity."
+                            .into(),
+                    keywords: vec![],
+                },
+                evidence_refs: vec![],
+                canonical_entities: vec![],
+                semantic_judgment: Some(MemoryCandidateSemanticJudgment {
+                    source: MemorySemanticJudgmentSource::RuntimeGate,
+                    decision: MemoryCandidateSemanticDecision::Accept,
+                    governed_target: Some(target),
+                    reason: "factual audit contract".into(),
+                }),
+            }],
         })
-        .expect("write");
+        .expect("formal factual write");
+    assert!(written.accepted && written.changed > 0);
     runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "audit identity".to_string(),

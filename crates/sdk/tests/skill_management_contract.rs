@@ -1,9 +1,11 @@
+#![cfg(feature = "nonproduction-replay-harness")]
+
 mod support;
 use bm_sdk::{
-    ErrorClass, MemoryIdentity, MemoryRuntime, MemoryScope, MemoryWriteRequest,
+    ErrorClass, GovernedRuntimeSkillWriteInput, MemoryIdentity, MemoryRuntime, MemoryScope,
     RuntimeSkillDetailRequest, RuntimeSkillEditRequest, RuntimeSkillListRequest,
     RuntimeSkillOwnerLocator, RuntimeSkillRetireRequest, RuntimeSkillSetEnabledRequest,
-    RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
+    RuntimeSkillWrite, StoreBackendConfig,
 };
 
 fn test_runtime() -> MemoryRuntime {
@@ -21,8 +23,8 @@ fn test_runtime() -> MemoryRuntime {
 
 fn seed_release_skill(runtime: &MemoryRuntime) -> RuntimeSkillOwnerLocator {
     let report = runtime
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
+        .seed_runtime_skills_for_replay(
+            vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
                 name: "runtime_skill__release_guard".to_string(),
                 title: "Release guard".to_string(),
                 topic: "release".to_string(),
@@ -32,9 +34,8 @@ fn seed_release_skill(runtime: &MemoryRuntime) -> RuntimeSkillOwnerLocator {
                 source_chat_id: Some("chat-1".to_string()),
                 observed_at: 1_800_000_000,
             })],
-            owning_scope: support::runtime_skill_subject_scope(),
-            source: RuntimeSkillWriteSource::Manual,
-        })
+            support::runtime_skill_subject_scope(),
+        )
         .expect("seed procedural skill");
     assert!(report.changed > 0);
     runtime
@@ -53,21 +54,17 @@ fn seed_release_skill(runtime: &MemoryRuntime) -> RuntimeSkillOwnerLocator {
         .locator
 }
 
-fn release_skill_write(summary: &str) -> MemoryWriteRequest {
-    MemoryWriteRequest::Procedural {
-        writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
-            name: "runtime_skill__release_guard".to_string(),
-            title: "Release guard".to_string(),
-            topic: "release".to_string(),
-            summary: summary.to_string(),
-            content: "1. run gates\n2. inspect artifacts\n3. dry run publish".to_string(),
-            citations: vec!["test".to_string()],
-            source_chat_id: Some("chat-1".to_string()),
-            observed_at: 1_800_000_000,
-        })],
-        owning_scope: support::runtime_skill_subject_scope(),
-        source: RuntimeSkillWriteSource::Manual,
-    }
+fn release_skill_write(summary: &str) -> Vec<GovernedRuntimeSkillWriteInput> {
+    vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
+        name: "runtime_skill__release_guard".to_string(),
+        title: "Release guard".to_string(),
+        topic: "release".to_string(),
+        summary: summary.to_string(),
+        content: "1. run gates\n2. inspect artifacts\n3. dry run publish".to_string(),
+        citations: vec!["test".to_string()],
+        source_chat_id: Some("chat-1".to_string()),
+        observed_at: 1_800_000_000,
+    })]
 }
 
 fn release_skill_edit_request(locator: RuntimeSkillOwnerLocator) -> RuntimeSkillEditRequest {
@@ -185,23 +182,26 @@ fn runtime_skill_management_mutations_require_existing_runtime_skill() {
 fn repeated_creation_authority_is_idempotent_or_advances_one_exact_revision() {
     let runtime = test_runtime();
     let first = runtime
-        .write(release_skill_write(
-            "Check release artifacts before publishing.",
-        ))
+        .seed_runtime_skills_for_replay(
+            release_skill_write("Check release artifacts before publishing."),
+            support::runtime_skill_subject_scope(),
+        )
         .expect("first write");
     assert_eq!(first.changed, 1);
 
     let duplicate = runtime
-        .write(release_skill_write(
-            "Check release artifacts before publishing.",
-        ))
+        .seed_runtime_skills_for_replay(
+            release_skill_write("Check release artifacts before publishing."),
+            support::runtime_skill_subject_scope(),
+        )
         .expect("idempotent duplicate");
     assert_eq!(duplicate.changed, 0);
 
     let revised = runtime
-        .write(release_skill_write(
-            "Check release artifacts and receipts before publishing.",
-        ))
+        .seed_runtime_skills_for_replay(
+            release_skill_write("Check release artifacts and receipts before publishing."),
+            support::runtime_skill_subject_scope(),
+        )
         .expect("revised write");
     assert_eq!(revised.changed, 1);
 

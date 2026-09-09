@@ -284,33 +284,40 @@ pub use bm_core::memory::{
     SubjectSoulReadRequestV1, SubjectSoulReadSelectorV1, SubjectSoulReadViewV1,
     SubjectSoulRelationshipProjectionV1, SubjectSoulRevisionOriginV1,
     SubjectSoulRevisionProvenanceV1, SubjectSoulSourceAuthorityV1, SubjectSoulSurface,
-    SubjectSoulTerminalActionV1, SubjectVisibility, TranscriptActivityBucket,
-    TranscriptActivityReport, TranscriptAnchor, TranscriptAttrEnvelope, TranscriptAttrGovernance,
-    TranscriptAttrLink, TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
-    TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind,
-    TranscriptAttrWriteRejection, TranscriptAttrWriteReport, TranscriptCatalogLifecycle,
-    TranscriptCommitReport, TranscriptConversationAlias, TranscriptEvidenceRef,
-    TranscriptInputMessage, TranscriptLifecycleAggregate, TranscriptLifecycleState,
-    TranscriptLifecycleStats, TranscriptLifecycleTransition, TranscriptLocator,
-    TranscriptQueryCursor, TranscriptRedactionReason, TranscriptRedactionReportItem,
-    TranscriptRedactionState, TranscriptRepairIssue, TranscriptRepairIssueKind,
-    TranscriptRepairReport, TranscriptReplayAudit, TranscriptReplayView, TranscriptSearchExcerpt,
-    TranscriptSearchHit, TranscriptSearchLifecycle, TranscriptSearchPage, TranscriptSearchSort,
-    TranscriptTimelineAnchor, TranscriptTimelinePage, TranscriptTurnPage, TranscriptTurnRecord,
-    TranscriptUtcRange, VerifiedSubjectSoulReadViewV1, SUBJECT_SOUL_MAX_CLAUSES_PER_FIELD,
-    SUBJECT_SOUL_MAX_CLAUSE_CHARS, SUBJECT_SOUL_MAX_TOTAL_CHARS, SUBJECT_SOUL_SCHEMA_VERSION,
+    SubjectSoulTerminalActionV1, SubjectVisibility, ToolObservationDigest,
+    TranscriptActivityBucket, TranscriptActivityReport, TranscriptAnchor, TranscriptAttrEnvelope,
+    TranscriptAttrGovernance, TranscriptAttrLink, TranscriptAttrRedactionPolicy,
+    TranscriptAttrScope, TranscriptAttrSource, TranscriptAttrSourceKind, TranscriptAttrTarget,
+    TranscriptAttrValueKind, TranscriptAttrWriteRejection, TranscriptAttrWriteReport,
+    TranscriptCatalogLifecycle, TranscriptCommitReport, TranscriptConversationAlias,
+    TranscriptEvidenceRef, TranscriptInputMessage, TranscriptLifecycleAggregate,
+    TranscriptLifecycleState, TranscriptLifecycleStats, TranscriptLifecycleTransition,
+    TranscriptLocator, TranscriptQueryCursor, TranscriptRedactionReason,
+    TranscriptRedactionReportItem, TranscriptRedactionState, TranscriptRepairIssue,
+    TranscriptRepairIssueKind, TranscriptRepairReport, TranscriptReplayAudit, TranscriptReplayView,
+    TranscriptSearchExcerpt, TranscriptSearchHit, TranscriptSearchLifecycle, TranscriptSearchPage,
+    TranscriptSearchSort, TranscriptTimelineAnchor, TranscriptTimelinePage, TranscriptTurnPage,
+    TranscriptTurnRecord, TranscriptUtcRange, VerifiedSubjectSoulReadViewV1,
+    SUBJECT_SOUL_MAX_CLAUSES_PER_FIELD, SUBJECT_SOUL_MAX_CLAUSE_CHARS,
+    SUBJECT_SOUL_MAX_TOTAL_CHARS, SUBJECT_SOUL_SCHEMA_VERSION,
 };
 pub use bm_core::memory::{
     governed_evidence_document_content_digest, governed_evidence_source_locator_digest,
+    AgentSkillUsageFeedbackV1, AgentToolExperienceSelectionV1, AgentToolUsageFeedbackV2,
     FacetReportView, ForgettingDecisionReport, GovernedEvidenceDocumentChunk,
     GovernedEvidenceDocumentDraft, GovernedEvidenceDocumentSourceKind, GovernedMemoryOwnerPlane,
     GovernedMemoryOwnerRef, GovernedOwnerTermination, GovernedOwnerTransition,
     GovernedRecallEligibility, GovernedRecallEligibilityReason, LongTermMemoryGovernedContent,
     LongTermMemoryHeadManifest, LongTermMemoryRetainedRevisionDigest,
     LongTermMemoryVersionMaterial, LongTermMemoryVersionOrigin, LongTermMemoryVersionScopeManifest,
-    MemoryLongTermAffectedFacetDoc, MemoryUpdateLineageFailure, PremiseEvaluationDecision,
-    PremiseTypedSource, GOVERNED_EVIDENCE_DOCUMENT_SCHEMA_VERSION,
-    LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
+    MemoryLongTermAffectedFacetDoc, MemoryUpdateLineageFailure, PostTurnLearningEvidenceV1,
+    PostTurnLearningInputV1, PremiseEvaluationDecision, PremiseTypedSource,
+    ProceduralApplicabilityContextV1, ProceduralExecutionOutcomeV1,
+    ProceduralFeedbackAuthorityInputV1, ProceduralFeedbackAuthorityV1, ProceduralFeedbackReceiptV1,
+    ProceduralProjectionBindingV1, ProceduralProjectionIdentityV1, ProceduralSelectionReceiptV1,
+    RuntimeSkillSelectionV1, RuntimeSkillUsageFeedbackV1, StandardAgentSkillSelectionV1,
+    TaskLearningSelectionV1, TaskLearningUsageFeedbackV1,
+    GOVERNED_EVIDENCE_DOCUMENT_SCHEMA_VERSION, LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
 };
 pub use bm_core::metrics::{
     RuntimeMetricCounters, RuntimeMetricEvidenceSummary, RuntimeMetricsQuery, RuntimeMetricsReport,
@@ -336,14 +343,14 @@ pub use bm_core::skills::{
     AgentSkillPackageWarning, AgentSkillProjectionAudit, AgentSkillProjectionRejection,
     AgentSkillProjectionSource, AgentSkillRecallHit, AgentSkillRefreshPolicy,
     AgentSkillRegistrySnapshot, AgentSkillResourceSummary, AgentSkillScope, AgentSkillTrust,
-    AgentToolDescriptor, AgentToolExperienceConfidence, AgentToolExperienceGovernanceDecision,
-    AgentToolExperienceGovernanceReport, AgentToolExperienceRecord, AgentToolExperienceStatus,
+    AgentToolDescriptor, AgentToolExperienceConfidence, AgentToolExperienceOwnerLocatorV2,
+    AgentToolExperienceOwningScopeV1, AgentToolExperienceRecord, AgentToolExperienceStatus,
     AgentToolExperienceStatusReport, AgentToolHint, AgentToolObservationDigest, AgentToolOutcome,
     AgentToolProjectionAudit, AgentToolProjectionRejection, AgentToolRegistryOwner,
     AgentToolRegistryRef, AgentToolRegistryReport, AgentToolRegistryScope,
-    AgentToolRegistrySnapshot, AgentToolSelectionReport, AgentToolUsageFeedback,
-    CapabilityAtomImportOutcome, CapabilityAtomSyncOutcome, ProjectedAgentSkillHint,
-    RuntimeSkillApplicability, RuntimeSkillApplicabilityContext, RuntimeSkillApplicabilityTarget,
+    AgentToolRegistrySnapshot, AgentToolSelectionReport, CapabilityAtomImportOutcome,
+    CapabilityAtomSyncOutcome, ProjectedAgentSkillHint, RuntimeSkillApplicability,
+    RuntimeSkillApplicabilityContext, RuntimeSkillApplicabilityTarget,
     RuntimeSkillCapabilityAffinity, RuntimeSkillConstraint, RuntimeSkillConstraintKind,
     RuntimeSkillCreationRef, RuntimeSkillDeliveryDropReason, RuntimeSkillEvidenceBinding,
     RuntimeSkillEvidenceKind, RuntimeSkillFailureMode, RuntimeSkillFeedbackKind,
@@ -363,7 +370,7 @@ pub use capability::{
     MemoryAdapterCapabilityCatalog, MemoryAdapterCapabilityPolicy, MemoryCapabilityCatalog,
     MemoryCapabilityPolicy, MemoryEntryRuntimeCapabilityCatalog, MemoryIndexedRecallVisibility,
     MemoryOperationVisibility, MemoryPrivacyPolicy, MemoryRuntimeLifecycleCapability,
-    MemoryValidationCapability, RuntimeSkillRecallTransport,
+    MemoryValidationCapability, ProceduralLearningCapability, RuntimeSkillRecallTransport,
 };
 pub use capability_snapshot::{
     platform_capability_snapshot, platform_capability_snapshot_file_name,
@@ -371,7 +378,8 @@ pub use capability_snapshot::{
     PlatformCapabilitySnapshot, PlatformCompiledFeatureSnapshot, PlatformEntryRuntimeSnapshot,
     PlatformGovernedOperationSnapshot, PlatformGovernedStateSnapshot,
     PlatformIndexedRecallSnapshot, PlatformLifecycleSnapshot, PlatformMemoryOperationSnapshot,
-    PlatformValidationSnapshot, PLATFORM_CAPABILITY_SNAPSHOT_SCHEMA,
+    PlatformProceduralLearningSnapshot, PlatformValidationSnapshot,
+    PLATFORM_CAPABILITY_SNAPSHOT_SCHEMA,
 };
 pub use learning::{
     AuthorizedGovernanceEnvelope, GovernanceEgressAuthority, GovernanceExecutionOperation,
@@ -380,36 +388,38 @@ pub use learning::{
     MemoryLearningCycleOutcome, MemoryLearningCycleRequest, MemoryLearningEngine,
     MemoryLearningServiceControlAuthorities, MemoryLearningServiceControlAuthority,
     MemoryLearningServiceControlOperation, MemoryLearningServiceStatusAuthority,
-    MemoryLearningStateReport, MemoryLearningWakeSink,
+    MemoryLearningStateReport, MemoryLearningWakeSink, MemoryProceduralLearningRunReport,
+    MemoryProceduralLearningStateReport,
 };
+#[cfg(feature = "nonproduction-replay-harness")]
+pub use ops::GovernedRuntimeSkillWriteInput;
 pub use ops::{
-    GovernedRuntimeSkillWriteInput, GovernedScopeArchiveEntry, GovernedScopeArchiveRootV1,
-    MemoryArchiveScope, MemoryCloseReport, MemoryCloseRequest, MemoryConsolidationReport,
-    MemoryConsolidationState, MemoryConversationListReport, MemoryConversationListRequest,
-    MemoryEvalEvidenceApplicability, MemoryEvalQuestionEvaluation, MemoryEvalRecallAblationReport,
-    MemoryEvalRecallAblationSlice, MemoryEvalRecallAtK, MemoryEvalRecallBenchmarkContext,
-    MemoryEvalRecallCandidate, MemoryEvalRecallCandidateEvidenceBinding,
-    MemoryEvalRecallCandidateRenderLoss, MemoryEvalRecallCandidateSelectionLoss,
-    MemoryEvalRecallEvidenceGroupCoverage, MemoryEvalRecallEvidenceRefIndexEntry,
-    MemoryEvalRecallFacetStageDiagnostics, MemoryEvalRecallGoldRank,
-    MemoryEvalRecallGraphDistanceToGold, MemoryEvalRecallLossEntry, MemoryEvalRecallLossLedger,
-    MemoryEvalRecallMetrics, MemoryEvalRecallPrivacyReport, MemoryEvalRecallReport,
-    MemoryEvalRecallRequest, MemoryEvalRecallStageCandidateMatch, MemoryEvalRecallStageDiagnostics,
-    MemoryEvalRecallStageEvidenceRefs, MemoryEvidenceDocumentMutation,
-    MemoryEvidenceDocumentReadReport, MemoryEvidenceDocumentReadRequest,
-    MemoryEvidenceDocumentView, MemoryEvidenceDocumentWriteSummary, MemoryEvidenceRefView,
-    MemoryEvidenceRefVisibility, MemoryFacetRecallIndexReport,
-    MemoryGovernanceBindingInstallReport, MemoryGovernanceBindingInstallRequest,
-    MemoryGovernanceCredentialChangedReport, MemoryGovernanceCredentialChangedRequest,
-    MemoryGovernanceJobRunReport, MemoryGovernanceJobStatusReport,
-    MemoryGovernanceJobStatusRequest, MemoryGovernancePolicyMutationReport,
-    MemoryGovernanceProviderPermissionChangedReport,
+    GovernedScopeArchiveEntry, GovernedScopeArchiveRootV1, MemoryArchiveScope, MemoryCloseReport,
+    MemoryCloseRequest, MemoryConsolidationReport, MemoryConsolidationState,
+    MemoryConversationListReport, MemoryConversationListRequest, MemoryEvalEvidenceApplicability,
+    MemoryEvalQuestionEvaluation, MemoryEvalRecallAblationReport, MemoryEvalRecallAblationSlice,
+    MemoryEvalRecallAtK, MemoryEvalRecallBenchmarkContext, MemoryEvalRecallCandidate,
+    MemoryEvalRecallCandidateEvidenceBinding, MemoryEvalRecallCandidateRenderLoss,
+    MemoryEvalRecallCandidateSelectionLoss, MemoryEvalRecallEvidenceGroupCoverage,
+    MemoryEvalRecallEvidenceRefIndexEntry, MemoryEvalRecallFacetStageDiagnostics,
+    MemoryEvalRecallGoldRank, MemoryEvalRecallGraphDistanceToGold, MemoryEvalRecallLossEntry,
+    MemoryEvalRecallLossLedger, MemoryEvalRecallMetrics, MemoryEvalRecallPrivacyReport,
+    MemoryEvalRecallReport, MemoryEvalRecallRequest, MemoryEvalRecallStageCandidateMatch,
+    MemoryEvalRecallStageDiagnostics, MemoryEvalRecallStageEvidenceRefs,
+    MemoryEvidenceDocumentMutation, MemoryEvidenceDocumentReadReport,
+    MemoryEvidenceDocumentReadRequest, MemoryEvidenceDocumentView,
+    MemoryEvidenceDocumentWriteSummary, MemoryEvidenceRefView, MemoryEvidenceRefVisibility,
+    MemoryFacetRecallIndexReport, MemoryGovernanceBindingInstallReport,
+    MemoryGovernanceBindingInstallRequest, MemoryGovernanceCredentialChangedReport,
+    MemoryGovernanceCredentialChangedRequest, MemoryGovernanceJobRunReport,
+    MemoryGovernanceJobStatusReport, MemoryGovernanceJobStatusRequest,
+    MemoryGovernancePolicyMutationReport, MemoryGovernanceProviderPermissionChangedReport,
     MemoryGovernanceProviderPermissionChangedRequest, MemoryGraphIntegrityMaintenanceReport,
     MemoryGraphIntegrityMaintenanceRequest, MemoryGraphRecallIndexReport, MemoryInspectionReport,
     MemoryInspectionRequest, MemoryLongTermDetailReport, MemoryLongTermDetailRequest,
     MemoryLongTermListReport, MemoryLongTermListRequest, MemoryLongTermMutationReport,
     MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryMaintenanceReport,
-    MemoryMaintenanceRequest, MemoryMutationExecution, MemoryProceduralWriteReport,
+    MemoryMaintenanceRequest, MemoryMutationExecution, MemoryProceduralLearningIntentReport,
     MemoryProjectionAuditReport, MemoryProjectionGatewayAuditView, MemoryProjectionOutput,
     MemoryProjectionPrivateGateAudit, MemoryProjectionReport, MemoryProjectionRequest,
     MemoryProjectionSafeAuditReport, MemoryProjectionSectionAudit, MemoryProjectionSourceAudit,
@@ -429,17 +439,19 @@ pub use ops::{
     MemoryTranscriptSearchRequest, MemoryTranscriptSearchScope, MemoryTranscriptTimelineReport,
     MemoryTranscriptTimelineRequest, MemoryTurnFinalizeReport, MemoryTurnFinalizeRequest,
     MemoryWriteReport, MemoryWriteRequest, MemoryWriteTransactionReport,
-    PrivateDisclosureIntegrityReport, PrivateDisclosureSurfaceReport, ProceduralMemoryDeliveryView,
-    ProviderProjectionMaintenanceCarry, ProviderProjectionPayload, RelationshipSourceReadReportV1,
-    RelationshipSourceSdkError, RelationshipSourceSdkOperation, RelationshipSourceSdkResult,
-    RuntimeDisclosureProtocolReport, RuntimeOperatorAction, RuntimeOperatorActionReport,
-    RuntimeSkillDetailReport, RuntimeSkillDetailRequest, RuntimeSkillEditRequest,
-    RuntimeSkillListReport, RuntimeSkillListRequest, RuntimeSkillMutationReport,
-    RuntimeSkillRetireRequest, RuntimeSkillSetEnabledRequest, RuntimeSkillSummary,
-    SoulGovernanceSdkErrorDisposition, SoulLifeProjectionReport,
-    SubjectSoulGovernedDisclosureDispositionV1, SubjectSoulGovernedDisclosureReportV1,
-    SubjectSoulGovernedDisclosureRequestV1, SubjectSoulSdkError, SubjectSoulSdkOperation,
-    SubjectSoulSdkResult, TemporalMemoryGraphMutationReport, TemporalMemoryGraphNodeOwnerRef,
+    PrivateDisclosureIntegrityReport, PrivateDisclosureSurfaceReport, ProceduralLearningErrorKeyV1,
+    ProceduralLearningSdkError, ProceduralLearningSdkErrorDisposition,
+    ProceduralLearningSdkOperation, ProceduralLearningSdkResult, ProceduralMemoryDeliveryView,
+    ProviderProjectionPayload, RelationshipSourceReadReportV1, RelationshipSourceSdkError,
+    RelationshipSourceSdkOperation, RelationshipSourceSdkResult, RuntimeDisclosureProtocolReport,
+    RuntimeOperatorAction, RuntimeOperatorActionReport, RuntimeSkillDetailReport,
+    RuntimeSkillDetailRequest, RuntimeSkillEditRequest, RuntimeSkillListReport,
+    RuntimeSkillListRequest, RuntimeSkillMutationReport, RuntimeSkillRetireRequest,
+    RuntimeSkillSetEnabledRequest, RuntimeSkillSummary, SoulGovernanceSdkErrorDisposition,
+    SoulLifeProjectionReport, SubjectSoulGovernedDisclosureDispositionV1,
+    SubjectSoulGovernedDisclosureReportV1, SubjectSoulGovernedDisclosureRequestV1,
+    SubjectSoulSdkError, SubjectSoulSdkOperation, SubjectSoulSdkResult,
+    TemporalMemoryGraphMutationReport, TemporalMemoryGraphNodeOwnerRef,
     TemporalMemoryGraphWriteRequest, WorkIntegrityReport,
     GOVERNED_SCOPE_ARCHIVE_ROOT_SCHEMA_VERSION, MEMORY_PROJECTION_DELIVERY_DIGEST_SCHEMA_VERSION,
     MEMORY_RECALL_DELIVERY_SCHEMA_VERSION,
@@ -508,18 +520,19 @@ pub mod nonproduction_replay_harness {
     #[cfg(feature = "sqlite-store")]
     pub use crate::store_internal::SqliteStoreEngine;
     pub use crate::store_internal::{
-        EmbeddedStoreEngine, FileStoreEngine, InMemoryStoreEngine, MemoryStoreEvent,
-        MemoryStoreEventKind, StoreBackendConfig, StoreBackendKind, StoreBlobAddress,
-        StoreCapacityBudget, StoreConsistentBlobRead, StoreConsistentJsonRead,
-        StoreConsistentReadRequest, StoreConsistentReadResult, StoreEngine, StoreEngineMutation,
-        StoreEventLog, StoreEventScope, StoreJsonAddress, StoreJsonPrecondition, StoreMutation,
-        StoreMutationBatch, StoreMutationBatchReport, StoreMutationBudgetReport, StoreOpenReport,
-        StorePathBudget, StorePhysicalOwningScope, StorePlatform, StoreRepairPolicy,
-        StoreRepairReport, StoreSchemaManifest, StoreScopedProjectionReplaceReport,
-        StoreScopedProjectionReplaceRequest, StoreScopedProjectionScope, StoreSnapshot,
-        StoreSnapshotBlob, StoreSnapshotExportReport, StoreSnapshotImportReport,
-        StoreSnapshotJsonDoc, StoreSnapshotReplaceReport, StoreTransactionReport,
-        StoreTransactionRequest, STORE_SCHEMA_ID, STORE_SCHEMA_VERSION,
+        AgentToolExperienceStoreLimitsV1, AgentToolExperienceStoreMutationOutcomeV1,
+        AgentToolExperienceStoreMutationPlanV1, EmbeddedStoreEngine, FileStoreEngine,
+        InMemoryStoreEngine, MemoryStoreEvent, MemoryStoreEventKind, StoreBackendConfig,
+        StoreBackendKind, StoreBlobAddress, StoreCapacityBudget, StoreConsistentBlobRead,
+        StoreConsistentJsonRead, StoreConsistentReadRequest, StoreConsistentReadResult,
+        StoreEngine, StoreEngineMutation, StoreEventLog, StoreEventScope, StoreJsonAddress,
+        StoreJsonPrecondition, StoreMutation, StoreMutationBatch, StoreMutationBatchReport,
+        StoreMutationBudgetReport, StoreOpenReport, StorePathBudget, StorePhysicalOwningScope,
+        StorePlatform, StoreRepairPolicy, StoreRepairReport, StoreSchemaManifest,
+        StoreScopedProjectionReplaceReport, StoreScopedProjectionReplaceRequest,
+        StoreScopedProjectionScope, StoreSnapshot, StoreSnapshotBlob, StoreSnapshotExportReport,
+        StoreSnapshotImportReport, StoreSnapshotJsonDoc, StoreSnapshotReplaceReport,
+        StoreTransactionReport, StoreTransactionRequest, STORE_SCHEMA_ID, STORE_SCHEMA_VERSION,
     };
     pub const LONG_TERM_HEAD_MANIFEST_NAMESPACE: &str =
         crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE;
@@ -527,6 +540,12 @@ pub mod nonproduction_replay_harness {
         crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE;
     pub const LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE: &str =
         crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE;
+    pub const AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE: &str =
+        crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE;
+    pub const AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE: &str =
+        crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE;
+    pub const AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE: &str =
+        crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE;
     pub const RUNTIME_SKILL_RECORD_NAMESPACE: &str =
         crate::store_internal::RUNTIME_SKILL_RECORD_NAMESPACE;
     pub const RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE: &str =
@@ -563,12 +582,7 @@ pub(crate) fn export_memory_space_from_platform_with_budget(
             projection_report.max_retained_long_term_revisions_per_owner,
         )?
     } else {
-        project_shared_program_snapshot(
-            &mut snapshot,
-            &store_scope,
-            private_material_policy,
-            projection_report.operation_capacity,
-        )?
+        project_shared_program_snapshot(&mut snapshot, &store_scope, private_material_policy)?
     };
     if !private_material_policy.includes_private() {
         privacy_redactions =
@@ -597,6 +611,7 @@ pub(crate) fn import_memory_space_from_platform_with_budget(
     request.scope.validate()?;
     let scope = request.scope;
     scope.validate_exact_identity(&request.archive.root().scope)?;
+    validate_public_procedural_archive_boundary(request.archive.snapshot())?;
     if request.archive.root().private_material_policy != request.expected_private_material_policy {
         return Err(Error::config(
             "memory_space_import",
@@ -657,7 +672,6 @@ fn project_shared_program_snapshot(
     snapshot: &mut StoreSnapshot,
     scope: &store_internal::StoreScopedProjectionScope,
     private_material_policy: MemorySpacePrivateMaterialPolicy,
-    capacity: StoreCapacityBudget,
 ) -> Result<usize> {
     let before = snapshot
         .json_docs
@@ -671,12 +685,6 @@ fn project_shared_program_snapshot(
             !is_private_snapshot_namespace(&event.plane)
                 && !is_private_snapshot_key(&event.record_key)
         });
-        rebuild_projected_runtime_skill_scope_closure(
-            snapshot,
-            &scope.memory_space_id,
-            bm_core::skills::RuntimeSkillOwningScope::SharedProgram,
-            capacity.kv_max_entries,
-        )?;
     }
     store_internal::validate_scoped_projection_governed_closure(snapshot, scope)?;
     snapshot.schema_manifest.projection_scope =
@@ -737,6 +745,12 @@ fn project_memory_space_snapshot(
     let privacy_redactions = (!include_private).then(|| count_private_snapshot_entries(snapshot));
 
     validate_memory_space_projection_ownership(snapshot, scope, capacity)?;
+    let store_scope = store_internal::StoreScopedProjectionScope::subject(
+        scope.memory_space_id.clone(),
+        scope.mounted_subject_id.clone(),
+    )?;
+    store_internal::validate_scoped_projection_governed_closure(snapshot, &store_scope)?;
+    let procedural_redactions = redact_procedural_archive_evidence(snapshot)?;
     snapshot.events.retain(|event| {
         event.scope.memory_space_id == scope.memory_space_id
             && event.scope.subject_id == scope.mounted_subject_id
@@ -759,10 +773,6 @@ fn project_memory_space_snapshot(
         &scope.memory_space_id,
         capacity.kv_max_entries,
     )?;
-    let store_scope = store_internal::StoreScopedProjectionScope::subject(
-        scope.memory_space_id.clone(),
-        scope.mounted_subject_id.clone(),
-    )?;
     store_internal::validate_scoped_projection_governed_closure(snapshot, &store_scope)?;
     snapshot.schema_manifest.projection_scope =
         store_internal::schema::StoreProjectionScope::MemorySpace {
@@ -772,7 +782,66 @@ fn project_memory_space_snapshot(
             },
             includes_private: include_private,
         };
-    Ok(privacy_redactions.unwrap_or(0))
+    Ok(privacy_redactions
+        .unwrap_or(0)
+        .saturating_add(procedural_redactions))
+}
+
+fn validate_public_procedural_archive_boundary(snapshot: &StoreSnapshot) -> Result<()> {
+    for doc in &snapshot.json_docs {
+        if store_internal::json_document_is_protected_owner(&doc.namespace, &doc.value)? {
+            return Err(Error::config(
+                "memory_space_import",
+                "public archive cannot import protected owner or worker state",
+            ));
+        }
+        if doc.namespace == "conversation_transcript" {
+            let record: bm_core::memory::TranscriptTurnRecord =
+                serde_json::from_value(doc.value.clone()).map_err(|_| {
+                    Error::config("memory_space_import", "invalid transcript archive record")
+                })?;
+            if record.learning_evidence.is_some() || !record.tool_observations.is_empty() {
+                return Err(Error::config(
+                    "memory_space_import",
+                    "public archive cannot restore raw procedural evidence",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn redact_procedural_archive_evidence(snapshot: &mut StoreSnapshot) -> Result<usize> {
+    let before = snapshot.json_docs.len();
+    let docs = std::mem::take(&mut snapshot.json_docs);
+    for doc in docs {
+        if !store_internal::json_document_is_protected_owner(&doc.namespace, &doc.value)? {
+            snapshot.json_docs.push(doc);
+        }
+    }
+    let mut redactions = before.saturating_sub(snapshot.json_docs.len());
+    for doc in &mut snapshot.json_docs {
+        if doc.namespace != "conversation_transcript" {
+            continue;
+        }
+        let mut record: bm_core::memory::TranscriptTurnRecord =
+            serde_json::from_value(doc.value.clone()).map_err(|_| {
+                Error::config("memory_space_export", "invalid transcript archive record")
+            })?;
+        if record.learning_evidence.take().is_some() || !record.tool_observations.is_empty() {
+            // A public archive is a disclosed projection, not a raw backup of the
+            // learning worker. Preserve chat identity/content without exporting
+            // tool results or creating a replayable feedback authority.
+            record.tool_observations.clear();
+            doc.value = serde_json::to_value(record)
+                .map_err(|error| Error::config("memory_space_export", error.to_string()))?;
+            redactions = redactions.saturating_add(1);
+        }
+    }
+    if redactions != 0 {
+        rebuild_disclosed_recall_manifest_closure(snapshot)?;
+    }
+    Ok(redactions)
 }
 
 fn validate_memory_space_projection_ownership(
@@ -1034,14 +1103,6 @@ fn redact_private_snapshot_entries(
         !is_private_snapshot_namespace(&event.plane)
             && !is_private_snapshot_key(event.record_key.as_str())
     });
-    rebuild_projected_runtime_skill_scope_closure(
-        snapshot,
-        &scope.memory_space_id,
-        bm_core::skills::RuntimeSkillOwningScope::Subject {
-            mounted_subject_id: scope.mounted_subject_id.clone(),
-        },
-        max_scope_entries,
-    )?;
     let governed_owners_after = governed_snapshot_owner_refs(snapshot)?;
     let governed_owner_removed = governed_owners_before != governed_owners_after;
     rebuild_projected_evidence_source_claim_closure(snapshot, scope, max_scope_entries)?;
@@ -1360,92 +1421,8 @@ fn rebuild_projected_long_term_private_closure(
     Ok(())
 }
 
-fn rebuild_projected_runtime_skill_scope_closure(
-    snapshot: &mut StoreSnapshot,
-    memory_space_id: &str,
-    owning_scope: bm_core::skills::RuntimeSkillOwningScope,
-    max_scope_entries: usize,
-) -> Result<()> {
-    let manifest_key =
-        bm_core::skills::runtime_skill_scope_manifest_key(memory_space_id, &owning_scope)
-            .map_err(|error| Error::config("memory_space_export", error.to_string()))?;
-    let mut manifest_revision = None;
-    for doc in snapshot.json_docs.iter().filter(|doc| {
-        doc.namespace == store_internal::schema::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE
-    }) {
-        let manifest =
-            serde_json::from_value::<bm_core::skills::RuntimeSkillScopeManifest>(doc.value.clone())
-                .map_err(|error| Error::config("memory_space_export", error.to_string()))?;
-        if doc.key != manifest.physical_key
-            || manifest.memory_space_id != memory_space_id
-            || manifest.owning_scope != owning_scope
-            || doc.key != manifest_key
-            || manifest_revision.replace(manifest.revision).is_some()
-        {
-            return Err(Error::config(
-                "memory_space_export",
-                "RuntimeSkill scope manifest is outside the exact archive scope or duplicated",
-            ));
-        }
-    }
-
-    let records = snapshot
-        .json_docs
-        .iter()
-        .filter(|doc| doc.namespace == store_internal::schema::RUNTIME_SKILL_RECORD_NAMESPACE)
-        .map(|doc| {
-            let record = serde_json::from_value::<bm_core::skills::RuntimeSkillOwnerRecord>(
-                doc.value.clone(),
-            )
-            .map_err(|error| Error::config("memory_space_export", error.to_string()))?;
-            if doc.key != record.physical_key
-                || record.memory_space_id != memory_space_id
-                || record.owning_scope != owning_scope
-            {
-                return Err(Error::config(
-                    "memory_space_export",
-                    "RuntimeSkill owner is outside the exact archive scope",
-                ));
-            }
-            Ok(record)
-        })
-        .collect::<Result<Vec<_>>>()?;
-    snapshot.json_docs.retain(|doc| {
-        !(doc.namespace == store_internal::schema::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE
-            && doc.key == manifest_key)
-    });
-    if records.is_empty() {
-        return Ok(());
-    }
-    let revision = manifest_revision.ok_or_else(|| {
-        Error::config(
-            "memory_space_export",
-            "RuntimeSkill owner closure is missing its scope manifest",
-        )
-    })?;
-    let bindings = records
-        .iter()
-        .map(bm_core::skills::RuntimeSkillOwnerBinding::from_record)
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|error| Error::config("memory_space_export", error.to_string()))?;
-    let manifest = bm_core::skills::RuntimeSkillScopeManifest::build(
-        revision,
-        memory_space_id,
-        owning_scope,
-        bindings,
-        max_scope_entries,
-    )
-    .map_err(|error| Error::config("memory_space_export", error.to_string()))?;
-    snapshot.json_docs.push(StoreSnapshotJsonDoc {
-        namespace: store_internal::schema::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE.to_string(),
-        key: manifest.physical_key.clone(),
-        value: serde_json::to_value(manifest)
-            .map_err(|error| Error::config("memory_space_export", error.to_string()))?,
-    });
-    Ok(())
-}
-
 fn rebuild_disclosed_recall_manifest_closure(snapshot: &mut StoreSnapshot) -> Result<()> {
+    use sha2::{Digest, Sha256};
     use store_internal::recall_index::{
         decode_typed_recall_index, ActiveTaskRunByChatIndex, ArchiveRecallManifest,
         ContinuityCapsuleScopeIndex, ConversationRecallManifest, ConversationTranscriptAuxManifest,
@@ -1455,6 +1432,7 @@ fn rebuild_disclosed_recall_manifest_closure(snapshot: &mut StoreSnapshot) -> Re
         CONVERSATION_RECALL_MANIFEST_NAMESPACE, CONVERSATION_TRANSCRIPT_AUX_MANIFEST_NAMESPACE,
         CONVERSATION_TRANSCRIPT_PAGE_NAMESPACE, TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE,
     };
+    use store_internal::schema::{RecallOwnerScopeBinding, RECALL_OWNER_SCOPE_BINDING_NAMESPACE};
 
     let json_values = snapshot
         .json_docs
@@ -1607,6 +1585,51 @@ fn rebuild_disclosed_recall_manifest_closure(snapshot: &mut StoreSnapshot) -> Re
         }
         .map_err(|error| Error::config("memory_space_export", error.to_string()))?;
     }
+    // Manifest entries and their exact scope bindings certify the same disclosed
+    // bytes. Rebuilding only the entries would leave the original raw digest in
+    // the binding and correctly fail immutable read/import closure validation.
+    let mut removed_bindings = BTreeSet::new();
+    for doc in &mut snapshot.json_docs {
+        if doc.namespace != RECALL_OWNER_SCOPE_BINDING_NAMESPACE {
+            continue;
+        }
+        let binding: RecallOwnerScopeBinding = serde_json::from_value(doc.value.clone())
+            .map_err(|error| Error::config("memory_space_export", error.to_string()))?;
+        binding.validate()?;
+        let address = (binding.owner_namespace.clone(), binding.owner_key.clone());
+        let bytes = match binding.owner_kind.as_str() {
+            "json" => json_values
+                .get(&address)
+                .map(serde_json::to_vec)
+                .transpose()
+                .map_err(|error| Error::config("memory_space_export", error.to_string()))?,
+            "blob" => blob_values.get(&address).cloned(),
+            _ => {
+                return Err(Error::config(
+                    "memory_space_export",
+                    "unknown disclosed recall owner kind",
+                ))
+            }
+        };
+        let Some(bytes) = bytes else {
+            removed_bindings.insert(doc.key.clone());
+            continue;
+        };
+        let disclosed = RecallOwnerScopeBinding::build(
+            &binding.memory_space_id,
+            &binding.mounted_subject_id,
+            &binding.owner_kind,
+            &binding.owner_namespace,
+            &binding.owner_key,
+            &format!("sha256:{:x}", Sha256::digest(bytes)),
+        )?;
+        doc.value = serde_json::to_value(disclosed)
+            .map_err(|error| Error::config("memory_space_export", error.to_string()))?;
+    }
+    snapshot.json_docs.retain(|doc| {
+        doc.namespace != RECALL_OWNER_SCOPE_BINDING_NAMESPACE
+            || !removed_bindings.contains(&doc.key)
+    });
     Ok(())
 }
 
@@ -2286,6 +2309,13 @@ fn count_private_snapshot_entries(snapshot: &StoreSnapshot) -> usize {
 
 fn snapshot_doc_requires_private_export(doc: &StoreSnapshotJsonDoc) -> bool {
     match doc.namespace.as_str() {
+        store_internal::schema::AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE => {
+            serde_json::from_value::<bm_core::skills::AgentToolExperienceRevisionMaterialV2>(
+                doc.value.clone(),
+            )
+            .map(|owner| !owner.privacy_class.projection_content_allowed())
+            .unwrap_or(true)
+        }
         store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE => serde_json::from_value::<
             bm_core::memory::LongTermMemoryVersionMaterial,
         >(doc.value.clone())
@@ -2336,6 +2366,82 @@ fn is_private_snapshot_key(key: &str) -> bool {
 #[cfg(test)]
 mod p7_6_memory_space_projection_tests {
     use super::*;
+
+    #[test]
+    fn public_archive_boundary_rejects_raw_observation_and_preserves_chat_when_disclosed() {
+        use bm_core::memory::{
+            CanonicalTurnDelta, ConversationKey, ConversationScope, MemoryTurnDeliveryStatus,
+            MemoryTurnProtocol, MemoryTurnSource, ToolObservationDigest, TranscriptInputMessage,
+            TranscriptTurnRecord,
+        };
+        let key = ConversationKey::new("space-a", "sdk", "conversation-a").unwrap();
+        let record = TranscriptTurnRecord::from_delta(
+            &key,
+            1,
+            &CanonicalTurnDelta {
+                turn_id: "turn-a".into(),
+                conversation: ConversationScope {
+                    channel: "sdk".into(),
+                    chat_id: "chat-a".into(),
+                    conversation_id: Some("conversation-a".into()),
+                },
+                subject: "agent-a".into(),
+                delivery_status: MemoryTurnDeliveryStatus::Delivered,
+                source: MemoryTurnSource {
+                    ingress: bm_core::memory::IngressKind::User,
+                    channel: "sdk".into(),
+                    provider: None,
+                    protocol: MemoryTurnProtocol::OllamaChat,
+                    endpoint: None,
+                    model_alias: None,
+                    model_resolved: None,
+                    request_id: None,
+                    client_conversation_hint: None,
+                },
+                actor: None,
+                input_messages: vec![TranscriptInputMessage::user("CHAT_POSITIVE")],
+                assistant_message: None,
+                tool_observations: vec![ToolObservationDigest {
+                    observation_id: "RAW_OBSERVATION_ID".into(),
+                    tool_name: "tool-a".into(),
+                    summary: "RAW_TOOL_OUTPUT".into(),
+                    external_content: false,
+                }],
+                external_content_used: false,
+                candidate_ids: Vec::new(),
+            },
+            Vec::new(),
+            100,
+        )
+        .unwrap();
+        let mut snapshot = snapshot_with_docs();
+        snapshot.json_docs = vec![StoreSnapshotJsonDoc {
+            namespace: "conversation_transcript".into(),
+            key: "synthetic-transcript".into(),
+            value: serde_json::to_value(record).unwrap(),
+        }];
+        assert!(validate_public_procedural_archive_boundary(&snapshot).is_err());
+        assert_eq!(
+            redact_procedural_archive_evidence(&mut snapshot).unwrap(),
+            1
+        );
+        validate_public_procedural_archive_boundary(&snapshot).unwrap();
+        let encoded = serde_json::to_string(&snapshot.json_docs).unwrap();
+        assert!(encoded.contains("CHAT_POSITIVE"));
+        assert!(!encoded.contains("RAW_TOOL_OUTPUT"));
+        assert!(!encoded.contains("RAW_OBSERVATION_ID"));
+    }
+
+    #[test]
+    fn public_archive_boundary_rejects_worker_state_even_without_raw_transcript() {
+        let mut snapshot = snapshot_with_docs();
+        snapshot.json_docs = vec![StoreSnapshotJsonDoc {
+            namespace: store_internal::schema::PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE.into(),
+            key: "protected-worker-state".into(),
+            value: serde_json::json!({}),
+        }];
+        assert!(validate_public_procedural_archive_boundary(&snapshot).is_err());
+    }
 
     fn scope(space: &str, subject: &str) -> MemorySpaceScope {
         MemorySpaceScope {

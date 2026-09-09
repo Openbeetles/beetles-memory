@@ -127,6 +127,7 @@ fn project_soul(
 ) -> String {
     runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation,
             user_query: "How should you approach this?".to_string(),
             system_max_len: 4096,
@@ -146,6 +147,7 @@ fn projection_request(
     temporal_operation: MemoryRecallTemporalOperation,
 ) -> MemoryProjectionRequest {
     MemoryProjectionRequest {
+        binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
         temporal_operation,
         user_query: "How should you approach this?".to_string(),
         system_max_len: 4096,

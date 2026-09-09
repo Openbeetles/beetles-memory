@@ -10,12 +10,12 @@ pub use contract::{
     AdapterAuthContext, AdapterCapabilityReportV2, AdapterCommand, AdapterEnvelope, AdapterEvent,
     AdapterGovernedProjectSafeReportV1, AdapterGovernedRecallSafeReportV1,
     AdapterGovernedSafeReportV1, AdapterMutationOperationCapability, AdapterMutationReceiptV1,
-    AdapterMutationReliability, AdapterOperation, AdapterProjectionAuditSummary,
-    AdapterProjectionReport, AdapterProtocolBinding, AdapterProtocolCapabilityBinding,
-    AdapterProtocolPrivacyBinding, AdapterProtocolRenderBudgetBinding, AdapterRequestIdentity,
-    AdapterRequestIdentityError, AdapterRequestIdentityOwner, AdapterResponse, AdapterSdkReport,
-    AdapterSource, AdapterTurnFinalizeReport, ExternalAiMemoryProtocolVersion, TransportKind,
-    TransportMode,
+    AdapterMutationReliability, AdapterOperation, AdapterProceduralLearningCapabilityBinding,
+    AdapterProjectionAuditSummary, AdapterProjectionReport, AdapterProtocolBinding,
+    AdapterProtocolCapabilityBinding, AdapterProtocolPrivacyBinding,
+    AdapterProtocolRenderBudgetBinding, AdapterRequestIdentity, AdapterRequestIdentityError,
+    AdapterRequestIdentityOwner, AdapterResponse, AdapterSdkReport, AdapterSource,
+    AdapterTurnFinalizeReport, ExternalAiMemoryProtocolVersion, TransportKind, TransportMode,
 };
 pub use dispatch::{
     dispatch_adapter_command, dispatch_adapter_command_with_services, project_adapter_report,
@@ -23,7 +23,7 @@ pub use dispatch::{
 };
 pub use error::{AdapterError, AdapterErrorKey};
 pub use payload::{
-    decode_json_adapter_command, governed_adapter_json_command_schema, AdapterJsonCommandOptions,
+    decode_json_adapter_command, governed_adapter_json_command_schema,
     GovernedAdapterJsonCommandSchema,
 };
 pub use policy::{AdapterBudget, AdapterPolicy};

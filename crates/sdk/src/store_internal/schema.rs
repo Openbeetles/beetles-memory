@@ -17,6 +17,7 @@ use bm_core::memory::{
     MemoryLongTermGovernancePolicy, MemoryMutationAuditRecord, MemoryMutationOperationIdentity,
     MemoryMutationReceipt, PostTurnGovernanceBindingRevisionIndexV1,
     PostTurnGovernanceBindingSnapshotV1, PostTurnGovernanceJobV3, PostTurnGovernanceScopeIndexV3,
+    ProceduralFeedbackApplicationLedgerV1, ProceduralFeedbackJobV1, ProceduralFeedbackScopeIndexV1,
     RelationshipSourceConstitutionV1, RelationshipSourceControlOutcomeV1,
     RelationshipSourceControlReportV1, RelationshipSourceScopeManifestV1,
     SubjectSoulGenerationTombstoneV1, SubjectSoulLifecycleHeadV1, SubjectSoulMutationOutcomeV1,
@@ -38,9 +39,10 @@ use bm_core::memory::{
 };
 use bm_core::platform::MemorySystemKind;
 use bm_core::skills::{
-    canonical_runtime_skill_owner_key, runtime_skill_scope_manifest_key, RuntimeSkillOwnerRecord,
-    RuntimeSkillOwningScope, RuntimeSkillScopeManifest,
-    RUNTIME_SKILL_SCOPE_MANIFEST_SCHEMA_VERSION,
+    canonical_runtime_skill_owner_key, runtime_skill_scope_manifest_key,
+    AgentToolExperienceOwnerHeadV2, AgentToolExperienceRevisionMaterialV2,
+    AgentToolExperienceScopeManifestV1, RuntimeSkillOwnerRecord, RuntimeSkillOwningScope,
+    RuntimeSkillScopeManifest, RUNTIME_SKILL_SCOPE_MANIFEST_SCHEMA_VERSION,
 };
 use bm_core::{Error, Result};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -59,14 +61,24 @@ use crate::store_internal::recall_index::{
     TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE,
 };
 
-pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema_v12";
-pub const STORE_SCHEMA_VERSION: u32 = 12;
+pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema_v13";
+pub const STORE_SCHEMA_VERSION: u32 = 13;
 pub(crate) const LONG_TERM_VERSION_MATERIAL_NAMESPACE: &str = "long_term_version_materials";
 pub(crate) const LONG_TERM_HEAD_MANIFEST_NAMESPACE: &str = "long_term_head_manifests";
 pub(crate) const LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE: &str =
     "long_term_version_scope_manifests";
 pub(crate) const RUNTIME_SKILL_RECORD_NAMESPACE: &str = "runtime_skill_records";
 pub(crate) const RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE: &str = "runtime_skill_scope_manifests";
+pub(crate) const AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE: &str =
+    "agent_tool_experience_revision_materials";
+pub(crate) const AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE: &str = "agent_tool_experience_owner_heads";
+pub(crate) const AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE: &str =
+    "agent_tool_experience_scope_manifests";
+pub(crate) const PROCEDURAL_FEEDBACK_JOB_NAMESPACE: &str = "procedural_feedback_jobs";
+pub(crate) const PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE: &str =
+    "procedural_feedback_scope_indexes";
+pub(crate) const PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE: &str =
+    "procedural_feedback_application_ledgers";
 pub(crate) const LEGACY_LONG_TERM_OWNER_NAMESPACE: &str = "long_term";
 pub(crate) const LEGACY_RUNTIME_SKILL_RECALL_MANIFEST_NAMESPACE: &str =
     "runtime_skill_recall_manifests";
@@ -211,6 +223,7 @@ fn canonical_scoped_store_key(domain: &str, components: &[&str]) -> Result<Strin
 
 const LEGACY_RUNTIME_SKILL_KEY_PREFIX: &str = "runtime_skill__";
 const LEGACY_RUNTIME_SKILL_CONTENT_MARKER: &str = "<!-- beetle:runtime-skill -->";
+const LEGACY_AGENT_TOOL_EXPERIENCE_KEY_PREFIX: &str = "agent_tool_experience__";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StoreJsonDecoderKind {
@@ -241,6 +254,13 @@ pub(crate) enum StoreJsonDecoderKind {
     GovernedEvidenceSourceClaimManifest,
     RuntimeSkillOwnerRecord,
     RuntimeSkillScopeManifest,
+    AgentToolExperienceRevisionMaterial,
+    AgentToolExperienceOwnerHead,
+    AgentToolExperienceScopeManifest,
+    ProceduralFeedbackJob,
+    ProceduralFeedbackScopeIndex,
+    ProceduralFeedbackApplicationLedger,
+    ProceduralSelectionAuthority,
     ConversationRecallManifest,
     ConversationTranscriptPageIndex,
     ConversationTranscriptAuxManifest,
@@ -278,6 +298,7 @@ pub(crate) enum StoreLegacyAddressKind {
     RuntimeSkillRecallManifest,
     RuntimeSkillBlobKeyPrefix,
     RuntimeSkillBlobMarker,
+    AgentToolExperienceBlobKeyPrefix,
     MixedRelationshipConstitution,
 }
 
@@ -456,6 +477,34 @@ pub(crate) const STORE_JSON_NAMESPACE_REGISTRY: &[StoreJsonNamespaceContract] = 
         namespace: RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE,
         decoder_kind: StoreJsonDecoderKind::RuntimeSkillScopeManifest,
     },
+    StoreJsonNamespaceContract {
+        namespace: AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE,
+        decoder_kind: StoreJsonDecoderKind::AgentToolExperienceRevisionMaterial,
+    },
+    StoreJsonNamespaceContract {
+        namespace: AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE,
+        decoder_kind: StoreJsonDecoderKind::AgentToolExperienceOwnerHead,
+    },
+    StoreJsonNamespaceContract {
+        namespace: AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE,
+        decoder_kind: StoreJsonDecoderKind::AgentToolExperienceScopeManifest,
+    },
+    typed_json_namespace(
+        PROCEDURAL_FEEDBACK_JOB_NAMESPACE,
+        StoreJsonDecoderKind::ProceduralFeedbackJob,
+    ),
+    typed_json_namespace(
+        super::procedural_selection::NAMESPACE,
+        StoreJsonDecoderKind::ProceduralSelectionAuthority,
+    ),
+    typed_json_namespace(
+        PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE,
+        StoreJsonDecoderKind::ProceduralFeedbackScopeIndex,
+    ),
+    typed_json_namespace(
+        PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE,
+        StoreJsonDecoderKind::ProceduralFeedbackApplicationLedger,
+    ),
     typed_json_namespace(
         CONVERSATION_RECALL_MANIFEST_NAMESPACE,
         StoreJsonDecoderKind::ConversationRecallManifest,
@@ -798,9 +847,18 @@ impl RelationshipSourceDurableOperationResultV1 {
 
 pub(crate) fn store_memory_space_archive_json_namespaces() -> impl Iterator<Item = &'static str> {
     store_json_namespaces().filter(|namespace| {
-        !is_subject_soul_protected_json_namespace(namespace)
+        *namespace != super::procedural_selection::NAMESPACE
+            && !is_runtime_skill_protected_json_namespace(namespace)
+            && !is_subject_soul_protected_json_namespace(namespace)
             && !is_relationship_source_protected_json_namespace(namespace)
     })
+}
+
+pub(crate) fn is_runtime_skill_protected_json_namespace(namespace: &str) -> bool {
+    matches!(
+        namespace,
+        RUNTIME_SKILL_RECORD_NAMESPACE | RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE
+    )
 }
 
 #[cfg(any(test, feature = "nonproduction-replay-harness"))]
@@ -902,6 +960,7 @@ fn validate_store_json_value(
                 name.trim().is_empty()
                     || name != name.trim()
                     || name.starts_with(LEGACY_RUNTIME_SKILL_KEY_PREFIX)
+                    || name.starts_with(LEGACY_AGENT_TOOL_EXPERIENCE_KEY_PREFIX)
                     || name.contains(LEGACY_RUNTIME_SKILL_CONTENT_MARKER)
             }) {
                 return Err(invalid(
@@ -1433,6 +1492,35 @@ fn validate_store_json_value(
             }
             Ok(())
         }
+        StoreJsonDecoderKind::AgentToolExperienceRevisionMaterial => {
+            let material = decode_json::<AgentToolExperienceRevisionMaterialV2>(value, invalid)?;
+            if !material.validate_contract().accepted || material.physical_key != key {
+                return Err(invalid(
+                    "Agent Tool experience material contract or physical key mismatch".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::AgentToolExperienceOwnerHead => {
+            let head = decode_json::<AgentToolExperienceOwnerHeadV2>(value, invalid)?;
+            if !head.validate_contract().accepted || head.physical_key != key {
+                return Err(invalid(
+                    "Agent Tool experience head contract or physical key mismatch".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::AgentToolExperienceScopeManifest => {
+            let manifest = decode_json::<AgentToolExperienceScopeManifestV1>(value, invalid)?;
+            if manifest.physical_key != key {
+                return Err(invalid(
+                    "Agent Tool experience manifest physical key mismatch".to_string(),
+                ));
+            }
+            manifest
+                .validate_exact(manifest.bindings.clone(), usize::MAX)
+                .map_err(|error| invalid(error.to_string()))
+        }
         StoreJsonDecoderKind::ConversationRecallManifest => {
             decode_recall::<ConversationRecallManifest>(key, value, invalid)
         }
@@ -1497,6 +1585,40 @@ fn validate_store_json_value(
             if index.scope_index_key != key || index.validate().is_err() {
                 return Err(invalid(
                     "post-turn governance scope index contract or physical key mismatch"
+                        .to_string(),
+                ));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::ProceduralSelectionAuthority => {
+            let authority = decode_json::<super::procedural_selection::ProceduralSelectionAuthority>(
+                value, invalid,
+            )?;
+            authority.validate(key)
+        }
+        StoreJsonDecoderKind::ProceduralFeedbackJob => {
+            let job = decode_json::<ProceduralFeedbackJobV1>(value, invalid)?;
+            if job.job_id != key || job.validate().is_err() {
+                return Err(invalid(
+                    "procedural feedback job contract or physical key mismatch".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::ProceduralFeedbackScopeIndex => {
+            let index = decode_json::<ProceduralFeedbackScopeIndexV1>(value, invalid)?;
+            if index.scope_index_key != key || index.validate().is_err() {
+                return Err(invalid(
+                    "procedural feedback scope index contract or physical key mismatch".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::ProceduralFeedbackApplicationLedger => {
+            let ledger = decode_json::<ProceduralFeedbackApplicationLedgerV1>(value, invalid)?;
+            if ledger.job_id != key || ledger.validate().is_err() {
+                return Err(invalid(
+                    "procedural feedback application ledger contract or physical key mismatch"
                         .to_string(),
                 ));
             }
@@ -2094,6 +2216,11 @@ pub(crate) fn classify_store_blob_address(
         return Ok(StoreAddressAdmission::Unknown);
     };
     if namespace == GENERIC_SKILL_BLOB_NAMESPACE {
+        if key.starts_with(LEGACY_AGENT_TOOL_EXPERIENCE_KEY_PREFIX) {
+            return Ok(StoreAddressAdmission::ForbiddenLegacy(
+                StoreLegacyAddressKind::AgentToolExperienceBlobKeyPrefix,
+            ));
+        }
         if key.starts_with(LEGACY_RUNTIME_SKILL_KEY_PREFIX) {
             return Ok(StoreAddressAdmission::ForbiddenLegacy(
                 StoreLegacyAddressKind::RuntimeSkillBlobKeyPrefix,
@@ -3013,14 +3140,14 @@ mod tests {
     }
 
     #[test]
-    fn store_schema_identity_is_exactly_v12_and_rejects_v11() {
-        assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v12");
-        assert_eq!(STORE_SCHEMA_VERSION, 12);
+    fn store_schema_identity_is_exactly_v13_and_rejects_v12() {
+        assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v13");
+        assert_eq!(STORE_SCHEMA_VERSION, 13);
         assert!(
             validate_store_schema_identity(STORE_SCHEMA_ID, STORE_SCHEMA_VERSION, "test").is_ok()
         );
         assert!(
-            validate_store_schema_identity("beetle_memory_store_schema_v11", 11, "test").is_err()
+            validate_store_schema_identity("beetle_memory_store_schema_v12", 12, "test").is_err()
         );
         assert!(
             validate_store_schema_identity("unknown_memory_store_schema_v999", 999, "test")
@@ -3029,7 +3156,7 @@ mod tests {
     }
 
     #[test]
-    fn store_v12_rejects_v2_governance_job_and_scope_payloads() {
+    fn store_v13_rejects_v2_governance_job_and_scope_payloads() {
         let identity = PostTurnGovernanceIdentityV2::new(
             "space:v2-reject",
             "subject:v2-reject",

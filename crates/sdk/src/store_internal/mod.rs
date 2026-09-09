@@ -5,9 +5,11 @@
 //! backend and capacity profile; they do not define Beetle Memory persistence
 //! semantics.
 
+pub(crate) mod agent_tool_experience;
 mod config;
 mod embedded;
 mod engine;
+pub(crate) use engine::json_document_is_protected_owner;
 mod error;
 mod event;
 mod file;
@@ -15,6 +17,8 @@ mod in_memory;
 mod mutation;
 mod platform;
 pub(crate) mod post_turn_governance;
+pub(crate) mod procedural_feedback;
+pub(crate) mod procedural_selection;
 pub(crate) mod recall_index;
 pub(crate) mod recall_read;
 pub(crate) mod schema;
@@ -25,6 +29,11 @@ pub(crate) mod subject_soul;
 mod transaction;
 mod transcript_query;
 
+#[cfg(feature = "nonproduction-replay-harness")]
+pub use agent_tool_experience::{
+    AgentToolExperienceStoreLimitsV1, AgentToolExperienceStoreMutationOutcomeV1,
+    AgentToolExperienceStoreMutationPlanV1,
+};
 pub(crate) use config::{enforce_event_key_budget, enforce_logical_key_budget, store_budget_error};
 pub use config::{
     profile_memory_system_kind, StoreBackendConfig, StoreBackendKind, StoreCapacityBudget,

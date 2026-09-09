@@ -135,8 +135,6 @@ fn seed_drafts(
 ) -> Vec<bm_sdk::LongTermMemoryEntry> {
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: drafts,
                 deletes: Vec::new(),
@@ -1138,6 +1136,7 @@ fn typed_head_and_material_revision_drift_fail_closed_in_recall_eval_and_project
         assert!(baseline_eval.graph_index_report.used);
         let baseline_projection = runtime
             .project(MemoryProjectionRequest {
+                binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
                 temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 user_query: target_topic.clone(),
                 system_max_len: 4096,
@@ -1251,6 +1250,7 @@ fn typed_head_and_material_revision_drift_fail_closed_in_recall_eval_and_project
             .expect_err("typed revision drift must fail eval");
         assert_eq!(eval_error.stage(), expected_stage);
         let projection_error = match runtime.project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             user_query: target_topic,
             system_max_len: 4096,
@@ -1571,6 +1571,7 @@ fn raw_legacy_owner_loss_does_not_override_typed_owner_or_mutate_graph() {
 
     let project = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             user_query: "pure read anchor".to_string(),
             system_max_len: 4096,
@@ -1786,7 +1787,6 @@ fn candidate_and_extraction_owner_updates_cascade_graph_in_the_same_transaction(
     let runtime = test_runtime(platform.clone(), support::host_test_profile());
     runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: None,
             candidates: vec![candidate("candidate cascade", "Initial candidate owner.")],
         })
         .expect("seed candidate owner");
@@ -1819,7 +1819,6 @@ fn candidate_and_extraction_owner_updates_cascade_graph_in_the_same_transaction(
 
     let candidate_update = runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: None,
             candidates: vec![candidate(
                 "candidate cascade",
                 "Updated candidate owner removes stale graph material.",
@@ -1862,8 +1861,6 @@ fn candidate_and_extraction_owner_updates_cascade_graph_in_the_same_transaction(
         "Updated extraction owner removes stale graph material.".to_string();
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![extraction_update],
                 deletes: Vec::new(),

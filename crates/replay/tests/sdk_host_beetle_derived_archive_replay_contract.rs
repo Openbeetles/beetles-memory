@@ -1,9 +1,10 @@
 use bm_sdk::nonproduction_replay_harness::{export_memory_space, import_memory_space};
 use bm_sdk::{
-    MemoryArchiveScope, MemoryIdentity, MemoryProjectionRequest, MemoryScope,
-    MemorySpaceExportRequest, MemorySpaceImportRequest, MemorySpacePrivateMaterialPolicy,
-    MemoryStoreHandle, MemoryWriteCandidate, MemoryWriteRequest, PressureLevel, ProfileId,
-    RuntimeLifecycleModeInput, RuntimeSkillOwningScope, StoreBackendConfig,
+    GovernedRuntimeSkillWriteInput, MemoryArchiveScope, MemoryIdentity, MemoryProjectionRequest,
+    MemoryScope, MemorySpaceExportRequest, MemorySpaceImportRequest,
+    MemorySpacePrivateMaterialPolicy, MemoryStoreHandle, MemoryWriteCandidate, MemoryWriteRequest,
+    PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillOwningScope,
+    StoreBackendConfig,
 };
 use serde::Deserialize;
 
@@ -14,6 +15,7 @@ struct SdkHostReplayFixture {
     chat_id: String,
     projection_query: String,
     candidates: Vec<MemoryWriteCandidate>,
+    runtime_skill_fixtures: Vec<GovernedRuntimeSkillWriteInput>,
 }
 
 #[test]
@@ -63,14 +65,21 @@ fn restore_then_expect_exact_identity_rejection(
 
     source_runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: Some(RuntimeSkillOwningScope::Subject {
-                mounted_subject_id: source_runtime.subject_id().to_string(),
-            }),
             candidates: fixture.candidates.clone(),
         })
         .expect("write fixture candidates");
+    let seeded = source_runtime
+        .seed_runtime_skills_for_replay(
+            fixture.runtime_skill_fixtures.clone(),
+            RuntimeSkillOwningScope::Subject {
+                mounted_subject_id: source_runtime.subject_id().to_string(),
+            },
+        )
+        .expect("typed nonproduction fixture seeds");
+    assert!(seeded.accepted && seeded.changed > 0);
     let projection = source_runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: fixture.projection_query.clone(),

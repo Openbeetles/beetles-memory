@@ -54,6 +54,7 @@ impl GovernedEvidenceDocumentSourceKind {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(deny_unknown_fields)]
 pub struct GovernedEvidenceDocumentChunk {
     pub identity: String,
     pub ordinal: u32,
@@ -61,6 +62,7 @@ pub struct GovernedEvidenceDocumentChunk {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct GovernedEvidenceDocumentDraft {
     pub memory_space_id: String,
     pub mounted_subject_id: String,

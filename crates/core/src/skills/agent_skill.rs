@@ -1,6 +1,7 @@
 use crate::error::{Error, Result};
 use crate::feature_gate::ProfileId;
 use crate::util::truncate_content_to_max;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -46,7 +47,8 @@ impl AgentSkillDirConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentSkillScope {
     Global,
     Owner,
@@ -60,7 +62,8 @@ pub enum AgentSkillAccess {
     ReadOnly,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentSkillTrust {
     HostBuiltin,
     HostProject,
@@ -125,6 +128,12 @@ pub struct AgentSkillPackageRecord {
     pub resource_summary: AgentSkillResourceSummary,
     pub status: AgentSkillPackageStatus,
     pub warnings: Vec<AgentSkillPackageWarning>,
+}
+
+impl AgentSkillPackageRecord {
+    pub fn package_binding(&self) -> String {
+        agent_skill_package_binding(self)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -213,7 +222,16 @@ pub struct AgentSkillProjectionSource {
     pub namespace: String,
     pub name: String,
     pub fingerprint: String,
+    pub scope: AgentSkillScope,
+    pub trust: AgentSkillTrust,
+    package_binding: String,
     pub reason: String,
+}
+
+impl AgentSkillProjectionSource {
+    pub fn package_binding(&self) -> &str {
+        &self.package_binding
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -249,7 +267,18 @@ pub struct AgentSkillRecallHit {
     pub score: u16,
     pub reasons: Vec<String>,
     pub fingerprint: String,
+    pub scope: AgentSkillScope,
+    pub trust: AgentSkillTrust,
+    package_binding: String,
     pub host_execution_required: bool,
+}
+
+impl AgentSkillRecallHit {
+    /// Exact local mount, applicability, trust, and projected-content binding.
+    /// Absolute paths participate in the digest but are never exposed by this view.
+    pub fn package_binding(&self) -> &str {
+        &self.package_binding
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -260,7 +289,16 @@ pub struct ProjectedAgentSkillHint {
     pub reason: String,
     pub prompt_snippet: String,
     pub fingerprint: String,
+    pub scope: AgentSkillScope,
+    pub trust: AgentSkillTrust,
+    package_binding: String,
     pub host_execution_required: bool,
+}
+
+impl ProjectedAgentSkillHint {
+    pub fn package_binding(&self) -> &str {
+        &self.package_binding
+    }
 }
 
 pub fn build_agent_skill_registry_snapshot(
@@ -289,10 +327,10 @@ pub fn build_agent_skill_registry_snapshot(
 }
 
 pub fn agent_skill_dirs_forbidden_by_profile(profile: ProfileId) -> bool {
-    matches!(
-        profile,
-        ProfileId::EspStandaloneMemory | ProfileId::EspEmbeddedSdk
-    )
+    crate::feature_gate::profile_capability_catalog()
+        .iter()
+        .find(|entry| entry.profile == profile)
+        .is_none_or(|entry| !entry.procedural_learning.standard_agent_skill_mount)
 }
 
 pub fn retrieve_agent_skill_hits(
@@ -340,18 +378,29 @@ pub fn build_projected_agent_skill_hints(
     let mut hints = Vec::new();
     let mut budget_limited = false;
     for hit in hits {
-        let Some(record) = snapshot
-            .packages
-            .iter()
-            .find(|record| record.id == hit.package_id)
-        else {
-            rejected.push(AgentSkillProjectionRejection {
-                package_id: hit.package_id.clone(),
-                namespace: hit.namespace.clone(),
-                name: hit.name.clone(),
-                reason: "package_not_in_registry_snapshot".to_string(),
-            });
-            continue;
+        let mut exact_records = snapshot.packages.iter().filter(|record| {
+            record.status == AgentSkillPackageStatus::Active
+                && record.id == hit.package_id
+                && record.namespace == hit.namespace
+                && record.name == hit.name
+                && record.title == hit.title
+                && record.description == hit.description
+                && record.fingerprint == hit.fingerprint
+                && record.scope == hit.scope
+                && record.trust == hit.trust
+                && agent_skill_package_binding(record) == hit.package_binding
+        });
+        let record = match (exact_records.next(), exact_records.next()) {
+            (Some(record), None) => record,
+            _ => {
+                rejected.push(AgentSkillProjectionRejection {
+                    package_id: hit.package_id.clone(),
+                    namespace: hit.namespace.clone(),
+                    name: hit.name.clone(),
+                    reason: "package_binding_missing_changed_or_ambiguous".to_string(),
+                });
+                continue;
+            }
         };
         let reason = hit
             .reasons
@@ -382,6 +431,9 @@ pub fn build_projected_agent_skill_hints(
             namespace: hit.namespace.clone(),
             name: hit.name.clone(),
             fingerprint: hit.fingerprint.clone(),
+            scope: hit.scope.clone(),
+            trust: hit.trust,
+            package_binding: hit.package_binding.clone(),
             reason: reason.clone(),
         });
         hints.push(ProjectedAgentSkillHint {
@@ -391,6 +443,9 @@ pub fn build_projected_agent_skill_hints(
             reason,
             prompt_snippet: prompt_snippet.to_string(),
             fingerprint: hit.fingerprint.clone(),
+            scope: hit.scope.clone(),
+            trust: hit.trust,
+            package_binding: hit.package_binding.clone(),
             host_execution_required: true,
         });
     }
@@ -788,8 +843,56 @@ fn score_agent_skill_record(
         score,
         reasons,
         fingerprint: record.fingerprint.clone(),
+        scope: record.scope.clone(),
+        trust: record.trust,
+        package_binding: agent_skill_package_binding(record),
         host_execution_required: true,
     })
+}
+
+fn agent_skill_package_binding(record: &AgentSkillPackageRecord) -> String {
+    let mut digest = Sha256::new();
+    let mut field = |bytes: &[u8]| {
+        digest.update((bytes.len() as u64).to_be_bytes());
+        digest.update(bytes);
+    };
+    field(b"agent_skill_exact_package_projection_binding_v1");
+    for value in [
+        &record.id,
+        &record.namespace,
+        &record.name,
+        &record.title,
+        &record.description,
+        &record.body_summary,
+        &record.relative_dir,
+        &record.fingerprint,
+    ] {
+        field(value.as_bytes());
+    }
+    field(record.root.as_os_str().as_encoded_bytes());
+    field(record.skill_file.as_os_str().as_encoded_bytes());
+    match &record.scope {
+        AgentSkillScope::Global => field(b"global"),
+        AgentSkillScope::Owner => field(b"owner"),
+        AgentSkillScope::Project { project_id } => {
+            field(b"project");
+            field(project_id.as_bytes());
+        }
+        AgentSkillScope::Workspace { workspace_id } => {
+            field(b"workspace");
+            field(workspace_id.as_bytes());
+        }
+        AgentSkillScope::Conversation { conversation_id } => {
+            field(b"conversation");
+            field(conversation_id.as_bytes());
+        }
+    }
+    field(match record.trust {
+        AgentSkillTrust::HostBuiltin => b"host_builtin",
+        AgentSkillTrust::HostProject => b"host_project",
+        AgentSkillTrust::UserMounted => b"user_mounted",
+    });
+    format!("sha256:{digest:x}", digest = digest.finalize())
 }
 
 fn normalize_agent_skill_text(value: &str) -> String {
@@ -975,6 +1078,51 @@ Check camera permissions, enumerate devices, then verify capture format.
         assert_eq!(hints.len(), 1);
         assert_eq!(audit.selected.len(), 1);
         assert!(hints[0].prompt_snippet.contains("camera"));
+    }
+
+    #[test]
+    fn projection_package_binding_rejects_content_scope_trust_mount_drift_and_ambiguity() {
+        let root = temp_root("exact-projection-binding");
+        write_skill(
+            &root,
+            "release-check",
+            "---\nname: release-check\ndescription: Verify release artifacts.\n---\nBOUND_ORIGINAL_BODY\n",
+        );
+        let snapshot = build_agent_skill_registry_snapshot(
+            ProfileId::ServerLinuxDevFull,
+            &[AgentSkillDirConfig::read_only(&root, "host")],
+            10,
+        )
+        .unwrap();
+        let hits = retrieve_agent_skill_hits(&snapshot, "release artifacts", 4);
+        let (positive, _) = build_projected_agent_skill_hints(&snapshot, &hits, 1024);
+        assert!(!positive.is_empty());
+        assert!(positive[0].prompt_snippet.contains("BOUND_ORIGINAL_BODY"));
+        assert_eq!(positive[0].package_binding(), hits[0].package_binding());
+        assert!(!format!("{hits:?}").contains(root.to_string_lossy().as_ref()));
+        for drift in ["content", "scope", "trust", "mount", "duplicate"] {
+            let mut changed = snapshot.clone();
+            match drift {
+                "content" => changed.packages[0].body_summary = "UNBOUND_BODY".into(),
+                "scope" => {
+                    changed.packages[0].scope = AgentSkillScope::Conversation {
+                        conversation_id: "other-conversation".into(),
+                    }
+                }
+                "trust" => changed.packages[0].trust = AgentSkillTrust::UserMounted,
+                "mount" => changed.packages[0].root = root.join("another-mount"),
+                "duplicate" => changed.packages.push(changed.packages[0].clone()),
+                _ => unreachable!(),
+            }
+            let (hints, audit) = build_projected_agent_skill_hints(&changed, &hits, 1024);
+            assert!(
+                hints.is_empty(),
+                "must reject {drift} without reading a substitute body"
+            );
+            assert!(audit.selected.is_empty());
+            assert!(!audit.rejected.is_empty());
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

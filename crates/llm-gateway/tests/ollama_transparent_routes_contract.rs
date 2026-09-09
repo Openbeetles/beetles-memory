@@ -1,13 +1,10 @@
 use bm_entry::EntryRuntimeBaseConfig;
 use bm_llm_gateway::{
     classify_ollama_route, GatewayAuditStage, GatewayConfig, GatewayProviderConfig, GatewayRuntime,
-    GatewayScopeRequest, GatewayScopeResolver, OllamaGatewayMethod, OllamaGatewayRequest,
-    OllamaNativeUpstream, OllamaPassthroughRequest, OllamaRouteAction, OllamaUpstreamRequest,
-    OllamaUpstreamResponse,
+    GatewayScopeRequest, OllamaGatewayMethod, OllamaGatewayRequest, OllamaNativeUpstream,
+    OllamaPassthroughRequest, OllamaRouteAction, OllamaUpstreamRequest, OllamaUpstreamResponse,
 };
-use bm_sdk::{
-    MemoryCapabilityPolicy, MemoryWriteRequest, RuntimeSkillWrite, RuntimeSkillWriteSource,
-};
+use bm_sdk::MemoryCapabilityPolicy;
 use serde_json::{json, Value};
 
 mod support;
@@ -38,38 +35,6 @@ fn scope_request() -> GatewayScopeRequest {
         model_alias: Some("local".to_string()),
         ..GatewayScopeRequest::new(support::gateway_bearer_auth("owner-token"))
     }
-}
-
-fn seed_runtime_skill(
-    gateway: &GatewayRuntime,
-    config: &GatewayConfig,
-    scope: &GatewayScopeRequest,
-) {
-    let resolved = GatewayScopeResolver::new(config.scope.clone())
-        .resolve(scope)
-        .expect("scope");
-    let agent_id = resolved.entry_scope.identity.agent_id.clone();
-    let runtime = gateway
-        .runtime_for_scope(resolved.entry_scope)
-        .expect("runtime");
-    runtime
-        .runtime()
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
-                name: "transparent_ollama_style".to_string(),
-                topic: "llm_gateway".to_string(),
-                title: "Transparent Ollama style".to_string(),
-                summary: "Transparent Ollama requests must still receive memory projection."
-                    .to_string(),
-                content: "Keep Beetle Memory projection visible for chat and generate.".to_string(),
-                citations: Vec::new(),
-                source_chat_id: Some("thread-ollama-transparent".to_string()),
-                observed_at: 1,
-            })],
-            owning_scope: support::runtime_skill_subject_scope(&agent_id),
-            source: RuntimeSkillWriteSource::Manual,
-        })
-        .expect("seed skill");
 }
 
 #[derive(Default)]
@@ -133,7 +98,6 @@ fn chat_and_generate_still_enter_projection_instead_of_passthrough() {
     let config = gateway_config();
     let gateway = GatewayRuntime::open(config.clone()).expect("gateway");
     let scope = scope_request();
-    seed_runtime_skill(&gateway, &config, &scope);
     let mut upstream = TransparentMockOllamaUpstream::default();
 
     bm_llm_gateway::handle_ollama_request(

@@ -8,10 +8,7 @@ use crate::llm::{
 use crate::orchestrator::PressureLevel;
 use crate::platform::{ResponseBody, SkillStorage};
 use crate::runtime::mode::{snapshot_from_source, RuntimeModeSource};
-use crate::skills::{
-    RuntimeSkillReuseOutcome, RuntimeSkillStorageMutation, RuntimeSkillWrite,
-    RuntimeSkillWriteSource,
-};
+use crate::skills::{RuntimeSkillStorageMutation, RuntimeSkillWrite, RuntimeSkillWriteSource};
 use crate::task::{TaskItem, TaskQuery, TaskStore};
 use crate::task_execution::{
     TaskArtifactRecord, TaskArtifactStore, TaskLearningRecord, TaskLearningStore, TaskRunRecord,
@@ -999,10 +996,6 @@ fn run_memory_harness_l2_production_replay() -> MemoryHarnessL2ReplayResult {
             tool_calls: 0,
             external_content_used: false,
             prompt_recall_intent: before_carry.prompt_recall_intent,
-            runtime_skill_selected_ids: before_carry.runtime_skill_selected_ids,
-            task_learning_selected_ids: before_carry.task_recall_selected_ids,
-            reuse_outcome: RuntimeSkillReuseOutcome::Neutral,
-            reuse_outcome_note: "",
             now_secs: NOW_SECS,
         },
         || {
@@ -1515,7 +1508,7 @@ fn memory_harness_prompt_inspection_parity() {
             source_chat_id: Some(CHAT_ID.to_string()),
             observed_at: NOW_SECS,
         }],
-        RuntimeSkillWriteSource::Manual,
+        RuntimeSkillWriteSource::ReplayHarness,
     )
     .unwrap();
 
@@ -1625,7 +1618,7 @@ fn memory_harness_forget_scope_contract() {
             source_chat_id: Some(CHAT_ID.to_string()),
             observed_at: NOW_SECS,
         }],
-        RuntimeSkillWriteSource::Manual,
+        RuntimeSkillWriteSource::ReplayHarness,
     )
     .unwrap();
 

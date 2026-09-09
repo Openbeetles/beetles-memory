@@ -49,6 +49,11 @@ cargo test -p bm-core --test post_image_closure_contract
 cargo test -p bm-sdk --features nonproduction-replay-harness --test governed_evidence_document_runtime_contract
 cargo test -p bm-sdk --features nonproduction-replay-harness --test memory_graph_v2_contract
 cargo test -p bm-sdk --features nonproduction-replay-harness --test archive_restore_contract
+cargo test -p bm-core --test post_turn_learning_contract
+cargo test -p bm-core --test conversation_transcript_contract
+# SQLite is the existing indexed RuntimeSkill delivery transport. Keep the
+# File/InMemory receipt contracts in the same real integration-test target.
+cargo test -p bm-sdk --features nonproduction-replay-harness,sqlite-store,sqlite-index --test procedural_selection_receipt_contract
 
 candidate_body="$(
   awk '
@@ -58,11 +63,11 @@ candidate_body="$(
   ' crates/sdk/src/runtime.rs
 )"
 
-runtime_source="$(cat crates/sdk/src/runtime.rs)"
+runtime_sources=(crates/sdk/src/runtime.rs crates/sdk/src/runtime/procedural.rs)
+runtime_source="$(cat "${runtime_sources[@]}")"
 
 for required in \
-  "commit_memory_write_transaction_with_operation" \
-  "commit_memory_write_transaction_in_runtime_skill_scope_with_operation"; do
+  "commit_memory_write_transaction_with_operation"; do
   if ! grep -q "${required}" <<<"${candidate_body}"; then
     echo "check_memory_write_transaction_contract: Candidates path must commit through the operation-aware governed Store transaction boundary ${required}" >&2
     exit 1
@@ -74,8 +79,16 @@ if ! grep -q "plan_governed_shared_memory_in_space" <<<"${candidate_body}"; then
   exit 1
 fi
 
-if ! grep -q "plan_runtime_skill_owner_upserts" <<<"${candidate_body}"; then
-  echo "check_memory_write_transaction_contract: Candidates path must use the typed runtime-skill owner plan builder" >&2
+# Initial RuntimeSkill creation belongs to the official procedural worker; the
+# public Candidates path cannot reintroduce caller-authored procedural creation.
+for required in "plan_runtime_skill_promotion_from_tool_evidence" "plan_runtime_skill_owner_records" "complete_procedural_feedback_job"; do
+  if ! rg -q "${required}" crates/sdk/src/runtime/procedural.rs; then
+    echo "check_memory_write_transaction_contract: official procedural worker must close typed promotion through ${required}" >&2
+    exit 1
+  fi
+done
+if grep -Eq "plan_runtime_skill_owner_upserts|runtime_skill_owner_record_from_candidate" <<<"${candidate_body}"; then
+  echo "check_memory_write_transaction_contract: public Candidates must not create RuntimeSkill owners" >&2
   exit 1
 fi
 
@@ -97,14 +110,53 @@ for required in \
   "plan_long_term_facet_index_upsert_mutations" \
   "plan_long_term_facet_index_mutations_for_store_mutations" \
   "ensure_transcript_lifecycle_has_facet_impact_or_fails_closed" \
-  "plan_agent_tool_experience_record" \
+  "plan_agent_tool_feedback_application" \
   "plan_long_term_control_mutation" \
   "plan_memory_governance_policy_mutation" \
   "plan_long_term_memory_refresh_transactional" \
   "PlanningSubjectSoulGenerationStores" \
-  "runtime_skill_storage_mutations_to_store_mutations"; do
+  "plan_runtime_skill_owner_records" \
+  "validate_public_memory_write_authority" \
+  "build_post_turn_learning_evidence" \
+  "run_claimed_procedural_feedback_job"; do
   if ! grep -q "${required}" <<<"${runtime_source}"; then
     echo "check_memory_write_transaction_contract: missing transactional runtime helper ${required}" >&2
+    exit 1
+  fi
+done
+
+# PFI1-E replaces caller-authored procedural CRUD with authenticated canonical
+# turn feedback and one official Store application owner, not a second worker.
+for required in \
+  "complete_procedural_feedback_job" \
+  "validate_new_applied_post_images" \
+  "validate_runtime_skill_promotion_sources" \
+  "validate_procedural_feedback_store_image" \
+  "plan_transcript_learning_lifecycle" \
+  "ProceduralLearning"; do
+  if ! rg -q "${required}" crates/sdk/src/store_internal/procedural_feedback.rs; then
+    echo "check_memory_write_transaction_contract: missing typed procedural transaction owner ${required}" >&2
+    exit 1
+  fi
+done
+
+for required in "verify_receipt_in_json" "validate_store_image"; do
+  if ! rg -q "${required}" crates/sdk/src/store_internal/procedural_selection.rs; then
+    echo "check_memory_write_transaction_contract: missing persistent selection authority ${required}" >&2
+    exit 1
+  fi
+done
+
+for source in crates/core/src/memory/turn_commit.rs crates/sdk/src/store_internal/platform.rs; do
+  if ! rg -q "append_canonical_turn_intent" "$source"; then
+    echo "check_memory_write_transaction_contract: canonical turn intake must use the atomic Session/Transcript seam in ${source}" >&2
+    exit 1
+  fi
+done
+
+for source in crates/core/src/memory/transcript.rs crates/sdk/src/store_internal/procedural_selection.rs; do
+  if ! rg -q "validate_canonical_intake" "$source"; then
+    echo "check_memory_write_transaction_contract: canonical intake digest must be validated at owner/Store post-image in ${source}" >&2
     exit 1
   fi
 done
@@ -202,10 +254,7 @@ for required in \
 done
 
 for operation in \
-  "write.procedural" \
-  "write.procedural_promotions" \
   "write.long_term_extraction" \
-  "write.agent_tool_usage_feedback" \
   "long_term_control.mutation" \
   "long_term_control.policy" \
   "post_turn.long_term_refresh" \
@@ -219,8 +268,14 @@ for operation in \
   fi
 done
 
-if rg -n "write_governed_runtime_skills|write_governed_shared_memory_in_space|apply_long_term_memory_extraction_with_report|write_agent_tool_experience_record|record_long_term_extraction_derived_memory_refs|record_private_garden_derived_memory_refs|append_candidate_derived_memory_ref|delete_skill_record|set_skill_enabled_record|set_skills_order" crates/sdk/src/runtime.rs; then
+if rg -n "write_governed_runtime_skills|write_governed_shared_memory_in_space|apply_long_term_memory_extraction_with_report|write_agent_tool_experience_record|record_long_term_extraction_derived_memory_refs|record_private_garden_derived_memory_refs|append_candidate_derived_memory_ref|delete_skill_record|set_skill_enabled_record|set_skills_order" "${runtime_sources[@]}"; then
   echo "check_memory_write_transaction_contract: SDK runtime contains direct write helper bypassing memory transaction" >&2
+  exit 1
+fi
+
+if rg -n 'write\.procedural(_promotions)?"|write\.agent_tool_usage_feedback"|plan_agent_tool_experience_record|runtime_skill_storage_mutations_to_store_mutations|record_post_reply_learning_reuse' \
+  "${runtime_sources[@]}" crates/core/src/memory/maintenance.rs; then
+  echo "check_memory_write_transaction_contract: legacy procedural CRUD or generic-maintenance feedback bypass must not return" >&2
   exit 1
 fi
 
@@ -233,6 +288,7 @@ if rg -n "commit_governed_(memory|graph_repair)_transaction" crates \
   --glob '!**/tests/**' \
   --glob '!crates/sdk/src/store_internal/platform.rs' \
   --glob '!crates/sdk/src/store_internal/post_turn_governance.rs' \
+  --glob '!crates/sdk/src/store_internal/procedural_feedback.rs' \
   --glob '!crates/sdk/src/store_internal/subject_soul.rs' \
   --glob '!crates/sdk/src/runtime.rs'; then
   echo "check_memory_write_transaction_contract: only StorePlatform and SDK transactional kernels/runtime may own governed transaction commits" >&2

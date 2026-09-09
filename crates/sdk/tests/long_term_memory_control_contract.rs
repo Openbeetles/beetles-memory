@@ -63,11 +63,7 @@ fn finalize_request(user: &str, assistant: &str) -> MemoryTurnFinalizeRequest {
             external_content_used: false,
             candidate_ids: Vec::new(),
         },
-        tool_calls: 0,
-        runtime_skill_selected_ids: Vec::new(),
-        task_learning_selected_ids: Vec::new(),
-        reuse_outcome_note: String::new(),
-        tool_usage_feedback: None,
+        learning: bm_sdk::PostTurnLearningInputV1::empty(),
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     }
@@ -183,6 +179,7 @@ fn assert_long_term_owner_exact_zero(
 fn assert_projection_exact_zero(runtime: &bm_sdk::MemoryRuntime, query: &str, content: &str) {
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: query.to_string(),
@@ -528,8 +525,6 @@ fn retained_revision_budget_rejects_owner_advance_without_any_store_change() {
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![draft_for_revision(1)],
                 deletes: Vec::new(),
@@ -613,8 +608,6 @@ fn long_term_control_list_and_detail_use_the_governed_runtime_view() {
     );
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![
                     bm_sdk::LongTermMemoryDraft {
@@ -797,8 +790,6 @@ fn long_term_control_mutation_reports_affected_facet_docs_for_operator_review() 
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![bm_sdk::LongTermMemoryDraft {
                     kind: LongTermMemoryKind::Project,
@@ -1626,6 +1617,7 @@ fn runtime_supersede_excludes_predecessor_and_admits_exact_cross_owner_successor
 
     let historical_projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: MemoryRecallTemporalOperation::HistoricalAsOf { as_of_time },
             structured_query_facets: Vec::new(),
             user_query: predecessor.content.clone(),
@@ -1973,8 +1965,6 @@ fn operation_aware_long_term_correct_delete_and_noop_are_terminal_and_replay_saf
                     deletes: Vec::new(),
                     skill_writes: Vec::new(),
                 },
-                governed_skill_writes: Vec::new(),
-                runtime_skill_owning_scope: None,
             },
         )
         .expect("same caller id under the Write kind must not collide");
@@ -2062,7 +2052,6 @@ fn runtime_suppression_policy_blocks_future_candidate_long_term_writes() {
 
     let report = runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: None,
             candidates: vec![bm_core::memory::MemoryWriteCandidate {
                 candidate_id: "candidate-temporary-tone".to_string(),
                 authority: bm_core::memory::MemoryEvidenceAuthority::UserAsserted,
@@ -2138,8 +2127,6 @@ fn runtime_suppression_policy_blocks_long_term_extraction_writes() {
 
     let report = runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![bm_sdk::LongTermMemoryDraft {
                     kind: LongTermMemoryKind::Preference,
@@ -2295,7 +2282,6 @@ fn runtime_mutates_long_term_memory_from_transcript_derived_ref_target() {
 
     runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: None,
             candidates: vec![MemoryWriteCandidate {
                 candidate_id: "candidate-concise-style".to_string(),
                 authority: MemoryEvidenceAuthority::UserAsserted,

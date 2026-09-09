@@ -1,12 +1,12 @@
-use bm_adapter::{AdapterCommand, AdapterOperation, TransportKind, TransportMode};
+#![cfg(feature = "nonproduction-replay-harness")]
+
 use bm_entry::{
     EntryAuthConfig, EntryConsoleRuntimeSkillEdit, EntryConsoleSkillSetEnabled,
     EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig, EntryScope,
-    EntryTransportConfig, EntryTransportContext,
+    EntryTransportConfig,
 };
 use bm_sdk::{
-    ErrorClass, MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryWriteRequest, RuntimeSkillWrite,
-    RuntimeSkillWriteSource, StoreBackendConfig,
+    ErrorClass, MemoryCapabilityPolicy, MemoryPrivacyPolicy, RuntimeSkillWrite, StoreBackendConfig,
 };
 
 mod support;
@@ -21,6 +21,7 @@ fn config() -> EntryRuntimeConfig {
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "console".to_string(),
             chat_id: "chat-1".to_string(),
         },
@@ -101,37 +102,21 @@ fn console_skill_facade_edits_disables_and_retires_runtime_skills_only() {
 }
 
 fn seed_runtime_skill(runtime: &EntryRuntime, name: &str) {
-    let response = runtime
-        .handle(
-            EntryTransportContext::new(
-                "seed-runtime-skill",
-                TransportKind::Cli,
-                TransportMode::InProcess,
-                AdapterOperation::Write,
-                "entry-test",
-                "test",
-                format!("seed-{name}"),
-                "seed-audit",
-                support::trusted_local_auth("operator"),
-            ),
-            AdapterCommand::Write(MemoryWriteRequest::Procedural {
-                writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
-                    name: name.to_string(),
-                    title: "Release guard".to_string(),
-                    topic: "release".to_string(),
-                    summary: "Check release artifacts before publishing.".to_string(),
-                    content: "1. run gates\n2. inspect artifacts\n3. dry run publish".to_string(),
-                    citations: vec!["entry-test".to_string()],
-                    source_chat_id: Some("chat-1".to_string()),
-                    observed_at: 1_700_000_000,
-                })],
-                owning_scope: support::runtime_skill_subject_scope("console-skill-agent"),
-                source: RuntimeSkillWriteSource::Manual,
-            }),
+    let report = runtime
+        .runtime()
+        .seed_runtime_skills_for_replay(
+            vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
+                name: name.to_string(),
+                title: "Release guard".to_string(),
+                topic: "release".to_string(),
+                summary: "Check release artifacts before publishing.".to_string(),
+                content: "1. run gates\n2. inspect artifacts\n3. dry run publish".to_string(),
+                citations: vec!["entry-test".to_string()],
+                source_chat_id: Some("chat-1".to_string()),
+                observed_at: 1_700_000_000,
+            })],
+            support::runtime_skill_subject_scope("console-skill-agent"),
         )
         .expect("seed write");
-    assert!(matches!(
-        response.adapter,
-        bm_adapter::AdapterResponse::Accepted { .. }
-    ));
+    assert!(report.accepted);
 }

@@ -4,8 +4,9 @@ mod support;
 
 use bm_sdk::nonproduction_replay_harness::{export_memory_space, import_memory_space};
 use bm_sdk::{
-    MemoryArchiveScope, MemorySpaceExportRequest, MemorySpaceImportRequest,
-    MemorySpacePrivateMaterialPolicy, MemoryWriteCandidate, MemoryWriteRequest,
+    GovernedRuntimeSkillWriteInput, MemoryArchiveScope, MemorySpaceExportRequest,
+    MemorySpaceImportRequest, MemorySpacePrivateMaterialPolicy, MemoryWriteCandidate,
+    MemoryWriteRequest, RuntimeSkillOwningScope,
 };
 use serde::Deserialize;
 
@@ -18,6 +19,7 @@ struct SdkHostMigrationFixture {
     channel: String,
     chat_id: String,
     candidates: Vec<MemoryWriteCandidate>,
+    runtime_skill_fixtures: Vec<GovernedRuntimeSkillWriteInput>,
 }
 
 #[test]
@@ -68,7 +70,6 @@ fn exercise_fixture_through_public_sdk(fixture: &SdkHostMigrationFixture) -> Fix
 
     let write = source_runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: Some(support::runtime_skill_subject_scope()),
             candidates: fixture.candidates.clone(),
         })
         .expect("write fixture candidates");
@@ -78,6 +79,16 @@ fn exercise_fixture_through_public_sdk(fixture: &SdkHostMigrationFixture) -> Fix
         "fixture {} changed no memory",
         fixture.fixture_id
     );
+    assert!(!fixture.runtime_skill_fixtures.is_empty());
+    let seeded = source_runtime
+        .seed_runtime_skills_for_replay(
+            fixture.runtime_skill_fixtures.clone(),
+            RuntimeSkillOwningScope::Subject {
+                mounted_subject_id: source_runtime.subject_id().to_string(),
+            },
+        )
+        .expect("seed governed RuntimeSkill fixture");
+    assert!(seeded.accepted && seeded.changed > 0, "{seeded:?}");
 
     let semantic = write
         .semantic_governance
@@ -102,6 +113,12 @@ fn exercise_fixture_through_public_sdk(fixture: &SdkHostMigrationFixture) -> Fix
         },
     )
     .expect("export memory space");
+    for namespace in ["runtime_skill_records", "runtime_skill_scope_manifests"] {
+        assert!(
+            !exported.archive.contains_json_namespace(namespace),
+            "public fixture archive must not carry protected RuntimeSkill owner {namespace}"
+        );
+    }
     let facet_index_present = exported
         .archive
         .contains_json_namespace("memory_facet_indexes");

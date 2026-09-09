@@ -6,7 +6,12 @@ use bm_entry::{
     EntryAuthConfig, EntryBearerPrincipal, EntryIdempotencyConfig, EntryIdentity,
     EntryOperationCapability, EntryRuntime, EntryRuntimeConfig, EntryScope, EntryTransportConfig,
 };
-use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, StoreBackendConfig};
+use bm_sdk::{
+    LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateSemanticDecision,
+    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryCapabilityPolicy,
+    MemoryEvidenceAuthority, MemoryPrivacyClass, MemoryPrivacyPolicy, MemorySemanticJudgmentSource,
+    MemorySubjectVisibilityPolicy, MemoryWriteCandidate, MemoryWriteRequest, StoreBackendConfig,
+};
 use bm_wss::{WssRuntimeFrame, WssRuntimeSession};
 
 fn runtime() -> EntryRuntime {
@@ -23,6 +28,7 @@ fn runtime_with_auth(auth: EntryAuthConfig) -> EntryRuntime {
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "wss".to_string(),
             chat_id: "chat-1".to_string(),
         },
@@ -44,25 +50,33 @@ fn wss_server_feature_enables_entry_governance_model_client() {
 }
 
 fn write_payload(name: &str, summary: &str) -> String {
-    serde_json::json!({
-        "name": name,
-        "topic": "wss-idempotency",
-        "title": format!("WSS write {name}"),
-        "summary": summary,
-        "content": "1. Decode the WSS write payload.\n2. Dispatch it through the governed EntryRuntime path and verify the receipt.",
-        "owning_scope": {
-            "kind": "subject",
-            "mounted_subject_id": "agent:wss-agent",
-        },
-        "creation_ref": {
-            "kind": "replay_promotion",
-            "candidate_ref": format!("test:wss:{name}"),
-            "verification_receipt_digest":
-                "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-        },
-        "privacy_class": "shared_with_subject",
+    let target = MemoryCandidateTarget::LongTermMemory {
+        kind: LongTermMemoryKind::Fact,
+        topic: "wss factual transport".to_string(),
+    };
+    serde_json::to_string(&MemoryWriteRequest::Candidates {
+        candidates: vec![MemoryWriteCandidate {
+            candidate_id: name.to_string(),
+            authority: MemoryEvidenceAuthority::ProgramMemoryCanonical,
+            target: target.clone(),
+            long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
+            privacy: MemoryPrivacyClass::SharedWithSubject,
+            content: MemoryCandidateContent::Text {
+                topic: "wss factual transport".to_string(),
+                body: summary.to_string(),
+                keywords: vec!["wss".to_string(), "factual".to_string()],
+            },
+            evidence_refs: vec!["synthetic:wss-factual-transport".to_string()],
+            canonical_entities: Vec::new(),
+            semantic_judgment: Some(MemoryCandidateSemanticJudgment {
+                source: MemorySemanticJudgmentSource::RuntimeGate,
+                decision: MemoryCandidateSemanticDecision::Accept,
+                governed_target: Some(target),
+                reason: "typed factual WSS transport contract".to_string(),
+            }),
+        }],
     })
-    .to_string()
+    .expect("serialize factual WSS write")
 }
 
 fn finalize_payload() -> String {
@@ -96,7 +110,8 @@ fn finalize_payload() -> String {
                 "speaker_kind": "human"
             }],
             "external_content_used": false
-        }
+        },
+        "learning": bm_sdk::PostTurnLearningInputV1::empty()
     })
     .to_string()
 }
@@ -129,6 +144,74 @@ fn response_status(response: &bm_wss::WssRuntimeEvent) -> String {
         .as_str()
         .expect("WSS response status")
         .to_string()
+}
+
+#[test]
+fn wss_factual_positive_and_procedural_rejection_share_the_sdk_authority() {
+    let runtime = runtime();
+    let mut session = WssRuntimeSession::new(
+        &runtime,
+        "wire-authority",
+        support::trusted_auth("wire-authority"),
+    );
+    let positive = write_payload("wire-fact", "A real factual WSS write is retained.");
+    let response = session
+        .handle_frame(
+            WssRuntimeFrame::command("command.write", positive.clone())
+                .with_idempotency_key("wire-fact-operation"),
+        )
+        .unwrap();
+    assert_eq!(
+        response_status(&response),
+        "accepted",
+        "{}",
+        response.payload
+    );
+    let value: serde_json::Value = serde_json::from_str(&response.payload).unwrap();
+    assert_eq!(value["changed"], 1);
+    let MemoryWriteRequest::Candidates { mut candidates } =
+        serde_json::from_str(&positive).unwrap()
+    else {
+        panic!("candidate fixture")
+    };
+    candidates[0].target = MemoryCandidateTarget::ProceduralMemory {
+        name: "runtime_skill__forbidden".into(),
+        topic: "forbidden".into(),
+    };
+    candidates[0].long_term_subject_visibility = None;
+    let denied = serde_json::to_string(&MemoryWriteRequest::Candidates { candidates }).unwrap();
+    #[cfg(feature = "nonproduction-replay-harness")]
+    let before = runtime
+        .runtime()
+        .replay_harness()
+        .export_store_snapshot()
+        .unwrap();
+    let response = session
+        .handle_frame(
+            WssRuntimeFrame::command("command.write", denied)
+                .with_idempotency_key("wire-denied-operation"),
+        )
+        .expect_err("typed SDK authority rejection");
+    let bm_sdk::Error::Other { source, .. } = response else {
+        panic!("typed SDK authority rejection");
+    };
+    assert_eq!(
+        source
+            .downcast_ref::<bm_sdk::ProceduralLearningSdkError>()
+            .unwrap()
+            .key,
+        bm_sdk::ProceduralLearningErrorKeyV1::TransitionRequiresGovernance
+    );
+    #[cfg(feature = "nonproduction-replay-harness")]
+    assert!(
+        runtime
+            .runtime()
+            .replay_harness()
+            .export_store_snapshot()
+            .unwrap()
+            == before,
+        "WSS denied write must preserve all Store documents and events"
+    );
 }
 
 fn assert_exact_governed_result(payload: &serde_json::Value) {
@@ -442,30 +525,37 @@ fn wss_runtime_decodes_declared_command_operations() {
     let runtime = runtime();
     let mut session =
         WssRuntimeSession::new(&runtime, "session-ops", support::trusted_auth("peer-ops"));
-    let frames = [
-        (
-            "command.write",
-            r#"{"name":"runtime_skill__wss_write","topic":"wss","title":"WSS write","summary":"WSS write summary","content":"1. Decode WSS write.\n2. Dispatch through EntryRuntime.","owning_scope":{"kind":"subject","mounted_subject_id":"agent:wss-agent"},"creation_ref":{"kind":"replay_promotion","candidate_ref":"test:wss:runtime_skill__wss_write","verification_receipt_digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"},"privacy_class":"shared_with_subject"}"#,
-        ),
+    let frames = vec![
+        ("command.write", write_payload("wss-declared-write", "WSS declared factual write")),
         (
             "command.project",
-            r#"{"temporal_operation":{"kind":"current"},"user_query":"release","system_max_len":1024}"#,
+            r#"{"binding":{"kind":"preview"},"temporal_operation":{"kind":"current"},"user_query":"release","system_max_len":1024}"#.to_string(),
         ),
         (
             "command.inspect",
-            r#"{"query":"release","system_max_len":1024}"#,
+            r#"{"query":"release","system_max_len":1024}"#.to_string(),
         ),
-        ("command.long_term.list", r#"{"query":{},"limit":2}"#),
-        ("command.capabilities", r#"{}"#),
+        (
+            "command.long_term.list",
+            r#"{"query":{},"limit":2}"#.to_string(),
+        ),
+        ("command.capabilities", r#"{}"#.to_string()),
     ];
 
     for (kind, payload) in frames {
+        let frame = WssRuntimeFrame::command(kind, payload);
+        let frame = if kind == "command.write" {
+            frame.with_idempotency_key("wss-declared-write")
+        } else {
+            frame
+        };
         let response = session
-            .handle_frame(WssRuntimeFrame::command(kind, payload))
+            .handle_frame(frame)
             .unwrap_or_else(|err| panic!("{kind} failed: {err}"));
         assert_eq!(response.kind, "event.report");
-        assert!(
-            response.payload.contains("\"status\""),
+        assert_eq!(
+            response_status(&response),
+            "accepted",
             "{kind}: {}",
             response.payload
         );

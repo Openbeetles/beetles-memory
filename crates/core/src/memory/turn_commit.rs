@@ -1,16 +1,20 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::bus::IngressKind;
 use crate::error::Result;
 
+use super::transcript::TranscriptTurnRecordAttachments;
 use super::{
     default_session_speaker_for_role, synthesize_session_message_id, ActorAttribution,
-    CanonicalTurnTranscriptCommitReport, ConversationKey, ConversationTranscriptStore,
-    HostOpaqueRef, SessionMessage, SessionMessageRecord, SessionStore, SubjectId,
-    TranscriptAppendIntent, TranscriptCommitReport, TranscriptConversationAlias,
-    TranscriptTurnRecord, MAX_SESSION_ENTRIES,
+    CanonicalTurnAppendIntent, CanonicalTurnTranscriptCommitReport, ConversationKey,
+    ConversationTranscriptStore, HostOpaqueRef, PostTurnLearningEvidenceV1, SessionMessage,
+    SessionMessageRecord, SessionStore, SubjectId, TranscriptAppendIntent, TranscriptCommitReport,
+    TranscriptConversationAlias, TranscriptTurnRecord, MAX_SESSION_ENTRIES,
 };
+
+const CANONICAL_TURN_LEARNING_DIGEST_DOMAIN: &str = "canonical_turn_learning_digest_v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -247,6 +251,26 @@ pub struct CommittedSessionMessage {
     pub speaker_kind: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanonicalTurnTranscriptCommitOptions {
+    pub host_refs: Vec<HostOpaqueRef>,
+    pub learning_evidence: Option<PostTurnLearningEvidenceV1>,
+    pub conversation_alias: Option<TranscriptConversationAlias>,
+    pub now_secs: u64,
+}
+
+pub fn canonical_turn_learning_digest(delta: &CanonicalTurnDelta) -> Result<String> {
+    let encoded = serde_json::to_vec(delta).map_err(|error| {
+        crate::error::Error::config("canonical_turn_learning_digest", error.to_string())
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update((CANONICAL_TURN_LEARNING_DIGEST_DOMAIN.len() as u64).to_be_bytes());
+    hasher.update(CANONICAL_TURN_LEARNING_DIGEST_DOMAIN.as_bytes());
+    hasher.update((encoded.len() as u64).to_be_bytes());
+    hasher.update(encoded);
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
 pub fn commit_canonical_turn_delta(
     session_store: &dyn SessionStore,
     delta: &CanonicalTurnDelta,
@@ -272,11 +296,34 @@ pub fn commit_canonical_turn_delta_with_transcript(
     transcript_store: &dyn ConversationTranscriptStore,
     memory_space_id: &str,
     delta: &CanonicalTurnDelta,
-    host_refs: Vec<HostOpaqueRef>,
-    conversation_alias: Option<TranscriptConversationAlias>,
-    now_secs: u64,
+    options: CanonicalTurnTranscriptCommitOptions,
 ) -> Result<CanonicalTurnTranscriptCommitReport> {
+    let CanonicalTurnTranscriptCommitOptions {
+        host_refs,
+        learning_evidence,
+        conversation_alias,
+        now_secs,
+    } = options;
     let key = ConversationKey::from_delta(memory_space_id, delta)?;
+    if let Some(evidence) = learning_evidence.as_ref() {
+        let conversation_id = delta
+            .conversation
+            .conversation_id
+            .as_deref()
+            .unwrap_or(delta.conversation.chat_id.as_str());
+        if !evidence.validate_contract()
+            || evidence.memory_space_id != memory_space_id
+            || evidence.mounted_subject_id != delta.subject
+            || evidence.conversation_id != conversation_id
+            || evidence.turn_id != delta.turn_id
+            || evidence.canonical_turn_digest != canonical_turn_learning_digest(delta)?
+        {
+            return Err(crate::error::Error::config(
+                "post_turn_learning_evidence",
+                "learning evidence must bind the exact canonical turn owner and digest",
+            ));
+        }
+    }
     if let Some(alias) = conversation_alias.as_ref() {
         alias.validate_for_transcript_owner(&key, &delta.subject)?;
         if alias.chat_id != delta.conversation.chat_id {
@@ -286,8 +333,24 @@ pub fn commit_canonical_turn_delta_with_transcript(
             ));
         }
     }
-    let before_count = session_store.message_count(&delta.conversation.chat_id)?;
+    let recent_records =
+        session_store.load_recent_records(&delta.conversation.chat_id, usize::MAX)?;
+    let session_before = recent_records
+        .iter()
+        .map(SessionMessageRecord::as_message)
+        .collect::<Vec<_>>();
+    let before_count = session_before.len();
     if let Some(existing) = transcript_store.get_turn(&key, &delta.subject, &delta.turn_id)? {
+        existing.validate_canonical_intake()?;
+        if existing.canonical_turn_digest != canonical_turn_learning_digest(delta)?
+            || existing.host_refs != host_refs
+            || existing.learning_evidence != learning_evidence
+        {
+            return Err(crate::error::Error::conflict(
+                "canonical_turn_intake_conflict",
+                "same turn cannot be committed with different canonical input, host references, or learning evidence",
+            ));
+        }
         let session_commit = SessionTurnCommitReport {
             attempted: true,
             committed: false,
@@ -311,28 +374,18 @@ pub fn commit_canonical_turn_delta_with_transcript(
             }),
         });
     }
-    let prepared = prepare_canonical_turn_delta_commit(session_store, delta)?;
+    let prepared = prepare_canonical_turn_delta_from_records(&recent_records, delta);
     let committed_inputs = prepared.messages.clone();
-    let session_commit = if prepared.messages.is_empty() {
-        SessionTurnCommitReport {
-            attempted: true,
-            committed: false,
-            chat_id: delta.conversation.chat_id.clone(),
-            before_count: prepared.before_count,
-            after_count: prepared.before_count,
-            committed_messages: Vec::new(),
-            skipped_reason: prepared.skipped_reason,
-        }
-    } else {
-        commit_prepared_session_messages(session_store, &delta.conversation.chat_id, prepared)?
-    };
+    let (session_append, mut session_commit) =
+        plan_prepared_session_messages(&delta.conversation.chat_id, prepared, now_secs);
     if !session_commit.committed {
         if session_commit
             .skipped_reason
             .as_deref()
             .is_some_and(|reason| reason == "canonical_turn_delta_already_committed")
         {
-            let backfill = committed_transcript_backfill_from_session_shadow(session_store, delta)?;
+            let backfill =
+                committed_transcript_backfill_from_session_shadow(&recent_records, delta);
             if let Some((backfill_inputs, backfill_committed)) = backfill {
                 let record = TranscriptTurnRecord::from_committed_messages(
                     &key,
@@ -340,7 +393,10 @@ pub fn commit_canonical_turn_delta_with_transcript(
                     delta,
                     &backfill_inputs,
                     &backfill_committed,
-                    host_refs,
+                    TranscriptTurnRecordAttachments {
+                        host_refs,
+                        learning_evidence,
+                    },
                     now_secs,
                 )?;
                 let intent = TranscriptAppendIntent {
@@ -348,7 +404,14 @@ pub fn commit_canonical_turn_delta_with_transcript(
                     conversation_alias: conversation_alias.clone(),
                 };
                 intent.validate()?;
-                let transcript_commit = transcript_store.append_turn_intent(&intent)?;
+                let atomic = CanonicalTurnAppendIntent {
+                    session_chat_id: delta.conversation.chat_id.clone(),
+                    session_before,
+                    session_append,
+                    transcript: intent,
+                };
+                atomic.validate()?;
+                let transcript_commit = transcript_store.append_canonical_turn_intent(&atomic)?;
                 return Ok(CanonicalTurnTranscriptCommitReport {
                     session_commit,
                     transcript_commit: Some(transcript_commit),
@@ -372,7 +435,10 @@ pub fn commit_canonical_turn_delta_with_transcript(
         delta,
         &committed_inputs,
         &session_commit.committed_messages,
-        host_refs,
+        TranscriptTurnRecordAttachments {
+            host_refs,
+            learning_evidence,
+        },
         now_secs,
     )?;
     let intent = TranscriptAppendIntent {
@@ -380,7 +446,20 @@ pub fn commit_canonical_turn_delta_with_transcript(
         conversation_alias,
     };
     intent.validate()?;
-    let transcript_commit = transcript_store.append_turn_intent(&intent)?;
+    let atomic = CanonicalTurnAppendIntent {
+        session_chat_id: delta.conversation.chat_id.clone(),
+        session_before,
+        session_append,
+        transcript: intent,
+    };
+    atomic.validate()?;
+    let transcript_commit = transcript_store.append_canonical_turn_intent(&atomic)?;
+    if !transcript_commit.committed {
+        session_commit.committed = false;
+        session_commit.after_count = session_commit.before_count;
+        session_commit.committed_messages.clear();
+        session_commit.skipped_reason = transcript_commit.skipped_reason.clone();
+    }
     Ok(CanonicalTurnTranscriptCommitReport {
         session_commit,
         transcript_commit: Some(transcript_commit),
@@ -392,9 +471,21 @@ fn prepare_canonical_turn_delta_commit(
     delta: &CanonicalTurnDelta,
 ) -> Result<PreparedCanonicalTurnCommit> {
     let chat_id = delta.conversation.chat_id.as_str();
-    let before_count = session_store.message_count(chat_id)?;
-    let recent_records = session_store.load_recent_records(chat_id, MAX_SESSION_ENTRIES)?;
-    let user_delta = canonical_user_delta(&recent_records, &delta.input_messages);
+    let recent_records = session_store.load_recent_records(chat_id, usize::MAX)?;
+    Ok(prepare_canonical_turn_delta_from_records(
+        &recent_records,
+        delta,
+    ))
+}
+
+fn prepare_canonical_turn_delta_from_records(
+    recent_records: &[SessionMessageRecord],
+    delta: &CanonicalTurnDelta,
+) -> PreparedCanonicalTurnCommit {
+    let before_count = recent_records.len();
+    let recent_records =
+        &recent_records[recent_records.len().saturating_sub(MAX_SESSION_ENTRIES)..];
+    let user_delta = canonical_user_delta(recent_records, &delta.input_messages);
     let assistant_message = delta
         .assistant_message
         .as_ref()
@@ -409,11 +500,11 @@ fn prepare_canonical_turn_delta_commit(
             .is_some_and(|record| record.content.trim() == message.content.trim())
     });
     if user_delta.is_empty() && assistant_already_committed {
-        return Ok(PreparedCanonicalTurnCommit {
+        return PreparedCanonicalTurnCommit {
             before_count,
             messages: Vec::new(),
             skipped_reason: Some("canonical_turn_delta_already_committed".to_string()),
-        });
+        };
     }
     let mut messages = Vec::new();
     match delta.delivery_status {
@@ -436,19 +527,19 @@ fn prepare_canonical_turn_delta_commit(
     } else {
         None
     };
-    Ok(PreparedCanonicalTurnCommit {
+    PreparedCanonicalTurnCommit {
         before_count,
         messages,
         skipped_reason,
-    })
+    }
 }
 
 fn committed_transcript_backfill_from_session_shadow(
-    session_store: &dyn SessionStore,
+    recent_records: &[SessionMessageRecord],
     delta: &CanonicalTurnDelta,
-) -> Result<Option<(Vec<TranscriptInputMessage>, Vec<CommittedSessionMessage>)>> {
+) -> Option<(Vec<TranscriptInputMessage>, Vec<CommittedSessionMessage>)> {
     let recent_records =
-        session_store.load_recent_records(&delta.conversation.chat_id, MAX_SESSION_ENTRIES)?;
+        &recent_records[recent_records.len().saturating_sub(MAX_SESSION_ENTRIES)..];
     let mut inputs = Vec::new();
     let mut committed = Vec::new();
 
@@ -466,7 +557,7 @@ fn committed_transcript_backfill_from_session_shadow(
             .find(|message| message.is_role("user") && !message.content.trim().is_empty())
             .cloned()
         {
-            if let Some(record) = matching_recent_session_record(&recent_records, &user_message) {
+            if let Some(record) = matching_recent_session_record(recent_records, &user_message) {
                 let committed_message =
                     committed_message_from_session_record(record, &user_message);
                 inputs.push(user_message);
@@ -483,8 +574,7 @@ fn committed_transcript_backfill_from_session_shadow(
             .filter(|message| !message.content.trim().is_empty())
             .cloned()
         {
-            if let Some(record) =
-                matching_recent_session_record(&recent_records, &assistant_message)
+            if let Some(record) = matching_recent_session_record(recent_records, &assistant_message)
             {
                 let committed_message =
                     committed_message_from_session_record(record, &assistant_message);
@@ -495,9 +585,9 @@ fn committed_transcript_backfill_from_session_shadow(
     }
 
     if inputs.is_empty() {
-        Ok(None)
+        None
     } else {
-        Ok(Some((inputs, committed)))
+        Some((inputs, committed))
     }
 }
 
@@ -533,19 +623,35 @@ fn commit_prepared_session_messages(
     chat_id: &str,
     prepared: PreparedCanonicalTurnCommit,
 ) -> Result<SessionTurnCommitReport> {
+    let (messages, mut report) =
+        plan_prepared_session_messages(chat_id, prepared, current_unix_secs());
+    if report.committed {
+        session_store.append_batch(chat_id, &messages)?;
+    }
+    report.after_count = session_store.message_count(chat_id)?;
+    Ok(report)
+}
+
+fn plan_prepared_session_messages(
+    chat_id: &str,
+    prepared: PreparedCanonicalTurnCommit,
+    now: u64,
+) -> (Vec<SessionMessage>, SessionTurnCommitReport) {
     if prepared.messages.is_empty() {
-        return Ok(SessionTurnCommitReport {
-            attempted: true,
-            committed: false,
-            chat_id: chat_id.to_string(),
-            before_count: prepared.before_count,
-            after_count: session_store.message_count(chat_id)?,
-            committed_messages: Vec::new(),
-            skipped_reason: prepared.skipped_reason,
-        });
+        return (
+            Vec::new(),
+            SessionTurnCommitReport {
+                attempted: true,
+                committed: false,
+                chat_id: chat_id.to_string(),
+                before_count: prepared.before_count,
+                after_count: prepared.before_count,
+                committed_messages: Vec::new(),
+                skipped_reason: prepared.skipped_reason,
+            },
+        );
     }
 
-    let now = current_unix_secs();
     let prepared_messages = prepared
         .messages
         .into_iter()
@@ -587,17 +693,22 @@ fn commit_prepared_session_messages(
         .into_iter()
         .map(|(message, _)| message)
         .collect::<Vec<_>>();
-    session_store.append_batch(chat_id, &session_messages)?;
-    let after_count = session_store.message_count(chat_id)?;
-    Ok(SessionTurnCommitReport {
-        attempted: true,
-        committed: true,
-        chat_id: chat_id.to_string(),
-        before_count: prepared.before_count,
-        after_count,
-        committed_messages,
-        skipped_reason: None,
-    })
+    let after_count = prepared
+        .before_count
+        .saturating_add(session_messages.len())
+        .min(MAX_SESSION_ENTRIES);
+    (
+        session_messages,
+        SessionTurnCommitReport {
+            attempted: true,
+            committed: true,
+            chat_id: chat_id.to_string(),
+            before_count: prepared.before_count,
+            after_count,
+            committed_messages,
+            skipped_reason: None,
+        },
+    )
 }
 
 pub fn canonical_user_delta(

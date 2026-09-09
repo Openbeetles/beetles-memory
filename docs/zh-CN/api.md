@@ -21,7 +21,7 @@ SDK API 是主要入口。宿主项目应通过 `bm-sdk` 进入，或通过 `bm-
 
 | 操作 | SDK method | 用途 |
 | --- | --- | --- |
-| Write | `MemoryRuntime::write` | 存储 procedural memory 或 long-term extraction 结果。 |
+| Write | `MemoryRuntime::write` | 提交 typed factual candidate、long-term extraction 结果或 governed evidence；公共写入不能创建 procedural owner。 |
 | Recall | `MemoryRuntime::recall` | 按 query 取回 memory hits。 |
 | Project | `MemoryRuntime::project` | 生成受长度限制的模型上下文 memory block。 |
 | Maintain | `MemoryRuntime::maintain` | 在显式配置 LLM client 后执行 post-reply memory maintenance。 |
@@ -109,15 +109,15 @@ SDK transcript 操作：
 
 `MemoryTranscriptReplayRequest` 和 `MemoryTranscriptExportRequest` 接收 `limit` 与可选 `cursor`；对应 report 返回 `next_cursor` 和 `has_more`。SDK 调用方应通过 `MemoryRuntime` 分页 replay/export transcript，不应下沉到 core/store trait。Runtime profile budget 可以裁剪 page size、每 turn 可见 host refs、每 turn/message 可见 attrs、redaction items、lifecycle derived refs 和 repair issues 数量，但不能放宽 redaction、lifecycle 或 privacy policy。Lifecycle 和 repair report 的列表被裁剪时会设置 `profile_budget_applied=true`。
 
-CTQ1 query surface 统一使用 Store-owned `TranscriptQueryCursor`。调用方必须把它当 opaque value：不得解码、铸造、签名、持久化 claims 或注入 host cursor authority。Cursor validation 绑定 operation、exact MemorySpace、mounted subject、filters、view、query digest、方向/anchor、Store incarnation 与 owner/index generation；每一页都重新执行 capability、subject、lifecycle、privacy 和 disclosure。Catalog/timeline 继续受 `transcript_replay` 控制；indexed search/activity 还分别要求 `transcript_search` 和 `transcript_activity`。Platform capability snapshot 通过 `beetle-memory.platform.capability.v4` 暴露这些开关。
+CTQ1 query surface 统一使用 Store-owned `TranscriptQueryCursor`。调用方必须把它当 opaque value：不得解码、铸造、签名、持久化 claims 或注入 host cursor authority。Cursor validation 绑定 operation、exact MemorySpace、mounted subject、filters、view、query digest、方向/anchor、Store incarnation 与 owner/index generation；每一页都重新执行 capability、subject、lifecycle、privacy 和 disclosure。Catalog/timeline 继续受 `transcript_replay` 控制；indexed search/activity 还分别要求 `transcript_search` 和 `transcript_activity`。Platform capability snapshot 通过 `beetle-memory.platform.capability.v5` 暴露这些开关。
 
 `HostUi` 只是 **host-presentable redacted disclosure view**。它不是聊天窗口 API、分页方向、宿主产品名、transcript index owner 或 authorization token。Catalog、timeline、search、activity 只返回 Runtime hydration 后仍能通过请求 view 脱敏规则的结果。Search hit 携带受治理的 Unicode-safe excerpt 和 durable `TranscriptAnchor`；宿主应把 anchor 交给 `TranscriptTimelineAnchor::Around`，不得在 UI 内扫描或二次匹配 transcript 正文。
 
-0.6.0 只接受 Store v12，不提供 public Store migration API、compatibility reader、双写或 automatic migration。Store v11、governance V2、partial v12 closure 与 foreign schema payload 都会 fail closed。旧代开发数据只能由其 owner 明确删除并重建；archive export/import 不是 schema migration。
+当前未发布 source candidate 只接受 Store v13，不提供 public Store migration API、compatibility reader、双写或 automatic migration。旧代、partial 与 foreign schema payload 都会 fail closed。旧代开发数据只能由其 owner 明确删除并重建；archive export/import 不是 schema migration。
 
 Timeline 支持 latest、before、after、around-anchor、around-sequence、around-time 与 first-visible-in-range；页内 turn 始终按 sequence 正序，report 可返回 opaque older/newer cursor。日历换算归宿主：按用户 IANA timezone 把本地日期转换为 canonical UTC `[start_inclusive, end_exclusive)` 后再调用 Memory。不得假设每天都是 86400 秒，DST 当天可以是 23 或 25 小时；Beetle Memory 不保存也不猜宿主时区。
 
-0.6.0 source candidate 保留 CTQ1 public query shape 与 capability snapshot v4，并把 Store 升到 v12 来承载 PL2 Job/Index/Binding closure。InMemory/File/SQLite 合同覆盖 query/learning persistence、reopen、repair/archive closure 与 privacy exact-zero。该工程结论不等于真实数据、Provider、GUI/UAT、crates.io 或托管 Release 回执。
+当前 source candidate 保留 CTQ1 public query shape，使用 capability snapshot v5 暴露受治理 procedural-learning 矩阵，并把 Store 升到 v13 承载 PFI1 owner closure。InMemory/File/SQLite 合同覆盖 query/learning persistence、reopen、repair/archive closure 与 privacy exact-zero。该工程结论不等于真实数据、Provider、GUI/UAT、crates.io 或托管 Release 回执。
 
 Transcript attrs 是 Memory-owned transcript metadata，不是宿主业务对象库。每条 attr 都必须有 `TranscriptAttrTarget`、命名空间化 key、`TranscriptAttrValueKind`、JSON value、`HostRefVisibility`、`TranscriptAttrSource`、`TranscriptAttrGovernance` 和可选 `TranscriptAttrLink`。`HostUi` replay 只返回 HostUi-visible attrs，`ModelContext` 只返回 model-context attrs，`OperatorAudit` 返回审计可见 attrs，`Export` 只返回 export-visible 且 `export_allowed=true` 的 attrs；`RawOwnerOnly` 仍是内部视图。Repair report 会把 target turn/message 缺失、attr source key 不匹配、非法 key、超限 value、corrupt attr record 作为 fail-closed issue。`DeleteRaw` 默认隐藏 attrs；`OperatorAuditOnlyAfterMask` 最多保留脱敏后的审计 metadata，raw deletion 后绝不返回原始 attr value。
 
@@ -144,7 +144,7 @@ Transcript attrs 是 Memory-owned transcript metadata，不是宿主业务对象
 隐私和投影边界：
 
 - Transcript evidence 不会自动变成 canonical fact、soul mutation、procedural skill 或 task experience。
-- 通过 governed candidate write、手动 extraction 或自动 post-turn extraction 接受的长期记忆、共享事实、程序性 Skill、private garden 和 soul candidate handoff 会写入结构化 transcript-derived refs，供 lifecycle impact review 使用。
+- accepted long-term、shared factual、private garden、soul candidate handoff 与受治理 post-turn procedural write 会写入结构化 transcript-derived refs，供 lifecycle impact review 使用。
 - Runtime recall、projection、maintenance、long-term refresh 和 operator inspection 会优先消费 transcript-backed evidence，再退到 legacy `SessionStore(chat_id)` shadow；如果 transcript 已 mask、delete raw，或 legacy `chat_id` alias 不可信，这些路径会 fail closed，不会回退读取 session shadow 原文。
 - Assistant self-claim 在被对应记忆平面治理前，只是 low-authority transcript evidence。
 - `HostUi` replay 不得泄漏 private garden、inner-life、soul-private raw material、backend trace 或 operator-only audit 内容。
@@ -158,12 +158,12 @@ Transcript attrs 是 Memory-owned transcript metadata，不是宿主业务对象
 
 | Request type | 必填字段 | 说明 |
 | --- | --- | --- |
-| `MemoryWriteRequest::Procedural` | `writes`, `owning_scope`, `source` | 每项写入必须同时携带 `RuntimeSkillWrite`、typed creation ref 和 privacy class；`name` 仅是展示输入，不参与 owner identity。 |
-| `MemoryWriteRequest::AgentToolUsageFeedback` | `feedback` | 宿主执行工具后回传 `registry_ref` 和 observation 摘要；SDK 治理后才可能沉淀工具经验。 |
+| `MemoryWriteRequest::Candidates` | `candidates` | 提交 typed factual candidate。公共 write surface 会拒绝 procedural target；Runtime Skill 与 Agent Tool 经验只能由受治理的 post-turn learning 创建。 |
 | `MemoryWriteRequest::LongTermExtraction` | `extraction` | 用于 extraction pipeline 已经产出 validated long-term memory extraction 的场景。 |
 | `MemoryWriteRequest::GovernedEvidenceDocuments` | `mutations` | 在同一事务中创建、修订或删除 governed evidence owner、source claim 和派生索引。`Upsert` 携带有界 `GovernedEvidenceDocumentDraft`；`Delete` 必须携带 expected owner revision。 |
 | `MemoryRecallRequest` | `temporal_operation`, `query`, `limit`, `structured_query_facets`, `tool_registry_refs` | 返回运行时 Skill hits、标准 Agent Skill hits、working recall inspection 和经验型 `agent_tool_hints`；structured facets 是 typed query constraint，无治理经验时 `agent_tool_hints=[]`。 |
-| `MemoryProjectionRequest` | `temporal_operation`, `user_query`, `system_max_len`, `recent_messages_limit`, `pressure`, `mode_input`, `structured_query_facets`, `tool_registry_refs` | 返回受 `system_max_len` 限制的 `system_memory_block`；structured facets 与 recall 共用受治理 query 合同，标准 Agent Skill 只以只读提示摘要进入上下文，Agent Tool 只以经验 hint 进入，不包含完整 schema。 |
+| `MemoryProjectionRequest` | `binding`, `temporal_operation`, `user_query`, `system_max_len`, `recent_messages_limit`, `pressure`, `mode_input`, `structured_query_facets`, `tool_registry_refs` | `Preview` 只读投影；`Turn { turn_id }` 把 current execution projection 及其签名 selection receipt 绑定到之后交给 `finalize_turn` 的 exact turn。 |
+| `MemoryTurnFinalizeRequest` | `turn`, `learning`, `pressure`, `mode_input` | 原子提交 canonical turn 与 durable post-turn intent。`learning` 携带 optional signed selection receipt、typed execution feedback、tool-call count 和 authority；caller 不能直接写 procedural owner。 |
 | `MemoryEvidenceDocumentReadRequest` | `memory_space_id`, `document_ids` | 通过 `MemoryRuntime::read_governed_evidence_documents(request)` 精确、有界地读取 governed evidence documents。runtime 会拒绝 memory-space 不一致、空/重复 document id 和超过当前 profile read budget 的请求；结果经过 privacy filter，并携带 typed owner identity、revision、canonical evidence binding、安全 source metadata 与有界 body/chunks。 |
 | `MemoryInspectionRequest` | `query`, `system_max_len`, `pressure`, `mode_input` | 返回 capability、lifecycle、operator inspection 数据、Agent Skill 目录扫描报告和 Agent Tool registry 报告。 |
 | `RuntimeSkillListRequest` | `owning_scope`, `query`, `include_disabled`, `include_retired`, `limit` | 只列出显式 Subject 或 SharedProgram scope manifest 中的 exact typed owners。 |
@@ -186,7 +186,17 @@ Transcript attrs 是 Memory-owned transcript metadata，不是宿主业务对象
 | `MemoryRecoverRequest` | `trigger`, `mode_input` | 执行可恢复 lifecycle recovery。 |
 | `MemoryCloseRequest` | `reason` | 发出 close lifecycle report。 |
 
+`Preview` 不会铸造 selection receipt，也不能作为执行身份。真实执行必须由宿主在请求入口
+选择一个稳定 turn id，使用 `Turn { turn_id }` 投影，完整保留返回的 receipt，并在同一个
+canonical turn 的 `finalize_turn` 中原样提交。同一 turn 的重试复用 id 与 receipt；即使正文
+相同，后续 turn 也必须使用新 id。宿主不得从 selected ids、digest 或日志重建 receipt。
+
 通用 adapter dispatch 支持 write、recall、project、inspect、recover、replay、long-term list/detail/mutate/policy、transcript attr write、capabilities、close。受治理的 memory-space export/import 绑定 runtime，不再通过旧的自由 snapshot 命令暴露。Maintain 只在调用方通过 `AdapterRuntimeServices` 显式提供 LLM/HTTP services 时执行；未注入 services 的 dispatch 会返回结构化拒绝。
+
+`governed_adapter_json_command_schema` 只是顶层 transport discovery schema，不是嵌套 Core
+request 的第二份 schema。`turn`、`learning`、`mode_input`、registry refs 等字段在这里保持
+shallow object；严格 typed serde decoder 才是权威，会拒绝缺失或未知的嵌套字段。消费者必须
+使用 SDK 导出的 request type，不能把 discovery schema 当成完整 payload generator。
 
 Transport helper crates 会对其声明的 memory operations 使用共享 JSON adapter decoder；subscribe 这类 stream-only operation 仍属于 transport-specific 行为。每种协议的 route/frame/tool/message 表面见 [部署文档](deployment.md)。
 
@@ -235,25 +245,10 @@ SDK / HTTP 的共同语义：
 | `/agent-tool-registries/{id}` | `GET` | 返回单个 registry snapshot。 |
 | `/agent-tool-registries/{id}` | `DELETE` | 删除 registry snapshot；不会删除已沉淀的历史经验，但后续 projection 会因 registry 缺失或 fingerprint mismatch 拒绝旧经验。 |
 
-`/memory/write` 可提交：
-
-```json
-{
-  "tool_usage_feedback": {
-    "registry_ref": {
-      "registry_id": "host-tools",
-      "fingerprint": "current-fingerprint",
-      "scope": "global"
-    },
-    "observations": [],
-    "user_visible_result_summary": "工具执行摘要",
-    "reuse_outcome": "succeeded",
-    "operator_note": null
-  }
-}
-```
-
-`observations` 必须是工具执行后的结构化摘要，不要放完整原始结果、secret 或完整 schema。
+真实 turn 的 `/memory/project` 使用 `binding: {"kind":"turn","turn_id":"..."}`。
+宿主执行工具后，通过 `/memory/finalize-turn` 提交同一个 canonical turn id、投影返回的
+签名 `selection_receipt` 和 typed bounded feedback。`/memory/write` 不接受工具反馈或
+procedural owner 创建。执行摘要不得包含完整原始结果、secret 或完整 schema。
 
 ## Console API
 

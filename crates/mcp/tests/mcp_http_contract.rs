@@ -24,6 +24,7 @@ fn runtime() -> EntryRuntime {
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "mcp-http".to_string(),
             chat_id: "chat-1".to_string(),
         },
@@ -62,8 +63,9 @@ fn remote_runtime_with(
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "mcp-http".to_string(),
-            chat_id: "chat-1".to_string(),
+            chat_id: "chat-remote".to_string(),
         },
         store: StoreBackendConfig::in_memory(support::native_runtime_profile())
             .expect("store config")
@@ -162,6 +164,90 @@ fn streamable_http_stream_serves_json_rpc_resources() {
     assert!(
         !response.contains("private_raw_allowed\":true"),
         "{response}"
+    );
+}
+
+#[test]
+fn remote_mcp_factual_write_uses_entry_scope_and_rejects_overrides() {
+    let runtime = remote_runtime([
+        EntryOperationCapability::McpProtocol,
+        EntryOperationCapability::Write,
+    ]);
+    let server = McpToolServer::new("remote-write", "remote-client");
+    let payload = support::factual_write_body();
+    let call = |arguments: serde_json::Value| {
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": "write", "method": "tools/call",
+            "params": { "name": "memory_write_candidate", "arguments": arguments,
+                "_meta": { "idempotencyKey": "remote-factual-operation" } }
+        })
+        .to_string()
+    };
+    let (result, response) = serve_mcp_request(
+        &server,
+        &runtime,
+        authorized_json_request(&call(payload.clone())),
+    );
+    result.expect("real remote MCP write");
+    assert_eq!(
+        response_json(&response)["result"]["structuredContent"]["changed"],
+        1,
+        "{response}"
+    );
+    let records = runtime
+        .runtime()
+        .list_long_term_memory(bm_sdk::MemoryLongTermListRequest {
+            query: Default::default(),
+            cursor: None,
+            limit: 8,
+            view: bm_sdk::MemoryLongTermControlView::RawOwner,
+        })
+        .unwrap()
+        .records;
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].record.source_chat_id.as_deref(),
+        Some("chat-remote")
+    );
+    assert_eq!(
+        records[0].record.content,
+        "The remote project uses the authenticated Entry scope."
+    );
+    #[cfg(any(
+        feature = "profile-desktop-macos-dev-full",
+        feature = "profile-desktop-windows-dev-full",
+        feature = "profile-server-linux-dev-full"
+    ))]
+    let before = runtime
+        .runtime()
+        .replay_harness()
+        .export_store_snapshot()
+        .unwrap();
+    for field in ["source_chat_id", "owner_id", "subject_id"] {
+        let mut forged = payload.clone();
+        forged[field] = "forged-scope".into();
+        let (result, response) =
+            serve_mcp_request(&server, &runtime, authorized_json_request(&call(forged)));
+        result.expect("MCP typed rejection response");
+        assert_eq!(
+            response_json(&response)["result"]["isError"],
+            true,
+            "{response}"
+        );
+    }
+    #[cfg(any(
+        feature = "profile-desktop-macos-dev-full",
+        feature = "profile-desktop-windows-dev-full",
+        feature = "profile-server-linux-dev-full"
+    ))]
+    assert!(
+        runtime
+            .runtime()
+            .replay_harness()
+            .export_store_snapshot()
+            .unwrap()
+            == before,
+        "scope injection must not write"
     );
 }
 
@@ -434,6 +520,11 @@ fn remote_mcp_snapshot_intersects_policy_transport_and_privacy() {
         privacy,
     );
     let server = McpToolServer::new("mcp-http-policy-snapshot", "unused-local-principal");
+    assert!(
+        runtime.learning_service_status_authority().is_err(),
+        "inspection cannot be widened to start maintenance"
+    );
+    assert!(runtime.runtime().capabilities().maintenance.visible);
 
     let tools = r#"{"jsonrpc":"2.0","id":"tools","method":"tools/list"}"#;
     let (result, response) = serve_mcp_request(&server, &runtime, authorized_json_request(tools));

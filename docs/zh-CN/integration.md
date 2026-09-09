@@ -83,38 +83,18 @@ let runtime = MemoryRuntime::builder()
 
 `add_agent_skill_dir` 是可选只读挂载。标准 Agent Skill 的添加、编辑、导入、删除和执行仍归宿主；Beetle Memory 只扫描 `SKILL.md` 摘要参与召回和投影。
 
-## 5. 写入记忆
+## 5. 提交受治理的记忆输入
 
-Procedural memory 是当前可直接写入的 reusable runtime knowledge 路径：
-
-```rust
-use bm_sdk::{MemoryWriteRequest, RuntimeSkillWrite, RuntimeSkillWriteSource};
-
-let report = runtime.write(MemoryWriteRequest::Procedural {
-    writes: vec![RuntimeSkillWrite {
-        name: "release_guard".to_string(),
-        topic: "release".to_string(),
-        title: "Release guard".to_string(),
-        summary: "Verify release artifacts before publishing.".to_string(),
-        content: "Run examples, platform gates, and publish dry-run.".to_string(),
-        citations: vec!["integration-guide".to_string()],
-        source_chat_id: Some("chat-1".to_string()),
-        observed_at: 1_800_000_000,
-    }],
-    source: RuntimeSkillWriteSource::Manual,
-})?;
-
-assert!(report.accepted);
-```
-
-Long-term extraction 写入应由 extraction pipeline 产生，然后通过 `MemoryWriteRequest::LongTermExtraction` 进入 runtime。
+宿主可以提交 typed long-term candidate 或 canonical extraction 结果。Runtime Skill
+和 Agent Tool 经验不是 caller-authored record：它们只能在 `finalize_turn` 之后由受治理的
+post-turn learning worker 创建。第 8 节给出了公共 candidate write 合同。
 
 ## 6. 召回与投影
 
 ```rust
 use bm_sdk::{
     MemoryProjectionRequest, MemoryRecallRequest, MemoryRecallTemporalOperation, PressureLevel,
-    RuntimeLifecycleModeInput,
+    ProceduralProjectionBindingV1, RuntimeLifecycleModeInput,
 };
 
 let recall = runtime.recall(MemoryRecallRequest {
@@ -126,6 +106,7 @@ let recall = runtime.recall(MemoryRecallRequest {
 })?;
 
 let projection = runtime.project(MemoryProjectionRequest {
+    binding: ProceduralProjectionBindingV1::Preview,
     temporal_operation: MemoryRecallTemporalOperation::Current,
     user_query: "How should this host release?".to_string(),
     system_max_len: 4096,
@@ -136,10 +117,17 @@ let projection = runtime.project(MemoryProjectionRequest {
     tool_registry_refs: Vec::new(),
 })?;
 
-let memory_block = projection.system_memory_block;
+let preview_block = projection.provider_payload().system_memory_block();
 ```
 
-把 projected memory block 放进你的模型上下文组装流程。最终 system、developer、user、tool message 的排序仍由宿主 prompt assembly 负责。
+`Preview` 只用于检查，不返回 selection receipt。真实 model/tool turn 必须由宿主在请求入口
+一次性选择稳定 turn id，再用 `ProceduralProjectionBindingV1::Turn { turn_id }` 投影并把
+该 memory block 放入模型上下文。完成同一个 canonical turn 时，要在
+`PostTurnLearningInputV1` 中原样提交完整 `selection_receipt`。同一 turn 的重试复用 id 与
+receipt；即使输入正文相同，另一个 turn 也必须使用新 id。禁止从 selected ids 或 digest
+重建 receipt。
+
+system、developer、user、tool message 的最终排序仍归宿主 prompt assembly。
 
 ## 7. 显式注入 LLM 后维护
 
@@ -154,7 +142,7 @@ if capabilities.lifecycle.maintain_lightweight.visible {
 
 ## 8. 提交记忆候选，不直接改存储面
 
-宿主应该提交候选事实或流程，由 Beetle Memory 判断能不能写、写到哪个记忆面。
+宿主应该提交候选事实或受治理证据，由 Beetle Memory 判断能不能写、写到哪个记忆面。
 这样 SDK、HTTP、gateway、后续任意宿主都会走同一套记忆治理合同。
 
 ```rust
@@ -166,7 +154,6 @@ use bm_sdk::{
 };
 
 runtime.write(MemoryWriteRequest::Candidates {
-    runtime_skill_owning_scope: None,
     candidates: vec![MemoryWriteCandidate {
         candidate_id: "turn-1:preferred-name".to_string(),
         authority: MemoryEvidenceAuthority::UserAsserted,
@@ -285,7 +272,7 @@ Transcript lifecycle 的 raw delete/mask 只处理 conversation evidence。它�
 
 1. 打开 `MemoryStoreHandle`，并通过 `MemoryRuntime::builder().store(...)` 注入；persistence engine、raw transaction 和 writable store trait 不是公开 runtime path。
 2. 用稳定的 owner、agent、channel、conversation id 构建 `MemoryIdentity` 和 `MemoryScope`。
-3. 用 `MemoryWriteRequest::Candidates` 提交事实、偏好、流程、诊断、subject hint 和 soul candidate。
+3. 用 `MemoryWriteRequest::Candidates` 提交事实候选。调用方自写的流程及改投程序性目标会被拒绝；真实执行证据通过 `finalize_turn` 进入受治理的程序性学习。
 4. 需要 transcript governance 时，通过 canonical turn 语义 finalize 当前回合。
 5. 用 `recall` 和 `project` 生成模型上下文；宿主不自己拼 memory plane。
 6. 用 `inspect` 提供运维可见性和安全恢复上下文。

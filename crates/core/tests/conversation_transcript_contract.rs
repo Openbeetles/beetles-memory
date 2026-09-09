@@ -1,7 +1,8 @@
 use bm_core::memory::{
     commit_canonical_turn_delta, commit_canonical_turn_delta_with_transcript,
     transcript_cursor_governance_context_digest, transcript_message_is_query_index_eligible,
-    ActorAttribution, CanonicalTurnDelta, ConversationCatalogHead, ConversationKey,
+    ActorAttribution, CanonicalTurnAppendIntent, CanonicalTurnDelta,
+    CanonicalTurnTranscriptCommitOptions, ConversationCatalogHead, ConversationKey,
     ConversationTranscriptStore, DerivedMemoryPlane, DerivedMemoryRef, HostOpaqueRef,
     HostRefRelation, HostRefVisibility, MemoryEvidenceAuthority, MemoryTurnDeliveryStatus,
     MemoryTurnProtocol, MemoryTurnSource, RedactedTranscriptSlice, SessionMessage, SessionStore,
@@ -20,7 +21,7 @@ use bm_core::memory::{
 use bm_core::Result;
 use serde_json::json;
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 fn turn_source() -> MemoryTurnSource {
     MemoryTurnSource {
@@ -1079,9 +1080,52 @@ struct RepairFixtureStore {
     turns: Vec<TranscriptTurnRecord>,
     derived_refs: Vec<DerivedMemoryRef>,
     appended_intents: Mutex<Vec<TranscriptAppendIntent>>,
+    sessions: Arc<Mutex<BTreeMap<String, Vec<SessionMessage>>>>,
+    reject_canonical_commit: bool,
 }
 
 impl ConversationTranscriptStore for RepairFixtureStore {
+    fn append_canonical_turn_intent(
+        &self,
+        intent: &CanonicalTurnAppendIntent,
+    ) -> Result<TranscriptCommitReport> {
+        intent.validate()?;
+        let mut sessions = self.sessions.lock().unwrap();
+        let mut appended = self.appended_intents.lock().unwrap();
+        if sessions
+            .get(&intent.session_chat_id)
+            .cloned()
+            .unwrap_or_default()
+            != intent.session_before
+        {
+            return Err(bm_core::Error::conflict(
+                "canonical_session",
+                "session pre-image changed",
+            ));
+        }
+        if self.reject_canonical_commit {
+            return Err(bm_core::Error::config(
+                "canonical_fixture_admission",
+                "synthetic transaction rejection",
+            ));
+        }
+        let before_count = appended.len();
+        let mut messages = intent.session_before.clone();
+        messages.extend_from_slice(&intent.session_append);
+        if !intent.session_append.is_empty() {
+            sessions.insert(intent.session_chat_id.clone(), messages);
+        }
+        appended.push(intent.transcript.clone());
+        Ok(TranscriptCommitReport {
+            key: intent.transcript.record.key.clone(),
+            turn_id: intent.transcript.record.turn_id.clone(),
+            sequence: before_count as u64 + 1,
+            committed: true,
+            before_count,
+            after_count: before_count + 1,
+            skipped_reason: None,
+        })
+    }
     fn append_turn_intent(
         &self,
         intent: &TranscriptAppendIntent,
@@ -1217,7 +1261,7 @@ impl ConversationTranscriptStore for RepairFixtureStore {
 
 #[derive(Default)]
 struct TranscriptSessionStore {
-    messages: Mutex<BTreeMap<String, Vec<SessionMessage>>>,
+    messages: Arc<Mutex<BTreeMap<String, Vec<SessionMessage>>>>,
 }
 
 impl SessionStore for TranscriptSessionStore {
@@ -1268,7 +1312,10 @@ impl SessionStore for TranscriptSessionStore {
 #[test]
 fn canonical_turn_commit_passes_conversation_alias_in_same_append_intent() {
     let session_store = TranscriptSessionStore::default();
-    let transcript_store = RepairFixtureStore::default();
+    let transcript_store = RepairFixtureStore {
+        sessions: session_store.messages.clone(),
+        ..Default::default()
+    };
     let delta = delivered_delta("turn-alias-intent");
     let alias = TranscriptConversationAlias::new(
         "space-a",
@@ -1285,13 +1332,17 @@ fn canonical_turn_commit_passes_conversation_alias_in_same_append_intent() {
         &transcript_store,
         "space-a",
         &delta,
-        Vec::new(),
-        Some(alias.clone()),
-        1_800_000_010,
+        CanonicalTurnTranscriptCommitOptions {
+            host_refs: Vec::new(),
+            learning_evidence: None,
+            conversation_alias: Some(alias.clone()),
+            now_secs: 1_800_000_010,
+        },
     )
     .unwrap();
 
     assert!(report.session_commit.committed);
+    assert_eq!(session_store.message_count("legacy-chat-a").unwrap(), 2);
     assert!(report.transcript_commit.unwrap().committed);
     let intents = transcript_store.appended_intents.lock().unwrap();
     assert_eq!(intents.len(), 1);
@@ -1301,7 +1352,10 @@ fn canonical_turn_commit_passes_conversation_alias_in_same_append_intent() {
 #[test]
 fn canonical_turn_backfill_passes_conversation_alias_in_same_append_intent() {
     let session_store = TranscriptSessionStore::default();
-    let transcript_store = RepairFixtureStore::default();
+    let transcript_store = RepairFixtureStore {
+        sessions: session_store.messages.clone(),
+        ..Default::default()
+    };
     let delta = delivered_delta("turn-alias-backfill");
     assert!(
         commit_canonical_turn_delta(&session_store, &delta)
@@ -1323,9 +1377,12 @@ fn canonical_turn_backfill_passes_conversation_alias_in_same_append_intent() {
         &transcript_store,
         "space-a",
         &delta,
-        Vec::new(),
-        Some(alias.clone()),
-        1_800_000_010,
+        CanonicalTurnTranscriptCommitOptions {
+            host_refs: Vec::new(),
+            learning_evidence: None,
+            conversation_alias: Some(alias.clone()),
+            now_secs: 1_800_000_010,
+        },
     )
     .unwrap();
 
@@ -1334,6 +1391,194 @@ fn canonical_turn_backfill_passes_conversation_alias_in_same_append_intent() {
     let intents = transcript_store.appended_intents.lock().unwrap();
     assert_eq!(intents.len(), 1);
     assert_eq!(intents[0].conversation_alias.as_ref(), Some(&alias));
+}
+
+#[test]
+fn transcript_canonical_intake_digest_is_required_and_survives_raw_deletion() {
+    let delta = delivered_delta("intake-identity");
+    let key = ConversationKey::from_delta("space-a", &delta).unwrap();
+    let mut record =
+        TranscriptTurnRecord::from_delta(&key, 1, &delta, Vec::new(), 1_800_000_010).unwrap();
+    let digest = bm_core::memory::canonical_turn_learning_digest(&delta).unwrap();
+    assert_eq!(record.canonical_turn_digest, digest);
+    record.validate_canonical_intake().unwrap();
+    let mut missing = serde_json::to_value(&record).unwrap();
+    missing
+        .as_object_mut()
+        .unwrap()
+        .remove("canonical_turn_digest");
+    assert!(serde_json::from_value::<TranscriptTurnRecord>(missing).is_err());
+    let mut corrupt = record.clone();
+    corrupt.canonical_turn_digest = "sha256:invalid".into();
+    assert!(corrupt.validate_canonical_intake().is_err());
+    record.apply_lifecycle_transition(
+        bm_core::memory::TranscriptLifecycleTransition::DeleteRaw,
+        1_800_000_011,
+    );
+    assert!(record
+        .input_messages
+        .iter()
+        .all(|message| message.content.is_empty()));
+    assert_eq!(record.canonical_turn_digest, digest);
+    record.validate_canonical_intake().unwrap();
+}
+
+#[test]
+fn canonical_existing_turn_rejects_divergent_payload_without_mutation() {
+    let session_store = TranscriptSessionStore::default();
+    let transcript_store = RepairFixtureStore {
+        sessions: session_store.messages.clone(),
+        ..Default::default()
+    };
+    let original = delivered_delta("same-canonical-id");
+    let options = CanonicalTurnTranscriptCommitOptions {
+        host_refs: vec![host_ref("original", HostRefVisibility::HostUi)],
+        learning_evidence: None,
+        conversation_alias: None,
+        now_secs: 1_800_000_010,
+    };
+    let first = commit_canonical_turn_delta_with_transcript(
+        &session_store,
+        &transcript_store,
+        "space-a",
+        &original,
+        options.clone(),
+    )
+    .unwrap();
+    assert!(first.transcript_commit.unwrap().committed);
+    let retry = commit_canonical_turn_delta_with_transcript(
+        &session_store,
+        &transcript_store,
+        "space-a",
+        &original,
+        CanonicalTurnTranscriptCommitOptions {
+            now_secs: options.now_secs + 1,
+            ..options.clone()
+        },
+    )
+    .unwrap();
+    assert!(!retry.transcript_commit.unwrap().committed);
+    let before = session_store
+        .load_recent("legacy-chat-a", usize::MAX)
+        .unwrap();
+    let mut variants = Vec::new();
+    let mut body = original.clone();
+    body.input_messages[0].content = "divergent body".into();
+    variants.push(("body", body, options.clone()));
+    let mut source = original.clone();
+    source.source.request_id = Some("different-request".into());
+    variants.push(("source", source, options.clone()));
+    let mut actor = original.clone();
+    actor.actor = Some(ActorAttribution::for_subject("different-actor"));
+    variants.push(("actor", actor, options.clone()));
+    let mut refs = options.clone();
+    refs.host_refs = vec![host_ref("different", HostRefVisibility::Internal)];
+    variants.push(("host_refs", original, refs));
+    let mut failures = Vec::new();
+    for (field, delta, options) in variants {
+        if commit_canonical_turn_delta_with_transcript(
+            &session_store,
+            &transcript_store,
+            "space-a",
+            &delta,
+            options,
+        )
+        .is_ok()
+        {
+            failures.push(field);
+        }
+        assert_eq!(
+            session_store
+                .load_recent("legacy-chat-a", usize::MAX)
+                .unwrap(),
+            before
+        );
+        assert_eq!(transcript_store.appended_intents.lock().unwrap().len(), 1);
+    }
+    assert!(
+        failures.is_empty(),
+        "same turn incorrectly accepted divergent canonical fields: {failures:?}"
+    );
+}
+
+#[test]
+fn canonical_atomic_intent_preserves_session_admission_and_speaker_binding() {
+    let session_store = TranscriptSessionStore::default();
+    let transcript_store = RepairFixtureStore {
+        sessions: session_store.messages.clone(),
+        ..Default::default()
+    };
+    commit_canonical_turn_delta_with_transcript(
+        &session_store,
+        &transcript_store,
+        "space-a",
+        &delivered_delta("canonical-binding"),
+        CanonicalTurnTranscriptCommitOptions {
+            host_refs: Vec::new(),
+            learning_evidence: None,
+            conversation_alias: None,
+            now_secs: 1_800_000_010,
+        },
+    )
+    .unwrap();
+    let valid = CanonicalTurnAppendIntent {
+        session_chat_id: "legacy-chat-a".into(),
+        session_before: Vec::new(),
+        session_append: session_store
+            .load_recent("legacy-chat-a", usize::MAX)
+            .unwrap(),
+        transcript: transcript_store.appended_intents.lock().unwrap()[0].clone(),
+    };
+    valid.validate().unwrap();
+    let mut mismatched_speaker = valid.clone();
+    mismatched_speaker.session_append[0].speaker_id = "unrelated-speaker".into();
+    assert!(mismatched_speaker.validate().is_err());
+    let mut empty_id = valid.clone();
+    empty_id.session_append[0].message_id.clear();
+    empty_id.transcript.record.input_messages[0]
+        .message_id
+        .clear();
+    assert!(empty_id.validate().is_err());
+    let mut empty_role = valid;
+    empty_role.session_append[0].role = " ".into();
+    empty_role.transcript.record.input_messages[0].role = " ".into();
+    assert!(empty_role.validate().is_err());
+}
+
+#[test]
+fn canonical_atomic_admission_rejection_leaves_session_and_transcript_unchanged() {
+    let session_store = TranscriptSessionStore::default();
+    session_store
+        .append("legacy-chat-a", "user", "earlier accepted message")
+        .unwrap();
+    let before = session_store
+        .load_recent("legacy-chat-a", usize::MAX)
+        .unwrap();
+    let transcript_store = RepairFixtureStore {
+        sessions: session_store.messages.clone(),
+        reject_canonical_commit: true,
+        ..Default::default()
+    };
+    let result = commit_canonical_turn_delta_with_transcript(
+        &session_store,
+        &transcript_store,
+        "space-a",
+        &delivered_delta("rejected-atomic"),
+        CanonicalTurnTranscriptCommitOptions {
+            host_refs: Vec::new(),
+            learning_evidence: None,
+            conversation_alias: None,
+            now_secs: 1_800_000_010,
+        },
+    );
+    assert!(result.is_err());
+    assert_eq!(
+        session_store
+            .load_recent("legacy-chat-a", usize::MAX)
+            .unwrap(),
+        before
+    );
+    assert!(transcript_store.appended_intents.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -1356,9 +1601,12 @@ fn mismatched_alias_fails_before_session_or_transcript_mutation() {
         &transcript_store,
         "space-a",
         &delta,
-        Vec::new(),
-        Some(alias),
-        1_800_000_010,
+        CanonicalTurnTranscriptCommitOptions {
+            host_refs: Vec::new(),
+            learning_evidence: None,
+            conversation_alias: Some(alias),
+            now_secs: 1_800_000_010,
+        },
     )
     .is_err());
     assert_eq!(session_store.message_count("legacy-chat-a").unwrap(), 0);
@@ -1405,6 +1653,7 @@ fn transcript_repair_report_flags_mismatched_orphan_duplicate_and_corrupt_record
         turns: vec![first, duplicate_sequence],
         derived_refs: vec![derived],
         appended_intents: Mutex::new(Vec::new()),
+        ..Default::default()
     };
 
     let report = store.repair_report(&key, "subject-agent").unwrap();

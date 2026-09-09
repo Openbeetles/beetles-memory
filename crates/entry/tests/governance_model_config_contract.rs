@@ -28,6 +28,7 @@ fn runtime(
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: channel.to_string(),
             chat_id: chat_id.to_string(),
         },
@@ -294,6 +295,7 @@ fn legacy_single_sidecar_requires_explicit_reset_without_mutation() {
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "console".to_string(),
             chat_id: "local-console".to_string(),
         },

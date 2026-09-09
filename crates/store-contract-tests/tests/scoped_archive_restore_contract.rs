@@ -17,9 +17,9 @@ use bm_sdk::{
     MemoryArchiveScope, MemoryCapabilityPolicy, MemoryClock, MemoryIdentity, MemoryPrivacyClass,
     MemoryPrivacyPolicy, MemoryRuntime, MemoryScope, MemorySpaceExportRequest,
     MemorySpaceImportRequest, MemorySpacePrivateMaterialPolicy, MemoryStoreHandle,
-    MemoryWriteRequest, NoopMemoryAuditSink, RuntimeSkillCreationRef, RuntimeSkillOwningScope,
-    RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
-    SubjectSoulFoundingCharterSeedV1, SubjectSoulMutationOutcomeV1, SubjectSoulProvisionIntentV1,
+    NoopMemoryAuditSink, RuntimeSkillCreationRef, RuntimeSkillOwningScope, RuntimeSkillWrite,
+    StoreBackendConfig, SubjectSoulFoundingCharterSeedV1, SubjectSoulMutationOutcomeV1,
+    SubjectSoulProvisionIntentV1,
 };
 use sha2::{Digest, Sha256};
 
@@ -77,17 +77,17 @@ fn seed_runtime_skill(runtime: &MemoryRuntime, owning_scope: RuntimeSkillOwningS
     let verification_receipt_digest =
         format!("sha256:{:x}", Sha256::digest(candidate_ref.as_bytes()));
     let report = runtime
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![GovernedRuntimeSkillWriteInput {
+        .seed_runtime_skills_for_replay(
+            vec![GovernedRuntimeSkillWriteInput {
                 write: RuntimeSkillWrite {
                     name: label.to_string(),
                     topic: "scoped archive restore".to_string(),
                     title: format!("Scoped archive {label}"),
                     summary: format!("Typed scoped archive fixture {label}."),
                     content: format!(
-                        "1. Verify the archive physical owner for {label}.\n\
-                         2. Replace only that scope and preserve every sibling scope.\n\
-                         3. Reject the restore when the root or owner kind differs."
+                        "1. Verify exact owner scope for {label}.\n\
+                         2. Replace only that scope.\n\
+                         3. Preserve all sibling scopes."
                     ),
                     citations: vec!["store-contract:scoped-archive".to_string()],
                     source_chat_id: Some("archive".to_string()),
@@ -100,8 +100,7 @@ fn seed_runtime_skill(runtime: &MemoryRuntime, owning_scope: RuntimeSkillOwningS
                 privacy_class: MemoryPrivacyClass::PublicRuntime,
             }],
             owning_scope,
-            source: RuntimeSkillWriteSource::Manual,
-        })
+        )
         .unwrap_or_else(|error| panic!("seed runtime skill {label}: {error}"));
     assert!(
         report.accepted,
@@ -113,9 +112,9 @@ fn seed_runtime_skill(runtime: &MemoryRuntime, owning_scope: RuntimeSkillOwningS
 fn seed_subject_soul(runtime: &MemoryRuntime, label: &str) {
     let charter = SubjectSoulFoundingCharterSeedV1 {
         identity_anchor: Some(format!("typed scoped archive Soul {label}")),
-        character_tendencies: vec!["preserve exact owner boundaries".to_string()],
-        priority_constitution: vec!["truth before fluency".to_string()],
-        non_negotiables: vec!["never cross archive scope".to_string()],
+        character_tendencies: vec![],
+        priority_constitution: vec![],
+        non_negotiables: vec![],
         default_response_mode: None,
         default_initiative_posture: None,
         default_relationship_posture: None,
@@ -136,6 +135,122 @@ fn seed_subject_soul(runtime: &MemoryRuntime, label: &str) {
         })
         .unwrap_or_else(|error| panic!("seed typed Subject Soul {label}: {error}"));
     assert_eq!(report.outcome, SubjectSoulMutationOutcomeV1::Committed);
+}
+
+fn seed_archive_payload(runtime: &MemoryRuntime, label: &str, factual_root: bool) {
+    use bm_sdk::*;
+    let body = format!("Canonical archive payload for {label}.");
+    let request = if factual_root {
+        let target = MemoryCandidateTarget::LongTermMemory {
+            kind: LongTermMemoryKind::Project,
+            topic: label.into(),
+        };
+        MemoryWriteRequest::Candidates {
+            candidates: vec![MemoryWriteCandidate {
+                candidate_id: label.into(),
+                authority: MemoryEvidenceAuthority::UserAsserted,
+                target: target.clone(),
+                long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
+                privacy: MemoryPrivacyClass::PublicRuntime,
+                content: MemoryCandidateContent::Text {
+                    topic: label.into(),
+                    body,
+                    keywords: vec![],
+                },
+                evidence_refs: vec![],
+                canonical_entities: vec![],
+                semantic_judgment: Some(MemoryCandidateSemanticJudgment {
+                    source: MemorySemanticJudgmentSource::RuntimeGate,
+                    decision: MemoryCandidateSemanticDecision::Accept,
+                    governed_target: Some(target),
+                    reason: "canonical archive fixture".into(),
+                }),
+            }],
+        }
+    } else {
+        let group = bm_core::memory::canonical_recall_evidence_group(label);
+        let chunks = vec![GovernedEvidenceDocumentChunk {
+            identity: "body".into(),
+            ordinal: 0,
+            body: body.clone(),
+        }];
+        MemoryWriteRequest::GovernedEvidenceDocuments {
+            mutations: vec![MemoryEvidenceDocumentMutation::Upsert {
+                draft: Box::new(GovernedEvidenceDocumentDraft {
+                    memory_space_id: runtime.memory_space_id().into(),
+                    mounted_subject_id: runtime.subject_id().into(),
+                    document_id: label.into(),
+                    source_kind: GovernedEvidenceDocumentSourceKind::StructuredMaterial,
+                    source_locator: label.into(),
+                    canonical_evidence_group: group.clone(),
+                    evidence_family_group: None,
+                    source_revision: 1,
+                    content_digest: governed_evidence_document_content_digest(
+                        label, &group, None, &body, &chunks,
+                    ),
+                    body,
+                    chunks,
+                    authority: MemoryEvidenceAuthority::UserAsserted,
+                    privacy: MemoryPrivacyClass::PublicRuntime,
+                    observed_at: 1_000,
+                }),
+            }],
+        }
+    };
+    let report = runtime
+        .write(request)
+        .expect("canonical nonempty archive payload");
+    assert!(report.accepted);
+    assert_eq!(report.changed, 1);
+}
+
+fn namespace_docs(
+    snapshot: &StoreSnapshot,
+    namespace: &str,
+) -> BTreeMap<String, serde_json::Value> {
+    snapshot
+        .json_docs
+        .iter()
+        .filter(|doc| doc.namespace == namespace)
+        .map(|doc| (doc.key.clone(), doc.value.clone()))
+        .collect()
+}
+
+fn assert_runtime_owner_preserved(before: &StoreSnapshot, after: &StoreSnapshot) {
+    for namespace in ["runtime_skill_records", "runtime_skill_scope_manifests"] {
+        let expected = namespace_docs(before, namespace);
+        assert!(!expected.is_empty(), "nonempty protected owner control");
+        assert!(
+            namespace_docs(after, namespace) == expected,
+            "protected owner must remain unchanged"
+        );
+    }
+    let events = |snapshot: &StoreSnapshot| {
+        snapshot
+            .events
+            .iter()
+            .filter(|event| is_runtime_event(event))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        !events(before).is_empty(),
+        "nonempty protected event control"
+    );
+    assert!(
+        events(before) == events(after),
+        "protected events must remain unchanged"
+    );
+}
+
+fn is_runtime_event(event: &bm_sdk::nonproduction_replay_harness::MemoryStoreEvent) -> bool {
+    matches!(
+        event.plane.as_str(),
+        "runtime_skill_records" | "runtime_skill_scope_manifests"
+    ) || event
+        .payload
+        .get("operation")
+        .is_some_and(|operation| operation.starts_with("runtime_skill."))
 }
 
 fn full_snapshot(handle: &MemoryStoreHandle) -> StoreSnapshot {
@@ -188,7 +303,21 @@ fn scoped_non_soul_event_ids(
                 .events
                 .iter()
                 .find(|event| &event.event_id == event_id)
-                .is_some_and(|event| !is_subject_soul_event(event))
+                .is_some_and(|event| {
+                    !is_subject_soul_event(event)
+                        && !is_runtime_event(event)
+                        && event.plane != "procedural_selection_authorities_private"
+                        && !matches!(
+                            event.plane.as_str(),
+                            "governed_evidence_documents"
+                                | "governed_evidence_source_refs"
+                                | "governed_evidence_source_claim_manifests"
+                        )
+                        && !event
+                            .payload
+                            .get("operation")
+                            .is_some_and(|operation| operation.starts_with("procedural_selection."))
+                })
         })
         .collect()
 }
@@ -319,7 +448,14 @@ fn backend_config(backend: &str, role: &str, root: &Path) -> StoreBackendConfig 
     }
 }
 
-fn assert_backend_scoped_archive_restore(backend: &str, root: &Path) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArchiveScenario {
+    FactualRoot,
+    ProtectedRuntime,
+    ProtectedSoul,
+}
+
+fn assert_backend_scoped_archive_restore(backend: &str, root: &Path, scenario: ArchiveScenario) {
     let source =
         MemoryStoreHandle::open_for_nonproduction_harness(backend_config(backend, "source", root))
             .unwrap_or_else(|error| panic!("open {backend} source: {error}"));
@@ -330,21 +466,32 @@ fn assert_backend_scoped_archive_restore(backend: &str, root: &Path) {
     let target_a = runtime(&target, SUBJECT_A);
     let target_b = runtime(&target, SUBJECT_B);
 
-    seed_runtime_skill(&source_a, subject_scope(SUBJECT_A), "source-subject-a");
-    seed_runtime_skill(
-        &source_a,
-        RuntimeSkillOwningScope::SharedProgram,
-        "source-shared",
-    );
-    seed_runtime_skill(&target_a, subject_scope(SUBJECT_A), "target-old-subject-a");
-    seed_runtime_skill(
-        &target_a,
-        RuntimeSkillOwningScope::SharedProgram,
-        "target-old-shared",
-    );
-    seed_runtime_skill(&target_b, subject_scope(SUBJECT_B), "target-sibling-b");
-    seed_subject_soul(&source_a, &format!("{backend}:source"));
-    seed_subject_soul(&target_a, &format!("{backend}:target"));
+    if scenario == ArchiveScenario::ProtectedRuntime {
+        seed_runtime_skill(&source_a, subject_scope(SUBJECT_A), "source-subject-a");
+        seed_runtime_skill(
+            &source_a,
+            RuntimeSkillOwningScope::SharedProgram,
+            "source-shared",
+        );
+        seed_runtime_skill(&target_a, subject_scope(SUBJECT_A), "target-old-subject-a");
+        seed_runtime_skill(
+            &target_a,
+            RuntimeSkillOwningScope::SharedProgram,
+            "target-old-shared",
+        );
+        seed_runtime_skill(&target_b, subject_scope(SUBJECT_B), "target-sibling-b");
+    }
+    if scenario == ArchiveScenario::ProtectedSoul {
+        seed_subject_soul(&source_a, &format!("{backend}:source"));
+        seed_subject_soul(&target_a, &format!("{backend}:target"));
+    }
+    seed_archive_payload(&source_a, "source-subject-evidence", false);
+    seed_archive_payload(&target_a, "target-old-subject-evidence", false);
+    seed_archive_payload(&target_b, "target-sibling-evidence", false);
+    if scenario == ArchiveScenario::FactualRoot {
+        seed_archive_payload(&source_a, "source-space-fact", true);
+        seed_archive_payload(&target_a, "target-old-space-fact", true);
+    }
 
     let source_snapshot = full_snapshot(&source);
     let target_before = full_snapshot(&target);
@@ -359,6 +506,27 @@ fn assert_backend_scoped_archive_restore(backend: &str, root: &Path) {
         &source,
         MemoryArchiveScope::shared_program(MEMORY_SPACE_ID).expect("shared archive scope"),
     );
+    for archive in [&subject_archive, &shared_archive] {
+        for namespace in ["runtime_skill_records", "runtime_skill_scope_manifests"] {
+            assert!(!archive.contains_json_namespace(namespace));
+            assert!(!archive.contains_event_plane(namespace));
+        }
+    }
+    assert!(subject_archive.contains_json_namespace("governed_evidence_documents"));
+    assert!(
+        !subject_archive.contains_event_plane("governed_evidence_documents"),
+        "ExcludePrivate does not export raw evidence event metadata"
+    );
+    assert_eq!(
+        subject_archive.contains_json_namespace("long_term_version_materials"),
+        scenario == ArchiveScenario::FactualRoot
+    );
+    assert!(!shared_archive.contains_json_namespace("long_term_version_materials"));
+    if scenario == ArchiveScenario::ProtectedSoul {
+        assert!(!subject_global_soul_docs(&source_snapshot).is_empty());
+        assert!(!subject_global_soul_docs(&target_before).is_empty());
+        assert!(!subject_soul_mor_docs(&target_before).is_empty());
+    }
 
     import_memory_space(
         &target,
@@ -372,8 +540,27 @@ fn assert_backend_scoped_archive_restore(backend: &str, root: &Path) {
     let after_subject = full_snapshot(&target);
     assert_eq!(
         runtime_skill_docs(&after_subject, &subject_scope(SUBJECT_A)),
-        runtime_skill_docs(&source_snapshot, &subject_scope(SUBJECT_A)),
-        "{backend}: Subject owner replacement"
+        runtime_skill_docs(&target_before, &subject_scope(SUBJECT_A)),
+        "{backend}: Subject protected owner preservation"
+    );
+    if scenario == ArchiveScenario::ProtectedRuntime {
+        assert_runtime_owner_preserved(&target_before, &after_subject);
+    }
+    let evidence = namespace_docs(&after_subject, "governed_evidence_documents");
+    let mut expected_evidence = namespace_docs(&source_snapshot, "governed_evidence_documents");
+    expected_evidence.extend(
+        namespace_docs(&target_before, "governed_evidence_documents")
+            .into_iter()
+            .filter(|(_, value)| value["mounted_subject_id"] == SUBJECT_B),
+    );
+    assert!(
+        evidence == expected_evidence,
+        "subject evidence replaced, sibling preserved"
+    );
+    assert!(
+        namespace_docs(&after_subject, "long_term_version_materials")
+            == namespace_docs(&source_snapshot, "long_term_version_materials"),
+        "subject archive restores its MemorySpace factual root"
     );
     assert_eq!(
         runtime_skill_docs(&after_subject, &RuntimeSkillOwningScope::SharedProgram),
@@ -385,10 +572,17 @@ fn assert_backend_scoped_archive_restore(backend: &str, root: &Path) {
         runtime_skill_docs(&target_before, &subject_scope(SUBJECT_B)),
         "{backend}: Subject replace must preserve sibling Subject"
     );
-    assert_eq!(
-        scoped_non_soul_event_ids(&after_subject, &subject_event_scope(SUBJECT_A)),
-        scoped_non_soul_event_ids(&source_snapshot, &subject_event_scope(SUBJECT_A)),
-        "{backend}: Subject archive-owned events"
+    let actual = scoped_non_soul_event_ids(&after_subject, &subject_event_scope(SUBJECT_A));
+    let expected = scoped_non_soul_event_ids(&source_snapshot, &subject_event_scope(SUBJECT_A));
+    let missing = source_snapshot
+        .events
+        .iter()
+        .filter(|event| expected.contains(&event.event_id) && !actual.contains(&event.event_id))
+        .map(|event| (&event.plane, event.payload.get("operation")))
+        .collect::<Vec<_>>();
+    assert!(
+        actual == expected,
+        "{backend}: Subject archive events missing safe metadata: {missing:?}"
     );
     assert_eq!(
         scoped_soul_event_ids(&after_subject, &subject_event_scope(SUBJECT_A)),
@@ -424,8 +618,21 @@ fn assert_backend_scoped_archive_restore(backend: &str, root: &Path) {
     let after_shared = full_snapshot(&target);
     assert_eq!(
         runtime_skill_docs(&after_shared, &RuntimeSkillOwningScope::SharedProgram),
-        runtime_skill_docs(&source_snapshot, &RuntimeSkillOwningScope::SharedProgram),
-        "{backend}: SharedProgram owner replacement"
+        runtime_skill_docs(&target_before, &RuntimeSkillOwningScope::SharedProgram),
+        "{backend}: SharedProgram protected owner preservation"
+    );
+    if scenario == ArchiveScenario::ProtectedRuntime {
+        assert_runtime_owner_preserved(&after_subject, &after_shared);
+    }
+    assert!(
+        namespace_docs(&after_shared, "long_term_version_materials")
+            == namespace_docs(&source_snapshot, "long_term_version_materials"),
+        "SharedProgram restore preserves the MemorySpace factual root"
+    );
+    assert!(
+        namespace_docs(&after_shared, "governed_evidence_documents")
+            == namespace_docs(&after_subject, "governed_evidence_documents"),
+        "shared restore preserves subject evidence"
     );
     assert_eq!(
         runtime_skill_docs(&after_shared, &subject_scope(SUBJECT_A)),
@@ -438,8 +645,8 @@ fn assert_backend_scoped_archive_restore(backend: &str, root: &Path) {
         "{backend}: SharedProgram replace must preserve sibling Subject"
     );
     assert_eq!(
-        scoped_event_ids(&after_shared, &StorePhysicalOwningScope::SharedProgram),
-        scoped_event_ids(&source_snapshot, &StorePhysicalOwningScope::SharedProgram),
+        scoped_non_soul_event_ids(&after_shared, &StorePhysicalOwningScope::SharedProgram),
+        scoped_non_soul_event_ids(&source_snapshot, &StorePhysicalOwningScope::SharedProgram),
         "{backend}: SharedProgram events"
     );
     assert_eq!(
@@ -471,9 +678,8 @@ fn assert_backend_scoped_archive_restore(backend: &str, root: &Path) {
             .contains("archive root does not match its canonical payload closure"),
         "{backend}: unexpected forged-root error: {forged_error}"
     );
-    assert_eq!(
-        full_snapshot(&target),
-        before_forged,
+    assert!(
+        full_snapshot(&target) == before_forged,
         "{backend}: forged root must be full-store atomic"
     );
 
@@ -493,9 +699,8 @@ fn assert_backend_scoped_archive_restore(backend: &str, root: &Path) {
         "memory_archive_scope",
         "{backend}: cross-kind stage"
     );
-    assert_eq!(
-        full_snapshot(&target),
-        before_cross_kind,
+    assert!(
+        full_snapshot(&target) == before_cross_kind,
         "{backend}: cross-kind rejection must be full-store atomic"
     );
 }
@@ -510,10 +715,17 @@ fn scoped_archive_restore_is_exact_and_atomic_across_all_backends() {
             .expect("system time")
             .as_nanos()
     ));
-    for backend in ["in_memory", "embedded", "file"] {
-        assert_backend_scoped_archive_restore(backend, &root);
+    for scenario in [
+        ArchiveScenario::FactualRoot,
+        ArchiveScenario::ProtectedRuntime,
+        ArchiveScenario::ProtectedSoul,
+    ] {
+        let scenario_root = root.join(format!("{scenario:?}"));
+        for backend in ["in_memory", "embedded", "file"] {
+            assert_backend_scoped_archive_restore(backend, &scenario_root, scenario);
+        }
+        #[cfg(feature = "sqlite-store")]
+        assert_backend_scoped_archive_restore("sqlite", &scenario_root, scenario);
     }
-    #[cfg(feature = "sqlite-store")]
-    assert_backend_scoped_archive_restore("sqlite", &root);
     let _ = std::fs::remove_dir_all(root);
 }

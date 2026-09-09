@@ -59,8 +59,8 @@ bm-sdk = { path = "crates/sdk", features = ["profile-desktop-macos-embedded-sdk"
 use bm_sdk::{
     AgentSkillDirConfig, MemoryIdentity, MemoryProjectionRequest, MemoryRecallRequest,
     MemoryRecallTemporalOperation, MemoryRuntime, MemoryScope, MemoryStoreHandle,
-    MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite,
-    RuntimeSkillWriteSource, StoreBackendConfig,
+    PressureLevel, ProceduralProjectionBindingV1, ProfileId, RuntimeLifecycleModeInput,
+    StoreBackendConfig,
 };
 
 fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
@@ -79,20 +79,6 @@ fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
 }
 
 fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
-    runtime.write(MemoryWriteRequest::Procedural {
-        writes: vec![RuntimeSkillWrite {
-            name: "release_guard".to_string(),
-            topic: "release".to_string(),
-            title: "Release guard".to_string(),
-            summary: "Verify release artifacts before publishing.".to_string(),
-            content: "Run examples, platform gates, and publish dry-run.".to_string(),
-            citations: vec!["quickstart".to_string()],
-            source_chat_id: Some("chat-1".to_string()),
-            observed_at: 1_800_000_000,
-        }],
-        source: RuntimeSkillWriteSource::Manual,
-    })?;
-
     let recall = runtime.recall(MemoryRecallRequest {
         temporal_operation: MemoryRecallTemporalOperation::Current,
         query: "release artifacts".to_string(),
@@ -100,12 +86,10 @@ fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
         structured_query_facets: Vec::new(),
         tool_registry_refs: Vec::new(),
     })?;
-    assert!(recall
-        .procedural_delivery_reports
-        .iter()
-        .any(|delivery| delivery.selected));
+    assert_eq!(recall.query, "release artifacts");
 
     let projection = runtime.project(MemoryProjectionRequest {
+        binding: ProceduralProjectionBindingV1::Preview,
         temporal_operation: MemoryRecallTemporalOperation::Current,
         user_query: "How should this host release?".to_string(),
         system_max_len: 4096,
@@ -115,7 +99,7 @@ fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
         structured_query_facets: Vec::new(),
         tool_registry_refs: Vec::new(),
     })?;
-    assert!(projection.system_memory_block.len() <= 4096);
+    assert!(projection.provider_payload().system_memory_block().len() <= 4096);
     Ok(())
 }
 ```

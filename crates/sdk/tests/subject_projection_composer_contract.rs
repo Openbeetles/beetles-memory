@@ -129,6 +129,7 @@ fn provision_subject_projection_soul(runtime: &MemoryRuntime, identity_anchor: &
 fn project(runtime: &MemoryRuntime) -> bm_sdk::MemoryProjectionOutput {
     runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: vec![QueryFacetInput::Keyword("release".to_string())],
             user_query: "What is the shared release train called?".to_string(),
@@ -233,8 +234,6 @@ fn one_shared_fact_can_produce_distinct_subject_projections() {
                 deletes: Vec::new(),
                 skill_writes: Vec::new(),
             },
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
         })
         .expect("write shared fact");
     assert!(write.accepted, "{write:#?}");
@@ -588,8 +587,6 @@ fn restricted_supersede_inherits_policy_and_never_opens_the_successor_to_other_s
                 deletes: Vec::new(),
                 skill_writes: Vec::new(),
             },
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
         })
         .expect("seed restricted predecessor");
     let predecessor = platform
@@ -758,8 +755,6 @@ fn restricted_subject_is_exact_zero_for_facet_only_hit_and_audit_is_safe() {
                 deletes: Vec::new(),
                 skill_writes: Vec::new(),
             },
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
         })
         .expect("write facet-only owner");
     let owner = platform

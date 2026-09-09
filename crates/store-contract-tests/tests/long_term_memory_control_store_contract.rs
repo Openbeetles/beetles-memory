@@ -105,8 +105,6 @@ fn seed_control_store(handle: &MemoryStoreHandle) -> ControlFixture {
     let runtime = runtime_for(handle);
     let write = runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![preferred_editor_draft(
                     "Use the integrated editor for this project.",

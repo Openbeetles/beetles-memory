@@ -131,12 +131,25 @@ fn operation_kind_is_protected_owner(operation_kind: MemoryMutationOperationKind
             | MemoryMutationOperationKind::SoulReseed
             | MemoryMutationOperationKind::SoulDelete
             | MemoryMutationOperationKind::RelationshipControl
+            | MemoryMutationOperationKind::ProceduralLearning
+            | MemoryMutationOperationKind::ProceduralLifecycle
     )
 }
 
 pub(crate) fn json_document_is_protected_owner(namespace: &str, value: &Value) -> Result<bool> {
-    if crate::store_internal::schema::is_subject_soul_protected_json_namespace(namespace)
+    if namespace == super::procedural_selection::NAMESPACE
+        || crate::store_internal::schema::is_runtime_skill_protected_json_namespace(namespace)
+        || crate::store_internal::schema::is_subject_soul_protected_json_namespace(namespace)
         || crate::store_internal::schema::is_relationship_source_protected_json_namespace(namespace)
+        || matches!(
+            namespace,
+            crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE
+                | crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE
+                | crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE
+                | crate::store_internal::schema::PROCEDURAL_FEEDBACK_JOB_NAMESPACE
+                | crate::store_internal::schema::PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE
+                | crate::store_internal::schema::PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE
+        )
     {
         return Ok(true);
     }
@@ -159,12 +172,23 @@ pub(crate) fn json_document_is_protected_owner(namespace: &str, value: &Value) -
 }
 
 pub(crate) fn event_is_protected_owner(event: &MemoryStoreEvent) -> bool {
-    crate::store_internal::schema::is_subject_soul_protected_json_namespace(&event.plane)
+    event.plane == super::procedural_selection::NAMESPACE
+        || crate::store_internal::schema::is_runtime_skill_protected_json_namespace(&event.plane)
+        || event
+            .payload
+            .get("operation")
+            .is_some_and(|operation| operation.starts_with("procedural_selection."))
+        || crate::store_internal::schema::is_subject_soul_protected_json_namespace(&event.plane)
         || crate::store_internal::schema::is_relationship_source_protected_json_namespace(
             &event.plane,
         )
         || event.payload.get("operation").is_some_and(|operation| {
-            operation.starts_with("subject_soul.") || operation.starts_with("relationship_source.")
+            operation.starts_with("subject_soul.")
+                || operation.starts_with("relationship_source.")
+                || operation.starts_with("agent_tool_experience.")
+                || operation.starts_with("runtime_skill.")
+                || operation.starts_with("post_turn.procedural.")
+                || operation == "conversation.transcript.lifecycle"
         })
 }
 
@@ -430,6 +454,19 @@ pub trait StoreEngine: StoreEventLog {
 mod tests {
     use super::*;
     use crate::store_internal::{MemoryStoreEventKind, StoreEventScope};
+
+    #[test]
+    fn procedural_selection_signing_authority_is_never_public_archive_content() {
+        assert!(json_document_is_protected_owner(
+            "procedural_selection_authorities_private",
+            &serde_json::json!({"secret_hex": "synthetic-secret-must-never-export"}),
+        )
+        .expect("protected owner classification"));
+        assert!(
+            !json_document_is_protected_owner("chat_messages", &serde_json::json!({}))
+                .expect("ordinary owner classification")
+        );
+    }
 
     fn metric_event() -> MemoryStoreEvent {
         MemoryStoreEvent::new(

@@ -21,7 +21,6 @@ const RUNTIME_SKILL_MARKER: &str = "<!-- beetle:runtime-skill -->";
 const MAX_RUNTIME_SKILL_HITS: usize = 4;
 const MAX_RUNTIME_SKILL_CITATIONS: usize = 8;
 const MIN_RUNTIME_SKILL_BLOCK_LEN: usize = 180;
-const RUNTIME_SKILL_TOUCH_INTERVAL_SECS: u64 = 6 * 60 * 60;
 const RUNTIME_SKILL_STALE_AFTER_SECS: u64 = 90 * 86_400;
 const RUNTIME_SKILL_DUPLICATE_SIMILARITY: u32 = 16;
 const MAX_RUNTIME_SKILL_GENOME_NODES: usize = 8;
@@ -222,11 +221,10 @@ pub enum RuntimeSkillReuseOutcome {
     Mismatch,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeSkillWriteSource {
-    #[default]
-    Manual,
+    ReplayHarness,
     Extraction,
     TaskLearning,
     ProgrammableReasoning,
@@ -235,7 +233,7 @@ pub enum RuntimeSkillWriteSource {
 impl RuntimeSkillWriteSource {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Manual => "manual",
+            Self::ReplayHarness => "replay_harness",
             Self::Extraction => "extraction",
             Self::TaskLearning => "task_learning",
             Self::ProgrammableReasoning => "programmable_reasoning",
@@ -244,10 +242,10 @@ impl RuntimeSkillWriteSource {
 
     pub const fn origin(self) -> RuntimeSkillOrigin {
         match self {
-            Self::Manual => RuntimeSkillOrigin::RuntimeLearned,
-            Self::Extraction | Self::TaskLearning | Self::ProgrammableReasoning => {
-                RuntimeSkillOrigin::RuntimeLearned
-            }
+            Self::ReplayHarness
+            | Self::Extraction
+            | Self::TaskLearning
+            | Self::ProgrammableReasoning => RuntimeSkillOrigin::RuntimeLearned,
         }
     }
 }
@@ -289,7 +287,7 @@ pub struct RuntimeSkillWriteItemReport {
     pub detail: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeSkillWriteOutcome {
     pub source: RuntimeSkillWriteSource,
     pub submitted: usize,
@@ -643,35 +641,6 @@ pub(crate) fn retrieve_runtime_skill_hits_with_backend(
     }
 }
 
-pub fn touch_runtime_skill_hits(
-    storage: &dyn SkillStorage,
-    hits: &[RuntimeSkillHit],
-    now_secs: u64,
-) -> usize {
-    let mut changed = 0usize;
-    for hit in hits {
-        let mut record = hit.record.clone();
-        if record.last_used_at.is_some_and(|previous| {
-            now_secs.saturating_sub(previous) < RUNTIME_SKILL_TOUCH_INTERVAL_SECS
-        }) {
-            continue;
-        }
-        record.last_used_at = Some(now_secs);
-        record.use_count = record.use_count.saturating_add(1);
-        record.quality_score = compute_runtime_skill_quality(&record);
-        record.status = RuntimeSkillStatus::Active;
-        record.retired_at = None;
-        record.retirement_reason.clear();
-        if let Some(last) = record.genome_lineage.last_mut() {
-            last.disposition = RuntimeSkillGenomeDisposition::Active;
-        }
-        if write_runtime_skill_record(storage, &record).is_ok() {
-            changed = changed.saturating_add(1);
-        }
-    }
-    changed
-}
-
 pub fn build_runtime_skill_recall_block(
     storage: &dyn SkillStorage,
     query: &str,
@@ -756,12 +725,12 @@ pub fn build_runtime_skill_recall_block(
     if appended == 0 {
         None
     } else {
-        let _ = touch_runtime_skill_hits(storage, &hits[..appended], now_secs);
         Some(out.trim_end().to_string())
     }
 }
 
-pub fn record_runtime_skill_outcomes(
+#[cfg(test)]
+pub(crate) fn record_runtime_skill_outcomes(
     storage: &dyn SkillStorage,
     skill_names: &[String],
     outcome: RuntimeSkillReuseOutcome,
@@ -813,10 +782,13 @@ pub fn govern_runtime_skill_write_shapes(
     let mut outcome = RuntimeSkillWriteOutcome {
         source,
         submitted: writes.len(),
-        ..RuntimeSkillWriteOutcome::default()
+        accepted: 0,
+        rejected: 0,
+        changed: 0,
+        reports: Vec::new(),
     };
     for write in writes {
-        match inspect_runtime_skill_write_shape(write) {
+        match inspect_runtime_skill_write_shape(write, source) {
             Ok(()) => {
                 outcome.accepted = outcome.accepted.saturating_add(1);
                 outcome.reports.push(RuntimeSkillWriteItemReport {
@@ -838,7 +810,7 @@ pub fn govern_runtime_skill_write_shapes(
     outcome
 }
 
-pub fn write_governed_runtime_skills(
+pub(crate) fn write_governed_runtime_skills(
     storage: &dyn SkillStorage,
     writes: &[RuntimeSkillWrite],
     source: RuntimeSkillWriteSource,
@@ -846,11 +818,14 @@ pub fn write_governed_runtime_skills(
     let mut outcome = RuntimeSkillWriteOutcome {
         source,
         submitted: writes.len(),
-        ..RuntimeSkillWriteOutcome::default()
+        accepted: 0,
+        rejected: 0,
+        changed: 0,
+        reports: Vec::new(),
     };
     for write in writes {
         let topic = write.topic.trim().to_string();
-        let (reason, detail) = match inspect_runtime_skill_write_shape(write) {
+        let (reason, detail) = match inspect_runtime_skill_write_shape(write, source) {
             Ok(()) => {
                 let changed = upsert_runtime_skill_inner(storage, write, source.origin(), false)?;
                 outcome.accepted = outcome.accepted.saturating_add(1);
@@ -970,7 +945,7 @@ impl SkillStorage for PlanningSkillStorage<'_> {
     }
 }
 
-pub fn govern_runtime_skills(
+pub(crate) fn govern_runtime_skills(
     storage: &dyn SkillStorage,
     now_secs: u64,
 ) -> crate::error::Result<RuntimeSkillGovernanceOutcome> {
@@ -1122,7 +1097,8 @@ fn fallback_runtime_skill_hits(
     hits
 }
 
-pub fn upsert_runtime_skill(
+#[cfg(test)]
+pub(crate) fn upsert_runtime_skill(
     storage: &dyn SkillStorage,
     write: &RuntimeSkillWrite,
 ) -> crate::error::Result<bool> {
@@ -2827,12 +2803,13 @@ fn should_prune_runtime_skill(record: &RuntimeSkillRecord, now_secs: u64) -> boo
 
 fn inspect_runtime_skill_write_shape(
     write: &RuntimeSkillWrite,
+    source: RuntimeSkillWriteSource,
 ) -> std::result::Result<(), RuntimeSkillWriteItemReport> {
     let topic = write.topic.trim().to_string();
     let content = write.content.trim();
     if topic.is_empty() || content.is_empty() {
         return Err(RuntimeSkillWriteItemReport {
-            source: RuntimeSkillWriteSource::Manual,
+            source,
             action: RuntimeSkillWriteAction::Rejected,
             reason: RuntimeSkillWriteReason::EmptyOrInvalid,
             topic,
@@ -2842,7 +2819,7 @@ fn inspect_runtime_skill_write_shape(
     }
     if looks_like_raw_payload_text(content) {
         return Err(RuntimeSkillWriteItemReport {
-            source: RuntimeSkillWriteSource::Manual,
+            source,
             action: RuntimeSkillWriteAction::Rejected,
             reason: RuntimeSkillWriteReason::RawPayloadOrLog,
             topic,
@@ -2857,7 +2834,7 @@ fn inspect_runtime_skill_write_shape(
     let has_summary = !write.summary.trim().is_empty();
     if signal < 2 && !(signal >= 1 && non_empty_lines >= 2 && has_summary) {
         return Err(RuntimeSkillWriteItemReport {
-            source: RuntimeSkillWriteSource::Manual,
+            source,
             action: RuntimeSkillWriteAction::Rejected,
             reason: RuntimeSkillWriteReason::WeakProcedure,
             topic,
@@ -3000,6 +2977,40 @@ mod tests {
             retired_at: None,
             retirement_reason: String::new(),
         }
+    }
+
+    #[test]
+    fn runtime_skill_recall_is_read_only_with_nonempty_positive_control() {
+        let storage = StubSkillStorage::default();
+        upsert_runtime_skill(
+            &storage,
+            &RuntimeSkillWrite {
+                name: String::new(),
+                topic: "release_patch_flow".to_string(),
+                title: "Release patch flow".to_string(),
+                summary: "Apply the release patch safely.".to_string(),
+                content: "1. inspect diff\n2. patch\n3. verify".to_string(),
+                citations: Vec::new(),
+                source_chat_id: Some("chat-1".to_string()),
+                observed_at: 100,
+            },
+        )
+        .unwrap();
+        let before = storage.files.lock().unwrap().clone();
+        assert!(!before.is_empty());
+        let block = build_runtime_skill_recall_block(
+            &storage,
+            "release patch flow",
+            Some("chat-1"),
+            200,
+            4096,
+        )
+        .expect("a real stored procedure must be delivered");
+        assert!(block.contains("Release patch flow"));
+        assert!(
+            *storage.files.lock().unwrap() == before,
+            "recall must not mutate usage counters, lifecycle, or procedural material"
+        );
     }
 
     #[test]
@@ -3247,7 +3258,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_skill_record_persists_runtime_learned_origin_for_manual_edits() {
+    fn runtime_skill_record_persists_runtime_learned_origin_for_task_learning() {
         let storage = StubSkillStorage::default();
         let outcome = write_governed_runtime_skills(
             &storage,
@@ -3261,7 +3272,7 @@ mod tests {
                 source_chat_id: Some("chat-1".to_string()),
                 observed_at: 1_800_000_000,
             }],
-            RuntimeSkillWriteSource::Manual,
+            RuntimeSkillWriteSource::TaskLearning,
         )
         .expect("write");
 
@@ -3309,7 +3320,7 @@ mod tests {
                 source_chat_id: Some("chat-1".to_string()),
                 observed_at: 100,
             }],
-            RuntimeSkillWriteSource::Manual,
+            RuntimeSkillWriteSource::Extraction,
         )
         .unwrap();
         assert_eq!(raw.accepted, 0);
@@ -3348,7 +3359,7 @@ mod tests {
     }
 
     #[test]
-    fn build_runtime_skill_block_touches_usage() {
+    fn build_runtime_skill_block_does_not_count_selection_as_usage() {
         let storage = StubSkillStorage::default();
         upsert_runtime_skill(
             &storage,
@@ -3378,8 +3389,8 @@ mod tests {
             &get_skill_content(&storage, "runtime_skill__archive_debug").unwrap(),
         )
         .unwrap();
-        assert_eq!(record.use_count, 1);
-        assert_eq!(record.last_used_at, Some(1000));
+        assert_eq!(record.use_count, 0);
+        assert_eq!(record.last_used_at, None);
     }
 
     #[test]

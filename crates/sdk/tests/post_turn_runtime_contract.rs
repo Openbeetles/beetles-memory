@@ -7,7 +7,7 @@ use bm_sdk::{
     CanonicalTurnDelta, ConversationScope, MemoryProjectionRequest, MemoryTranscriptExportRequest,
     MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest,
     MemoryTurnProtocol, MemoryTurnSource, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
-    TranscriptInputMessage, TranscriptReplayView,
+    ToolObservationDigest, TranscriptInputMessage, TranscriptReplayView,
 };
 
 use support::{
@@ -50,11 +50,7 @@ fn finalize_request(user: &str, assistant: Option<&str>) -> MemoryTurnFinalizeRe
             external_content_used: false,
             candidate_ids: Vec::new(),
         },
-        tool_calls: 0,
-        runtime_skill_selected_ids: Vec::new(),
-        task_learning_selected_ids: Vec::new(),
-        reuse_outcome_note: String::new(),
-        tool_usage_feedback: None,
+        learning: bm_sdk::PostTurnLearningInputV1::empty(),
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     }
@@ -67,7 +63,15 @@ fn finalize_request_with_tools(
     external_content_used: bool,
 ) -> MemoryTurnFinalizeRequest {
     let mut request = finalize_request(user, assistant);
-    request.tool_calls = tool_calls;
+    request.learning.tool_call_count = tool_calls;
+    request.turn.tool_observations = (0..tool_calls)
+        .map(|index| ToolObservationDigest {
+            observation_id: format!("synthetic-tool-observation-{index}"),
+            tool_name: "synthetic.tool".to_string(),
+            summary: "Synthetic tool execution completed.".to_string(),
+            external_content: external_content_used,
+        })
+        .collect();
     request.turn.external_content_used = external_content_used;
     request
 }
@@ -411,6 +415,7 @@ fn finalize_turn_applies_llm_governed_long_term_memory_for_cross_chat_projection
     );
     let projection = runtime_b
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "我叫什么？".to_string(),
@@ -484,6 +489,7 @@ fn finalize_turn_rejects_assistant_self_claim_as_long_term_identity_memory() {
     );
     let projection = runtime_b
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "你是谁？".to_string(),
@@ -549,6 +555,7 @@ fn finalize_turn_applies_generic_preference_memory_for_cross_chat_projection() {
     );
     let projection = runtime_b
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "回答风格偏好是什么？".to_string(),
@@ -612,6 +619,7 @@ fn finalize_turn_does_not_extract_external_content_into_long_term_memory() {
     );
     let projection = runtime_b
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "external_claim".to_string(),
@@ -672,6 +680,7 @@ fn finalize_turn_uses_canonical_delta_external_content_boundary() {
     );
     let projection = runtime_b
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "external_delta_claim".to_string(),

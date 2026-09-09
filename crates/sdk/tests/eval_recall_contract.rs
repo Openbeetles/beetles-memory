@@ -18,9 +18,8 @@ use bm_sdk::{
     MemoryEvidenceRefVisibility, MemoryGraphEdge, MemoryGraphEdgeKind, MemoryGraphNode,
     MemoryGraphNodeKind, MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallRequest,
     MemorySubjectVisibilityPolicy, MemoryWriteRequest, NonproductionRuntimeBudgetLimits,
-    PressureLevel, RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource,
-    TemporalMemoryGraphNodeOwnerRef, TemporalMemoryGraphWriteRequest, TemporalValidity,
-    MEMORY_GRAPH_SCHEMA_VERSION,
+    PressureLevel, RuntimeLifecycleModeInput, RuntimeSkillWrite, TemporalMemoryGraphNodeOwnerRef,
+    TemporalMemoryGraphWriteRequest, TemporalValidity, MEMORY_GRAPH_SCHEMA_VERSION,
 };
 
 use support::{
@@ -116,8 +115,6 @@ fn evidence_with_family(source: &str, family: &str) -> CanonicalEvidenceRef {
 fn seed_governed_long_term(runtime: &bm_sdk::MemoryRuntime, drafts: Vec<LongTermMemoryDraft>) {
     let report = runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: bm_sdk::ParsedLongTermMemoryExtraction {
                 upserts: drafts,
                 deletes: Vec::new(),
@@ -277,6 +274,7 @@ fn production_delivery_rejects_private_owner_records_before_capsule_render() {
         }));
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "public delivery anchor".to_string(),
@@ -942,6 +940,7 @@ fn production_typed_temporal_facet_preempts_text_facets_and_hits_recall_projecti
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             user_query: "plain text decoy".to_string(),
             system_max_len: 4096,
@@ -1057,6 +1056,7 @@ fn invalid_or_unresolved_typed_entity_and_temporal_facets_reject_all_production_
         assert!(recall_error.to_string().contains(reason));
 
         let projection_error = match runtime.project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             user_query: "typed rejection".to_string(),
             system_max_len: 1024,
@@ -1422,6 +1422,7 @@ fn projection_consumes_production_evidence_capsules_without_render_budget_growth
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "release capsule evidence".to_string(),
@@ -1463,6 +1464,7 @@ fn projection_consumes_production_evidence_capsules_without_render_budget_growth
 
     let constrained = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "release capsule evidence".to_string(),
@@ -1506,6 +1508,7 @@ fn projection_keeps_unicode_capsules_consistent_with_the_character_budget() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "unicode delivery evidence".to_string(),
@@ -1558,6 +1561,7 @@ fn projection_digest_proves_duplicate_content_by_candidate_source_id() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "duplicate receipt".to_string(),
@@ -1583,8 +1587,8 @@ fn p8_persistence_does_not_deliver_runtime_skill_before_p8_3() {
     let runtime = test_runtime(platform, support::host_test_profile());
 
     runtime
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
+        .seed_runtime_skills_for_replay(
+            vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
                 name: "release_guard".to_string(),
                 topic: "release".to_string(),
                 title: "Release artifact guard".to_string(),
@@ -1594,9 +1598,8 @@ fn p8_persistence_does_not_deliver_runtime_skill_before_p8_3() {
                 source_chat_id: Some("chat-1".to_string()),
                 observed_at: 1_800_000_000,
             })],
-            owning_scope: support::runtime_skill_subject_scope(),
-            source: RuntimeSkillWriteSource::Manual,
-        })
+            support::runtime_skill_subject_scope(),
+        )
         .expect("seed procedural memory");
 
     let baseline = runtime
@@ -2884,8 +2887,6 @@ fn facet_recall_expands_graph_anchor_pool_without_render_growth() {
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: bm_sdk::ParsedLongTermMemoryExtraction {
                 upserts: vec![
                     long_term_draft(
@@ -3025,8 +3026,6 @@ fn facet_recall_respects_memory_space_shared_owner_and_profile_budget() {
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: bm_sdk::ParsedLongTermMemoryExtraction {
                 upserts: vec![
                     long_term_draft(
@@ -3144,8 +3143,6 @@ fn facet_rank_fusion_preserves_pool_provenance() {
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: bm_sdk::ParsedLongTermMemoryExtraction {
                 upserts: vec![
                     long_term_draft(
@@ -3256,8 +3253,6 @@ fn facet_coverage_selection_prioritizes_distinct_canonical_evidence_groups() {
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: bm_sdk::ParsedLongTermMemoryExtraction {
                 upserts: vec![
                     long_term_draft(
@@ -3496,6 +3491,7 @@ fn production_delivery_enforces_profile_capsule_character_ceiling() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "capsule budget governed evidence".to_string(),
@@ -3841,8 +3837,6 @@ fn facet_recall_exposes_memory_space_shared_fact_without_privacy_failure() {
 
     alpha_runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: bm_sdk::ParsedLongTermMemoryExtraction {
                 upserts: vec![long_term_draft(
                     "facet/hidden/alpha-only",
@@ -3928,8 +3922,6 @@ fn delegated_actor_attribution_preserves_memory_space_shared_fact_visibility() {
     );
     let write = delegated_runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: bm_sdk::ParsedLongTermMemoryExtraction {
                 upserts: vec![long_term_draft(
                     "delegated owner evidence",
@@ -4023,6 +4015,7 @@ fn subject_local_capsule_never_enters_cross_subject_shared_fact_surface() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "subject local surface evidence".to_string(),
@@ -4072,8 +4065,6 @@ fn facet_graph_propagation_uses_indexed_graph_anchor_without_full_scan() {
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: bm_sdk::ParsedLongTermMemoryExtraction {
                 upserts: vec![anchor_draft, alpha_draft, beta_draft],
                 deletes: Vec::new(),

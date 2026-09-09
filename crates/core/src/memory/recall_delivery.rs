@@ -232,6 +232,24 @@ fn selection_decision(
     }
 }
 
+/// Require a shared word or CJK bigram before admitting lexical candidates.
+/// Character trigrams remain ranking signals only; a single CJK-character
+/// query may use its exact character as an anchor.
+pub fn has_recall_delivery_lexical_anchor(query: &str, text: &str) -> bool {
+    let query_features = delivery_lexical_features(query);
+    let document_features = delivery_lexical_features(text)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let mut query_chars = query.trim().chars();
+    let single_cjk_query = query_chars.next().is_some_and(is_cjk) && query_chars.next().is_none();
+    query_features.iter().any(|feature| {
+        (feature.starts_with("w:")
+            || feature.starts_with("b:")
+            || (single_cjk_query && feature.starts_with("c:")))
+            && document_features.contains(feature)
+    })
+}
+
 pub fn score_recall_delivery_texts(
     query: &str,
     documents: &[RecallDeliveryText<'_>],
@@ -484,4 +502,44 @@ fn select_delivery_candidate(
             .iter()
             .map(|binding| binding.effective_evidence_family_group().to_string()),
     );
+}
+
+#[cfg(test)]
+mod lexical_anchor_tests {
+    use super::*;
+
+    #[test]
+    fn suffix_overlap_is_ranking_only_not_an_eligibility_anchor() {
+        let query = "invoice extraction";
+        let unrelated = "database snapshot rotation completed";
+        let scores = score_recall_delivery_texts(
+            query,
+            &[RecallDeliveryText {
+                candidate_id: "database",
+                text: unrelated,
+            }],
+        );
+        assert!(
+            scores[0].score > 0,
+            "the existing fuzzy scorer must remain unchanged"
+        );
+        assert!(!has_recall_delivery_lexical_anchor(query, unrelated));
+        assert!(has_recall_delivery_lexical_anchor(
+            query,
+            "invoice extraction completed"
+        ));
+    }
+
+    #[test]
+    fn cjk_words_need_bigrams_except_for_a_single_character_query() {
+        assert!(!has_recall_delivery_lexical_anchor("发票", "开发工具"));
+        assert!(has_recall_delivery_lexical_anchor("发票", "读取发票"));
+        assert!(has_recall_delivery_lexical_anchor("票", "读取发票"));
+        assert!(!has_recall_delivery_lexical_anchor("发 票", "开发工具"));
+        assert!(!has_recall_delivery_lexical_anchor("the and", "the and"));
+        assert!(!has_recall_delivery_lexical_anchor(
+            "",
+            "invoice extraction"
+        ));
+    }
 }

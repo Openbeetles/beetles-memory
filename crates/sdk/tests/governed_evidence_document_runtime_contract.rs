@@ -1192,8 +1192,6 @@ fn same_owner_id_does_not_collide_across_long_term_and_evidence_document_planes(
     );
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![LongTermMemoryDraft {
                     kind: LongTermMemoryKind::Project,
@@ -1328,8 +1326,6 @@ fn recall_snapshot_keeps_long_term_and_evidence_typed_owner_bindings_consistent(
     );
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![LongTermMemoryDraft {
                     kind: LongTermMemoryKind::Project,
@@ -1447,8 +1443,6 @@ fn concurrent_mixed_owner_updates_never_produce_a_torn_recall_snapshot() {
         .expect("seed evidence owner");
     reader
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![LongTermMemoryDraft {
                     kind: LongTermMemoryKind::Project,
@@ -1492,8 +1486,6 @@ fn concurrent_mixed_owner_updates_never_produce_a_torn_recall_snapshot() {
         for index in 0..16_u64 {
             runtime
                 .write(MemoryWriteRequest::LongTermExtraction {
-                    governed_skill_writes: Vec::new(),
-                    runtime_skill_owning_scope: None,
                     extraction: ParsedLongTermMemoryExtraction {
                         upserts: vec![LongTermMemoryDraft {
                             kind: LongTermMemoryKind::Project,
@@ -1582,6 +1574,7 @@ fn projection_exposes_only_safe_delivery_counts_for_typed_evidence_owner() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             user_query: "orchid tungsten typed evidence owner".to_string(),
             system_max_len: 4096,

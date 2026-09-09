@@ -17,6 +17,10 @@ pub struct MemoryHarnessReport {
 
 pub fn build_sdk_memory_harness_fixture(profile: ProfileId) -> bm_core::Result<ReplayFixture> {
     let platform = MemoryStoreHandle::open_in_memory(StoreBackendConfig::in_memory(profile)?)?;
+    let config = ReplayRunnerConfig::for_backend(platform.config().clone())?;
+    // A replay fixture captures one prepared Store incarnation, including its
+    // randomly generated protected authority, before any backend executes it.
+    crate::runner::build_replay_runtime(&platform, &config)?;
     let snapshot = platform.export_replay_snapshot()?;
     Ok(ReplayFixture {
         fixture_id: "sdk-memory-harness".to_string(),

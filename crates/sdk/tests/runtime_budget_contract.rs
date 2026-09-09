@@ -112,6 +112,7 @@ fn projection_render_limit_does_not_cut_source_recall() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "release artifact safety".to_string(),
@@ -479,6 +480,7 @@ fn projection_exposes_runtime_awareness_without_archive_backend_trace() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "release artifact safety".to_string(),

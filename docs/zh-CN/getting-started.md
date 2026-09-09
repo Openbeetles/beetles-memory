@@ -49,31 +49,15 @@ fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
 
 `add_agent_skill_dir` 是可选项。它把标准 Agent Skill 目录只读挂载给召回和投影使用，Beetle Memory 只读取 `SKILL.md` 摘要，不添加、不编辑、不导入、不删除、不执行这些 skill。
 
-## 写入、召回、投影
+## 召回与投影
 
 ```rust
 use bm_sdk::{
     MemoryProjectionRequest, MemoryRecallRequest, MemoryRecallTemporalOperation,
-    MemoryWriteRequest, PressureLevel, RuntimeLifecycleModeInput, RuntimeSkillWrite,
-    RuntimeSkillWriteSource,
+    PressureLevel, ProceduralProjectionBindingV1, RuntimeLifecycleModeInput,
 };
 
 let runtime = build_runtime()?;
-
-let write = runtime.write(MemoryWriteRequest::Procedural {
-    writes: vec![RuntimeSkillWrite {
-        name: "release_guard".to_string(),
-        topic: "release".to_string(),
-        title: "Release guard".to_string(),
-        summary: "Verify release artifacts before publishing.".to_string(),
-        content: "Run examples, platform gates, and publish dry-run.".to_string(),
-        citations: vec!["getting-started".to_string()],
-        source_chat_id: Some("chat-1".to_string()),
-        observed_at: 1_800_000_000,
-    }],
-    source: RuntimeSkillWriteSource::Manual,
-})?;
-assert!(write.accepted);
 
 let recall = runtime.recall(MemoryRecallRequest {
     temporal_operation: MemoryRecallTemporalOperation::Current,
@@ -82,12 +66,10 @@ let recall = runtime.recall(MemoryRecallRequest {
     structured_query_facets: Vec::new(),
     tool_registry_refs: Vec::new(),
 })?;
-assert!(recall
-    .procedural_delivery_reports
-    .iter()
-    .any(|delivery| delivery.selected));
+assert_eq!(recall.query, "release artifacts");
 
 let projection = runtime.project(MemoryProjectionRequest {
+    binding: ProceduralProjectionBindingV1::Preview,
     temporal_operation: MemoryRecallTemporalOperation::Current,
     user_query: "How should this host release?".to_string(),
     system_max_len: 4096,
@@ -97,8 +79,12 @@ let projection = runtime.project(MemoryProjectionRequest {
     structured_query_facets: Vec::new(),
     tool_registry_refs: Vec::new(),
 })?;
-assert!(projection.system_memory_block.len() <= 4096);
+assert!(projection.provider_payload().system_memory_block().len() <= 4096);
 ```
+
+宿主提交 typed long-term candidate 或 canonical turn。Runtime Skill 与 Agent Tool
+经验只能由 Beetle Memory 的受治理 post-turn learning worker 生成；公共 API 不再提供
+手工 procedural write 旁路。
 
 ## 运行示例
 

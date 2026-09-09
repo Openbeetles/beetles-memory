@@ -9,7 +9,13 @@ use bm_entry::{
 use bm_mcp::{
     handle_mcp_streamable_http_in_process_request, McpResourceRead, McpToolCall, McpToolServer,
 };
-use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, StoreBackendConfig};
+use bm_sdk::{
+    LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateSemanticDecision,
+    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryCapabilityPolicy,
+    MemoryEvidenceAuthority, MemoryPrivacyClass, MemoryPrivacyPolicy, MemorySemanticJudgmentSource,
+    MemorySubjectVisibilityPolicy, MemoryWriteCandidate, MemoryWriteRequest,
+    RuntimeSkillListRequest, RuntimeSkillOwningScope, StoreBackendConfig,
+};
 use serde_json::Value;
 
 fn runtime() -> EntryRuntime {
@@ -21,6 +27,7 @@ fn runtime() -> EntryRuntime {
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "mcp".to_string(),
             chat_id: "chat-1".to_string(),
         },
@@ -42,25 +49,158 @@ fn mcp_server_feature_enables_entry_governance_model_client() {
 }
 
 fn write_arguments(name: &str, summary: &str) -> String {
-    serde_json::json!({
-        "name": name,
-        "topic": "mcp-idempotency",
-        "title": format!("MCP write {name}"),
-        "summary": summary,
-        "content": "1. Decode the MCP write payload.\n2. Dispatch it through the governed EntryRuntime path and verify the receipt.",
-        "owning_scope": {
-            "kind": "subject",
-            "mounted_subject_id": "agent:mcp-agent",
-        },
-        "creation_ref": {
-            "kind": "replay_promotion",
-            "candidate_ref": format!("test:mcp:{name}"),
-            "verification_receipt_digest":
-                "sha256:3333333333333333333333333333333333333333333333333333333333333333",
-        },
-        "privacy_class": "shared_with_subject",
+    factual_write_arguments(name, summary)
+}
+
+fn factual_write_arguments(candidate_id: &str, body: &str) -> String {
+    let target = MemoryCandidateTarget::LongTermMemory {
+        kind: LongTermMemoryKind::Fact,
+        topic: "mcp factual transport".to_string(),
+    };
+    serde_json::to_string(&MemoryWriteRequest::Candidates {
+        candidates: vec![MemoryWriteCandidate {
+            candidate_id: candidate_id.to_string(),
+            authority: MemoryEvidenceAuthority::ProgramMemoryCanonical,
+            target: target.clone(),
+            long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
+            privacy: MemoryPrivacyClass::SharedWithSubject,
+            content: MemoryCandidateContent::Text {
+                topic: "mcp factual transport".to_string(),
+                body: body.to_string(),
+                keywords: vec!["mcp".to_string(), "factual".to_string()],
+            },
+            evidence_refs: vec!["synthetic:mcp-factual-transport".to_string()],
+            canonical_entities: Vec::new(),
+            semantic_judgment: Some(MemoryCandidateSemanticJudgment {
+                source: MemorySemanticJudgmentSource::RuntimeGate,
+                decision: MemoryCandidateSemanticDecision::Accept,
+                governed_target: Some(target),
+                reason: "typed factual MCP transport contract".to_string(),
+            }),
+        }],
     })
-    .to_string()
+    .expect("serialize factual MCP write")
+}
+
+fn procedural_write_arguments(candidate_id: &str) -> String {
+    let target = MemoryCandidateTarget::ProceduralMemory {
+        name: "runtime_skill__mcp_forbidden".to_string(),
+        topic: "forbidden mcp procedure".to_string(),
+    };
+    serde_json::to_string(&MemoryWriteRequest::Candidates {
+        candidates: vec![MemoryWriteCandidate {
+            candidate_id: candidate_id.to_string(),
+            authority: MemoryEvidenceAuthority::ProgramMemoryCanonical,
+            target: target.clone(),
+            long_term_subject_visibility: None,
+            privacy: MemoryPrivacyClass::SharedWithSubject,
+            content: MemoryCandidateContent::RuntimeSkill {
+                name: "runtime_skill__mcp_forbidden".to_string(),
+                topic: "forbidden mcp procedure".to_string(),
+                title: "Forbidden MCP procedure".to_string(),
+                summary: "MCP callers cannot establish procedural learning authority.".to_string(),
+                content: "1. Submit a public write.\n2. Verify it remains rejected.".to_string(),
+                citations: vec!["synthetic:mcp-procedural-negative".to_string()],
+            },
+            evidence_refs: vec!["synthetic:mcp-procedural-negative".to_string()],
+            canonical_entities: Vec::new(),
+            semantic_judgment: Some(MemoryCandidateSemanticJudgment {
+                source: MemorySemanticJudgmentSource::RuntimeGate,
+                decision: MemoryCandidateSemanticDecision::Accept,
+                governed_target: Some(target),
+                reason: "negative MCP authority contract".to_string(),
+            }),
+        }],
+    })
+    .expect("serialize procedural MCP write")
+}
+
+#[test]
+fn mcp_write_accepts_typed_factual_candidates_and_rejects_procedural_creation() {
+    let runtime = runtime();
+    let server = McpToolServer::new("mcp-typed-write", "principal-typed-write");
+    let factual = server
+        .call(
+            &runtime,
+            McpToolCall::json(
+                "memory_write_candidate",
+                factual_write_arguments(
+                    "mcp-factual-transport-candidate",
+                    "The MCP adapter preserves factual write authority.",
+                ),
+            )
+            .with_idempotency_key("mcp-factual-transport-operation"),
+        )
+        .expect("factual MCP write");
+    assert_eq!(factual.status, "accepted", "{}", factual.content);
+    let factual_content: Value =
+        serde_json::from_str(&factual.content).expect("factual MCP response json");
+    assert_eq!(factual_content["operation"], "write.candidates");
+    assert_eq!(factual_content["changed"], 1);
+
+    #[cfg(any(
+        feature = "profile-desktop-macos-dev-full",
+        feature = "profile-desktop-windows-dev-full",
+        feature = "profile-server-linux-dev-full"
+    ))]
+    let before = runtime
+        .runtime()
+        .replay_harness()
+        .export_store_snapshot()
+        .unwrap();
+    let rejected = server
+        .call(
+            &runtime,
+            McpToolCall::json(
+                "memory_write_candidate",
+                procedural_write_arguments("mcp-procedural-transport-candidate"),
+            )
+            .with_idempotency_key("mcp-procedural-transport-operation"),
+        )
+        .expect_err("typed SDK authority rejection");
+    let bm_sdk::Error::Other { source, .. } = rejected else {
+        panic!("typed SDK authority rejection");
+    };
+    assert_eq!(
+        source
+            .downcast_ref::<bm_sdk::ProceduralLearningSdkError>()
+            .unwrap()
+            .key,
+        bm_sdk::ProceduralLearningErrorKeyV1::TransitionRequiresGovernance
+    );
+    #[cfg(any(
+        feature = "profile-desktop-macos-dev-full",
+        feature = "profile-desktop-windows-dev-full",
+        feature = "profile-server-linux-dev-full"
+    ))]
+    assert!(
+        runtime
+            .runtime()
+            .replay_harness()
+            .export_store_snapshot()
+            .unwrap()
+            == before,
+        "MCP rejected intent must not mutate any Store document or event"
+    );
+
+    let skills = runtime
+        .runtime()
+        .list_runtime_skills(RuntimeSkillListRequest {
+            owning_scope: RuntimeSkillOwningScope::Subject {
+                mounted_subject_id: runtime
+                    .runtime()
+                    .scoped_runtime()
+                    .mounted_subject_id
+                    .clone(),
+            },
+            query: None,
+            include_disabled: true,
+            include_retired: true,
+            limit: 16,
+        })
+        .expect("runtime skill list");
+    assert_eq!(skills.total, 0);
+    assert!(skills.skills.is_empty());
 }
 
 fn finalize_arguments() -> String {
@@ -94,7 +234,8 @@ fn finalize_arguments() -> String {
                 "speaker_kind": "human"
             }],
             "external_content_used": false
-        }
+        },
+        "learning": bm_sdk::PostTurnLearningInputV1::empty()
     })
     .to_string()
 }
@@ -275,20 +416,23 @@ fn mcp_tool_call_dispatches_through_entry_runtime_without_private_raw() {
 fn mcp_tool_server_decodes_declared_memory_tools() {
     let runtime = runtime();
     let server = McpToolServer::new("mcp-server-ops", "mcp-client-ops");
-    let calls = [
-        ("memory_capabilities", r#"{}"#),
+    let calls = vec![
+        ("memory_capabilities", r#"{}"#.to_string()),
         (
             "memory_project",
-            r#"{"temporal_operation":{"kind":"current"},"user_query":"release","system_max_len":1024}"#,
+            r#"{"binding":{"kind":"preview"},"temporal_operation":{"kind":"current"},"user_query":"release","system_max_len":1024}"#.to_string(),
         ),
         (
             "memory_inspect",
-            r#"{"query":"release","system_max_len":1024}"#,
+            r#"{"query":"release","system_max_len":1024}"#.to_string(),
         ),
-        ("memory_long_term_list", r#"{"query":{},"limit":2}"#),
+        (
+            "memory_long_term_list",
+            r#"{"query":{},"limit":2}"#.to_string(),
+        ),
         (
             "memory_write_candidate",
-            r#"{"name":"runtime_skill__mcp_write","topic":"mcp","title":"MCP write","summary":"MCP write summary","content":"1. Decode MCP tool payload.\n2. Dispatch through EntryRuntime.","owning_scope":{"kind":"subject","mounted_subject_id":"agent:mcp-agent"},"creation_ref":{"kind":"replay_promotion","candidate_ref":"test:mcp:runtime_skill__mcp_write","verification_receipt_digest":"sha256:4444444444444444444444444444444444444444444444444444444444444444"},"privacy_class":"shared_with_subject"}"#,
+            factual_write_arguments("mcp-declared-tools-write", "MCP declared factual write"),
         ),
     ];
 
@@ -351,7 +495,7 @@ fn mcp_project_tool_exposes_only_the_adapter_projection_surface() {
             &runtime,
             McpToolCall::json(
                 "memory_project",
-                r#"{"temporal_operation":{"kind":"current"},"user_query":"release","system_max_len":1024}"#,
+                r#"{"binding":{"kind":"preview"},"temporal_operation":{"kind":"current"},"user_query":"release","system_max_len":1024}"#,
             ),
         )
         .expect("project tool call");

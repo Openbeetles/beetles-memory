@@ -5,9 +5,10 @@ mod support;
 use bm_core::memory::commit_canonical_turn_delta;
 use bm_core::platform::Platform as _;
 use bm_sdk::{
-    ActorAttribution, CanonicalTurnDelta, ConversationKey, ConversationScope, DerivedMemoryPlane,
-    DerivedMemoryRef, HostOpaqueRef, HostRefRelation, HostRefVisibility, LongTermMemoryDraft,
-    LongTermMemoryKind, LongTermMemoryProvenance, MemoryArchiveScope, MemoryCandidateContent,
+    default_agent_subject_id, primary_human_subject_id, ActorAttribution, CanonicalTurnDelta,
+    ConversationKey, ConversationScope, DerivedMemoryPlane, DerivedMemoryRef, HostOpaqueRef,
+    HostRefRelation, HostRefVisibility, LongTermMemoryDraft, LongTermMemoryKind,
+    LongTermMemoryProvenance, MemoryArchiveScope, MemoryCandidateContent,
     MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
     MemoryConversationListRequest, MemoryEvidenceAuthority, MemoryInspectionRequest,
     MemoryMaintenanceRequest, MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryProjectionRequest,
@@ -19,9 +20,8 @@ use bm_sdk::{
     MemoryTranscriptSearchScope, MemoryTranscriptTimelineRequest, MemoryTurnDeliveryStatus,
     MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteCandidate,
     MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel, ProfileId,
-    RuntimeLifecycleModeInput, RuntimeSkillOwningScope, RuntimeSkillReuseOutcome,
-    TranscriptAttrEnvelope, TranscriptAttrGovernance, TranscriptAttrLink,
-    TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
+    RuntimeLifecycleModeInput, TranscriptAttrEnvelope, TranscriptAttrGovernance,
+    TranscriptAttrLink, TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
     TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind,
     TranscriptCatalogLifecycle, TranscriptEvidenceRef, TranscriptInputMessage,
     TranscriptLifecycleTransition, TranscriptQueryCursor, TranscriptRedactionReason,
@@ -31,7 +31,7 @@ use bm_sdk::{
 use serde_json::json;
 
 use support::{
-    empty_store_platform, test_runtime_with_scope_and_subject,
+    empty_store_platform, test_runtime_with_delegated_actor, test_runtime_with_scope_and_subject,
     test_runtime_with_scope_subject_and_privacy, StaticHttpClient, StaticLlmClient,
 };
 
@@ -68,11 +68,7 @@ fn finalize_request(user: &str, assistant: &str) -> MemoryTurnFinalizeRequest {
             external_content_used: false,
             candidate_ids: Vec::new(),
         },
-        tool_calls: 0,
-        runtime_skill_selected_ids: Vec::new(),
-        task_learning_selected_ids: Vec::new(),
-        reuse_outcome_note: String::new(),
-        tool_usage_feedback: None,
+        learning: bm_sdk::PostTurnLearningInputV1::empty(),
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     }
@@ -441,20 +437,23 @@ fn runtime_transcript_attr_dry_run_reports_without_persisting() {
 fn finalize_turn_preserves_host_provided_actor_attribution() {
     let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
-    let runtime = test_runtime_with_scope_and_subject(
+    let human_subject_id = primary_human_subject_id("owner-default");
+    let mounted_subject_id = default_agent_subject_id("agent-alpha");
+    let runtime = test_runtime_with_delegated_actor(
         platform.clone(),
         profile,
-        "llm.gateway",
+        "agent-alpha",
+        &human_subject_id,
         "chat-a",
-        "subject-default",
     );
     let mut request = finalize_request("由宿主事件触发", "已记录。");
+    request.turn.subject = mounted_subject_id.clone();
     request.turn.actor = Some(ActorAttribution {
         speaker_id: "runtime-dispatcher".to_string(),
         speaker_kind: "runtime".to_string(),
-        subject_id: Some("subject-default".to_string()),
-        actor_subject_id: Some("subject-human".to_string()),
-        mounted_subject_id: Some("subject-agent".to_string()),
+        subject_id: Some(mounted_subject_id.clone()),
+        actor_subject_id: Some(human_subject_id.clone()),
+        mounted_subject_id: Some(mounted_subject_id.clone()),
         agent_id: Some("agent-alpha".to_string()),
         triggered_by: Some("host:event:42".to_string()),
     });
@@ -477,11 +476,11 @@ fn finalize_turn_preserves_host_provided_actor_attribution() {
     let turn = &replay.slice.turns[0];
     assert_eq!(
         turn.actor.actor_subject_id.as_deref(),
-        Some("subject-human")
+        Some(human_subject_id.as_str())
     );
     assert_eq!(
         turn.actor.mounted_subject_id.as_deref(),
-        Some("subject-agent")
+        Some(mounted_subject_id.as_str())
     );
     assert_eq!(turn.actor.agent_id.as_deref(), Some("agent-alpha"));
     assert_eq!(
@@ -519,6 +518,7 @@ fn projection_uses_transcript_substrate_after_session_shadow_is_cleared() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "what evidence exists?".to_string(),
@@ -585,6 +585,7 @@ fn projection_does_not_fallback_to_session_shadow_after_transcript_mask() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "what evidence exists?".to_string(),
@@ -644,6 +645,7 @@ fn transcript_backed_projection_honors_recent_message_limit() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "limit evidence".to_string(),
@@ -709,6 +711,7 @@ fn fresh_runtime_does_not_fallback_to_session_shadow_after_transcript_mask() {
     );
     let projection = fresh_runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "what evidence exists?".to_string(),
@@ -914,10 +917,6 @@ fn recall_inspect_and_maintenance_do_not_fallback_to_session_shadow_after_transc
                 reply_content: "new unmasked reply".to_string(),
                 tool_calls: 0,
                 external_content_used: false,
-                runtime_skill_selected_ids: Vec::new(),
-                task_learning_selected_ids: Vec::new(),
-                reuse_outcome: RuntimeSkillReuseOutcome::Neutral,
-                reuse_outcome_note: String::new(),
                 pressure: PressureLevel::Normal,
                 mode_input: RuntimeLifecycleModeInput::default(),
             },
@@ -1067,7 +1066,6 @@ fn candidate_write_records_transcript_derived_ref_for_lifecycle_impact() {
 
     let write = runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: None,
             candidates: vec![MemoryWriteCandidate {
                 candidate_id: "candidate-concise-style".to_string(),
                 authority: MemoryEvidenceAuthority::UserAsserted,
@@ -1117,7 +1115,7 @@ fn candidate_write_records_only_second_stage_accepted_derived_refs() {
     let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
-        platform,
+        platform.clone(),
         profile,
         "llm.gateway",
         "chat-a",
@@ -1153,11 +1151,20 @@ fn candidate_write_records_only_second_stage_accepted_derived_refs() {
         authority: Some(MemoryEvidenceAuthority::UserAsserted),
     };
 
+    let mut positive_turn = finalize_request("我喜欢简洁且准确的回复。", "我会保留这个明确偏好。");
+    positive_turn.turn.turn_id = "turn-positive-preference".into();
+    positive_turn.turn.source.request_id = Some("request-positive-preference".into());
+    runtime
+        .finalize_turn_with_inline_governance(None, None, positive_turn)
+        .unwrap();
+    let positive_evidence = TranscriptEvidenceRef {
+        turn_id: "turn-positive-preference".into(),
+        message_id: None,
+        ..evidence_ref.clone()
+    };
+
     let write = runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: Some(RuntimeSkillOwningScope::Subject {
-                mounted_subject_id: runtime.subject_id().to_string(),
-            }),
             candidates: vec![
                 MemoryWriteCandidate {
                     candidate_id: "candidate-structured-fact".to_string(),
@@ -1187,35 +1194,69 @@ fn candidate_write_records_only_second_stage_accepted_derived_refs() {
                     }),
                 },
                 MemoryWriteCandidate {
-                    candidate_id: "candidate-weak-skill".to_string(),
+                    candidate_id: "candidate-positive-preference".to_string(),
                     authority: MemoryEvidenceAuthority::UserAsserted,
-                    target: MemoryCandidateTarget::ProceduralMemory {
-                        name: "runtime_skill__weak_summary".to_string(),
-                        topic: "summary_style".to_string(),
+                    target: MemoryCandidateTarget::LongTermMemory {
+                        kind: LongTermMemoryKind::Preference,
+                        topic: "response_style".to_string(),
                     },
-                    long_term_subject_visibility: None,
+                    long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
                     privacy: MemoryPrivacyClass::SharedWithSubject,
                     content: MemoryCandidateContent::Text {
-                        topic: "summary_style".to_string(),
-                        body: "Use summaries.".to_string(),
+                        topic: "response_style".to_string(),
+                        body: "用户偏好简洁且准确的回复。".to_string(),
                         keywords: vec!["summary".to_string()],
                     },
-                    evidence_refs: vec![evidence_ref.display_citation()],
+                    evidence_refs: vec![positive_evidence.display_citation()],
                     canonical_entities: Vec::new(),
                     semantic_judgment: Some(MemoryCandidateSemanticJudgment {
                         source: MemorySemanticJudgmentSource::LlmGovernance,
                         decision: MemoryCandidateSemanticDecision::Accept,
-                        governed_target: Some(MemoryCandidateTarget::ProceduralMemory {
-                            name: "runtime_skill__weak_summary".to_string(),
-                            topic: "summary_style".to_string(),
+                        governed_target: Some(MemoryCandidateTarget::LongTermMemory {
+                            kind: LongTermMemoryKind::Preference,
+                            topic: "response_style".to_string(),
                         }),
-                        reason: "candidate_requires_second_stage_skill_governance".to_string(),
+                        reason: "explicit_user_preference".to_string(),
                     }),
                 },
             ],
         })
         .unwrap();
-    assert_eq!(write.changed, 0);
+    assert_eq!(write.changed, 1);
+    let accepted = &write
+        .semantic_governance
+        .as_ref()
+        .unwrap()
+        .accepted_candidate_ids;
+    assert!(accepted.contains(&"candidate-structured-fact".to_string()));
+    assert!(accepted.contains(&"candidate-positive-preference".to_string()));
+    let key =
+        ConversationKey::new(runtime.memory_space_id(), "llm.gateway", "conversation-a").unwrap();
+    let derived = platform
+        .replay_harness()
+        .conversation_transcript_store()
+        .list_derived_memory_refs(&key, runtime.subject_id(), None)
+        .unwrap();
+    let derived = derived
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.plane,
+                DerivedMemoryPlane::SharedFact | DerivedMemoryPlane::LongTerm
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !derived.is_empty(),
+        "real accepted factual derived reference"
+    );
+    assert!(
+        derived
+            .iter()
+            .all(|item| item.plane == DerivedMemoryPlane::LongTerm
+                && item.source.turn_id == "turn-positive-preference"),
+        "only second-stage accepted source is linked"
+    );
 
     let lifecycle = runtime
         .request_transcript_lifecycle(MemoryTranscriptLifecycleRequest {
@@ -1277,8 +1318,6 @@ fn long_term_extraction_records_transcript_derived_ref_for_lifecycle_impact() {
 
     let write = runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![LongTermMemoryDraft {
                     kind: LongTermMemoryKind::Preference,
@@ -1447,7 +1486,6 @@ fn soul_candidate_handoff_records_transcript_derived_ref_for_lifecycle_impact() 
 
     let write = runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: None,
             candidates: vec![MemoryWriteCandidate {
                 candidate_id: "candidate-soul-handoff".to_string(),
                 authority: MemoryEvidenceAuthority::UserAsserted,
@@ -2271,7 +2309,7 @@ fn manual_transcript_commit_backfills_when_session_shadow_already_has_turn() {
     );
     let request = finalize_request("旧 session 已有", "回填 transcript。");
     let turn = request.turn.clone();
-    let session_store = platform.replay_harness().session_store();
+    let session_store = runtime.replay_harness().session_store();
     let legacy_session = commit_canonical_turn_delta(session_store.as_ref(), &turn).unwrap();
     assert!(legacy_session.committed);
 
@@ -2329,7 +2367,7 @@ fn finalize_turn_reports_transcript_backfill_as_committed_when_session_shadow_al
     );
     let request = finalize_request("finalize 回填", "回填 transcript。");
     let turn = request.turn.clone();
-    let session_store = platform.replay_harness().session_store();
+    let session_store = runtime.replay_harness().session_store();
     let legacy_session = commit_canonical_turn_delta(session_store.as_ref(), &turn).unwrap();
     assert!(legacy_session.committed);
 
@@ -2366,6 +2404,72 @@ fn finalize_turn_reports_transcript_backfill_as_committed_when_session_shadow_al
         replay.slice.turns[0].input_messages[0].content.as_deref(),
         Some("finalize 回填")
     );
+}
+
+#[test]
+fn transcript_backfill_rejects_session_shadow_owned_by_another_subject_without_mutation() {
+    let profile = support::host_test_profile();
+    let platform = empty_store_platform(profile);
+    let owner_runtime = test_runtime_with_scope_and_subject(
+        platform.clone(),
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    let other_runtime = test_runtime_with_scope_and_subject(
+        platform.clone(),
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-other",
+    );
+    let owner_turn = finalize_request("subject owner session", "owner response").turn;
+    let session_store = owner_runtime.replay_harness().session_store();
+    let session_commit = commit_canonical_turn_delta(session_store.as_ref(), &owner_turn).unwrap();
+    assert!(session_commit.committed);
+
+    let mut other_turn = owner_turn.clone();
+    other_turn.subject = "subject-other".to_string();
+    let error = other_runtime
+        .commit_transcript(MemoryTranscriptCommitRequest {
+            turn: other_turn,
+            host_refs: Vec::new(),
+        })
+        .expect_err("another subject cannot backfill from the owner's session shadow");
+    assert_eq!(error.stage(), "canonical_turn_intake");
+
+    let rejected_snapshot = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("snapshot after rejected backfill");
+    assert_eq!(
+        rejected_snapshot
+            .json_docs
+            .iter()
+            .filter(|doc| doc.namespace == "conversation_transcript")
+            .count(),
+        0
+    );
+    assert_eq!(
+        owner_runtime
+            .replay_harness()
+            .session_store()
+            .message_count("chat-a")
+            .unwrap(),
+        2
+    );
+
+    let owner_backfill = owner_runtime
+        .commit_transcript(MemoryTranscriptCommitRequest {
+            turn: owner_turn,
+            host_refs: Vec::new(),
+        })
+        .expect("exact owner can backfill the same session shadow");
+    assert!(owner_backfill
+        .transcript_commit
+        .as_ref()
+        .is_some_and(|report| report.committed));
 }
 
 #[test]

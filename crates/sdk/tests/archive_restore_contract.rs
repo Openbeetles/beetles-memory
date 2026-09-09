@@ -83,7 +83,6 @@ fn write_project_candidate_with_privacy(
 ) {
     runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: None,
             candidates: vec![MemoryWriteCandidate {
                 candidate_id: candidate_id.to_string(),
                 authority: MemoryEvidenceAuthority::UserAsserted,

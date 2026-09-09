@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use bm_entry::EntryOperationCapability;
 use bm_sdk::{
     ConversationScope, MemoryProjectionRequest, MemoryTurnProtocol, MemoryTurnSource,
-    ProviderModelContextLimit, RuntimeLifecycleModeInput, TranscriptInputMessage,
+    ProceduralProjectionBindingV1, ProviderModelContextLimit, RuntimeLifecycleModeInput,
+    TranscriptInputMessage,
 };
 use serde_json::{Map, Value};
 
@@ -12,8 +13,8 @@ use crate::agent_tools::request_scoped_agent_tool_registry;
 use crate::budget_io::{bounded_json_request, read_bounded_json, BoundedStreamReader};
 use crate::budget_io::{validate_json, StreamBudgetTracker, StreamProtocol};
 use crate::maintenance::{
-    run_text_maintenance, BoundedText, GatewayInputTranscript, GatewayMaintenancePlan,
-    GatewayMaintenancePlanInput,
+    canonical_gateway_turn_id, ensure_gateway_request_id, run_text_maintenance, BoundedText,
+    GatewayInputTranscript, GatewayMaintenancePlan, GatewayMaintenancePlanInput,
 };
 use crate::ollama_passthrough::{
     classify_ollama_route, ollama_passthrough_audit_id, ollama_passthrough_prefers_stream,
@@ -557,6 +558,7 @@ fn handle_chat(
     if request.scope.model_alias.is_none() {
         request.scope.model_alias = Some(model_alias.to_string());
     }
+    ensure_gateway_request_id(&mut request.scope.request_id_hint)?;
 
     let scope = GatewayScopeResolver::new(config.scope.clone()).resolve(&request.scope)?;
     let mut audit = GatewayAuditReport::new(
@@ -573,6 +575,25 @@ fn handle_chat(
         || body_object.get("tools").is_some();
     let provider_limit = provider_model_context_limit(provider, model_alias);
     let runtime_budget = context.report();
+    let model = provider_model_name(provider, model_alias);
+    let runtime_scope = runtime.runtime().scope();
+    let conversation = ConversationScope {
+        channel: runtime_scope.channel.clone(),
+        chat_id: runtime_scope.chat_id.clone(),
+        conversation_id: runtime_scope.conversation_id.clone(),
+    };
+    let turn_source = MemoryTurnSource {
+        ingress: bm_sdk::IngressKind::User,
+        channel: scope.channel.clone(),
+        provider: Some(provider.kind.as_str().to_string()),
+        protocol: MemoryTurnProtocol::OllamaChat,
+        endpoint: Some("/api/chat".to_string()),
+        model_alias: Some(model_alias.to_string()),
+        model_resolved: Some(model.clone()),
+        request_id: request.scope.request_id_hint.clone(),
+        client_conversation_hint: request.scope.client_conversation_hint.clone(),
+    };
+    let turn_id = canonical_gateway_turn_id(&conversation, &turn_source)?;
     let tool_registry_refs = if let Some(registry) =
         request_scoped_agent_tool_registry("ollama-compatible", body_object.get("tools"))
     {
@@ -589,6 +610,9 @@ fn handle_chat(
     let projection = runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            binding: ProceduralProjectionBindingV1::Turn {
+                turn_id: turn_id.clone(),
+            },
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: extracted_user_text.clone(),
@@ -615,7 +639,6 @@ fn handle_chat(
         .get("stream")
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    let model = provider_model_name(provider, model_alias);
     let mut upstream_body = build_upstream_chat_body(
         &body,
         projection.provider_payload().system_memory_block(),
@@ -624,34 +647,14 @@ fn handle_chat(
     if force_ollama_think_false(&mut upstream_body) {
         audit.record_note("ollama_thinking_request_forced_false");
     }
-    let carry = projection.provider_payload().maintenance_carry();
     let maintenance_plan = GatewayMaintenancePlan::new(GatewayMaintenancePlanInput {
         runtime,
-        user_content: extracted_user_text.clone(),
         input_messages: input_transcript.messages.clone(),
-        conversation: ConversationScope {
-            channel: scope.channel.clone(),
-            chat_id: scope.chat_id.clone(),
-            conversation_id: request
-                .scope
-                .client_conversation_hint
-                .clone()
-                .or_else(|| request.scope.body_conversation_hint.clone()),
-        },
-        turn_source: MemoryTurnSource {
-            ingress: bm_sdk::IngressKind::User,
-            channel: scope.channel.clone(),
-            provider: Some(provider.kind.as_str().to_string()),
-            protocol: MemoryTurnProtocol::OllamaChat,
-            endpoint: Some("/api/chat".to_string()),
-            model_alias: Some(model_alias.to_string()),
-            model_resolved: Some(model.clone()),
-            request_id: request.scope.request_id_hint.clone(),
-            client_conversation_hint: request.scope.client_conversation_hint.clone(),
-        },
+        conversation,
+        turn_source,
+        turn_id,
         external_content_used,
-        runtime_skill_selected_ids: carry.runtime_skill_selected_ids().to_vec(),
-        task_learning_selected_ids: carry.task_learning_selected_ids().to_vec(),
+        selection_receipt: projection.report().selection_receipt().cloned(),
         pressure: config.projection.pressure,
         mode_input: RuntimeLifecycleModeInput::default(),
         budget: context.report().maintenance_budget,
@@ -697,6 +700,7 @@ fn handle_generate(
     if request.scope.model_alias.is_none() {
         request.scope.model_alias = Some(model_alias.to_string());
     }
+    ensure_gateway_request_id(&mut request.scope.request_id_hint)?;
 
     let scope = GatewayScopeResolver::new(config.scope.clone()).resolve(&request.scope)?;
     let mut audit = GatewayAuditReport::new(
@@ -721,6 +725,25 @@ fn handle_generate(
         .unwrap_or(false);
     let provider_limit = provider_model_context_limit(provider, model_alias);
     let runtime_budget = context.report();
+    let model = provider_model_name(provider, model_alias);
+    let runtime_scope = runtime.runtime().scope();
+    let conversation = ConversationScope {
+        channel: runtime_scope.channel.clone(),
+        chat_id: runtime_scope.chat_id.clone(),
+        conversation_id: runtime_scope.conversation_id.clone(),
+    };
+    let turn_source = MemoryTurnSource {
+        ingress: bm_sdk::IngressKind::User,
+        channel: scope.channel.clone(),
+        provider: Some(provider.kind.as_str().to_string()),
+        protocol: MemoryTurnProtocol::OllamaGenerate,
+        endpoint: Some("/api/generate".to_string()),
+        model_alias: Some(model_alias.to_string()),
+        model_resolved: Some(model.clone()),
+        request_id: request.scope.request_id_hint.clone(),
+        client_conversation_hint: request.scope.client_conversation_hint.clone(),
+    };
+    let turn_id = canonical_gateway_turn_id(&conversation, &turn_source)?;
     let tool_registry_refs = if let Some(registry) =
         request_scoped_agent_tool_registry("ollama-compatible", body_object.get("tools"))
     {
@@ -737,6 +760,9 @@ fn handle_generate(
     let projection = runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            binding: ProceduralProjectionBindingV1::Turn {
+                turn_id: turn_id.clone(),
+            },
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: extracted_user_text.clone(),
@@ -763,7 +789,6 @@ fn handle_generate(
         .get("stream")
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    let model = provider_model_name(provider, model_alias);
     let (mut upstream_body, used_prompt_prefix_fallback) = build_upstream_generate_body(
         &body,
         projection.provider_payload().system_memory_block(),
@@ -776,34 +801,14 @@ fn handle_generate(
     if used_prompt_prefix_fallback {
         audit.record_note("ollama_generate_prompt_prefix_fallback");
     }
-    let carry = projection.provider_payload().maintenance_carry();
     let maintenance_plan = GatewayMaintenancePlan::new(GatewayMaintenancePlanInput {
         runtime,
-        user_content: extracted_user_text.clone(),
         input_messages: input_transcript.messages,
-        conversation: ConversationScope {
-            channel: scope.channel.clone(),
-            chat_id: scope.chat_id.clone(),
-            conversation_id: request
-                .scope
-                .client_conversation_hint
-                .clone()
-                .or_else(|| request.scope.body_conversation_hint.clone()),
-        },
-        turn_source: MemoryTurnSource {
-            ingress: bm_sdk::IngressKind::User,
-            channel: scope.channel.clone(),
-            provider: Some(provider.kind.as_str().to_string()),
-            protocol: MemoryTurnProtocol::OllamaGenerate,
-            endpoint: Some("/api/generate".to_string()),
-            model_alias: Some(model_alias.to_string()),
-            model_resolved: Some(model.clone()),
-            request_id: request.scope.request_id_hint.clone(),
-            client_conversation_hint: request.scope.client_conversation_hint.clone(),
-        },
+        conversation,
+        turn_source,
+        turn_id,
         external_content_used,
-        runtime_skill_selected_ids: carry.runtime_skill_selected_ids().to_vec(),
-        task_learning_selected_ids: carry.task_learning_selected_ids().to_vec(),
+        selection_receipt: projection.report().selection_receipt().cloned(),
         pressure: config.projection.pressure,
         mode_input: RuntimeLifecycleModeInput::default(),
         budget: context.report().maintenance_budget,
@@ -1141,12 +1146,11 @@ impl OllamaDeferredMaintenance {
     }
 
     fn finish(self) -> crate::maintenance::GatewayMaintenanceRunOutcome {
-        let (reply_content, tool_calls, reuse_outcome_note, saw_done) =
-            self.accumulator.into_parts(self.endpoint);
+        let (reply_content, saw_done) = self.accumulator.into_parts(self.endpoint);
         if !saw_done {
             return crate::maintenance::GatewayMaintenanceRunOutcome::Skipped;
         }
-        run_text_maintenance(self.plan, reply_content, tool_calls, reuse_outcome_note)
+        run_text_maintenance(self.plan, reply_content)
     }
 }
 
@@ -1157,17 +1161,15 @@ fn run_ollama_json_maintenance(
 ) -> crate::maintenance::GatewayMaintenanceRunOutcome {
     let mut accumulator = OllamaReplyAccumulator::new(plan.budget());
     accumulator.observe_json_response(body, endpoint);
-    let (reply_content, tool_calls, reuse_outcome_note, saw_done) =
-        accumulator.into_parts(endpoint);
+    let (reply_content, saw_done) = accumulator.into_parts(endpoint);
     if !saw_done {
         return crate::maintenance::GatewayMaintenanceRunOutcome::Skipped;
     }
-    run_text_maintenance(plan, reply_content, tool_calls, reuse_outcome_note)
+    run_text_maintenance(plan, reply_content)
 }
 
 struct OllamaReplyAccumulator {
     reply: BoundedText,
-    tool_calls: Vec<OllamaToolCallSummary>,
     ndjson_buffer: String,
     saw_done: bool,
 }
@@ -1176,7 +1178,6 @@ impl OllamaReplyAccumulator {
     fn new(budget: bm_sdk::MaintenanceBudget) -> Self {
         Self {
             reply: BoundedText::new(budget.reply_input_max_chars, budget.reply_input_max_bytes),
-            tool_calls: Vec::new(),
             ndjson_buffer: String::new(),
             saw_done: false,
         }
@@ -1225,71 +1226,15 @@ impl OllamaReplyAccumulator {
         if let Some(content) = message.get("content").and_then(Value::as_str) {
             self.reply.push_str(content);
         }
-        if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
-            for tool_call in tool_calls {
-                self.observe_tool_call(tool_call);
-            }
-        }
     }
 
-    fn observe_tool_call(&mut self, tool_call: &Value) {
-        let function = tool_call.get("function").and_then(Value::as_object);
-        let name = function
-            .and_then(|function| function.get("name"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
-        let arguments_bytes = function
-            .and_then(|function| function.get("arguments"))
-            .and_then(|arguments| serde_json::to_string(arguments).ok())
-            .map(|arguments| arguments.len())
-            .unwrap_or(0);
-        self.tool_calls.push(OllamaToolCallSummary {
-            name,
-            arguments_bytes,
-        });
-    }
-
-    fn into_parts(mut self, endpoint: OllamaCompletionEndpoint) -> (String, u32, String, bool) {
+    fn into_parts(mut self, endpoint: OllamaCompletionEndpoint) -> (String, bool) {
         if !self.ndjson_buffer.trim().is_empty() {
             let line = std::mem::take(&mut self.ndjson_buffer);
             self.observe_ndjson_line(&line, endpoint);
         }
-        let tool_calls = self.tool_calls.len() as u32;
-        let reuse_outcome_note = if tool_calls == 0 {
-            String::new()
-        } else {
-            format!(
-                "ollama_tool_calls={tool_calls}; tool_summaries={}",
-                self.tool_call_summary()
-            )
-        };
-        (
-            self.reply.into_string(),
-            tool_calls,
-            reuse_outcome_note,
-            self.saw_done,
-        )
+        (self.reply.into_string(), self.saw_done)
     }
-
-    fn tool_call_summary(&self) -> String {
-        self.tool_calls
-            .iter()
-            .enumerate()
-            .map(|(index, summary)| {
-                format!(
-                    "tool={index}:name={}:arguments_bytes={}",
-                    summary.name, summary.arguments_bytes
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(",")
-    }
-}
-
-struct OllamaToolCallSummary {
-    name: String,
-    arguments_bytes: usize,
 }
 
 #[cfg(feature = "client-reqwest")]

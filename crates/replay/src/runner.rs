@@ -9,9 +9,8 @@ use bm_core::runtime::RuntimeLifecycleReport;
 use bm_sdk::{
     MemoryCapabilityPolicy, MemoryClock, MemoryIdentity, MemoryInspectionRequest,
     MemoryMaintenanceRequest, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest,
-    MemoryReplayRequest, MemoryRuntime, MemoryScope, MemoryStoreHandle, MemoryWriteRequest,
-    PressureLevel, RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome, RuntimeSkillWriteSource,
-    StoreBackendConfig,
+    MemoryReplayRequest, MemoryRuntime, MemoryScope, MemoryStoreHandle, PressureLevel,
+    RuntimeLifecycleModeInput, StoreBackendConfig,
 };
 
 use crate::{ReplayFailure, ReplayFixture, ReplayOperation, ReplayRunReport};
@@ -64,16 +63,7 @@ pub fn run_replay_fixture(
 
     let platform = MemoryStoreHandle::open(config.backend.clone())?;
     platform.import_replay_snapshot(&fixture.store_snapshot)?;
-    let runtime = MemoryRuntime::builder()
-        .identity(config.identity)
-        .scope(config.scope)
-        .store(platform.clone())
-        .clock(Arc::new(FixedReplayClock {
-            now_secs: config.now_secs,
-        }))
-        .capability_policy(config.capability_policy)
-        .privacy_policy(config.privacy_policy)
-        .build()?;
+    let runtime = build_replay_runtime(&platform, &config)?;
 
     let mut report = ReplayRunReport::new(
         fixture.fixture_id.clone(),
@@ -106,6 +96,22 @@ pub fn run_replay_fixture(
     Ok(report.finish(&fixture.expected))
 }
 
+pub(crate) fn build_replay_runtime(
+    platform: &MemoryStoreHandle,
+    config: &ReplayRunnerConfig,
+) -> bm_core::Result<MemoryRuntime> {
+    MemoryRuntime::builder()
+        .identity(config.identity.clone())
+        .scope(config.scope.clone())
+        .store(platform.clone())
+        .clock(Arc::new(FixedReplayClock {
+            now_secs: config.now_secs,
+        }))
+        .capability_policy(config.capability_policy.clone())
+        .privacy_policy(config.privacy_policy.clone())
+        .build()
+}
+
 struct OperationReport {
     lifecycle_operation: String,
     fragment: String,
@@ -120,11 +126,8 @@ fn run_operation(
             writes,
             owning_scope,
         } => {
-            let report = runtime.write(MemoryWriteRequest::Procedural {
-                writes: writes.clone(),
-                owning_scope: owning_scope.clone(),
-                source: RuntimeSkillWriteSource::Manual,
-            })?;
+            let report =
+                runtime.seed_runtime_skills_for_replay(writes.clone(), owning_scope.clone())?;
             Ok(OperationReport::new(
                 &report.lifecycle_report,
                 format!(
@@ -161,6 +164,7 @@ fn run_operation(
             system_max_len,
         } => {
             let report = runtime.project_safe(MemoryProjectionRequest {
+                binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
                 temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 structured_query_facets: Vec::new(),
                 user_query: user_query.clone(),
@@ -194,10 +198,6 @@ fn run_operation(
                     reply_content: reply_content.clone(),
                     tool_calls: *tool_calls,
                     external_content_used: *external_content_used,
-                    runtime_skill_selected_ids: Vec::new(),
-                    task_learning_selected_ids: Vec::new(),
-                    reuse_outcome: RuntimeSkillReuseOutcome::Neutral,
-                    reuse_outcome_note: String::new(),
                     pressure: *pressure,
                     mode_input: RuntimeLifecycleModeInput::default(),
                 },

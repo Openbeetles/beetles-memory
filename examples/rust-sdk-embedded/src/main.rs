@@ -1,11 +1,10 @@
 use bm_sdk::{
-    GovernedRuntimeSkillWriteInput, LongTermMemoryKind, MemoryCandidateContent,
-    MemoryCandidateTarget, MemoryCapabilityPolicy, MemoryEvidenceAuthority, MemoryIdentity,
-    MemoryInspectionRequest, MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryProjectionRequest,
-    MemoryRecallRequest, MemoryRuntime, MemoryScope, MemorySemanticJudgmentSource,
-    MemoryStoreHandle, MemorySubjectVisibilityPolicy, MemoryWriteCandidate, MemoryWriteRequest,
-    PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillCreationRef,
-    RuntimeSkillOwningScope, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
+    LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateTarget, MemoryCapabilityPolicy,
+    MemoryEvidenceAuthority, MemoryIdentity, MemoryInspectionRequest, MemoryPrivacyClass,
+    MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime, MemoryScope,
+    MemorySemanticJudgmentSource, MemoryStoreHandle, MemorySubjectVisibilityPolicy,
+    MemoryWriteCandidate, MemoryWriteRequest, PressureLevel, ProceduralProjectionBindingV1,
+    ProfileId, RuntimeLifecycleModeInput, StoreBackendConfig,
 };
 use bm_sdk::{MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment};
 
@@ -69,7 +68,6 @@ fn runtime_accept(target: MemoryCandidateTarget) -> MemoryCandidateSemanticJudgm
 
 fn run_host_turn_lifecycle(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
     let write = runtime.write(MemoryWriteRequest::Candidates {
-        runtime_skill_owning_scope: None,
         candidates: vec![MemoryWriteCandidate {
             candidate_id: "turn-1:project-readiness".to_string(),
             authority: MemoryEvidenceAuthority::ProgramMemoryCanonical,
@@ -93,31 +91,6 @@ fn run_host_turn_lifecycle(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
         }],
     })?;
     assert!(write.accepted);
-    let procedural = runtime.write(MemoryWriteRequest::Procedural {
-        writes: vec![GovernedRuntimeSkillWriteInput {
-            write: RuntimeSkillWrite {
-                name: "sdk_release_guard".to_string(),
-                topic: "release".to_string(),
-                title: "SDK release guard".to_string(),
-                summary: "Validate SDK host lifecycle before release.".to_string(),
-                content: "- run candidate governance before release\n- verify recall, projection, and operator inspection\n- cite gate output before claiming readiness".to_string(),
-                citations: vec!["rust-sdk-embedded example".to_string()],
-                source_chat_id: Some("chat-1".to_string()),
-                observed_at: current_unix_secs(),
-            },
-            creation_ref: RuntimeSkillCreationRef::ReplayPromotion {
-                candidate_ref: "example:rust-sdk-embedded-release-guard".to_string(),
-                verification_receipt_digest:
-                    "sha256:4444444444444444444444444444444444444444444444444444444444444444"
-                        .to_string(),
-            },
-            privacy_class: MemoryPrivacyClass::PublicRuntime,
-        }],
-        owning_scope: RuntimeSkillOwningScope::SharedProgram,
-        source: RuntimeSkillWriteSource::Manual,
-    })?;
-    assert!(procedural.accepted);
-
     let recall = runtime.recall(MemoryRecallRequest {
         temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
         query: "release artifacts".to_string(),
@@ -136,6 +109,7 @@ fn run_host_turn_lifecycle(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
     assert!(inspect.capabilities.inspection.visible);
 
     let projection = runtime.project(MemoryProjectionRequest {
+        binding: ProceduralProjectionBindingV1::Preview,
         temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
         user_query: "How should this host release?".to_string(),
         system_max_len: 4096,
@@ -148,11 +122,4 @@ fn run_host_turn_lifecycle(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
     assert!(projection.provider_payload().system_memory_block().len() <= 4096);
 
     Ok(())
-}
-
-fn current_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(1)
 }

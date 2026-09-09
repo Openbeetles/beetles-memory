@@ -5,7 +5,7 @@ use crate::{
     MemoryCapabilityCatalog, MemoryOperationVisibility, ProfileId, RuntimeSkillRecallTransport,
 };
 
-pub const PLATFORM_CAPABILITY_SNAPSHOT_SCHEMA: &str = "beetle-memory.platform.capability.v4";
+pub const PLATFORM_CAPABILITY_SNAPSHOT_SCHEMA: &str = "beetle-memory.platform.capability.v5";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PlatformCapabilitySnapshot {
@@ -21,6 +21,7 @@ pub struct PlatformCapabilitySnapshot {
     pub entry: PlatformEntryRuntimeSnapshot,
     pub indexed_recall: PlatformIndexedRecallSnapshot,
     pub governed_state: PlatformGovernedStateSnapshot,
+    pub procedural_learning: PlatformProceduralLearningSnapshot,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -134,6 +135,18 @@ pub struct PlatformGovernedStateSnapshot {
     pub environment_premise_evaluation: PlatformGovernedOperationSnapshot,
     pub update_lineage_inspection: PlatformGovernedOperationSnapshot,
     pub runtime_skill_recall_transport: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PlatformProceduralLearningSnapshot {
+    pub standard_agent_skill_mount: PlatformGovernedOperationSnapshot,
+    pub agent_tool_registry: PlatformGovernedOperationSnapshot,
+    pub agent_tool_experience_read: PlatformGovernedOperationSnapshot,
+    pub agent_tool_hint: PlatformGovernedOperationSnapshot,
+    pub agent_tool_learning: PlatformGovernedOperationSnapshot,
+    pub selection_receipt: PlatformGovernedOperationSnapshot,
+    pub finalize_feedback: PlatformGovernedOperationSnapshot,
+    pub worker: PlatformGovernedOperationSnapshot,
 }
 
 pub const fn platform_profile_feature_id(profile: ProfileId) -> &'static str {
@@ -262,6 +275,30 @@ pub fn platform_capability_snapshot(
                 RuntimeSkillRecallTransport::CompactTypedDirect => "compact_typed_direct",
                 RuntimeSkillRecallTransport::Unavailable => "unavailable",
             },
+        },
+        procedural_learning: PlatformProceduralLearningSnapshot {
+            standard_agent_skill_mount: governed_operation_snapshot(
+                catalog.procedural_learning.standard_agent_skill_mount,
+            ),
+            agent_tool_registry: governed_operation_snapshot(
+                catalog.procedural_learning.agent_tool_registry,
+            ),
+            agent_tool_experience_read: governed_operation_snapshot(
+                catalog.procedural_learning.agent_tool_experience_read,
+            ),
+            agent_tool_hint: governed_operation_snapshot(
+                catalog.procedural_learning.agent_tool_hint,
+            ),
+            agent_tool_learning: governed_operation_snapshot(
+                catalog.procedural_learning.agent_tool_learning,
+            ),
+            selection_receipt: governed_operation_snapshot(
+                catalog.procedural_learning.selection_receipt,
+            ),
+            finalize_feedback: governed_operation_snapshot(
+                catalog.procedural_learning.finalize_feedback,
+            ),
+            worker: governed_operation_snapshot(catalog.procedural_learning.worker),
         },
     }
 }

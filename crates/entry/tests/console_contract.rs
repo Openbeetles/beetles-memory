@@ -25,6 +25,7 @@ fn config() -> EntryRuntimeConfig {
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "console".to_string(),
             chat_id: "chat-1".to_string(),
         },
@@ -98,7 +99,6 @@ fn console_overview_aggregates_memory_runtime_events_from_the_store() {
                     reason: "console telemetry fixture".to_string(),
                 }),
             }],
-            runtime_skill_owning_scope: None,
         })
         .expect("write");
     assert_eq!(
@@ -118,6 +118,7 @@ fn console_overview_aggregates_memory_runtime_events_from_the_store() {
     runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "How should console system metrics work?".to_string(),

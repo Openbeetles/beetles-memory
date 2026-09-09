@@ -41,6 +41,7 @@ pub struct PromptMemoryContext {
     pub execution_state_text: Option<String>,
     pub task_workspace_text: Option<String>,
     pub task_recall_text: Option<String>,
+    pub task_recall_bindings: Vec<crate::task_execution::TaskRecallEntryBinding>,
     pub shared_factual_recall_report: super::RecallSelectionReport,
     pub continuity_capsule_report: super::RecallSelectionReport,
     pub archive_recall_report: super::RecallSelectionReport,
@@ -1656,6 +1657,10 @@ fn load_prompt_memory_context_inner(params: PromptMemoryContextParams<'_>) -> Pr
         runtime_skill_recall_report,
         task_recall_report,
     } = *scratch;
+    let (task_recall_text, task_recall_bindings) = session
+        .task_recall_bundle
+        .map(|bundle| (Some(bundle.rendered_text), bundle.entries))
+        .unwrap_or_default();
     PromptMemoryContext {
         memory_health_issues: health.issues(),
         personality_governance_gate_text: None,
@@ -1669,7 +1674,8 @@ fn load_prompt_memory_context_inner(params: PromptMemoryContextParams<'_>) -> Pr
         work_continuity_text: session.work_continuity_text,
         execution_state_text: session.execution_state_text,
         task_workspace_text: session.task_workspace_text,
-        task_recall_text: session.task_recall_text,
+        task_recall_text,
+        task_recall_bindings,
         shared_factual_recall_report,
         continuity_capsule_report,
         archive_recall_report,
@@ -1797,6 +1803,7 @@ mod tests {
             execution_state_text: None,
             task_workspace_text: None,
             task_recall_text: None,
+            task_recall_bindings: Vec::new(),
             shared_factual_recall_report: crate::memory::RecallSelectionReport::default(),
             continuity_capsule_report: crate::memory::RecallSelectionReport::default(),
             archive_recall_report: crate::memory::RecallSelectionReport::default(),
@@ -1854,6 +1861,7 @@ mod tests {
             execution_state_text: None,
             task_workspace_text: None,
             task_recall_text: None,
+            task_recall_bindings: Vec::new(),
             shared_factual_recall_report: crate::memory::RecallSelectionReport::default(),
             continuity_capsule_report: crate::memory::RecallSelectionReport::default(),
             archive_recall_report: crate::memory::RecallSelectionReport::default(),
@@ -2001,6 +2009,7 @@ mod tests {
             execution_state_text: None,
             task_workspace_text: None,
             task_recall_text: None,
+            task_recall_bindings: Vec::new(),
             shared_factual_recall_report: crate::memory::RecallSelectionReport::default(),
             continuity_capsule_report: crate::memory::RecallSelectionReport::default(),
             archive_recall_report: crate::memory::RecallSelectionReport::default(),
@@ -2054,6 +2063,7 @@ mod tests {
             execution_state_text: Some(repeated.clone()),
             task_workspace_text: Some(repeated.clone()),
             task_recall_text: Some(repeated.clone()),
+            task_recall_bindings: Vec::new(),
             shared_factual_recall_report: crate::memory::RecallSelectionReport::default(),
             continuity_capsule_report: crate::memory::RecallSelectionReport::default(),
             archive_recall_report: crate::memory::RecallSelectionReport::default(),
@@ -2158,6 +2168,7 @@ mod tests {
             execution_state_text: None,
             task_workspace_text: None,
             task_recall_text: None,
+            task_recall_bindings: Vec::new(),
             shared_factual_recall_report: crate::memory::RecallSelectionReport::default(),
             continuity_capsule_report: crate::memory::RecallSelectionReport::default(),
             archive_recall_report: crate::memory::RecallSelectionReport::default(),

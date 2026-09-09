@@ -1,15 +1,13 @@
 use bm_sdk::{
-    AgentToolRegistryRef, AgentToolUsageFeedback, CanonicalTurnDelta,
-    GovernedRuntimeSkillWriteInput, IngressKind, LongTermMemoryQuery, MemoryCloseRequest,
+    AgentToolRegistryRef, CanonicalTurnDelta, IngressKind, LongTermMemoryQuery, MemoryCloseRequest,
     MemoryGovernancePolicyMutation, MemoryInspectionRequest, MemoryLongTermControlView,
     MemoryLongTermDetailRequest, MemoryLongTermListRequest, MemoryLongTermMutation,
     MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryLongTermTarget,
-    MemoryMaintenanceRequest, MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallRequest,
+    MemoryMaintenanceRequest, MemoryProjectionRequest, MemoryRecallRequest,
     MemoryRecallTemporalOperation, MemoryRecoverRequest, MemoryReplayRequest,
-    MemoryTranscriptAttrWriteRequest, MemoryTurnFinalizeRequest, MemoryWriteRequest, PressureLevel,
-    QueryFacetInput, Result, RuntimeLifecycleModeInput, RuntimeLifecycleTrigger,
-    RuntimeSkillCreationRef, RuntimeSkillOwningScope, RuntimeSkillReuseOutcome, RuntimeSkillWrite,
-    RuntimeSkillWriteSource, TranscriptAttrEnvelope,
+    MemoryTranscriptAttrWriteRequest, MemoryTurnFinalizeRequest, PostTurnLearningInputV1,
+    PressureLevel, ProceduralProjectionBindingV1, QueryFacetInput, Result,
+    RuntimeLifecycleModeInput, RuntimeLifecycleTrigger, TranscriptAttrEnvelope,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -17,14 +15,11 @@ use serde_json::{json, Value};
 use crate::{AdapterCommand, AdapterOperation};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AdapterJsonCommandOptions {
-    pub citation: String,
-    pub default_source_chat_id: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GovernedAdapterJsonCommandSchema {
     pub field_names: &'static [&'static str],
+    /// Top-level transport discovery only. Nested typed payloads are deliberately
+    /// shallow here; `decode_json_adapter_command` remains their single strict
+    /// serde authority instead of duplicating Core contracts in hand-written JSON Schema.
     pub input_schema: Value,
 }
 
@@ -53,6 +48,40 @@ pub fn governed_adapter_json_command_schema(
         ]
     });
     match operation {
+        AdapterOperation::Write => Some(GovernedAdapterJsonCommandSchema {
+            field_names: &["kind", "candidates", "extraction", "mutations"],
+            input_schema: json!({
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "kind": {"const": "candidates"},
+                            "candidates": {"type": "array", "items": {"type": "object"}}
+                        },
+                        "required": ["kind", "candidates"],
+                        "additionalProperties": false
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "kind": {"const": "long_term_extraction"},
+                            "extraction": {"type": "object"}
+                        },
+                        "required": ["kind", "extraction"],
+                        "additionalProperties": false
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "kind": {"const": "governed_evidence_documents"},
+                            "mutations": {"type": "array", "items": {"type": "object"}}
+                        },
+                        "required": ["kind", "mutations"],
+                        "additionalProperties": false
+                    }
+                ]
+            }),
+        }),
         AdapterOperation::Recall => Some(GovernedAdapterJsonCommandSchema {
             field_names: &[
                 "temporal_operation",
@@ -82,6 +111,7 @@ pub fn governed_adapter_json_command_schema(
         }),
         AdapterOperation::Project => Some(GovernedAdapterJsonCommandSchema {
             field_names: &[
+                "binding",
                 "temporal_operation",
                 "user_query",
                 "system_max_len",
@@ -94,6 +124,25 @@ pub fn governed_adapter_json_command_schema(
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "binding": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {"kind": {"const": "preview"}},
+                                "required": ["kind"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {"const": "turn"},
+                                    "turn_id": {"type": "string", "minLength": 1}
+                                },
+                                "required": ["kind", "turn_id"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    },
                     "temporal_operation": temporal_operation,
                     "user_query": {"type": "string"},
                     "system_max_len": {"type": "integer", "minimum": 1},
@@ -109,40 +158,21 @@ pub fn governed_adapter_json_command_schema(
                         "items": {"type": "object"}
                     }
                 },
-                "required": ["temporal_operation", "user_query", "system_max_len"],
+                "required": ["binding", "temporal_operation", "user_query", "system_max_len"],
                 "additionalProperties": false
             }),
         }),
         AdapterOperation::FinalizeTurn => Some(GovernedAdapterJsonCommandSchema {
-            field_names: &[
-                "turn",
-                "tool_calls",
-                "runtime_skill_selected_ids",
-                "task_learning_selected_ids",
-                "reuse_outcome_note",
-                "tool_usage_feedback",
-                "pressure",
-                "mode_input",
-            ],
+            field_names: &["turn", "learning", "pressure", "mode_input"],
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "turn": {"type": "object"},
-                    "tool_calls": {"type": "integer", "minimum": 0},
-                    "runtime_skill_selected_ids": {
-                        "type": "array",
-                        "items": {"type": "string"}
-                    },
-                    "task_learning_selected_ids": {
-                        "type": "array",
-                        "items": {"type": "string"}
-                    },
-                    "reuse_outcome_note": {"type": "string"},
-                    "tool_usage_feedback": {"type": ["object", "null"]},
+                    "learning": {"type": "object"},
                     "pressure": {"type": "string"},
                     "mode_input": {"type": "object"}
                 },
-                "required": ["turn"],
+                "required": ["turn", "learning"],
                 "additionalProperties": false
             }),
         }),
@@ -150,38 +180,19 @@ pub fn governed_adapter_json_command_schema(
     }
 }
 
-impl AdapterJsonCommandOptions {
-    pub fn new(citation: impl Into<String>) -> Self {
-        Self {
-            citation: citation.into(),
-            default_source_chat_id: None,
-        }
-    }
-
-    pub fn with_default_source_chat_id(mut self, chat_id: impl Into<String>) -> Self {
-        self.default_source_chat_id = Some(chat_id.into());
-        self
-    }
-}
-
 pub fn decode_json_adapter_command(
     operation: AdapterOperation,
     body: &str,
-    options: &AdapterJsonCommandOptions,
 ) -> Result<AdapterCommand> {
     match operation {
         AdapterOperation::Capabilities => Ok(AdapterCommand::Capabilities),
-        AdapterOperation::Write => decode_write(body, options),
+        AdapterOperation::Write => parse_json(body).map(AdapterCommand::Write),
         AdapterOperation::FinalizeTurn => {
             let payload: FinalizeTurnPayload = parse_json(body)?;
             Ok(AdapterCommand::FinalizeTurn(Box::new(
                 MemoryTurnFinalizeRequest {
                     turn: payload.turn,
-                    tool_calls: payload.tool_calls.unwrap_or(0),
-                    runtime_skill_selected_ids: payload.runtime_skill_selected_ids,
-                    task_learning_selected_ids: payload.task_learning_selected_ids,
-                    reuse_outcome_note: payload.reuse_outcome_note,
-                    tool_usage_feedback: payload.tool_usage_feedback,
+                    learning: payload.learning,
                     pressure: payload.pressure,
                     mode_input: payload.mode_input,
                 },
@@ -200,6 +211,7 @@ pub fn decode_json_adapter_command(
         AdapterOperation::Project => {
             let payload: ProjectPayload = parse_json(body)?;
             Ok(AdapterCommand::Project(MemoryProjectionRequest {
+                binding: payload.binding,
                 temporal_operation: payload.temporal_operation,
                 user_query: payload.user_query,
                 system_max_len: payload.system_max_len,
@@ -218,10 +230,6 @@ pub fn decode_json_adapter_command(
                 reply_content: payload.reply_content,
                 tool_calls: payload.tool_calls.unwrap_or(0),
                 external_content_used: payload.external_content_used.unwrap_or(false),
-                runtime_skill_selected_ids: payload.runtime_skill_selected_ids,
-                task_learning_selected_ids: payload.task_learning_selected_ids,
-                reuse_outcome: payload.reuse_outcome,
-                reuse_outcome_note: payload.reuse_outcome_note,
                 pressure: payload.pressure,
                 mode_input: payload.mode_input,
             }))
@@ -315,145 +323,9 @@ pub fn decode_json_adapter_command(
     }
 }
 
-fn decode_write(body: &str, options: &AdapterJsonCommandOptions) -> Result<AdapterCommand> {
-    let payload: WritePayload = parse_json(body)?;
-    if let Some(feedback) = payload.tool_usage_feedback {
-        return Ok(AdapterCommand::Write(
-            MemoryWriteRequest::AgentToolUsageFeedback { feedback },
-        ));
-    }
-    let owning_scope = payload.owning_scope.ok_or_else(|| {
-        bm_sdk::Error::config("adapter_json_command", "write payload missing owning_scope")
-    })?;
-    let mut writes = if payload.writes.is_empty() {
-        vec![GovernedRuntimeSkillWriteInput {
-            write: RuntimeSkillWrite {
-                name: required_field(payload.name, "name")?,
-                topic: required_field(payload.topic, "topic")?,
-                title: required_field(payload.title, "title")?,
-                summary: required_field(payload.summary, "summary")?,
-                content: required_field(payload.content, "content")?,
-                citations: payload
-                    .citations
-                    .filter(|citations| !citations.is_empty())
-                    .unwrap_or_else(|| vec![options.citation.clone()]),
-                source_chat_id: payload
-                    .source_chat_id
-                    .or_else(|| options.default_source_chat_id.clone()),
-                observed_at: 0,
-            },
-            creation_ref: payload.creation_ref.ok_or_else(|| {
-                bm_sdk::Error::config("adapter_json_command", "write payload missing creation_ref")
-            })?,
-            privacy_class: payload.privacy_class.ok_or_else(|| {
-                bm_sdk::Error::config(
-                    "adapter_json_command",
-                    "write payload missing privacy_class",
-                )
-            })?,
-        }]
-    } else {
-        payload
-            .writes
-            .into_iter()
-            .map(AdapterRuntimeSkillWritePayload::into_runtime_write)
-            .collect()
-    };
-    for write in &mut writes {
-        write.write.observed_at = 0;
-    }
-    Ok(AdapterCommand::Write(MemoryWriteRequest::Procedural {
-        writes,
-        owning_scope,
-        source: payload.source,
-    }))
-}
-
 fn parse_json<T: for<'de> Deserialize<'de>>(body: &str) -> Result<T> {
     serde_json::from_str(body)
         .map_err(|err| bm_sdk::Error::config("adapter_json_command", err.to_string()))
-}
-
-fn required_field(value: Option<String>, field: &'static str) -> Result<String> {
-    let Some(value) = value else {
-        return Err(bm_sdk::Error::config(
-            "adapter_json_command",
-            format!("write payload missing {field}"),
-        ));
-    };
-    if value.trim().is_empty() {
-        return Err(bm_sdk::Error::config(
-            "adapter_json_command",
-            format!("write payload has empty {field}"),
-        ));
-    }
-    Ok(value)
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WritePayload {
-    #[serde(default)]
-    tool_usage_feedback: Option<AgentToolUsageFeedback>,
-    #[serde(default)]
-    writes: Vec<AdapterRuntimeSkillWritePayload>,
-    #[serde(default)]
-    source: RuntimeSkillWriteSource,
-    #[serde(default)]
-    owning_scope: Option<RuntimeSkillOwningScope>,
-    #[serde(default)]
-    creation_ref: Option<RuntimeSkillCreationRef>,
-    #[serde(default)]
-    privacy_class: Option<MemoryPrivacyClass>,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    topic: Option<String>,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    summary: Option<String>,
-    #[serde(default)]
-    content: Option<String>,
-    #[serde(default)]
-    citations: Option<Vec<String>>,
-    #[serde(default)]
-    source_chat_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AdapterRuntimeSkillWritePayload {
-    name: String,
-    topic: String,
-    title: String,
-    summary: String,
-    content: String,
-    #[serde(default)]
-    citations: Vec<String>,
-    #[serde(default)]
-    source_chat_id: Option<String>,
-    creation_ref: RuntimeSkillCreationRef,
-    privacy_class: MemoryPrivacyClass,
-}
-
-impl AdapterRuntimeSkillWritePayload {
-    fn into_runtime_write(self) -> GovernedRuntimeSkillWriteInput {
-        GovernedRuntimeSkillWriteInput {
-            write: RuntimeSkillWrite {
-                name: self.name,
-                topic: self.topic,
-                title: self.title,
-                summary: self.summary,
-                content: self.content,
-                citations: self.citations,
-                source_chat_id: self.source_chat_id,
-                observed_at: 0,
-            },
-            creation_ref: self.creation_ref,
-            privacy_class: self.privacy_class,
-        }
-    }
 }
 
 #[derive(Deserialize)]
@@ -472,6 +344,7 @@ struct RecallPayload {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProjectPayload {
+    binding: ProceduralProjectionBindingV1,
     temporal_operation: MemoryRecallTemporalOperation,
     user_query: String,
     system_max_len: usize,
@@ -491,16 +364,7 @@ struct ProjectPayload {
 #[serde(deny_unknown_fields)]
 struct FinalizeTurnPayload {
     turn: CanonicalTurnDelta,
-    #[serde(default)]
-    tool_calls: Option<u32>,
-    #[serde(default)]
-    runtime_skill_selected_ids: Vec<String>,
-    #[serde(default)]
-    task_learning_selected_ids: Vec<String>,
-    #[serde(default)]
-    reuse_outcome_note: String,
-    #[serde(default)]
-    tool_usage_feedback: Option<AgentToolUsageFeedback>,
+    learning: PostTurnLearningInputV1,
     #[serde(default)]
     pressure: PressureLevel,
     #[serde(default)]
@@ -519,14 +383,6 @@ struct MaintainPayload {
     tool_calls: Option<u32>,
     #[serde(default)]
     external_content_used: Option<bool>,
-    #[serde(default)]
-    runtime_skill_selected_ids: Vec<String>,
-    #[serde(default)]
-    task_learning_selected_ids: Vec<String>,
-    #[serde(default)]
-    reuse_outcome: RuntimeSkillReuseOutcome,
-    #[serde(default)]
-    reuse_outcome_note: String,
     #[serde(default)]
     pressure: PressureLevel,
     #[serde(default)]

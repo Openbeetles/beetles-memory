@@ -28,12 +28,12 @@ use bm_ollama_transparent::{
     TransitionOutcome, TransitionStep, TransitionStepReport,
 };
 use bm_sdk::{
-    default_agent_subject_id, LongTermMemoryKind, MemoryCandidateContent,
-    MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
-    MemoryCapabilityPolicy, MemoryEvidenceAuthority, MemoryPrivacyClass, MemoryPrivacyPolicy,
-    MemoryProjectionRequest, MemorySemanticJudgmentSource, MemorySubjectVisibilityPolicy,
-    MemoryWriteCandidate, MemoryWriteRequest, PressureLevel, RuntimeLifecycleModeInput,
-    RuntimeSkillCreationRef, StoreBackendConfig,
+    LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateSemanticDecision,
+    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryCapabilityPolicy,
+    MemoryEvidenceAuthority, MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryProjectionRequest,
+    MemorySemanticJudgmentSource, MemorySubjectVisibilityPolicy, MemoryWriteCandidate,
+    MemoryWriteRequest, PressureLevel, RuntimeLifecycleModeInput, RuntimeSkillListRequest,
+    RuntimeSkillOwningScope, StoreBackendConfig,
 };
 use serde_json::Value;
 
@@ -46,6 +46,7 @@ fn runtime() -> EntryRuntime {
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "console".to_string(),
             chat_id: "chat-1".to_string(),
         },
@@ -61,28 +62,144 @@ fn runtime() -> EntryRuntime {
     .expect("entry runtime")
 }
 
-fn runtime_skill_http_write_body(name: &str, summary: &str, content: &str) -> String {
-    serde_json::json!({
-        "name": name,
-        "topic": "release",
-        "title": "Release guard",
-        "summary": summary,
-        "content": content,
-        "source": "manual",
-        "citations": ["http-test"],
-        "owning_scope": {
-            "kind": "subject",
-            "mounted_subject_id": default_agent_subject_id("http-console-agent"),
-        },
-        "creation_ref": RuntimeSkillCreationRef::ReplayPromotion {
-            candidate_ref: format!("http-test:{name}"),
-            verification_receipt_digest:
-                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-                    .to_string(),
-        },
-        "privacy_class": MemoryPrivacyClass::SharedWithSubject,
+fn factual_http_write_body(candidate_id: &str, body: &str) -> String {
+    let target = MemoryCandidateTarget::LongTermMemory {
+        kind: LongTermMemoryKind::Fact,
+        topic: "http factual transport".to_string(),
+    };
+    serde_json::to_string(&MemoryWriteRequest::Candidates {
+        candidates: vec![MemoryWriteCandidate {
+            candidate_id: candidate_id.to_string(),
+            authority: MemoryEvidenceAuthority::ProgramMemoryCanonical,
+            target: target.clone(),
+            long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
+            privacy: MemoryPrivacyClass::SharedWithSubject,
+            content: MemoryCandidateContent::Text {
+                topic: "http factual transport".to_string(),
+                body: body.to_string(),
+                keywords: vec!["http".to_string(), "factual".to_string()],
+            },
+            evidence_refs: vec!["synthetic:http-factual-transport".to_string()],
+            canonical_entities: Vec::new(),
+            semantic_judgment: Some(MemoryCandidateSemanticJudgment {
+                source: MemorySemanticJudgmentSource::RuntimeGate,
+                decision: MemoryCandidateSemanticDecision::Accept,
+                governed_target: Some(target),
+                reason: "typed factual HTTP transport contract".to_string(),
+            }),
+        }],
     })
-    .to_string()
+    .expect("serialize factual HTTP write")
+}
+
+fn procedural_http_candidate_body(candidate_id: &str) -> String {
+    let target = MemoryCandidateTarget::ProceduralMemory {
+        name: "runtime_skill__http_forbidden".to_string(),
+        topic: "forbidden http procedure".to_string(),
+    };
+    serde_json::to_string(&MemoryWriteRequest::Candidates {
+        candidates: vec![MemoryWriteCandidate {
+            candidate_id: candidate_id.to_string(),
+            authority: MemoryEvidenceAuthority::ProgramMemoryCanonical,
+            target: target.clone(),
+            long_term_subject_visibility: None,
+            privacy: MemoryPrivacyClass::SharedWithSubject,
+            content: MemoryCandidateContent::RuntimeSkill {
+                name: "runtime_skill__http_forbidden".to_string(),
+                topic: "forbidden http procedure".to_string(),
+                title: "Forbidden HTTP procedure".to_string(),
+                summary: "HTTP callers cannot establish procedural learning authority.".to_string(),
+                content: "1. Submit a public write.\n2. Verify it remains rejected.".to_string(),
+                citations: vec!["synthetic:http-procedural-negative".to_string()],
+            },
+            evidence_refs: vec!["synthetic:http-procedural-negative".to_string()],
+            canonical_entities: Vec::new(),
+            semantic_judgment: Some(MemoryCandidateSemanticJudgment {
+                source: MemorySemanticJudgmentSource::RuntimeGate,
+                decision: MemoryCandidateSemanticDecision::Accept,
+                governed_target: Some(target),
+                reason: "negative HTTP authority contract".to_string(),
+            }),
+        }],
+    })
+    .expect("serialize procedural HTTP write")
+}
+
+#[test]
+fn http_write_accepts_typed_factual_candidates_and_rejects_procedural_creation() {
+    let runtime = runtime();
+    let factual = handle_http_in_process_request(
+        &runtime,
+        HttpRuntimeRequest::post_json(
+            "/memory/write",
+            factual_http_write_body(
+                "http-factual-transport-candidate",
+                "The HTTP adapter preserves factual write authority.",
+            ),
+        )
+        .with_idempotency_key("http-factual-transport-operation"),
+    )
+    .expect("factual HTTP write response");
+    assert_eq!(factual.status_code, 200, "{}", factual.body);
+    let factual: Value = serde_json::from_str(&factual.body).expect("factual response json");
+    assert_eq!(factual["status"], "accepted");
+    assert_eq!(factual["operation"], "write.candidates");
+    assert_eq!(factual["changed"], 1);
+
+    #[cfg(feature = "nonproduction-replay-harness")]
+    let before = runtime
+        .runtime()
+        .replay_harness()
+        .export_store_snapshot()
+        .unwrap();
+    let rejected = handle_http_in_process_request(
+        &runtime,
+        HttpRuntimeRequest::post_json(
+            "/memory/write",
+            procedural_http_candidate_body("http-procedural-transport-candidate"),
+        )
+        .with_idempotency_key("http-procedural-transport-operation"),
+    )
+    .expect_err("procedural HTTP rejection");
+    let bm_sdk::Error::Other { source, .. } = rejected else {
+        panic!("typed SDK authority rejection");
+    };
+    assert_eq!(
+        source
+            .downcast_ref::<bm_sdk::ProceduralLearningSdkError>()
+            .unwrap()
+            .key,
+        bm_sdk::ProceduralLearningErrorKeyV1::TransitionRequiresGovernance
+    );
+    #[cfg(feature = "nonproduction-replay-harness")]
+    assert!(
+        runtime
+            .runtime()
+            .replay_harness()
+            .export_store_snapshot()
+            .unwrap()
+            == before,
+        "HTTP rejected intent must not mutate any Store document or event"
+    );
+
+    let skills = runtime
+        .runtime()
+        .list_runtime_skills(RuntimeSkillListRequest {
+            owning_scope: RuntimeSkillOwningScope::Subject {
+                mounted_subject_id: runtime
+                    .runtime()
+                    .scoped_runtime()
+                    .mounted_subject_id
+                    .clone(),
+            },
+            query: None,
+            include_disabled: true,
+            include_retired: true,
+            limit: 16,
+        })
+        .expect("runtime skill list");
+    assert_eq!(skills.total, 0);
+    assert!(skills.skills.is_empty());
 }
 
 fn runtime_with_file_store(path: &Path) -> EntryRuntime {
@@ -94,6 +211,7 @@ fn runtime_with_file_store(path: &Path) -> EntryRuntime {
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "console".to_string(),
             chat_id: "chat-1".to_string(),
         },
@@ -137,12 +255,12 @@ fn seed_memory_runtime_activity(runtime: &EntryRuntime) {
                     reason: "http_console_metrics_fixture".to_string(),
                 }),
             }],
-            runtime_skill_owning_scope: None,
         })
         .expect("write");
     runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "How should transparent Ollama metrics appear?".to_string(),
@@ -1024,10 +1142,9 @@ fn console_overview_reflects_real_memory_operations() {
     let before: Value = serde_json::from_str(&before.body).expect("overview before json");
     assert_eq!(before["overview"]["writesToday"]["value"], "0");
 
-    let write_body = runtime_skill_http_write_body(
+    let write_body = factual_http_write_body(
         "release_patch_flow",
         "Patch the release and verify the result",
-        "1. inspect release diff\n2. patch rollback guards\n3. verify logs",
     );
     let mut write_request = HttpRuntimeRequest::post_json("/memory/write", &write_body);
     write_request.idempotency_key = "console-overview-release-patch-flow".to_string();
@@ -1044,11 +1161,18 @@ fn console_overview_reflects_real_memory_operations() {
         &runtime,
         HttpRuntimeRequest::post_json(
             "/memory/recall",
-            r#"{"temporal_operation":{"kind":"current"},"query":"release_patch_flow","limit":4}"#,
+            r#"{"temporal_operation":{"kind":"current"},"query":"http factual transport","limit":4}"#,
         ),
     )
     .expect("recall");
     assert_eq!(recall.status_code, 200, "{}", recall.body);
+    let recalled: Value = serde_json::from_str(&recall.body).unwrap();
+    assert!(
+        !recalled["result"]["report"]["governed_recall"]["validity_candidate_bindings"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 
     let after =
         handle_http_in_process_request(&runtime, HttpRuntimeRequest::get("/console/overview"))
@@ -1059,7 +1183,7 @@ fn console_overview_reflects_real_memory_operations() {
     assert!(!safe_overview_json.contains("Patch the release and verify the result"));
     assert!(!safe_overview_json.contains("patch rollback guards"));
     assert_eq!(after["overview"]["writesToday"]["value"], "1");
-    assert_eq!(after["overview"]["recall"]["value"], "0.0%");
+    assert_eq!(after["overview"]["recall"]["value"], "100.0%");
     assert!(after["overview"]["recentEvents"]
         .as_array()
         .expect("events")
@@ -1173,6 +1297,7 @@ fn legacy_name_based_console_skill_route_is_not_available() {
 }
 
 #[test]
+#[cfg(feature = "nonproduction-replay-harness")]
 fn console_http_skill_routes_edit_runtime_skills_without_store_shortcut() {
     let runtime = runtime();
 
@@ -1190,16 +1315,24 @@ fn console_http_skill_routes_edit_runtime_skills_without_store_shortcut() {
         create_forbidden.body
     );
 
-    let seed_body = runtime_skill_http_write_body(
-        "runtime_skill__release",
-        "Check artifacts before publishing.",
-        "1. run gates\n2. inspect artifacts\n3. dry run publish",
-    );
-    let mut seed_request = HttpRuntimeRequest::post_json("/memory/write", &seed_body);
-    seed_request.idempotency_key = "console-skill-release-seed".to_string();
-    let seeded =
-        handle_http_in_process_request(&runtime, seed_request).expect("seed runtime skill");
-    assert_eq!(seeded.status_code, 200, "{}", seeded.body);
+    runtime
+        .runtime()
+        .seed_runtime_skills_for_replay(
+            vec![support::governed_runtime_skill_write(
+                bm_sdk::RuntimeSkillWrite {
+                    name: "runtime_skill__release".into(),
+                    topic: "release".into(),
+                    title: "Release guard".into(),
+                    summary: "Check artifacts before publishing.".into(),
+                    content: "1. run gates\n2. inspect artifacts\n3. dry run publish".into(),
+                    citations: vec!["http-test".into()],
+                    source_chat_id: Some("chat-1".into()),
+                    observed_at: 1_700_000_000,
+                },
+            )],
+            support::runtime_skill_subject_scope("http-console-agent"),
+        )
+        .expect("nonproduction governed skill fixture");
 
     let list = handle_http_in_process_request(&runtime, HttpRuntimeRequest::get("/console/skills"))
         .expect("list");

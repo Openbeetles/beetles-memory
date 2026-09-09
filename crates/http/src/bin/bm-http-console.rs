@@ -278,6 +278,7 @@ impl ConsoleServerOptions {
                 owner_id: self.owner_id.clone(),
             },
             scope: EntryScope {
+                conversation_id: None,
                 channel: "console".to_string(),
                 chat_id: "local-console".to_string(),
             },

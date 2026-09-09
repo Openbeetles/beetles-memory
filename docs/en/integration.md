@@ -83,38 +83,19 @@ let runtime = MemoryRuntime::builder()
 
 `add_agent_skill_dir` is optional and read-only. The host still owns standard Agent Skill add/edit/import/delete/execute flows; Beetle Memory only scans `SKILL.md` summaries for recall and projection.
 
-## 5. Write Memory
+## 5. Submit Governed Memory Input
 
-Procedural memory is the current direct write path for reusable runtime knowledge:
-
-```rust
-use bm_sdk::{MemoryWriteRequest, RuntimeSkillWrite, RuntimeSkillWriteSource};
-
-let report = runtime.write(MemoryWriteRequest::Procedural {
-    writes: vec![RuntimeSkillWrite {
-        name: "release_guard".to_string(),
-        topic: "release".to_string(),
-        title: "Release guard".to_string(),
-        summary: "Verify release artifacts before publishing.".to_string(),
-        content: "Run examples, platform gates, and publish dry-run.".to_string(),
-        citations: vec!["integration-guide".to_string()],
-        source_chat_id: Some("chat-1".to_string()),
-        observed_at: 1_800_000_000,
-    }],
-    source: RuntimeSkillWriteSource::Manual,
-})?;
-
-assert!(report.accepted);
-```
-
-Long-term extraction writes should be produced by the extraction pipeline and passed through `MemoryWriteRequest::LongTermExtraction`.
+Hosts may submit typed long-term candidates or a canonical extraction result.
+Runtime Skill and Agent Tool experience are not caller-authored records: they
+are created only by the governed post-turn learning worker after
+`finalize_turn`. Section 8 shows the public candidate-write contract.
 
 ## 6. Recall And Project
 
 ```rust
 use bm_sdk::{
     MemoryProjectionRequest, MemoryRecallRequest, MemoryRecallTemporalOperation, PressureLevel,
-    RuntimeLifecycleModeInput,
+    ProceduralProjectionBindingV1, RuntimeLifecycleModeInput,
 };
 
 let recall = runtime.recall(MemoryRecallRequest {
@@ -126,6 +107,7 @@ let recall = runtime.recall(MemoryRecallRequest {
 })?;
 
 let projection = runtime.project(MemoryProjectionRequest {
+    binding: ProceduralProjectionBindingV1::Preview,
     temporal_operation: MemoryRecallTemporalOperation::Current,
     user_query: "How should this host release?".to_string(),
     system_max_len: 4096,
@@ -136,10 +118,19 @@ let projection = runtime.project(MemoryProjectionRequest {
     tool_registry_refs: Vec::new(),
 })?;
 
-let memory_block = projection.system_memory_block;
+let preview_block = projection.provider_payload().system_memory_block();
 ```
 
-Use the projected memory block as part of your model-context assembly. Keep your host prompt assembly responsible for final ordering with system, developer, user, and tool messages.
+`Preview` is inspection-only and returns no selection receipt. For a real model/tool
+turn, choose a stable turn id once at request ingress, project with
+`ProceduralProjectionBindingV1::Turn { turn_id }`, and use that projected block in
+model-context assembly. Pass the complete returned `selection_receipt` unchanged in
+`PostTurnLearningInputV1` when finalizing the same canonical turn. A retry of that
+turn reuses its id and receipt; a separate turn gets a new id even when the input
+text is identical. Never reconstruct a receipt from selected ids or digests.
+
+The host remains responsible for final ordering of system, developer, user, and
+tool messages.
 
 ## 7. Maintain With Explicit LLM Injection
 
@@ -154,7 +145,7 @@ if capabilities.lifecycle.maintain_lightweight.visible {
 
 ## 8. Submit Memory Candidates, Not Store Mutations
 
-Hosts should submit candidate facts or procedures and let Beetle Memory decide
+Hosts should submit candidate facts or governed evidence and let Beetle Memory decide
 which memory plane may change. This keeps SDK, HTTP, gateway, and future hosts
 on the same memory-governance contract.
 
@@ -167,7 +158,6 @@ use bm_sdk::{
 };
 
 runtime.write(MemoryWriteRequest::Candidates {
-    runtime_skill_owning_scope: None,
     candidates: vec![MemoryWriteCandidate {
         candidate_id: "turn-1:preferred-name".to_string(),
         authority: MemoryEvidenceAuthority::UserAsserted,
@@ -299,7 +289,7 @@ A complete SDK host turn uses one public path:
 
 1. Open a `MemoryStoreHandle` and pass it through `MemoryRuntime::builder().store(...)`; persistence engines, raw transactions, and writable store traits are not public runtime paths.
 2. Build `MemoryIdentity` and `MemoryScope` from stable host owner, agent, channel, and conversation ids.
-3. Submit `MemoryWriteRequest::Candidates` for facts, preferences, procedures, diagnostics, subject hints, and soul candidates.
+3. Submit `MemoryWriteRequest::Candidates` for factual candidates. Caller-authored procedures and procedural retargeting are rejected; submit actual execution evidence through `finalize_turn` for governed procedural learning.
 4. Finalize the turn through canonical turn semantics when transcript governance is required.
 5. Use `recall` and `project` to build model context; do not assemble memory planes in the host.
 6. Use `inspect` for operator visibility and safe recovery context.

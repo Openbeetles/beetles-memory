@@ -111,6 +111,7 @@ fn projection_embeds_the_same_safe_recall_authority_without_raw_material() {
     let runtime = test_runtime(empty_store_platform(profile), profile);
     let report = runtime
         .project_safe(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: MemoryRecallTemporalOperation::Current,
             user_query: "release evidence".to_string(),
             system_max_len: 4096,
@@ -288,6 +289,7 @@ fn non_empty_long_term_safe_bindings_exactly_follow_delivery_decisions() {
 
     let projection = runtime
         .project_safe(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: MemoryRecallTemporalOperation::Current,
             user_query: "release artifact".to_string(),
             system_max_len: 4096,
@@ -317,8 +319,6 @@ fn private_long_term_material_never_enters_the_safe_recall_closure() {
     let runtime = test_runtime(empty_store_platform(profile), profile);
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![LongTermMemoryDraft {
                     kind: LongTermMemoryKind::Project,

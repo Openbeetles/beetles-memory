@@ -9,30 +9,32 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bm_core::platform::Platform as _;
 use bm_sdk::{
     default_agent_subject_id, default_memory_space_id, primary_human_subject_id,
-    AuthorizedGovernanceEnvelope, CanonicalTurnDelta, ConversationScope, GovernanceEgressAuthority,
-    GovernanceExecutionOperation, GovernanceExecutionPort, GovernanceExecutionPortFailure,
-    ImmutableGovernanceExecutionBinding, MemoryClock, MemoryConsolidationState,
-    MemoryGovernanceActiveJobsRequest, MemoryGovernanceAttemptAuthorityRequest,
-    MemoryGovernanceBindingInstallRequest, MemoryGovernanceCredentialChangedRequest,
-    MemoryGovernanceJobClaimRequest, MemoryGovernanceJobRenewRequest,
-    MemoryGovernanceJobRetryRequest, MemoryGovernanceJobRunRequest,
-    MemoryGovernanceJobStatusRequest, MemoryGovernanceProviderPermissionChangedRequest,
-    MemoryGovernanceReconcileRequest, MemoryIdentity, MemoryLearningCycleOutcome,
-    MemoryLearningCycleRequest, MemoryLearningEngine, MemoryMutationOperationKind,
-    MemoryMutationReceipt, MemoryPrivacyPolicy, MemoryScope, MemoryStoreHandle,
-    MemoryTranscriptCommitRequest, MemoryTranscriptLifecycleRequest, MemoryTurnDeliveryStatus,
-    MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, Message,
-    PostTurnGovernanceAttemptAuthorityV3, PostTurnGovernanceErrorClassV2,
+    AgentToolDescriptor, AgentToolObservationDigest, AgentToolOutcome, AgentToolRegistrySnapshot,
+    AgentToolUsageFeedbackV2, AuthorizedGovernanceEnvelope, CanonicalTurnDelta, ConversationScope,
+    GovernanceEgressAuthority, GovernanceExecutionOperation, GovernanceExecutionPort,
+    GovernanceExecutionPortFailure, ImmutableGovernanceExecutionBinding, MemoryClock,
+    MemoryConsolidationState, MemoryGovernanceActiveJobsRequest,
+    MemoryGovernanceAttemptAuthorityRequest, MemoryGovernanceBindingInstallRequest,
+    MemoryGovernanceCredentialChangedRequest, MemoryGovernanceJobClaimRequest,
+    MemoryGovernanceJobRenewRequest, MemoryGovernanceJobRetryRequest,
+    MemoryGovernanceJobRunRequest, MemoryGovernanceJobStatusRequest,
+    MemoryGovernanceProviderPermissionChangedRequest, MemoryGovernanceReconcileRequest,
+    MemoryIdentity, MemoryLearningCycleOutcome, MemoryLearningCycleRequest, MemoryLearningEngine,
+    MemoryMutationOperationKind, MemoryMutationReceipt, MemoryPrivacyPolicy, MemoryScope,
+    MemoryStoreHandle, MemoryTranscriptCommitRequest, MemoryTranscriptLifecycleRequest,
+    MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource,
+    Message, PostTurnGovernanceAttemptAuthorityV3, PostTurnGovernanceErrorClassV2,
     PostTurnGovernanceExecutionBindingV1, PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV3,
     PostTurnGovernancePrivacyAuthorityV1, PostTurnGovernanceProviderProtocolV1, PressureLevel,
-    RelationshipAccessConstraintV1, RelationshipDisclosureCeilingV1, RelationshipSourceClausesV1,
-    RelationshipSourceControlAuthorityV1, RelationshipSourceControlIntentActionV1,
-    RelationshipSourceControlIntentV1, ResponseBody, RuntimeLifecycleModeInput, StopReason,
-    StoreBackendConfig, SubjectRegistry, SubjectRelationshipGraph, SubjectRelationshipKind,
-    SubjectScopedRuntime, SubjectSoulFoundingCharterSeedV1, SubjectSoulLifecycleStateV1,
-    SubjectSoulProvisionIntentV1, SubjectSoulReadOutcomeV1, SubjectSoulReadRequestV1,
-    SubjectSoulReadSelectorV1, SubjectSoulReadViewV1, ToolChoicePolicy, ToolSpec,
-    TranscriptInputMessage, TranscriptLifecycleTransition,
+    ProceduralExecutionOutcomeV1, RelationshipAccessConstraintV1, RelationshipDisclosureCeilingV1,
+    RelationshipSourceClausesV1, RelationshipSourceControlAuthorityV1,
+    RelationshipSourceControlIntentActionV1, RelationshipSourceControlIntentV1, ResponseBody,
+    RuntimeLifecycleModeInput, StopReason, StoreBackendConfig, SubjectRegistry,
+    SubjectRelationshipGraph, SubjectRelationshipKind, SubjectScopedRuntime,
+    SubjectSoulFoundingCharterSeedV1, SubjectSoulLifecycleStateV1, SubjectSoulProvisionIntentV1,
+    SubjectSoulReadOutcomeV1, SubjectSoulReadRequestV1, SubjectSoulReadSelectorV1,
+    SubjectSoulReadViewV1, ToolChoicePolicy, ToolSpec, TranscriptInputMessage,
+    TranscriptLifecycleTransition,
 };
 use bm_sdk::{LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, MemoryRuntime, Result};
 
@@ -80,14 +82,32 @@ fn finalize_request(
             external_content_used: false,
             candidate_ids: vec!["candidate-a".to_string()],
         },
-        tool_calls: 0,
-        runtime_skill_selected_ids: Vec::new(),
-        task_learning_selected_ids: Vec::new(),
-        reuse_outcome_note: String::new(),
-        tool_usage_feedback: None,
+        learning: bm_sdk::PostTurnLearningInputV1::empty(),
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     }
+}
+
+fn attach_tool_feedback(
+    request: &mut MemoryTurnFinalizeRequest,
+    feedback: AgentToolUsageFeedbackV2,
+) {
+    assert!(
+        feedback.validate_contract(),
+        "synthetic observations must form canonical typed feedback"
+    );
+    request.turn.tool_observations = feedback
+        .observations
+        .iter()
+        .map(|observation| bm_sdk::ToolObservationDigest {
+            observation_id: observation.observation_id.clone(),
+            tool_name: observation.tool_id.clone(),
+            summary: observation.summary.clone(),
+            external_content: observation.external_content,
+        })
+        .collect();
+    request.learning.tool_call_count = u32::try_from(request.turn.tool_observations.len()).unwrap();
+    request.learning.agent_tool_feedback = vec![feedback];
 }
 
 fn system_governor_control_runtime(
@@ -1604,6 +1624,29 @@ impl GovernanceExecutionPort for NoopLearningPort {
     }
 }
 
+#[derive(Default)]
+struct ForbiddenProceduralExecutionPort {
+    calls: usize,
+}
+
+impl GovernanceExecutionPort for ForbiddenProceduralExecutionPort {
+    fn execute(
+        &mut self,
+        _envelope: &AuthorizedGovernanceEnvelope,
+        _binding: &ImmutableGovernanceExecutionBinding,
+        _egress: &GovernanceEgressAuthority,
+        _operation: &mut dyn GovernanceExecutionOperation,
+    ) -> std::result::Result<(), GovernanceExecutionPortFailure> {
+        self.calls = self.calls.saturating_add(1);
+        Err(GovernanceExecutionPortFailure::Other(
+            bm_sdk::Error::config(
+                "procedural_feedback_test",
+                "local procedural lane must never invoke the Provider execution port",
+            ),
+        ))
+    }
+}
+
 struct BindingCapturingPort<'a, H: LlmHttpClient + Send> {
     http: &'a mut H,
     llm: &'a (dyn LlmClient + Send + Sync),
@@ -2343,6 +2386,1367 @@ fn duplicate_finalize_repairs_or_reuses_one_exact_intent() {
             .count(),
         1
     );
+}
+
+#[test]
+fn duplicate_finalize_with_different_learning_evidence_is_rejected_without_mutation() {
+    let profile = support::host_test_profile();
+    let platform = empty_store_platform(profile);
+    let runtime = test_runtime_with_scope_and_subject(
+        platform.clone(),
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    let mut first = finalize_request(
+        "subject-default",
+        "window-a",
+        "turn-learning-evidence-conflict",
+        "同一回合内容",
+    );
+    first.turn.tool_observations = vec![bm_sdk::ToolObservationDigest {
+        observation_id: "actual-counted-call".into(),
+        tool_name: "synthetic.inspect".into(),
+        summary: "completed one synthetic call".into(),
+        external_content: false,
+    }];
+    first.learning.tool_call_count = 1;
+    let mut conflicting = first.clone();
+    conflicting.learning.tool_call_count = 2;
+    runtime.finalize_turn(first).expect("first finalize");
+    let before = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("snapshot before conflicting evidence");
+
+    let error = runtime
+        .finalize_turn(conflicting)
+        .err()
+        .expect("same turn with different learning evidence must conflict");
+    let bm_sdk::Error::Other { source, .. } = error else {
+        panic!("typed evidence rejection")
+    };
+    assert_eq!(
+        source
+            .downcast_ref::<bm_sdk::ProceduralLearningSdkError>()
+            .expect("typed procedural SDK error")
+            .key,
+        bm_sdk::ProceduralLearningErrorKeyV1::EvidenceConflict
+    );
+
+    let after = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("snapshot after conflicting evidence");
+    assert_eq!(before.json_docs, after.json_docs);
+    assert_eq!(before.events, after.events);
+}
+
+#[test]
+fn production_finalize_atomically_persists_semantic_and_procedural_intents() {
+    let profile = support::host_test_profile();
+    let platform = empty_store_platform(profile);
+    let runtime = test_runtime_with_scope_and_subject(
+        platform.clone(),
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    let registry = AgentToolRegistrySnapshot::compact(
+        "host-tools",
+        "host",
+        vec![AgentToolDescriptor::compact(
+            "pdf.extract",
+            "PDF Extract",
+            "schema-pdf-v1",
+        )],
+        1_800_000_000,
+    );
+    runtime
+        .upsert_agent_tool_registry(registry.clone())
+        .expect("register tool registry");
+    let mut request = finalize_request(
+        "subject-default",
+        "window-a",
+        "turn-dual-learning-intents",
+        "请提取 PDF 内容",
+    );
+    attach_tool_feedback(
+        &mut request,
+        AgentToolUsageFeedbackV2 {
+            tool_id: registry.tools[0].tool_id.clone(),
+            schema_fingerprint: registry.tools[0].schema_fingerprint.clone(),
+            registry_ref: registry.registry_ref(),
+            observations: ["1", "2"]
+                .into_iter()
+                .map(|suffix| AgentToolObservationDigest {
+                    observation_id: format!("observation-pdf-{suffix}"),
+                    registry_id: "host-tools".to_string(),
+                    tool_id: "pdf.extract".to_string(),
+                    schema_fingerprint: "schema-pdf-v1".to_string(),
+                    call_id: Some(format!("call-pdf-{suffix}")),
+                    task_signature: "extract_pdf_text".to_string(),
+                    summary: "PDF extraction succeeded".to_string(),
+                    outcome: AgentToolOutcome::Succeeded,
+                    error_code: None,
+                    external_content: false,
+                    private_content_used: false,
+                    permission_tags: vec!["filesystem.read".to_string()],
+                    risk_tags: Vec::new(),
+                    started_at: Some(1_800_000_000),
+                    completed_at: Some(1_800_000_001),
+                })
+                .collect(),
+            user_visible_result_summary: Some("已提取 PDF 内容".to_string()),
+            outcome: ProceduralExecutionOutcomeV1::Succeeded,
+            operator_note: Some("diagnostic note only".to_string()),
+        },
+    );
+
+    let report = runtime.finalize_turn(request).expect("finalize");
+    assert_eq!(
+        report.memory_consolidation.state,
+        MemoryConsolidationState::Queued
+    );
+    assert_eq!(
+        report.procedural_learning.state,
+        MemoryConsolidationState::Queued
+    );
+    assert!(report.procedural_learning.job_id.is_some());
+    let semantic_job_id = report
+        .memory_consolidation
+        .job_id
+        .clone()
+        .expect("semantic job id");
+
+    let snapshot = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("snapshot");
+    assert_eq!(
+        snapshot
+            .json_docs
+            .iter()
+            .filter(|doc| doc.namespace == "post_turn_governance_jobs")
+            .count(),
+        1
+    );
+    assert_eq!(
+        snapshot
+            .json_docs
+            .iter()
+            .filter(|doc| doc.namespace == "procedural_feedback_jobs")
+            .count(),
+        1
+    );
+    let transcript = snapshot
+        .json_docs
+        .iter()
+        .find(|doc| doc.namespace == "conversation_transcript")
+        .expect("transcript");
+    assert!(transcript.value["learning_evidence"].is_object());
+    assert_eq!(
+        transcript.value["learning_evidence"]["authority"]["kind"],
+        "host_runtime_observation"
+    );
+
+    let engine = MemoryLearningEngine::attach(Arc::new(runtime)).expect("attach learning engine");
+    let mut port = ForbiddenProceduralExecutionPort::default();
+    let outcome = engine
+        .run_due_cycle(learning_cycle_request(1), &mut port)
+        .expect("run local procedural lane");
+    let MemoryLearningCycleOutcome::ProceduralCompleted(report) = outcome else {
+        panic!("first fair cycle must complete the due procedural lane")
+    };
+    assert_eq!(port.calls, 0);
+    assert_eq!(report.receipt.submitted_count, 1);
+    assert_eq!(report.receipt.accepted_count, 1);
+    assert_eq!(report.receipt.deferred_count, 0);
+    assert_eq!(report.receipt.rejected_count, 0);
+    assert_eq!(report.receipt.changed_count, 1);
+
+    let completed = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("completed snapshot");
+    for (namespace, expected) in [
+        ("procedural_feedback_application_ledgers", 1),
+        ("agent_tool_experience_revision_materials", 1),
+        ("agent_tool_experience_owner_heads", 1),
+        ("agent_tool_experience_scope_manifests", 1),
+        ("memory_mutation_receipts", 1),
+    ] {
+        assert_eq!(
+            completed
+                .json_docs
+                .iter()
+                .filter(|doc| doc.namespace == namespace)
+                .count(),
+            expected,
+            "{namespace} must commit in the same procedural closure"
+        );
+    }
+    let semantic_outcome = engine
+        .run_due_cycle(learning_cycle_request(1), &mut port)
+        .expect("run fair semantic lane after procedural completion");
+    let MemoryLearningCycleOutcome::Blocked(semantic_report) = semantic_outcome else {
+        panic!("unbound semantic lane must report its independent configuration block")
+    };
+    assert_eq!(semantic_report.job.job_id, semantic_job_id);
+    assert_eq!(port.calls, 0);
+}
+
+#[test]
+fn operator_note_never_promotes_one_runtime_observation() {
+    let profile = support::host_test_profile();
+    let platform = empty_store_platform(profile);
+    let runtime = test_runtime_with_scope_and_subject(
+        platform.clone(),
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    let registry = AgentToolRegistrySnapshot::compact(
+        "host-tools",
+        "host",
+        vec![AgentToolDescriptor::compact(
+            "pdf.extract",
+            "PDF Extract",
+            "schema-pdf-v1",
+        )],
+        1_800_000_000,
+    );
+    runtime
+        .upsert_agent_tool_registry(registry.clone())
+        .expect("register tool registry");
+    let mut request = finalize_request(
+        "subject-default",
+        "window-note-authority",
+        "turn-note-authority",
+        "一次普通自动工具调用",
+    );
+    attach_tool_feedback(
+        &mut request,
+        AgentToolUsageFeedbackV2 {
+            tool_id: registry.tools[0].tool_id.clone(),
+            schema_fingerprint: registry.tools[0].schema_fingerprint.clone(),
+            registry_ref: registry.registry_ref(),
+            observations: vec![AgentToolObservationDigest {
+                observation_id: "observation-note-1".to_string(),
+                registry_id: "host-tools".to_string(),
+                tool_id: "pdf.extract".to_string(),
+                schema_fingerprint: "schema-pdf-v1".to_string(),
+                call_id: Some("call-note-1".to_string()),
+                task_signature: "extract_pdf_text".to_string(),
+                summary: "PDF extraction succeeded".to_string(),
+                outcome: AgentToolOutcome::Succeeded,
+                error_code: None,
+                external_content: false,
+                private_content_used: false,
+                permission_tags: Vec::new(),
+                risk_tags: Vec::new(),
+                started_at: Some(1_800_000_000),
+                completed_at: Some(1_800_000_001),
+            }],
+            user_visible_result_summary: None,
+            outcome: ProceduralExecutionOutcomeV1::Succeeded,
+            operator_note: Some("this text is not confirmation authority".to_string()),
+        },
+    );
+    runtime.finalize_turn(request).expect("finalize");
+    let engine = MemoryLearningEngine::attach(Arc::new(runtime)).expect("attach learning engine");
+    let mut port = ForbiddenProceduralExecutionPort::default();
+    let outcome = engine
+        .run_due_cycle(learning_cycle_request(1), &mut port)
+        .expect("run local procedural lane");
+    let MemoryLearningCycleOutcome::ProceduralCompleted(report) = outcome else {
+        panic!("procedural governance must terminate with a deferred receipt")
+    };
+    assert_eq!(port.calls, 0);
+    assert_eq!(report.receipt.accepted_count, 0);
+    assert_eq!(report.receipt.deferred_count, 1);
+    assert_eq!(report.receipt.changed_count, 0);
+    let completed = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("completed snapshot");
+    assert_eq!(
+        completed
+            .json_docs
+            .iter()
+            .filter(|doc| doc.namespace == "agent_tool_experience_revision_materials")
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn unknown_tool_registry_rejects_before_transcript_or_job_mutation() {
+    let profile = support::host_test_profile();
+    let platform = empty_store_platform(profile);
+    let runtime = test_runtime_with_scope_and_subject(
+        platform.clone(),
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    let unknown_registry = AgentToolRegistrySnapshot::compact(
+        "unknown-tools",
+        "host",
+        vec![AgentToolDescriptor::compact(
+            "pdf.extract",
+            "PDF Extract",
+            "schema-pdf-v1",
+        )],
+        1_800_000_000,
+    );
+    let mut request = finalize_request(
+        "subject-default",
+        "window-unknown-registry",
+        "turn-unknown-registry",
+        "未知 registry 不得进入 Transcript",
+    );
+    attach_tool_feedback(
+        &mut request,
+        AgentToolUsageFeedbackV2 {
+            tool_id: unknown_registry.tools[0].tool_id.clone(),
+            schema_fingerprint: unknown_registry.tools[0].schema_fingerprint.clone(),
+            registry_ref: unknown_registry.registry_ref(),
+            observations: vec![AgentToolObservationDigest {
+                observation_id: "observation-unknown-1".to_string(),
+                registry_id: "unknown-tools".to_string(),
+                tool_id: "pdf.extract".to_string(),
+                schema_fingerprint: "schema-pdf-v1".to_string(),
+                call_id: Some("call-unknown-1".to_string()),
+                task_signature: "extract_pdf_text".to_string(),
+                summary: "must not persist".to_string(),
+                outcome: AgentToolOutcome::Succeeded,
+                error_code: None,
+                external_content: false,
+                private_content_used: false,
+                permission_tags: Vec::new(),
+                risk_tags: Vec::new(),
+                started_at: Some(1_800_000_000),
+                completed_at: Some(1_800_000_001),
+            }],
+            user_visible_result_summary: None,
+            outcome: ProceduralExecutionOutcomeV1::Succeeded,
+            operator_note: None,
+        },
+    );
+    let before = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("snapshot before");
+    let error = runtime
+        .finalize_turn(request)
+        .err()
+        .expect("unknown registry must fail before durable mutation");
+    assert_eq!(error.stage(), "post_turn_learning_evidence");
+    let after = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("snapshot after");
+    assert_eq!(before.json_docs, after.json_docs);
+    assert_eq!(before.events, after.events);
+}
+
+fn reopen_procedural_registry() -> AgentToolRegistrySnapshot {
+    AgentToolRegistrySnapshot::compact(
+        "reopen-tools",
+        "host",
+        vec![AgentToolDescriptor::compact(
+            "archive.unpack",
+            "Archive Unpack",
+            "schema-archive-v1",
+        )],
+        1_800_000_000,
+    )
+}
+
+fn seed_reopen_procedural_job(store: MemoryStoreHandle) -> (String, AgentToolRegistrySnapshot) {
+    let profile = support::host_test_profile();
+    let runtime = test_runtime_with_scope_and_subject(
+        store,
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    let registry = reopen_procedural_registry();
+    runtime
+        .upsert_agent_tool_registry(registry.clone())
+        .expect("register reopen tool registry");
+    let mut request = finalize_request(
+        "subject-default",
+        "chat-a",
+        "turn-procedural-reopen",
+        "持久任务必须在重开后完成",
+    );
+    attach_tool_feedback(
+        &mut request,
+        AgentToolUsageFeedbackV2 {
+            tool_id: registry.tools[0].tool_id.clone(),
+            schema_fingerprint: registry.tools[0].schema_fingerprint.clone(),
+            registry_ref: registry.registry_ref(),
+            observations: ["1", "2"]
+                .into_iter()
+                .map(|suffix| AgentToolObservationDigest {
+                    observation_id: format!("observation-reopen-{suffix}"),
+                    registry_id: "reopen-tools".to_string(),
+                    tool_id: "archive.unpack".to_string(),
+                    schema_fingerprint: "schema-archive-v1".to_string(),
+                    call_id: Some(format!("call-reopen-{suffix}")),
+                    task_signature: "unpack_archive".to_string(),
+                    summary: "archive unpack succeeded".to_string(),
+                    outcome: AgentToolOutcome::Succeeded,
+                    error_code: None,
+                    external_content: false,
+                    private_content_used: false,
+                    permission_tags: vec!["filesystem.read".to_string()],
+                    risk_tags: Vec::new(),
+                    started_at: Some(1_800_000_000),
+                    completed_at: Some(1_800_000_001),
+                })
+                .collect(),
+            user_visible_result_summary: Some("已解包归档".to_string()),
+            outcome: ProceduralExecutionOutcomeV1::Succeeded,
+            operator_note: None,
+        },
+    );
+    let report = runtime.finalize_turn(request).expect("seed procedural job");
+    (
+        report
+            .procedural_learning
+            .job_id
+            .expect("procedural job id"),
+        registry,
+    )
+}
+
+fn complete_reopened_procedural_job(
+    store: MemoryStoreHandle,
+    expected_job_id: &str,
+    registry: AgentToolRegistrySnapshot,
+) {
+    let profile = support::host_test_profile();
+    let runtime = test_runtime_with_scope_and_subject(
+        store,
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    runtime
+        .upsert_agent_tool_registry(registry)
+        .expect("remount exact tool registry");
+    let engine = MemoryLearningEngine::attach(Arc::new(runtime)).expect("attach reopened engine");
+    let mut port = ForbiddenProceduralExecutionPort::default();
+    let outcome = engine
+        .run_due_cycle(learning_cycle_request(1), &mut port)
+        .expect("complete reopened procedural job");
+    let MemoryLearningCycleOutcome::ProceduralCompleted(report) = outcome else {
+        panic!("reopened procedural job must remain due")
+    };
+    assert_eq!(port.calls, 0);
+    assert_eq!(report.job.job_id, expected_job_id);
+    assert_eq!(report.receipt.accepted_count, 1);
+    assert_eq!(report.receipt.changed_count, 1);
+}
+
+fn assert_production_experience_read(store: MemoryStoreHandle, projection: bool) {
+    let (job_id, registry) = seed_reopen_procedural_job(store.clone());
+    complete_reopened_procedural_job(store.clone(), &job_id, registry.clone());
+    let runtime = test_runtime_with_scope_and_subject(
+        store,
+        support::host_test_profile(),
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    runtime
+        .upsert_agent_tool_registry(registry.clone())
+        .expect("remount registry");
+    if projection {
+        let result = runtime
+            .project(bm_sdk::MemoryProjectionRequest {
+                binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
+                temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
+                user_query: "unpack archive".into(),
+                system_max_len: 8192,
+                recent_messages_limit: 8,
+                pressure: PressureLevel::Normal,
+                mode_input: RuntimeLifecycleModeInput::default(),
+                structured_query_facets: vec![],
+                tool_registry_refs: vec![registry.registry_ref()],
+            })
+            .expect("project accepted production experience");
+        let hints = result.provider_payload().agent_tool_hints();
+        assert_eq!(
+            hints.len(),
+            1,
+            "real accepted experience must reach provider projection"
+        );
+        assert_eq!(hints[0].tool_id, "archive.unpack");
+    } else {
+        let result = runtime
+            .recall(bm_sdk::MemoryRecallRequest {
+                temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
+                query: "unpack archive".into(),
+                limit: 8,
+                structured_query_facets: vec![],
+                tool_registry_refs: vec![registry.registry_ref()],
+            })
+            .expect("recall accepted production experience");
+        assert_eq!(
+            result.agent_tool_hints.len(),
+            1,
+            "real accepted experience must be recalled"
+        );
+        assert_eq!(result.agent_tool_hints[0].tool_id, "archive.unpack");
+        assert!(result.store_snapshot_consistent);
+    }
+}
+
+#[test]
+fn production_experience_current_recall_positive() {
+    assert_production_experience_read(empty_store_platform(support::host_test_profile()), false);
+}
+
+#[test]
+fn production_experience_current_projection_positive() {
+    assert_production_experience_read(empty_store_platform(support::host_test_profile()), true);
+}
+
+#[test]
+fn production_projection_audit_counts_only_delivered_tool_hints() {
+    let store = empty_store_platform(support::host_test_profile());
+    let (job, registry) = seed_reopen_procedural_job(store.clone());
+    complete_reopened_procedural_job(store.clone(), &job, registry.clone());
+    let runtime = test_runtime_with_scope_and_subject(
+        store,
+        support::host_test_profile(),
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    runtime
+        .upsert_agent_tool_registry(registry.clone())
+        .unwrap();
+    let mut observed_positive = false;
+    let mut observed_budget_drop = false;
+    for budget in [128, 512, 8192] {
+        let output = runtime
+            .project(bm_sdk::MemoryProjectionRequest {
+                binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
+                temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
+                user_query: "unpack archive".into(),
+                system_max_len: budget,
+                recent_messages_limit: 8,
+                pressure: PressureLevel::Normal,
+                mode_input: RuntimeLifecycleModeInput::default(),
+                structured_query_facets: vec![],
+                tool_registry_refs: vec![registry.registry_ref()],
+            })
+            .expect("bounded projection");
+        let delivered = output.provider_payload().agent_tool_hints().len();
+        observed_positive |= delivered > 0;
+        observed_budget_drop |= delivered == 0;
+        assert_eq!(
+            output.report().audit().agent_tool_selected_count,
+            delivered,
+            "safe audit must describe final delivery, not pre-budget candidates"
+        );
+        if delivered == 0 {
+            assert!(output.report().audit().agent_tool_rejection_count > 0);
+        }
+    }
+    assert!(observed_positive && observed_budget_drop);
+}
+
+#[test]
+fn production_feedback_group_counts_are_distinct_from_changed_owner_counts() {
+    assert_feedback_group_owner_accounting(true);
+}
+
+#[test]
+fn production_feedback_successes_cannot_pool_across_task_signatures() {
+    assert_feedback_group_owner_accounting(false);
+}
+
+fn assert_feedback_group_owner_accounting(repeated_per_task: bool) {
+    let store = empty_store_platform(support::host_test_profile());
+    let runtime = Arc::new(test_runtime_with_scope_and_subject(
+        store.clone(),
+        support::host_test_profile(),
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    ));
+    let registry = reopen_procedural_registry();
+    runtime
+        .upsert_agent_tool_registry(registry.clone())
+        .unwrap();
+    let mut request = finalize_request(
+        "subject-default",
+        "chat-a",
+        "multi-task-group",
+        "unpack archives",
+    );
+    attach_tool_feedback(
+        &mut request,
+        AgentToolUsageFeedbackV2 {
+            tool_id: registry.tools[0].tool_id.clone(),
+            schema_fingerprint: registry.tools[0].schema_fingerprint.clone(),
+            registry_ref: registry.registry_ref(),
+            observations: ["archive-a", "archive-b"]
+                .into_iter()
+                .flat_map(|task| {
+                    ["1", "2"]
+                        .into_iter()
+                        .take(if repeated_per_task { 2 } else { 1 })
+                        .map(move |id| AgentToolObservationDigest {
+                            observation_id: format!("{task}-{id}"),
+                            registry_id: "reopen-tools".into(),
+                            tool_id: "archive.unpack".into(),
+                            schema_fingerprint: "schema-archive-v1".into(),
+                            call_id: Some(format!("call-{task}-{id}")),
+                            task_signature: task.into(),
+                            summary: "unpack archives successfully".into(),
+                            outcome: AgentToolOutcome::Succeeded,
+                            error_code: None,
+                            external_content: false,
+                            private_content_used: false,
+                            permission_tags: vec![],
+                            risk_tags: vec![],
+                            started_at: Some(1_800_000_000),
+                            completed_at: Some(1_800_000_001),
+                        })
+                })
+                .collect(),
+            user_visible_result_summary: None,
+            outcome: ProceduralExecutionOutcomeV1::Succeeded,
+            operator_note: None,
+        },
+    );
+    runtime
+        .finalize_turn(request)
+        .expect("finalize multi-task group");
+    let engine = MemoryLearningEngine::attach(runtime).unwrap();
+    let MemoryLearningCycleOutcome::ProceduralCompleted(report) = engine
+        .run_due_cycle(
+            learning_cycle_request(1),
+            &mut ForbiddenProceduralExecutionPort::default(),
+        )
+        .expect("learn two owners atomically")
+    else {
+        panic!("procedural completion");
+    };
+    assert_eq!(report.receipt.submitted_count, 1);
+    assert_eq!(report.receipt.accepted_count, u32::from(repeated_per_task));
+    assert_eq!(report.receipt.deferred_count, u32::from(!repeated_per_task));
+    let snapshot = store.export_replay_snapshot().unwrap();
+    let heads = snapshot
+        .json_docs
+        .iter()
+        .filter(|doc| doc.namespace == "agent_tool_experience_owner_heads")
+        .count();
+    assert_eq!(
+        heads,
+        if repeated_per_task { 2 } else { 0 },
+        "only repeated same-task evidence creates durable owners"
+    );
+    assert_eq!(report.receipt.changed_count, heads as u32);
+}
+
+#[test]
+fn production_learning_raw_delete_cancels_procedural_and_erases_learning_evidence() {
+    let store = empty_store_platform(support::host_test_profile());
+    let (job_id, _) = seed_reopen_procedural_job(store.clone());
+    let runtime = test_runtime_with_scope_and_subject(
+        store.clone(),
+        support::host_test_profile(),
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    runtime
+        .request_transcript_lifecycle(MemoryTranscriptLifecycleRequest {
+            memory_space_id: runtime.memory_space_id().into(),
+            channel_id: "llm.gateway".into(),
+            conversation_id: "chat-a".into(),
+            turn_id: Some("turn-procedural-reopen".into()),
+            transition: TranscriptLifecycleTransition::DeleteRaw,
+            reason: "withdraw synthetic evidence".into(),
+        })
+        .expect("delete learning source");
+    let snapshot = store.export_replay_snapshot().expect("deleted snapshot");
+    let job = snapshot
+        .json_docs
+        .iter()
+        .find(|doc| doc.namespace == "procedural_feedback_jobs" && doc.value["job_id"] == job_id)
+        .expect("durable procedural job");
+    assert_eq!(
+        job.value["status"], "cancelled",
+        "withdrawal must cancel both learning lanes atomically"
+    );
+    let transcript = snapshot
+        .json_docs
+        .iter()
+        .find(|doc| doc.namespace == "conversation_transcript")
+        .expect("transcript tombstone");
+    assert!(
+        transcript.value["learning_evidence"].is_null(),
+        "DeleteRaw must erase learning evidence too"
+    );
+}
+
+#[test]
+fn production_learning_public_archive_never_exports_raw_tool_evidence() {
+    let store = empty_store_platform(support::host_test_profile());
+    seed_reopen_procedural_job(store.clone());
+    let runtime = test_runtime_with_scope_and_subject(
+        store.clone(),
+        support::host_test_profile(),
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    let durable = serde_json::to_string(&store.export_replay_snapshot().expect("durable snapshot"))
+        .expect("snapshot JSON");
+    assert!(
+        durable.contains("archive unpack succeeded"),
+        "positive raw evidence in controlled Store"
+    );
+    let exported = runtime
+        .export_memory_space(bm_sdk::MemorySpaceExportRequest {
+            scope: bm_sdk::MemoryArchiveScope::Subject {
+                memory_space_id: runtime.memory_space_id().into(),
+                mounted_subject_id: runtime.subject_id().into(),
+            },
+            private_material_policy: bm_sdk::MemorySpacePrivateMaterialPolicy::IncludePrivate,
+        })
+        .expect("public archive");
+    let restored_store = empty_store_platform(support::host_test_profile());
+    let restored = test_runtime_with_scope_and_subject(
+        restored_store.clone(),
+        support::host_test_profile(),
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    restored
+        .import_memory_space(bm_sdk::MemorySpaceImportRequest {
+            scope: exported.projection_scope.scope,
+            expected_private_material_policy:
+                bm_sdk::MemorySpacePrivateMaterialPolicy::IncludePrivate,
+            archive: exported.archive,
+        })
+        .expect("import public archive into empty synthetic Store");
+    let encoded = serde_json::to_string(
+        &restored_store
+            .export_replay_snapshot()
+            .expect("restored snapshot"),
+    )
+    .expect("archive JSON");
+    assert!(
+        encoded.contains("持久任务必须在重开后完成"),
+        "chat transcript remains positive"
+    );
+    assert!(
+        !encoded.contains("archive unpack succeeded"),
+        "public archive must not export tool evidence raw"
+    );
+    assert!(!encoded.contains("observation-reopen-1"));
+}
+
+fn assert_experience_history_and_isolation(store: MemoryStoreHandle) {
+    let runtime = test_runtime_with_scope_and_subject(
+        store.clone(),
+        support::host_test_profile(),
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    let registry = reopen_procedural_registry();
+    let request = |time| bm_sdk::MemoryRecallRequest {
+        temporal_operation: time,
+        query: "unpack archive".into(),
+        limit: 8,
+        structured_query_facets: vec![],
+        tool_registry_refs: vec![registry.registry_ref()],
+    };
+    assert!(runtime
+        .recall(request(bm_sdk::MemoryRecallTemporalOperation::Current))
+        .expect("registry absent")
+        .agent_tool_hints
+        .is_empty());
+    runtime
+        .upsert_agent_tool_registry(registry.clone())
+        .expect("remount exact registry");
+    for (time, expected) in [
+        (bm_sdk::MemoryRecallTemporalOperation::Current, 1),
+        (
+            bm_sdk::MemoryRecallTemporalOperation::HistoricalAsOf {
+                as_of_time: 1_799_999_999,
+            },
+            0,
+        ),
+        (
+            bm_sdk::MemoryRecallTemporalOperation::HistoricalAsOf {
+                as_of_time: 1_800_000_000,
+            },
+            1,
+        ),
+    ] {
+        let recall = runtime
+            .recall(request(time))
+            .expect("revision-exact recall");
+        assert_eq!(recall.agent_tool_hints.len(), expected, "{time:?}");
+        let projection = runtime
+            .project(bm_sdk::MemoryProjectionRequest {
+                binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
+                temporal_operation: time,
+                user_query: "unpack archive".into(),
+                system_max_len: 8192,
+                recent_messages_limit: 8,
+                pressure: PressureLevel::Normal,
+                mode_input: RuntimeLifecycleModeInput::default(),
+                structured_query_facets: vec![],
+                tool_registry_refs: vec![registry.registry_ref()],
+            })
+            .expect("revision-exact projection");
+        assert_eq!(
+            projection.provider_payload().agent_tool_hints().len(),
+            expected,
+            "{time:?}"
+        );
+    }
+    let mut shared_registry = runtime.subject_registry().clone();
+    shared_registry
+        .upsert_subject(bm_sdk::SubjectDescriptor::agent_persona(
+            "subject-b",
+            "Agent B",
+        ))
+        .expect("register B");
+    let other = MemoryRuntime::builder()
+        .identity(runtime.identity().clone())
+        .subject_id("subject-b")
+        .subject_registry(shared_registry)
+        .scope(runtime.scope().clone())
+        .store(store.clone())
+        .agent_tool_registry(registry.clone())
+        .build()
+        .expect("other active subject");
+    let denied = other
+        .recall(request(bm_sdk::MemoryRecallTemporalOperation::Current))
+        .expect("other subject recall");
+    assert!(denied.agent_tool_hints.is_empty());
+    assert_eq!(
+        denied.tool_experience_status.governed_experience_candidates,
+        0
+    );
+    let projected = other
+        .project(bm_sdk::MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
+            user_query: "unpack archive".into(),
+            system_max_len: 8192,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+            structured_query_facets: vec![],
+            tool_registry_refs: vec![registry.registry_ref()],
+        })
+        .expect("other subject projection");
+    assert!(projected.provider_payload().agent_tool_hints().is_empty());
+    assert!(!projected
+        .provider_payload()
+        .system_memory_block()
+        .contains("archive unpack succeeded"));
+    assert!(!format!("{:?}", projected.report().audit()).contains("observation-reopen"));
+    let mut bad = request(bm_sdk::MemoryRecallTemporalOperation::Current);
+    bad.tool_registry_refs[0].fingerprint = "wrong-fingerprint".into();
+    assert!(runtime
+        .recall(bad)
+        .expect("registry mismatch fail closed")
+        .agent_tool_hints
+        .is_empty());
+    let public_before = runtime
+        .export_memory_space(bm_sdk::MemorySpaceExportRequest {
+            scope: bm_sdk::MemoryArchiveScope::Subject {
+                memory_space_id: runtime.memory_space_id().into(),
+                mounted_subject_id: runtime.subject_id().into(),
+            },
+            private_material_policy: bm_sdk::MemorySpacePrivateMaterialPolicy::IncludePrivate,
+        })
+        .expect("safe archive before withdrawal");
+    runtime
+        .request_transcript_lifecycle(MemoryTranscriptLifecycleRequest {
+            memory_space_id: runtime.memory_space_id().into(),
+            channel_id: "llm.gateway".into(),
+            conversation_id: "chat-a".into(),
+            turn_id: Some("turn-procedural-reopen".into()),
+            transition: TranscriptLifecycleTransition::DeleteRaw,
+            reason: "withdraw source".into(),
+        })
+        .expect("withdraw accepted source");
+    for time in [
+        bm_sdk::MemoryRecallTemporalOperation::Current,
+        bm_sdk::MemoryRecallTemporalOperation::HistoricalAsOf {
+            as_of_time: 1_800_000_000,
+        },
+    ] {
+        assert!(runtime
+            .recall(request(time))
+            .expect("no historical deletion bypass")
+            .agent_tool_hints
+            .is_empty());
+    }
+    let terminal = store
+        .export_replay_snapshot()
+        .expect("terminal owner snapshot");
+    assert!(terminal
+        .json_docs
+        .iter()
+        .all(|doc| doc.namespace != "agent_tool_experience_revision_materials"));
+    assert!(!serde_json::to_string(&terminal)
+        .expect("snapshot JSON")
+        .contains("archive unpack succeeded"));
+    runtime
+        .import_memory_space(bm_sdk::MemorySpaceImportRequest {
+            scope: public_before.projection_scope.scope,
+            expected_private_material_policy:
+                bm_sdk::MemorySpacePrivateMaterialPolicy::IncludePrivate,
+            archive: public_before.archive,
+        })
+        .expect("safe public archive cannot replace protected tombstone");
+    assert!(runtime
+        .recall(request(bm_sdk::MemoryRecallTemporalOperation::Current))
+        .expect("no archive resurrection")
+        .agent_tool_hints
+        .is_empty());
+}
+
+#[test]
+fn production_experience_memory_reopen_history_and_isolation() {
+    let store = empty_store_platform(support::host_test_profile());
+    let (id, registry) = seed_reopen_procedural_job(store.clone());
+    complete_reopened_procedural_job(store.clone(), &id, registry);
+    assert_experience_history_and_isolation(store);
+}
+
+#[test]
+fn production_experience_file_reopen_history_and_isolation() {
+    let root = persistent_test_root("experience-read-history");
+    let config = StoreBackendConfig::file(&root, support::host_test_profile()).expect("config");
+    {
+        let store = MemoryStoreHandle::open(config.clone()).expect("first open");
+        let (id, registry) = seed_reopen_procedural_job(store.clone());
+        complete_reopened_procedural_job(store, &id, registry);
+    }
+    assert_experience_history_and_isolation(MemoryStoreHandle::open(config).expect("reopen"));
+    std::fs::remove_dir_all(root).expect("remove synthetic Store");
+}
+
+#[cfg(feature = "sqlite-store")]
+#[test]
+fn production_experience_sqlite_reopen_history_and_isolation() {
+    let root = persistent_test_root("experience-read-history-sqlite");
+    let config =
+        StoreBackendConfig::sqlite(root.join("memory.sqlite3"), support::host_test_profile())
+            .expect("config");
+    {
+        let store = MemoryStoreHandle::open(config.clone()).expect("first open");
+        let (id, registry) = seed_reopen_procedural_job(store.clone());
+        complete_reopened_procedural_job(store, &id, registry);
+    }
+    assert_experience_history_and_isolation(MemoryStoreHandle::open(config).expect("reopen"));
+    std::fs::remove_dir_all(root).expect("remove synthetic Store");
+}
+
+#[test]
+fn production_experience_two_revisions_and_source_withdrawal_are_exact() {
+    let store = empty_store_platform(support::host_test_profile());
+    let base = test_runtime_with_scope_and_subject(
+        store.clone(),
+        support::host_test_profile(),
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    let clock = Arc::new(AdjustableMemoryClock::new(1_800_000_000));
+    let registry = reopen_procedural_registry();
+    let runtime = Arc::new(
+        MemoryRuntime::builder()
+            .identity(base.identity().clone())
+            .subject_id(base.subject_id())
+            .scope(base.scope().clone())
+            .subject_registry(base.subject_registry().clone())
+            .store(store.clone())
+            .agent_tool_registry(registry.clone())
+            .clock(clock.clone())
+            .build()
+            .expect("runtime"),
+    );
+    for (time, marker, turn) in [
+        (1_800_000_000, "GUIDANCE_REVISION_ONE", "rev-one"),
+        (1_800_000_100, "GUIDANCE_REVISION_TWO", "rev-two"),
+    ] {
+        clock.set(time);
+        let mut request =
+            finalize_request("subject-default", "chat-a", turn, "learn archive usage");
+        attach_tool_feedback(
+            &mut request,
+            AgentToolUsageFeedbackV2 {
+                tool_id: registry.tools[0].tool_id.clone(),
+                schema_fingerprint: registry.tools[0].schema_fingerprint.clone(),
+                registry_ref: registry.registry_ref(),
+                observations: ["a", "b"]
+                    .into_iter()
+                    .map(|suffix| AgentToolObservationDigest {
+                        observation_id: format!("{turn}-{suffix}"),
+                        registry_id: registry.registry_id.clone(),
+                        tool_id: "archive.unpack".into(),
+                        schema_fingerprint: "schema-archive-v1".into(),
+                        call_id: Some(format!("call-{turn}-{suffix}")),
+                        task_signature: "unpack_archive".into(),
+                        summary: format!("unpack archive: {marker}"),
+                        outcome: AgentToolOutcome::Succeeded,
+                        error_code: None,
+                        external_content: false,
+                        private_content_used: false,
+                        permission_tags: vec![],
+                        risk_tags: vec![],
+                        started_at: Some(time),
+                        completed_at: Some(time),
+                    })
+                    .collect(),
+                user_visible_result_summary: None,
+                outcome: ProceduralExecutionOutcomeV1::Succeeded,
+                operator_note: None,
+            },
+        );
+        runtime
+            .finalize_turn(request)
+            .expect("finalize revision evidence");
+        let engine = MemoryLearningEngine::attach(runtime.clone()).expect("engine");
+        assert!(matches!(
+            engine
+                .run_due_cycle(
+                    learning_cycle_request(1),
+                    &mut ForbiddenProceduralExecutionPort::default()
+                )
+                .expect("learn revision"),
+            MemoryLearningCycleOutcome::ProceduralCompleted(_)
+        ));
+    }
+    let request = |time| bm_sdk::MemoryRecallRequest {
+        temporal_operation: time,
+        query: "unpack archive".into(),
+        limit: 8,
+        structured_query_facets: vec![],
+        tool_registry_refs: vec![registry.registry_ref()],
+    };
+    let current = runtime
+        .recall(request(bm_sdk::MemoryRecallTemporalOperation::Current))
+        .expect("current");
+    assert_eq!(current.agent_tool_hints.len(), 1);
+    assert!(current.agent_tool_hints[0]
+        .reason
+        .contains("GUIDANCE_REVISION_TWO"));
+    let past = runtime
+        .recall(request(
+            bm_sdk::MemoryRecallTemporalOperation::HistoricalAsOf {
+                as_of_time: 1_800_000_050,
+            },
+        ))
+        .expect("past");
+    assert_eq!(past.agent_tool_hints.len(), 1);
+    assert!(past.agent_tool_hints[0]
+        .reason
+        .contains("GUIDANCE_REVISION_ONE"));
+    assert!(!past.agent_tool_hints[0]
+        .reason
+        .contains("GUIDANCE_REVISION_TWO"));
+    let withdraw = || MemoryTranscriptLifecycleRequest {
+        memory_space_id: runtime.memory_space_id().into(),
+        channel_id: "llm.gateway".into(),
+        conversation_id: "chat-a".into(),
+        turn_id: Some("rev-one".into()),
+        transition: TranscriptLifecycleTransition::DeleteRaw,
+        reason: "withdraw first source".into(),
+    };
+    runtime
+        .request_transcript_lifecycle(withdraw())
+        .expect("withdraw founding evidence");
+    for time in [
+        bm_sdk::MemoryRecallTemporalOperation::Current,
+        bm_sdk::MemoryRecallTemporalOperation::HistoricalAsOf {
+            as_of_time: 1_800_000_050,
+        },
+    ] {
+        assert!(runtime
+            .recall(request(time))
+            .expect("deleted current/history")
+            .agent_tool_hints
+            .is_empty());
+    }
+    let before = store.export_replay_snapshot().expect("terminal snapshot");
+    assert_eq!(
+        before
+            .json_docs
+            .iter()
+            .filter(|doc| doc.namespace == "agent_tool_experience_revision_materials")
+            .count(),
+        0
+    );
+    assert_eq!(
+        before
+            .json_docs
+            .iter()
+            .filter(|doc| doc.namespace == "procedural_feedback_application_ledgers")
+            .count(),
+        2
+    );
+    clock.set(1_800_000_200);
+    runtime
+        .request_transcript_lifecycle(withdraw())
+        .expect("idempotent withdrawal");
+    let after = store.export_replay_snapshot().expect("repeat snapshot");
+    assert_eq!(
+        before.json_docs, after.json_docs,
+        "repeat lifecycle cannot revise durable owners or receipts"
+    );
+    let reconciled = runtime
+        .reconcile_governance_intents(MemoryGovernanceReconcileRequest { limit: 32 })
+        .expect("reconcile after withdrawal");
+    assert_eq!(reconciled.procedural_created, 0);
+    assert_eq!(reconciled.created, 0);
+}
+
+#[test]
+fn in_memory_runtime_recreation_preserves_procedural_job_and_evidence() {
+    let config =
+        StoreBackendConfig::in_memory(support::host_test_profile()).expect("in-memory config");
+    let store = MemoryStoreHandle::open(config).expect("in-memory Store");
+    let (job_id, registry) = seed_reopen_procedural_job(store.clone());
+    complete_reopened_procedural_job(store, &job_id, registry);
+}
+
+#[test]
+fn file_reopen_preserves_procedural_job_and_evidence() {
+    let root = persistent_test_root("file-procedural-reopen");
+    let config =
+        StoreBackendConfig::file(&root, support::host_test_profile()).expect("file config");
+    let (job_id, registry) = {
+        let first = MemoryStoreHandle::open(config.clone()).expect("first file Store");
+        seed_reopen_procedural_job(first)
+    };
+    let reopened = MemoryStoreHandle::open(config).expect("reopened file Store");
+    complete_reopened_procedural_job(reopened, &job_id, registry);
+    std::fs::remove_dir_all(root).expect("remove file procedural Store");
+}
+
+#[cfg(feature = "sqlite-store")]
+#[test]
+fn sqlite_reopen_preserves_procedural_job_and_evidence() {
+    let root = persistent_test_root("sqlite-procedural-reopen");
+    let config =
+        StoreBackendConfig::sqlite(root.join("memory.sqlite3"), support::host_test_profile())
+            .expect("sqlite config");
+    let (job_id, registry) = {
+        let first = MemoryStoreHandle::open(config.clone()).expect("first sqlite Store");
+        seed_reopen_procedural_job(first)
+    };
+    let reopened = MemoryStoreHandle::open(config).expect("reopened sqlite Store");
+    complete_reopened_procedural_job(reopened, &job_id, registry);
+    std::fs::remove_dir_all(root).expect("remove sqlite procedural Store");
+}
+
+#[test]
+fn concurrent_learning_engines_apply_one_procedural_job_once() {
+    let profile = support::host_test_profile();
+    let platform = empty_store_platform(profile);
+    let first = Arc::new(test_runtime_with_scope_and_subject(
+        platform.clone(),
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    ));
+    let second = Arc::new(test_runtime_with_scope_and_subject(
+        platform.clone(),
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    ));
+    let registry = reopen_procedural_registry();
+    first
+        .upsert_agent_tool_registry(registry.clone())
+        .expect("register first worker tools");
+    second
+        .upsert_agent_tool_registry(registry.clone())
+        .expect("register second worker tools");
+    let mut request = finalize_request(
+        "subject-default",
+        "window-procedural-concurrent",
+        "turn-procedural-concurrent",
+        "并发 worker 只能应用一次",
+    );
+    attach_tool_feedback(
+        &mut request,
+        AgentToolUsageFeedbackV2 {
+            tool_id: registry.tools[0].tool_id.clone(),
+            schema_fingerprint: registry.tools[0].schema_fingerprint.clone(),
+            registry_ref: registry.registry_ref(),
+            observations: ["1", "2"]
+                .into_iter()
+                .map(|suffix| AgentToolObservationDigest {
+                    observation_id: format!("observation-concurrent-{suffix}"),
+                    registry_id: "reopen-tools".to_string(),
+                    tool_id: "archive.unpack".to_string(),
+                    schema_fingerprint: "schema-archive-v1".to_string(),
+                    call_id: Some(format!("call-concurrent-{suffix}")),
+                    task_signature: "unpack_archive".to_string(),
+                    summary: "archive unpack succeeded".to_string(),
+                    outcome: AgentToolOutcome::Succeeded,
+                    error_code: None,
+                    external_content: false,
+                    private_content_used: false,
+                    permission_tags: Vec::new(),
+                    risk_tags: Vec::new(),
+                    started_at: Some(1_800_000_000),
+                    completed_at: Some(1_800_000_001),
+                })
+                .collect(),
+            user_visible_result_summary: None,
+            outcome: ProceduralExecutionOutcomeV1::Succeeded,
+            operator_note: None,
+        },
+    );
+    first
+        .finalize_turn(request)
+        .expect("finalize concurrent job");
+    let barrier = Arc::new(Barrier::new(3));
+    let workers = [first, second]
+        .into_iter()
+        .enumerate()
+        .map(|(index, runtime)| {
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let engine = MemoryLearningEngine::attach(runtime).expect("attach worker");
+                let mut port = ForbiddenProceduralExecutionPort::default();
+                barrier.wait();
+                let outcome = engine
+                    .run_due_cycle(
+                        MemoryLearningCycleRequest {
+                            lease_owner: format!("procedural-worker-{index}"),
+                            lease_duration_secs: 60,
+                        },
+                        &mut port,
+                    )
+                    .expect("run concurrent worker");
+                (outcome, port.calls)
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    let results = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("join worker"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        results
+            .iter()
+            .filter(|(outcome, _)| {
+                matches!(outcome, MemoryLearningCycleOutcome::ProceduralCompleted(_))
+            })
+            .count(),
+        1
+    );
+    assert!(results.iter().all(|(_, calls)| *calls == 0));
+    let snapshot = platform
+        .replay_harness()
+        .export_store_snapshot()
+        .expect("concurrent completion snapshot");
+    assert_eq!(
+        snapshot
+            .json_docs
+            .iter()
+            .filter(|doc| doc.namespace == "procedural_feedback_application_ledgers")
+            .count(),
+        1
+    );
+    assert_eq!(
+        snapshot
+            .json_docs
+            .iter()
+            .filter(|doc| doc.namespace == "agent_tool_experience_revision_materials")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn reconciliation_repairs_missing_semantic_and_procedural_intents_from_transcript() {
+    let profile = support::host_test_profile();
+    let source = empty_store_platform(profile);
+    let (expected_procedural_job_id, registry) = seed_reopen_procedural_job(source.clone());
+    let mut transcript_only = source.export_replay_snapshot().expect("source snapshot");
+    transcript_only.json_docs.retain(|doc| {
+        !matches!(
+            doc.namespace.as_str(),
+            "post_turn_governance_jobs"
+                | "post_turn_governance_scope_indexes"
+                | "procedural_feedback_jobs"
+                | "procedural_feedback_scope_indexes"
+        )
+    });
+
+    let target = empty_store_platform(profile);
+    target
+        .import_replay_snapshot(&transcript_only)
+        .expect("import transcript-only crash image");
+    let runtime = test_runtime_with_scope_and_subject(
+        target.clone(),
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    runtime
+        .upsert_agent_tool_registry(registry)
+        .expect("remount exact registry");
+    let report = runtime
+        .reconcile_governance_intents(MemoryGovernanceReconcileRequest { limit: 1 })
+        .expect("reconcile both learning lanes");
+    assert_eq!(report.inspected, 1);
+    assert_eq!(report.created, 1);
+    assert_eq!(report.cursor_sequence, 1);
+    assert_eq!(report.procedural_created, 1);
+    assert_eq!(report.procedural_cursor_sequence, 1);
+    assert!(!report.has_more);
+    assert!(!report.procedural_has_more);
+    let repaired = target.export_replay_snapshot().expect("repaired snapshot");
+    assert!(repaired.json_docs.iter().any(|doc| {
+        doc.namespace == "procedural_feedback_jobs" && doc.key == expected_procedural_job_id
+    }));
+
+    let engine = MemoryLearningEngine::attach(Arc::new(runtime)).expect("attach repaired engine");
+    let mut port = ForbiddenProceduralExecutionPort::default();
+    assert!(matches!(
+        engine
+            .run_due_cycle(learning_cycle_request(1), &mut port)
+            .expect("run repaired procedural job"),
+        MemoryLearningCycleOutcome::ProceduralCompleted(_)
+    ));
+    assert_eq!(port.calls, 0);
 }
 
 #[test]

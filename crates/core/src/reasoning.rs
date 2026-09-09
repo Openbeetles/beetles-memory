@@ -1,3 +1,9 @@
+//! Pure procedural adjudication is public; internal promotion is not caller write authority.
+//!
+//! ```compile_fail
+//! use bm_core::reasoning::promote_skill_crystal_candidates;
+//! ```
+
 use crate::error::Result;
 use crate::platform::SkillStorage;
 use crate::skills::{
@@ -60,7 +66,7 @@ pub fn adjudicate_skill_crystal_candidate(
         .iter()
         .find(|name| name.as_str() == target_name)
         .cloned();
-    if distinct_runs >= 2 || candidate.promotion_readiness >= 80 {
+    if has_repeated_procedural_runs(distinct_runs) || candidate.promotion_readiness >= 80 {
         ExperienceCrystalAdjudication {
             disposition: ExperienceCrystalDisposition::Promote,
             reason_code: "ready".to_string(),
@@ -77,7 +83,12 @@ pub fn adjudicate_skill_crystal_candidate(
     }
 }
 
-pub fn promote_skill_crystal_candidates(
+/// Repeated execution evidence must come from distinct canonical runs, not calls.
+pub(crate) const fn has_repeated_procedural_runs(distinct_runs: usize) -> bool {
+    distinct_runs >= 2
+}
+
+pub(crate) fn promote_skill_crystal_candidates(
     storage: &dyn SkillStorage,
     candidates: &[SkillCrystalCandidate],
     source_chat_id: Option<&str>,

@@ -347,6 +347,7 @@ pub struct AdapterProtocolCapabilityBinding {
     pub wss_visible: bool,
     pub mcp_visible: bool,
     pub a2a_visible: bool,
+    pub procedural_learning: AdapterProceduralLearningCapabilityBinding,
     pub mutation_operation_inventory: Vec<AdapterMutationOperationCapability>,
     pub mutation_receipt_policy: bm_sdk::MutationOperationReceiptQuota,
 }
@@ -372,6 +373,28 @@ impl AdapterProtocolCapabilityBinding {
             wss_visible: catalog.adapter.wss.visible,
             mcp_visible: catalog.adapter.mcp.visible,
             a2a_visible: catalog.adapter.a2a.visible,
+            procedural_learning: AdapterProceduralLearningCapabilityBinding {
+                standard_agent_skill_mount_visible: catalog
+                    .procedural_learning
+                    .standard_agent_skill_mount
+                    .visible,
+                agent_tool_registry_visible: catalog
+                    .procedural_learning
+                    .agent_tool_registry
+                    .visible,
+                agent_tool_experience_read_visible: catalog
+                    .procedural_learning
+                    .agent_tool_experience_read
+                    .visible,
+                agent_tool_hint_visible: catalog.procedural_learning.agent_tool_hint.visible,
+                agent_tool_learning_visible: catalog
+                    .procedural_learning
+                    .agent_tool_learning
+                    .visible,
+                selection_receipt_visible: catalog.procedural_learning.selection_receipt.visible,
+                finalize_feedback_visible: catalog.procedural_learning.finalize_feedback.visible,
+                worker_visible: catalog.procedural_learning.worker.visible,
+            },
             mutation_operation_inventory: AdapterOperation::ALL
                 .into_iter()
                 .map(|operation| AdapterMutationOperationCapability {
@@ -382,6 +405,19 @@ impl AdapterProtocolCapabilityBinding {
             mutation_receipt_policy: retention_quota.mutation_operation_receipts,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdapterProceduralLearningCapabilityBinding {
+    pub standard_agent_skill_mount_visible: bool,
+    pub agent_tool_registry_visible: bool,
+    pub agent_tool_experience_read_visible: bool,
+    pub agent_tool_hint_visible: bool,
+    pub agent_tool_learning_visible: bool,
+    pub selection_receipt_visible: bool,
+    pub finalize_feedback_visible: bool,
+    pub worker_visible: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -637,6 +673,7 @@ pub struct AdapterProjectionReport {
     pub projection_block: String,
     pub chars: usize,
     pub agent_tool_hints: Vec<AgentToolHint>,
+    pub selection_receipt: Option<bm_sdk::ProceduralSelectionReceiptV1>,
     pub audit: AdapterProjectionAuditSummary,
     pub governed_recall: GovernedRecallPublicReportV1,
 }
@@ -667,6 +704,7 @@ impl From<MemoryProjectionReport> for AdapterProjectionReport {
             chars: report.ui_api_chars(),
             projection_block: report.ui_api_projection().to_string(),
             agent_tool_hints: report.agent_tool_hints().to_vec(),
+            selection_receipt: report.selection_receipt().cloned(),
             audit,
             governed_recall: report.governed_public_report().clone(),
         }
@@ -688,6 +726,7 @@ pub struct AdapterGovernedProjectSafeReportV1 {
     pub projection_block: String,
     pub chars: usize,
     pub agent_tool_hints: Vec<AgentToolHint>,
+    pub selection_receipt: Option<bm_sdk::ProceduralSelectionReceiptV1>,
     pub audit: AdapterProjectionAuditSummary,
     pub governed_recall: GovernedRecallPublicReportV1,
 }
@@ -700,8 +739,8 @@ pub struct AdapterGovernedProjectSafeReportV1 {
     deny_unknown_fields
 )]
 pub enum AdapterGovernedSafeReportV1 {
-    Recall(AdapterGovernedRecallSafeReportV1),
-    Project(AdapterGovernedProjectSafeReportV1),
+    Recall(Box<AdapterGovernedRecallSafeReportV1>),
+    Project(Box<AdapterGovernedProjectSafeReportV1>),
 }
 
 impl std::fmt::Debug for AdapterCommand {
@@ -733,26 +772,10 @@ impl AdapterCommand {
         }
     }
 
-    pub fn pin_accepted_at(&mut self, accepted_at: u64) {
-        if let Self::Write(MemoryWriteRequest::Procedural { writes, .. }) = self {
-            for write in writes {
-                write.write.observed_at = accepted_at;
-            }
-        }
-    }
-
     /// Produces stable typed material for transport-independent idempotency hashing.
     pub fn idempotency_fingerprint_material(&self) -> Result<Vec<u8>, serde_json::Error> {
         let payload = match self {
-            Self::Write(request) => {
-                let mut request = request.clone();
-                if let MemoryWriteRequest::Procedural { writes, .. } = &mut request {
-                    for write in writes {
-                        write.write.observed_at = 0;
-                    }
-                }
-                serde_json::to_vec(&request)?
-            }
+            Self::Write(request) => serde_json::to_vec(request)?,
             Self::FinalizeTurn(request) => {
                 serde_json::to_vec(&AdapterTurnFinalizeFingerprint::from(request.as_ref()))?
             }
@@ -784,11 +807,7 @@ impl AdapterCommand {
 #[derive(Serialize)]
 struct AdapterTurnFinalizeFingerprint<'a> {
     turn: &'a bm_sdk::CanonicalTurnDelta,
-    tool_calls: u32,
-    runtime_skill_selected_ids: &'a [String],
-    task_learning_selected_ids: &'a [String],
-    reuse_outcome_note: &'a str,
-    tool_usage_feedback: &'a Option<bm_sdk::AgentToolUsageFeedback>,
+    learning: &'a bm_sdk::PostTurnLearningInputV1,
     pressure: bm_sdk::PressureLevel,
     mode_input: bm_sdk::RuntimeLifecycleModeInput,
 }
@@ -797,11 +816,7 @@ impl<'a> From<&'a MemoryTurnFinalizeRequest> for AdapterTurnFinalizeFingerprint<
     fn from(request: &'a MemoryTurnFinalizeRequest) -> Self {
         Self {
             turn: &request.turn,
-            tool_calls: request.tool_calls,
-            runtime_skill_selected_ids: &request.runtime_skill_selected_ids,
-            task_learning_selected_ids: &request.task_learning_selected_ids,
-            reuse_outcome_note: &request.reuse_outcome_note,
-            tool_usage_feedback: &request.tool_usage_feedback,
+            learning: &request.learning,
             pressure: request.pressure,
             mode_input: request.mode_input,
         }
@@ -817,6 +832,8 @@ pub struct AdapterTurnFinalizeReport {
     pub maintenance_performed: bool,
     #[serde(rename = "memoryConsolidation")]
     pub memory_consolidation: AdapterMemoryConsolidationReport,
+    #[serde(rename = "proceduralLearning")]
+    pub procedural_learning: bm_sdk::MemoryProceduralLearningIntentReport,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -842,6 +859,7 @@ impl AdapterTurnFinalizeReport {
                 job_id: report.memory_consolidation.job_id,
                 reason: report.memory_consolidation.reason,
             },
+            procedural_learning: report.procedural_learning,
         }
     }
 }
@@ -887,23 +905,24 @@ impl AdapterSdkReport {
 
     pub fn governed_safe_report(&self) -> Option<AdapterGovernedSafeReportV1> {
         match self {
-            Self::Recall(report) => Some(AdapterGovernedSafeReportV1::Recall(
+            Self::Recall(report) => Some(AdapterGovernedSafeReportV1::Recall(Box::new(
                 AdapterGovernedRecallSafeReportV1 {
                     query: report.query.clone(),
                     temporal_operation: report.temporal_operation,
                     governed_recall: report.governed_public_report().clone(),
                 },
-            )),
-            Self::Project(report) => Some(AdapterGovernedSafeReportV1::Project(
+            ))),
+            Self::Project(report) => Some(AdapterGovernedSafeReportV1::Project(Box::new(
                 AdapterGovernedProjectSafeReportV1 {
                     temporal_operation: report.governed_recall.authority().temporal_operation(),
                     projection_block: report.projection_block.clone(),
                     chars: report.chars,
                     agent_tool_hints: report.agent_tool_hints.clone(),
+                    selection_receipt: report.selection_receipt.clone(),
                     audit: report.audit.clone(),
                     governed_recall: report.governed_recall.clone(),
                 },
-            )),
+            ))),
             _ => None,
         }
     }

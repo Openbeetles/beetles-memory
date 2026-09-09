@@ -5,9 +5,7 @@ use bm_llm_gateway::{
     OllamaGatewayRequest, OllamaNativeUpstream, OllamaPassthroughRequest, OllamaUpstreamRequest,
     OllamaUpstreamResponse,
 };
-use bm_sdk::{
-    MemoryCapabilityPolicy, MemoryWriteRequest, RuntimeSkillWrite, RuntimeSkillWriteSource,
-};
+use bm_sdk::MemoryCapabilityPolicy;
 use serde_json::{json, Value};
 
 mod support;
@@ -38,34 +36,6 @@ fn scope_request() -> GatewayScopeRequest {
         model_alias: Some("local".to_string()),
         ..GatewayScopeRequest::new(support::gateway_bearer_auth("owner-token"))
     }
-}
-
-fn seed_runtime_skill(gateway: &GatewayRuntime, config: &GatewayConfig) {
-    let resolved = bm_llm_gateway::GatewayScopeResolver::new(config.scope.clone())
-        .resolve(&scope_request())
-        .expect("scope");
-    let agent_id = resolved.entry_scope.identity.agent_id.clone();
-    let runtime = gateway
-        .runtime_for_scope(resolved.entry_scope)
-        .expect("runtime");
-    runtime
-        .runtime()
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
-                name: "thinking_privacy_style".to_string(),
-                topic: "llm_gateway".to_string(),
-                title: "Thinking privacy style".to_string(),
-                summary: "The gateway must not persist or return hidden model thinking."
-                    .to_string(),
-                content: "Only final assistant content may enter maintenance.".to_string(),
-                citations: Vec::new(),
-                source_chat_id: Some("thread-ollama-thinking".to_string()),
-                observed_at: 1,
-            })],
-            owning_scope: support::runtime_skill_subject_scope(&agent_id),
-            source: RuntimeSkillWriteSource::Manual,
-        })
-        .expect("seed skill");
 }
 
 #[derive(Default)]
@@ -140,7 +110,6 @@ impl OllamaNativeUpstream for ThinkingMockOllamaUpstream {
 fn chat_forces_think_false_and_strips_thinking_before_response_and_maintenance() {
     let config = gateway_config();
     let gateway = GatewayRuntime::open(config.clone()).expect("gateway");
-    seed_runtime_skill(&gateway, &config);
     let mut upstream = ThinkingMockOllamaUpstream::default();
 
     let response = handle_ollama_request(
@@ -185,7 +154,6 @@ fn chat_forces_think_false_and_strips_thinking_before_response_and_maintenance()
 fn streaming_chat_strips_thinking_before_chunks_and_deferred_maintenance() {
     let config = gateway_config();
     let gateway = GatewayRuntime::open(config.clone()).expect("gateway");
-    seed_runtime_skill(&gateway, &config);
     let mut upstream = ThinkingMockOllamaUpstream::with_response(OllamaUpstreamResponse::ndjson(
         200,
         vec![

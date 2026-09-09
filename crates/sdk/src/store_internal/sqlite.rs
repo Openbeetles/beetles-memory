@@ -2079,16 +2079,43 @@ impl StoreEngine for SqliteStoreEngine {
         }
         for doc in &request.json_docs {
             let address = (doc.namespace.clone(), doc.key.clone());
-            let exists = tx
+            if deleted_addresses.contains(&address) {
+                continue;
+            }
+            let existing = tx
                 .query_row(
-                    "SELECT 1 FROM bm_kv WHERE namespace = ?1 AND key = ?2",
+                    "SELECT value_json FROM bm_kv WHERE namespace = ?1 AND key = ?2",
                     params![&doc.namespace, &doc.key],
-                    |_| Ok(()),
+                    |row| row.get::<_, String>(0),
                 )
                 .optional()
-                .map_err(|error| map_transaction_error("store_scoped_projection", error))?
-                .is_some();
-            if exists && !deleted_addresses.contains(&address) {
+                .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+            let Some(existing) = existing else { continue };
+            let existing: Value = serde_json::from_str(&existing)
+                .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?;
+            let same_search_owner =
+                crate::store_internal::transaction::existing_scoped_search_owner_is_replaceable(
+                    &doc.namespace,
+                    &doc.key,
+                    &existing,
+                    &request.scope,
+                    |namespace, key| {
+                        tx.query_row(
+                            "SELECT value_json FROM bm_kv WHERE namespace = ?1 AND key = ?2",
+                            params![namespace, key],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .optional()
+                        .map_err(|error| map_transaction_error("store_scoped_projection", error))?
+                        .map(|raw| {
+                            serde_json::from_str(&raw).map_err(|error| {
+                                Error::config("store_scoped_projection", error.to_string())
+                            })
+                        })
+                        .transpose()
+                    },
+                )?;
+            if !same_search_owner {
                 return Err(Error::config(
                     "store_scoped_projection",
                     format!(
@@ -2097,6 +2124,7 @@ impl StoreEngine for SqliteStoreEngine {
                     ),
                 ));
             }
+            deleted_addresses.insert(address);
         }
         for (namespace, key) in &deleted_addresses {
             tx.execute(
@@ -2699,7 +2727,7 @@ mod tests {
 
         let error = validate_existing_sqlite_schema_read_only(&path, &config)
             .expect_err("v5 must fail closed");
-        assert_eq!(error.stage(), "sqlite_store_schema");
+        assert_eq!(error.stage(), "store_rebuild_required");
         assert_eq!(std::fs::read(&path).expect("read sqlite after"), before);
 
         std::fs::remove_file(path).expect("remove sqlite fixture");

@@ -51,6 +51,7 @@ fn config() -> EntryRuntimeConfig {
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "local".to_string(),
             chat_id: "chat-1".to_string(),
         },
@@ -153,7 +154,6 @@ fn write_command_with_summary(summary: &str) -> AdapterCommand {
                 reason: "entry durable mutation receipt fixture".to_string(),
             }),
         }],
-        runtime_skill_owning_scope: None,
     })
 }
 

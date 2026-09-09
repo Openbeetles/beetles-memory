@@ -30,3 +30,6 @@ window-vibrancy = "0.7.1"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+[dev-dependencies]
+bm-sdk = { workspace = true, features = ["nonproduction-replay-harness"] }

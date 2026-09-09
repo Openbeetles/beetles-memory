@@ -56,6 +56,7 @@ fn runtime(path: &std::path::Path) -> EntryRuntime {
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "external-ai".to_string(),
             chat_id: "chat-a".to_string(),
         },
@@ -100,11 +101,7 @@ fn finalize_request(conversation_id: &str, turn_id: &str) -> MemoryTurnFinalizeR
             external_content_used: false,
             candidate_ids: Vec::new(),
         },
-        tool_calls: 0,
-        runtime_skill_selected_ids: Vec::new(),
-        task_learning_selected_ids: Vec::new(),
-        reuse_outcome_note: String::new(),
-        tool_usage_feedback: None,
+        learning: bm_sdk::PostTurnLearningInputV1::empty(),
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     }
@@ -411,6 +408,7 @@ fn authentication_rejection_blocks_configuration_without_retrying() {
     let calls = fake.calls.load(Ordering::SeqCst);
     std::thread::sleep(Duration::from_millis(200));
     assert_eq!(fake.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(service_report(&runtime).blocked_jobs, 1);
     std::env::remove_var(CREDENTIAL_ENV);
 }
 

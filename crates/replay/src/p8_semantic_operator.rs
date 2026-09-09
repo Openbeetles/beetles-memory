@@ -629,10 +629,9 @@ pub(crate) fn run_p8_gate_contract() -> Result<(), String> {
         GovernedRuntimeSkillWriteInput, IngressKind, MemoryIdentity, MemoryPrivacyClass,
         MemoryProjectionRequest, MemoryRecallTemporalOperation, MemoryRuntime, MemoryScope,
         MemoryStoreHandle, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol,
-        MemoryTurnSource, MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
-        RuntimeSkillCreationRef, RuntimeSkillOwningScope, RuntimeSkillWrite,
-        RuntimeSkillWriteSource, StoreBackendConfig, SubjectSoulFoundingCharterSeedV1,
-        SubjectSoulProvisionIntentV1, TranscriptInputMessage,
+        MemoryTurnSource, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
+        RuntimeSkillCreationRef, RuntimeSkillOwningScope, RuntimeSkillWrite, StoreBackendConfig,
+        SubjectSoulFoundingCharterSeedV1, SubjectSoulProvisionIntentV1, TranscriptInputMessage,
     };
 
     struct P8GateHttpClient;
@@ -734,6 +733,7 @@ pub(crate) fn run_p8_gate_contract() -> Result<(), String> {
     fn project(runtime: &MemoryRuntime) -> Result<bm_sdk::MemoryProjectionOutput, String> {
         runtime
             .project(MemoryProjectionRequest {
+                binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
                 temporal_operation: MemoryRecallTemporalOperation::Current,
                 user_query: "P8 gate privacy procedure".into(),
                 system_max_len: 4096,
@@ -803,8 +803,8 @@ pub(crate) fn run_p8_gate_contract() -> Result<(), String> {
     let soul_procedure = "p8-soul-runtime-skill-procedure-sentinel";
     let cross_scope_procedure = "p8-cross-scope-runtime-skill-procedure-sentinel";
     runtime
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![
+        .seed_runtime_skills_for_replay(
+            vec![
                 skill_write(
                     "runtime_skill__p8_gate_private",
                     private_procedure,
@@ -821,11 +821,10 @@ pub(crate) fn run_p8_gate_contract() -> Result<(), String> {
                     MemoryPrivacyClass::SharedWithSubject,
                 ),
             ],
-            owning_scope: RuntimeSkillOwningScope::Subject {
+            RuntimeSkillOwningScope::Subject {
                 mounted_subject_id: default_agent_subject_id("agent-main"),
             },
-            source: RuntimeSkillWriteSource::Manual,
-        })
+        )
         .map_err(|error| error.to_string())?;
 
     let soul_content = "p8 gate stable soul";
@@ -898,11 +897,7 @@ pub(crate) fn run_p8_gate_contract() -> Result<(), String> {
                     external_content_used: false,
                     candidate_ids: Vec::new(),
                 },
-                tool_calls: 0,
-                runtime_skill_selected_ids: Vec::new(),
-                task_learning_selected_ids: Vec::new(),
-                reuse_outcome_note: String::new(),
-                tool_usage_feedback: None,
+                learning: bm_sdk::PostTurnLearningInputV1::empty(),
                 pressure: PressureLevel::Normal,
                 mode_input: RuntimeLifecycleModeInput::default(),
             },

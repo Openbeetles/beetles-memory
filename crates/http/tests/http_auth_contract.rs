@@ -7,9 +7,7 @@ use bm_entry::{
     EntryOperationCapability, EntryRuntime, EntryRuntimeConfig, EntryScope, EntryTransportConfig,
 };
 use bm_http::{handle_http_in_process_request, validate_http_bind_security, HttpRuntimeRequest};
-use bm_sdk::{
-    default_agent_subject_id, MemoryCapabilityPolicy, MemoryPrivacyPolicy, StoreBackendConfig,
-};
+use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, StoreBackendConfig};
 
 fn remote_runtime() -> (EntryRuntime, EntryAuthConfig) {
     let auth = EntryAuthConfig::required_bearer_principal(
@@ -31,6 +29,7 @@ fn remote_runtime() -> (EntryRuntime, EntryAuthConfig) {
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "http.remote".to_string(),
             chat_id: "chat-remote".to_string(),
         },
@@ -68,7 +67,7 @@ fn http_authenticated_principal_without_capability_is_forbidden() {
     let (runtime, _auth) = remote_runtime();
     let request = HttpRuntimeRequest::post_json(
         "/memory/project",
-        r#"{"temporal_operation":{"kind":"current"},"user_query":"release","system_max_len":1024,"recent_messages_limit":2}"#,
+        r#"{"binding":{"kind":"preview"},"temporal_operation":{"kind":"current"},"user_query":"release","system_max_len":1024,"recent_messages_limit":2}"#,
     )
     .with_bearer_token("secret-token");
 
@@ -80,16 +79,19 @@ fn http_authenticated_principal_without_capability_is_forbidden() {
 }
 
 #[test]
-fn http_remote_write_without_explicit_source_scope_does_not_fall_back_to_chat_1() {
+fn http_remote_write_rejects_caller_supplied_scope() {
     let (runtime, _auth) = remote_runtime();
-    let request = HttpRuntimeRequest::post_json(
-        "/memory/write",
-        r#"{"name":"runtime_skill__remote_write","topic":"scope","title":"Remote write","summary":"Remote write","content":"must declare scope"}"#,
-    )
-    .with_bearer_token("secret-token");
+    let mut payload: serde_json::Value = serde_json::from_str(&support::factual_memory_write_body(
+        "forged-scope",
+        "A factual payload cannot override the trusted Entry scope.",
+    ))
+    .unwrap();
+    payload["source_chat_id"] = "forged-scope".into();
+    let request = HttpRuntimeRequest::post_json("/memory/write", payload.to_string())
+        .with_bearer_token("secret-token");
 
     let error = handle_http_in_process_request(&runtime, request)
-        .expect_err("remote write without source_chat_id must be rejected before dispatch");
+        .expect_err("caller scope must be rejected before dispatch");
 
     assert_eq!(error.stage(), "adapter_json_command");
     assert!(error.to_string().contains("source_chat_id"), "{error}");
@@ -105,6 +107,7 @@ fn http_local_profile_requires_explicit_owner_scope_and_may_fill_local_source_ch
             owner_id: "owner-local".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "http.local".to_string(),
             chat_id: "chat-local".to_string(),
         },
@@ -119,27 +122,10 @@ fn http_local_profile_requires_explicit_owner_scope_and_may_fill_local_source_ch
     })
     .expect("entry runtime");
 
-    let body = serde_json::json!({
-        "name": "runtime_skill__local_write",
-        "topic": "scope",
-        "title": "Local write",
-        "summary": "Local write",
-        "content": "- validate the explicit owner scope before dispatch\n- fill only the local source chat after scope validation",
-        "source": "manual",
-        "citations": ["http-auth-contract"],
-        "owning_scope": {
-            "kind": "subject",
-            "mounted_subject_id": default_agent_subject_id("http-agent"),
-        },
-        "creation_ref": {
-            "kind": "replay_promotion",
-            "candidate_ref": "http-auth-contract:local-write",
-            "verification_receipt_digest":
-                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-        },
-        "privacy_class": "shared_with_subject",
-    })
-    .to_string();
+    let body = support::factual_memory_write_body(
+        "http-auth-local-write",
+        "The authenticated local transport preserves factual write scope.",
+    );
     let mut request = HttpRuntimeRequest::post_json("/memory/write", &body);
     request.idempotency_key = "http-auth-contract-local-write".to_string();
     let response = handle_http_in_process_request(&runtime, request).expect("http response");
@@ -158,6 +144,7 @@ fn non_loopback_http_bind_without_bearer_verifier_fails_before_accept() {
             owner_id: "owner-local".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "http.local".to_string(),
             chat_id: "chat-local".to_string(),
         },

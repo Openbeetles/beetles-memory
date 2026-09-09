@@ -1,7 +1,43 @@
 use bm_sdk::{
-    default_agent_subject_id, GovernedRuntimeSkillWriteInput, MemoryPrivacyClass, ProfileId,
-    RuntimeSkillCreationRef, RuntimeSkillOwningScope, RuntimeSkillWrite,
+    default_agent_subject_id, LongTermMemoryKind, MemoryCandidateContent,
+    MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
+    MemoryEvidenceAuthority, MemoryPrivacyClass, MemorySemanticJudgmentSource,
+    MemorySubjectVisibilityPolicy, MemoryWriteCandidate, MemoryWriteRequest, ProfileId,
+    RuntimeSkillOwningScope,
 };
+#[cfg(feature = "nonproduction-replay-harness")]
+use bm_sdk::{GovernedRuntimeSkillWriteInput, RuntimeSkillCreationRef, RuntimeSkillWrite};
+
+#[allow(dead_code)]
+pub fn factual_memory_write_body(candidate_id: &str, body: &str) -> String {
+    let target = MemoryCandidateTarget::LongTermMemory {
+        kind: LongTermMemoryKind::Fact,
+        topic: "http factual transport".to_string(),
+    };
+    serde_json::to_string(&MemoryWriteRequest::Candidates {
+        candidates: vec![MemoryWriteCandidate {
+            candidate_id: candidate_id.to_string(),
+            authority: MemoryEvidenceAuthority::ProgramMemoryCanonical,
+            target: target.clone(),
+            long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
+            privacy: MemoryPrivacyClass::SharedWithSubject,
+            content: MemoryCandidateContent::Text {
+                topic: "http factual transport".to_string(),
+                body: body.to_string(),
+                keywords: vec!["http".to_string(), "factual".to_string()],
+            },
+            evidence_refs: vec!["synthetic:http-factual-transport".to_string()],
+            canonical_entities: Vec::new(),
+            semantic_judgment: Some(MemoryCandidateSemanticJudgment {
+                source: MemorySemanticJudgmentSource::RuntimeGate,
+                decision: MemoryCandidateSemanticDecision::Accept,
+                governed_target: Some(target),
+                reason: "typed factual HTTP transport contract".to_string(),
+            }),
+        }],
+    })
+    .expect("serialize factual HTTP write")
+}
 
 pub fn native_runtime_profile() -> ProfileId {
     #[cfg(feature = "nonproduction-replay-harness")]
@@ -30,6 +66,7 @@ pub fn native_runtime_profile() -> ProfileId {
 }
 
 #[allow(dead_code)]
+#[cfg(feature = "nonproduction-replay-harness")]
 pub fn governed_runtime_skill_write(write: RuntimeSkillWrite) -> GovernedRuntimeSkillWriteInput {
     GovernedRuntimeSkillWriteInput {
         write,

@@ -46,8 +46,6 @@ fn retention_compaction_executor_compacts_metadata_without_deleting_accepted_mem
     let runtime = test_runtime(platform.clone(), profile);
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![LongTermMemoryDraft {
                     kind: LongTermMemoryKind::Project,

@@ -8,7 +8,6 @@ use crate::error::Result;
 use crate::llm::{LlmClient, LlmHttpClient};
 use crate::orchestrator::PressureLevel;
 use crate::platform::SkillStorage;
-use crate::skills::{record_runtime_skill_outcomes, RuntimeSkillReuseOutcome};
 use crate::task_execution::{
     active_task_run_for_chat, run_task_learning_maintenance, TaskArtifactStore,
     TaskLearningMaintenanceContext, TaskLearningMaintenanceInput, TaskLearningMaintenanceOutcome,
@@ -58,10 +57,6 @@ pub struct PostReplyMemoryMaintenanceInput<'a> {
     pub tool_calls: u32,
     pub external_content_used: bool,
     pub prompt_recall_intent: PromptRecallIntent,
-    pub runtime_skill_selected_ids: Vec<String>,
-    pub task_learning_selected_ids: Vec<String>,
-    pub reuse_outcome: RuntimeSkillReuseOutcome,
-    pub reuse_outcome_note: &'a str,
     pub now_secs: u64,
 }
 
@@ -273,13 +268,6 @@ fn run_post_reply_followup_passes(
 ) -> PostReplyFollowupPasses {
     crate::platform::task_wdt::feed_current_task();
     let governance = run_post_reply_memory_governance(ctx, input, recent, shared);
-    if let Err(error) = record_post_reply_learning_reuse(ctx, input) {
-        log::warn!(
-            "[memory_maintenance] learning reuse feedback failed chat_id={}: {}",
-            input.chat_id,
-            error
-        );
-    }
     crate::platform::task_wdt::feed_current_task();
     let extraction_request_outcome = evaluate_post_reply_extraction_request(
         ctx,
@@ -336,35 +324,6 @@ fn run_post_reply_followup_passes(
         task_learning_outcome,
         continuity_capsule_outcome,
     }
-}
-
-fn record_post_reply_learning_reuse(
-    ctx: &PostReplyMemoryMaintenanceContext<'_>,
-    input: &PostReplyMemoryMaintenanceInput<'_>,
-) -> Result<()> {
-    if !input.runtime_skill_selected_ids.is_empty() {
-        let _ = record_runtime_skill_outcomes(
-            ctx.skill_storage,
-            &input.runtime_skill_selected_ids,
-            input.reuse_outcome,
-            input.now_secs,
-            input.reuse_outcome_note,
-        )?;
-    }
-    if matches!(input.reuse_outcome, RuntimeSkillReuseOutcome::Mismatch) {
-        for learning_id in &input.task_learning_selected_ids {
-            let Some(mut record) = ctx.task_learning_store.get(learning_id)? else {
-                continue;
-            };
-            if record.kind != crate::task_execution::TaskLearningKind::ReusableProcedure {
-                continue;
-            }
-            record.last_failure_reason = input.reuse_outcome_note.trim().to_string();
-            record.candidate_state_updated_at = input.now_secs;
-            ctx.task_learning_store.upsert(&record)?;
-        }
-    }
-    Ok(())
 }
 
 fn run_post_reply_memory_governance(
@@ -1226,10 +1185,6 @@ mod tests {
                 tool_calls: 1,
                 external_content_used: false,
                 prompt_recall_intent: PromptRecallIntent::Mixed,
-                runtime_skill_selected_ids: Vec::new(),
-                task_learning_selected_ids: Vec::new(),
-                reuse_outcome: RuntimeSkillReuseOutcome::Neutral,
-                reuse_outcome_note: "",
                 now_secs: 10,
             },
             || true,
@@ -1304,10 +1259,6 @@ mod tests {
                 tool_calls: 0,
                 external_content_used: false,
                 prompt_recall_intent: PromptRecallIntent::Mixed,
-                runtime_skill_selected_ids: Vec::new(),
-                task_learning_selected_ids: Vec::new(),
-                reuse_outcome: RuntimeSkillReuseOutcome::Neutral,
-                reuse_outcome_note: "",
                 now_secs: 20,
             },
             || {
@@ -1390,10 +1341,6 @@ mod tests {
                 tool_calls: 0,
                 external_content_used: false,
                 prompt_recall_intent: PromptRecallIntent::Mixed,
-                runtime_skill_selected_ids: Vec::new(),
-                task_learning_selected_ids: Vec::new(),
-                reuse_outcome: RuntimeSkillReuseOutcome::Neutral,
-                reuse_outcome_note: "",
                 now_secs: 42,
             },
             || false,
@@ -1477,10 +1424,6 @@ mod tests {
                 tool_calls: 1,
                 external_content_used: false,
                 prompt_recall_intent: PromptRecallIntent::Mixed,
-                runtime_skill_selected_ids: Vec::new(),
-                task_learning_selected_ids: Vec::new(),
-                reuse_outcome: RuntimeSkillReuseOutcome::Neutral,
-                reuse_outcome_note: "",
                 now_secs: 42,
             },
             || false,
@@ -1644,10 +1587,6 @@ mod tests {
                 tool_calls: 1,
                 external_content_used: false,
                 prompt_recall_intent: PromptRecallIntent::Mixed,
-                runtime_skill_selected_ids: Vec::new(),
-                task_learning_selected_ids: Vec::new(),
-                reuse_outcome: RuntimeSkillReuseOutcome::Neutral,
-                reuse_outcome_note: "",
                 now_secs: 30,
             },
             || false,
@@ -1773,10 +1712,6 @@ mod tests {
                 tool_calls: 1,
                 external_content_used: false,
                 prompt_recall_intent: PromptRecallIntent::Mixed,
-                runtime_skill_selected_ids: Vec::new(),
-                task_learning_selected_ids: Vec::new(),
-                reuse_outcome: RuntimeSkillReuseOutcome::Neutral,
-                reuse_outcome_note: "",
                 now_secs: 100,
             },
             Some("Post-reply maintenance can now reuse one continuity builder"),
@@ -1889,10 +1824,6 @@ mod tests {
                 tool_calls: 1,
                 external_content_used: false,
                 prompt_recall_intent: PromptRecallIntent::Mixed,
-                runtime_skill_selected_ids: Vec::new(),
-                task_learning_selected_ids: Vec::new(),
-                reuse_outcome: RuntimeSkillReuseOutcome::Neutral,
-                reuse_outcome_note: "",
                 now_secs: 100,
             },
             Some("Failed runs must not leak into continuity capsules"),
@@ -2024,10 +1955,6 @@ mod tests {
                 tool_calls: 1,
                 external_content_used: false,
                 prompt_recall_intent: PromptRecallIntent::Mixed,
-                runtime_skill_selected_ids: Vec::new(),
-                task_learning_selected_ids: Vec::new(),
-                reuse_outcome: RuntimeSkillReuseOutcome::Neutral,
-                reuse_outcome_note: "",
                 now_secs: 100,
             },
             Some("Settled runs should beat unsettled recent runs"),
@@ -2234,10 +2161,6 @@ mod tests {
                 tool_calls: 1,
                 external_content_used: false,
                 prompt_recall_intent: PromptRecallIntent::Mixed,
-                runtime_skill_selected_ids: Vec::new(),
-                task_learning_selected_ids: Vec::new(),
-                reuse_outcome: RuntimeSkillReuseOutcome::Neutral,
-                reuse_outcome_note: "",
                 now_secs: 30,
             },
             || false,
@@ -2322,10 +2245,6 @@ mod tests {
                 tool_calls: 2,
                 external_content_used: true,
                 prompt_recall_intent: PromptRecallIntent::Mixed,
-                runtime_skill_selected_ids: Vec::new(),
-                task_learning_selected_ids: Vec::new(),
-                reuse_outcome: RuntimeSkillReuseOutcome::Neutral,
-                reuse_outcome_note: "",
                 now_secs: 99,
             },
             || panic!("external-content turns should not enqueue long-term refresh"),
@@ -2335,98 +2254,5 @@ mod tests {
             outcome.extraction_request_outcome,
             LongTermMemoryRefreshRequestOutcome::NotRequested
         );
-    }
-
-    #[test]
-    fn post_reply_maintenance_records_runtime_skill_success_and_mismatch() {
-        let session_store = StubSessionStore {
-            recent: vec![
-                SessionMessage::synthetic(
-                    "user".to_string(),
-                    "继续按 release patch flow 做".to_string(),
-                ),
-                SessionMessage::synthetic(
-                    "assistant".to_string(),
-                    "我会按之前验证过的流程继续".to_string(),
-                ),
-            ],
-            count: 10,
-            ..Default::default()
-        };
-        let summary_store = StubSessionSummaryStore::default();
-        let extraction_state_store = StubExtractionStateStore::default();
-        let execution_state_store = StubExecutionStateStore::default();
-        let memory_store = StubMemoryStore;
-        let long_term_memory_store = StubLongTermMemoryStore;
-        let continuity_capsule_store = StubContinuityCapsuleStore::default();
-        let turn_ledger_store = StubTurnLedgerStore;
-        let skill_storage = StubSkillStorage::default();
-        crate::skills::upsert_runtime_skill(
-            &skill_storage,
-            &crate::skills::RuntimeSkillWrite {
-                name: String::new(),
-                topic: "release_patch_flow".to_string(),
-                title: "Release patch flow".to_string(),
-                summary: "Apply the release patch safely.".to_string(),
-                content: "1. inspect diff\n2. patch\n3. verify".to_string(),
-                citations: Vec::new(),
-                source_chat_id: Some("chat-1".to_string()),
-                observed_at: 10,
-            },
-        )
-        .unwrap();
-        let mut http = DummyHttpClient;
-
-        for reuse_outcome in [
-            crate::skills::RuntimeSkillReuseOutcome::Succeeded,
-            crate::skills::RuntimeSkillReuseOutcome::Mismatch,
-        ] {
-            let _ = run_post_reply_memory_maintenance(
-                &mut http,
-                &FixedLlmClient,
-                PostReplyMemoryMaintenanceContext {
-                    session_store: &session_store,
-                    memory_store: &memory_store,
-                    session_summary_store: &summary_store,
-                    execution_state_store: &execution_state_store,
-                    active_work_store: &StubActiveWorkStore::default(),
-                    long_term_memory_store: &long_term_memory_store,
-                    continuity_capsule_store: &continuity_capsule_store,
-                    extraction_state_store: &extraction_state_store,
-                    turn_ledger_store: &turn_ledger_store,
-                    skill_storage: &skill_storage,
-                    task_run_store: &StubTaskRunStore::default(),
-                    task_artifact_store: &StubTaskArtifactStore::default(),
-                    task_learning_store: &StubTaskLearningStore::default(),
-                },
-                PostReplyMemoryMaintenanceInput {
-                    mounted_subject_id: TEST_SUBJECT_ID,
-                    chat_id: "chat-1",
-                    ingress: IngressKind::User,
-                    channel: "chat_channel",
-                    user_content: "继续按 release patch flow 做",
-                    reply_content: "我会按之前验证过的流程继续",
-                    pressure: PressureLevel::Normal,
-                    memory_profile: MemoryProfile::Embedded,
-                    tool_calls: 1,
-                    external_content_used: false,
-                    prompt_recall_intent: crate::memory::PromptRecallIntent::Procedural,
-                    runtime_skill_selected_ids: vec![
-                        "runtime_skill__release_patch_flow".to_string()
-                    ],
-                    task_learning_selected_ids: Vec::new(),
-                    reuse_outcome,
-                    reuse_outcome_note: "test_outcome",
-                    now_secs: 50,
-                },
-                || false,
-            );
-        }
-
-        let record =
-            crate::skills::get_skill_content(&skill_storage, "runtime_skill__release_patch_flow")
-                .expect("runtime skill content");
-        assert!(record.contains("Validated success count: 1"));
-        assert!(record.contains("Mismatch count: 1"));
     }
 }

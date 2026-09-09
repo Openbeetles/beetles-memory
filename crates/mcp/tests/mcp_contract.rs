@@ -96,17 +96,15 @@ fn resource_schema_exposes_only_safe_memory_resources() {
 }
 
 #[test]
-fn write_candidate_tool_schema_matches_adapter_payload_not_placeholder_candidate() {
+fn write_candidate_tool_schema_discovers_the_typed_adapter_write_variants() {
     let tools = tool_specs();
     let write = tools
         .iter()
         .find(|tool| tool.name == "memory_write_candidate")
         .expect("memory_write_candidate tool");
 
-    assert!(write.schema_fields.contains(&"name".to_string()));
-    assert!(write.schema_fields.contains(&"topic".to_string()));
-    assert!(write.schema_fields.contains(&"title".to_string()));
-    assert!(write.schema_fields.contains(&"summary".to_string()));
-    assert!(write.schema_fields.contains(&"content".to_string()));
-    assert!(!write.schema_fields.contains(&"candidate".to_string()));
+    assert_eq!(
+        write.schema_fields,
+        ["kind", "candidates", "extraction", "mutations"]
+    );
 }

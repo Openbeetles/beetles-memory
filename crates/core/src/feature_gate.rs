@@ -210,7 +210,53 @@ pub struct ProfileCapabilityCatalogEntry {
     pub indexed_task_learning_recall_allowed: bool,
     pub communication_adapter_allowed: bool,
     pub llm_gateway_server_allowed: bool,
+    pub procedural_learning: ProfileProceduralLearningCapabilityCatalog,
     pub adapter: ProfileAdapterCapabilityCatalog,
+}
+
+/// Profile-owned participation in the full procedural learning lifecycle.
+///
+/// Compact Runtime Skill recall is intentionally separate: constrained profiles
+/// may recall already-governed procedures without mounting host packages,
+/// accepting registries, issuing receipts, or running a learning worker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProfileProceduralLearningCapabilityCatalog {
+    pub standard_agent_skill_mount: bool,
+    pub agent_tool_registry: bool,
+    pub agent_tool_experience_read: bool,
+    pub agent_tool_hint: bool,
+    pub agent_tool_learning: bool,
+    pub selection_receipt: bool,
+    pub finalize_feedback: bool,
+    pub worker: bool,
+}
+
+impl ProfileProceduralLearningCapabilityCatalog {
+    pub const fn forbidden() -> Self {
+        Self {
+            standard_agent_skill_mount: false,
+            agent_tool_registry: false,
+            agent_tool_experience_read: false,
+            agent_tool_hint: false,
+            agent_tool_learning: false,
+            selection_receipt: false,
+            finalize_feedback: false,
+            worker: false,
+        }
+    }
+
+    pub const fn full() -> Self {
+        Self {
+            standard_agent_skill_mount: true,
+            agent_tool_registry: true,
+            agent_tool_experience_read: true,
+            agent_tool_hint: true,
+            agent_tool_learning: true,
+            selection_receipt: true,
+            finalize_feedback: true,
+            worker: true,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -390,6 +436,7 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 11] = [
         indexed_task_learning_recall_allowed: false,
         communication_adapter_allowed: true,
         llm_gateway_server_allowed: false,
+        procedural_learning: ProfileProceduralLearningCapabilityCatalog::forbidden(),
         adapter: ProfileAdapterCapabilityCatalog {
             cli: ProfileAdapterTransportCapability::local(false),
             http: ProfileAdapterTransportCapability::forbidden(),
@@ -417,6 +464,7 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 11] = [
         indexed_task_learning_recall_allowed: false,
         communication_adapter_allowed: false,
         llm_gateway_server_allowed: false,
+        procedural_learning: ProfileProceduralLearningCapabilityCatalog::forbidden(),
         adapter: ProfileAdapterCapabilityCatalog {
             cli: ProfileAdapterTransportCapability::forbidden(),
             http: ProfileAdapterTransportCapability::forbidden(),
@@ -444,6 +492,7 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 11] = [
         indexed_task_learning_recall_allowed: true,
         communication_adapter_allowed: true,
         llm_gateway_server_allowed: false,
+        procedural_learning: ProfileProceduralLearningCapabilityCatalog::full(),
         adapter: ProfileAdapterCapabilityCatalog {
             cli: ProfileAdapterTransportCapability::local(false),
             http: ProfileAdapterTransportCapability::server(false),
@@ -471,6 +520,7 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 11] = [
         indexed_task_learning_recall_allowed: true,
         communication_adapter_allowed: true,
         llm_gateway_server_allowed: true,
+        procedural_learning: ProfileProceduralLearningCapabilityCatalog::full(),
         adapter: ProfileAdapterCapabilityCatalog {
             cli: ProfileAdapterTransportCapability::local(true),
             http: ProfileAdapterTransportCapability::server(true),
@@ -498,6 +548,7 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 11] = [
         indexed_task_learning_recall_allowed: true,
         communication_adapter_allowed: true,
         llm_gateway_server_allowed: false,
+        procedural_learning: ProfileProceduralLearningCapabilityCatalog::full(),
         adapter: ProfileAdapterCapabilityCatalog {
             cli: ProfileAdapterTransportCapability::local(true),
             http: ProfileAdapterTransportCapability::server(true),
@@ -526,6 +577,7 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 11] = [
         indexed_task_learning_recall_allowed: true,
         communication_adapter_allowed: true,
         llm_gateway_server_allowed: false,
+        procedural_learning: ProfileProceduralLearningCapabilityCatalog::full(),
         adapter: ProfileAdapterCapabilityCatalog {
             cli: ProfileAdapterTransportCapability::local(true),
             http: ProfileAdapterTransportCapability::server(true),
@@ -553,6 +605,7 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 11] = [
         indexed_task_learning_recall_allowed: true,
         communication_adapter_allowed: true,
         llm_gateway_server_allowed: false,
+        procedural_learning: ProfileProceduralLearningCapabilityCatalog::full(),
         adapter: ProfileAdapterCapabilityCatalog {
             cli: ProfileAdapterTransportCapability::local(true),
             http: ProfileAdapterTransportCapability::server(true),
@@ -584,6 +637,7 @@ const PROFILE_CAPABILITY_CATALOG: [ProfileCapabilityCatalogEntry; 11] = [
         indexed_task_learning_recall_allowed: true,
         communication_adapter_allowed: true,
         llm_gateway_server_allowed: true,
+        procedural_learning: ProfileProceduralLearningCapabilityCatalog::full(),
         adapter: ProfileAdapterCapabilityCatalog {
             cli: ProfileAdapterTransportCapability::local(true),
             http: ProfileAdapterTransportCapability::server(true),
@@ -618,6 +672,7 @@ const fn dev_full_catalog_entry(
         indexed_task_learning_recall_allowed: true,
         communication_adapter_allowed: true,
         llm_gateway_server_allowed: true,
+        procedural_learning: ProfileProceduralLearningCapabilityCatalog::full(),
         adapter: ProfileAdapterCapabilityCatalog {
             cli: ProfileAdapterTransportCapability::local(true),
             http: ProfileAdapterTransportCapability::server(true),

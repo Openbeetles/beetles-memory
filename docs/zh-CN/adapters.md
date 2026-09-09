@@ -34,6 +34,7 @@ let entry = EntryRuntime::open(EntryRuntimeConfig {
         owner_id: "owner-default".to_string(),
     },
     scope: EntryScope {
+        conversation_id: None,
         channel: "gateway".to_string(),
         chat_id: "chat-1".to_string(),
     },

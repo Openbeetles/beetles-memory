@@ -18,6 +18,7 @@ fn remote_runtime() -> EntryRuntime {
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "mcp.remote".to_string(),
             chat_id: "chat-remote".to_string(),
         },
@@ -41,19 +42,18 @@ fn remote_runtime() -> EntryRuntime {
 }
 
 #[test]
-fn mcp_remote_write_without_explicit_source_scope_is_rejected() {
+fn mcp_write_rejects_caller_supplied_scope_fields() {
     let runtime = remote_runtime();
     let server = McpToolServer::new("mcp-remote", "mcp-remote-client");
 
+    let mut payload = support::factual_write_body();
+    payload["source_chat_id"] = "forged-chat".into();
     let error = server
         .call(
             &runtime,
-            McpToolCall::json(
-                "memory_write_candidate",
-                r#"{"name":"runtime_skill__mcp_remote","topic":"scope","title":"Remote","summary":"Remote","content":"must declare scope"}"#,
-            ),
+            McpToolCall::json("memory_write_candidate", payload.to_string()),
         )
-        .expect_err("remote MCP write must not silently fall back to chat-1");
+        .expect_err("caller scope field must be rejected by canonical decoder");
 
     assert_eq!(error.stage(), "adapter_json_command");
     assert!(error.to_string().contains("source_chat_id"), "{error}");

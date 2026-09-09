@@ -388,16 +388,18 @@ impl EntryRuntime {
     ) -> Result<Self> {
         let capability_policy = enabled_capability_policy(config.capability.clone());
         let privacy = privacy_policy(config.privacy.clone());
+        let mut scope =
+            MemoryScope::new(config.scope.channel.clone(), config.scope.chat_id.clone())?;
+        if let Some(conversation_id) = &config.scope.conversation_id {
+            scope = scope.with_conversation_id(conversation_id.clone())?;
+        }
         let runtime = Arc::new(
             MemoryRuntime::builder()
                 .identity(MemoryIdentity::new(
                     config.identity.agent_id.clone(),
                     config.identity.owner_id.clone(),
                 )?)
-                .scope(MemoryScope::new(
-                    config.scope.channel.clone(),
-                    config.scope.chat_id.clone(),
-                )?)
+                .scope(scope)
                 .store(store.clone())
                 .agent_skill_dirs(agent_skill_dirs_from_env())
                 .capability_policy(capability_policy.clone())
@@ -422,7 +424,11 @@ impl EntryRuntime {
         ) = if runtime.capabilities().maintenance.visible {
             let governor_runtime = governor_control_runtime(&runtime, store.clone())?;
             let control_authorities = governor_runtime.learning_service_control_authorities()?;
-            let service_status_authority = governor_runtime.learning_service_status_authority()?;
+            let service_status_authority = if governor_runtime.capabilities().inspection.visible {
+                Some(governor_runtime.learning_service_status_authority()?)
+            } else {
+                None
+            };
             let learning_identity =
                 MemoryLearningEngine::attach(Arc::clone(&runtime))?.attachment_identity()?;
             let mut groups = learning_services
@@ -439,7 +445,7 @@ impl EntryRuntime {
                     Arc::clone(&group.governance_model),
                     Some(group.service.clone()),
                     Some(attachment),
-                    Some(service_status_authority),
+                    service_status_authority,
                 )
             } else {
                 let governance_model = Arc::new(EntryGovernanceModelStore::open(
@@ -467,7 +473,7 @@ impl EntryRuntime {
                     governance_model,
                     Some(service),
                     Some(attachment),
-                    Some(service_status_authority),
+                    service_status_authority,
                 )
             }
         } else {
@@ -893,6 +899,7 @@ impl EntryRuntime {
         match project_adapter_report(
             &self.runtime,
             MemoryProjectionRequest {
+                binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
                 temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 structured_query_facets: Vec::new(),
                 user_query: query.clone(),

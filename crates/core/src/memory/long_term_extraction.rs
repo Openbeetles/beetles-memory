@@ -161,7 +161,8 @@ pub fn mark_long_term_memory_extraction_deferred(
     next_state
 }
 
-#[derive(Default, Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Default, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ParsedLongTermMemoryExtraction {
     pub upserts: Vec<LongTermMemoryDraft>,
     pub deletes: Vec<LongTermMemorySlot>,

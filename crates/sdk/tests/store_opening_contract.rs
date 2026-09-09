@@ -10,7 +10,7 @@ use bm_sdk::{
     MemoryPrivacyClass, MemoryProjectionRequest, MemoryRecallRequest, MemorySpaceExportRequest,
     MemorySpaceImportRequest, MemorySpacePrivateMaterialPolicy, MemorySubjectVisibilityPolicy,
     MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel, RuntimeLifecycleModeInput,
-    RuntimeSkillReuseOutcome, StoreBackendConfig,
+    StoreBackendConfig,
 };
 
 use support::{test_runtime, StaticHttpClient, StaticLlmClient};
@@ -34,8 +34,6 @@ fn sdk_runtime_accepts_store_platform_without_host_store_traits() {
 
     let write = runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![LongTermMemoryDraft {
                     kind: LongTermMemoryKind::Project,
@@ -84,6 +82,7 @@ fn sdk_runtime_accepts_store_platform_without_host_store_traits() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "How do I open storage?".to_string(),
@@ -108,10 +107,6 @@ fn sdk_runtime_accepts_store_platform_without_host_store_traits() {
                 reply_content: "Use MemoryStoreHandle and pass it to MemoryRuntime.".to_string(),
                 tool_calls: 0,
                 external_content_used: false,
-                runtime_skill_selected_ids: Vec::new(),
-                task_learning_selected_ids: Vec::new(),
-                reuse_outcome: RuntimeSkillReuseOutcome::Neutral,
-                reuse_outcome_note: String::new(),
                 pressure: PressureLevel::Normal,
                 mode_input: RuntimeLifecycleModeInput::default(),
             },

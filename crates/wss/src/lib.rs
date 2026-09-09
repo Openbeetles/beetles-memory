@@ -24,8 +24,8 @@ use bm_adapter::AdapterOperation;
 
 #[cfg(any(feature = "server-std", feature = "client-compact"))]
 use bm_adapter::{
-    decode_json_adapter_command, AdapterJsonCommandOptions, AdapterRequestIdentityOwner,
-    AdapterResponse, AdapterSdkReport, TransportKind, TransportMode,
+    decode_json_adapter_command, AdapterRequestIdentityOwner, AdapterResponse, AdapterSdkReport,
+    TransportKind, TransportMode,
 };
 #[cfg(feature = "server-std")]
 use bm_entry::EntryAcceptedTcpStream;
@@ -226,12 +226,7 @@ impl<'runtime> WssRuntimeSession<'runtime> {
             .request_identity_owner
             .issue(frame.idempotency_key.as_deref())
             .map_err(|error| bm_sdk::Error::config("wss_request_identity", error.to_string()))?;
-        reject_missing_remote_source_scope(self.runtime, operation, &frame.payload)?;
-        let command = decode_json_adapter_command(
-            operation,
-            &frame.payload,
-            &wss_command_options(self.runtime),
-        )?;
+        let command = decode_json_adapter_command(operation, &frame.payload)?;
         let response = self.runtime.handle_with_budget_lease(
             EntryTransportContext::new(
                 request_identity.request_id,
@@ -290,40 +285,6 @@ impl<'runtime> WssRuntimeSession<'runtime> {
             budget_report,
         )
     }
-}
-
-#[cfg(any(feature = "server-std", feature = "client-compact"))]
-fn wss_command_options(runtime: &EntryRuntime) -> AdapterJsonCommandOptions {
-    let options = AdapterJsonCommandOptions::new("bm-wss");
-    if runtime.uses_local_default_scope_policy() {
-        options.with_default_source_chat_id(runtime.runtime().scope().chat_id.clone())
-    } else {
-        options
-    }
-}
-
-#[cfg(any(feature = "server-std", feature = "client-compact"))]
-fn reject_missing_remote_source_scope(
-    runtime: &EntryRuntime,
-    operation: AdapterOperation,
-    body: &str,
-) -> bm_sdk::Result<()> {
-    if runtime.uses_local_default_scope_policy() || operation != AdapterOperation::Write {
-        return Ok(());
-    }
-    let value: serde_json::Value = serde_json::from_str(body)
-        .map_err(|err| bm_sdk::Error::config("adapter_json_command", err.to_string()))?;
-    if value
-        .get("source_chat_id")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
-    {
-        return Ok(());
-    }
-    Err(bm_sdk::Error::config(
-        "adapter_json_command",
-        "remote adapter write payload missing source_chat_id; refusing implicit chat-1 scope",
-    ))
 }
 
 #[cfg(any(feature = "server-std", feature = "client-compact"))]
@@ -916,6 +877,14 @@ fn render_response(response: AdapterResponse<AdapterSdkReport>) -> String {
                 );
             }
             omit_null_receipt(match report {
+                AdapterSdkReport::Write(report) => json!({
+                    "status": "accepted",
+                    "operation": report.operation,
+                    "accepted": report.accepted,
+                    "changed": report.changed,
+                    "reason": report.reason,
+                    "receipt": receipt,
+                }).to_string(),
                 AdapterSdkReport::Recall(_) | AdapterSdkReport::Project(_) => {
                     unreachable!("governed DTO handled above")
                 }

@@ -137,6 +137,9 @@ pub struct GovernedStateRuntimeBudget {
     pub max_retained_long_term_revisions_per_owner: usize,
     pub max_retained_runtime_skill_owners_per_scope: usize,
     pub max_runtime_skill_lineage_depth: usize,
+    pub max_agent_tool_experience_owners_per_subject: usize,
+    pub max_agent_tool_experience_revisions_per_owner: usize,
+    pub max_agent_tool_experience_evidence_refs_per_owner: usize,
     pub max_as_of_candidates: usize,
     pub max_obsolete_decisions: usize,
     pub max_procedural_candidates: usize,
@@ -1041,6 +1044,27 @@ pub fn compile_runtime_budget(input: RuntimeBudgetInput) -> RuntimeBudgetReport 
             ceiling
                 .governed_state_budget
                 .max_runtime_skill_lineage_depth,
+            source_scale,
+        )
+        .max(1),
+        max_agent_tool_experience_owners_per_subject: scale_usize(
+            ceiling
+                .governed_state_budget
+                .max_agent_tool_experience_owners_per_subject,
+            source_scale,
+        )
+        .max(1),
+        max_agent_tool_experience_revisions_per_owner: scale_usize(
+            ceiling
+                .governed_state_budget
+                .max_agent_tool_experience_revisions_per_owner,
+            source_scale,
+        )
+        .max(1),
+        max_agent_tool_experience_evidence_refs_per_owner: scale_usize(
+            ceiling
+                .governed_state_budget
+                .max_agent_tool_experience_evidence_refs_per_owner,
             source_scale,
         )
         .max(1),
@@ -2326,6 +2350,13 @@ const fn profile_budget(spec: ProfileBudgetSpec) -> ProfileBudgetCeiling {
             max_retained_runtime_skill_owners_per_scope: spec
                 .retained_runtime_skill_owners_per_scope,
             max_runtime_skill_lineage_depth: spec.runtime_skill_lineage_depth,
+            max_agent_tool_experience_owners_per_subject: spec
+                .retained_runtime_skill_owners_per_scope,
+            max_agent_tool_experience_revisions_per_owner: spec.runtime_skill_lineage_depth,
+            max_agent_tool_experience_evidence_refs_per_owner: max_usize(
+                spec.source_chars / 128,
+                8,
+            ),
             max_as_of_candidates: max_usize(spec.records / 512, 2),
             max_obsolete_decisions: max_usize(spec.records / 256, 2),
             max_procedural_candidates: max_usize(spec.source_chars / 256, 2),
@@ -2695,6 +2726,15 @@ mod tests {
                 ceiling.max_runtime_skill_lineage_depth, expected_lineage,
                 "{profile:?} runtime skill lineage ceiling drifted"
             );
+            assert_eq!(
+                ceiling.max_agent_tool_experience_owners_per_subject, expected_owners,
+                "{profile:?} Agent Tool experience owner ceiling drifted"
+            );
+            assert_eq!(
+                ceiling.max_agent_tool_experience_revisions_per_owner, expected_lineage,
+                "{profile:?} Agent Tool experience revision ceiling drifted"
+            );
+            assert!(ceiling.max_agent_tool_experience_evidence_refs_per_owner > 0);
             let compiled = compile_runtime_budget(compiler_fixture(profile)).governed_state_budget;
             assert!(compiled.max_retained_runtime_skill_owners_per_scope > 0);
             assert!(
@@ -2705,6 +2745,21 @@ mod tests {
             assert!(
                 compiled.max_runtime_skill_lineage_depth <= expected_lineage,
                 "{profile:?} compiled runtime skill lineage cap exceeded its profile ceiling"
+            );
+            assert!(compiled.max_agent_tool_experience_owners_per_subject > 0);
+            assert!(
+                compiled.max_agent_tool_experience_owners_per_subject <= expected_owners,
+                "{profile:?} compiled Agent Tool owner cap exceeded its profile ceiling"
+            );
+            assert!(compiled.max_agent_tool_experience_revisions_per_owner > 0);
+            assert!(
+                compiled.max_agent_tool_experience_revisions_per_owner <= expected_lineage,
+                "{profile:?} compiled Agent Tool revision cap exceeded its profile ceiling"
+            );
+            assert!(compiled.max_agent_tool_experience_evidence_refs_per_owner > 0);
+            assert!(
+                compiled.max_agent_tool_experience_evidence_refs_per_owner
+                    <= ceiling.max_agent_tool_experience_evidence_refs_per_owner
             );
         }
     }

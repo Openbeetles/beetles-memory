@@ -177,6 +177,53 @@ fn owner_record(scope: RuntimeSkillOwningScope) -> RuntimeSkillOwnerRecord {
     owner_record_with_intrinsic(scope, intrinsic())
 }
 
+#[test]
+fn usage_feedback_reduces_into_exact_owner_without_reauthoring_skill() {
+    use bm_core::memory::ProceduralExecutionOutcomeV1 as Outcome;
+    let before = owner_record(RuntimeSkillOwningScope::Subject {
+        mounted_subject_id: "subject-1".into(),
+    });
+    assert_eq!(
+        before
+            .apply_usage_feedback(&[Outcome::NotExecuted], 110)
+            .unwrap(),
+        before
+    );
+    let after = before
+        .apply_usage_feedback(
+            &[
+                Outcome::Succeeded,
+                Outcome::Failed,
+                Outcome::Mismatch,
+                Outcome::NotExecuted,
+            ],
+            110,
+        )
+        .unwrap();
+    assert_eq!(after.owner_revision, before.owner_revision + 1);
+    assert_eq!(after.lifecycle.usage_outcome.observation_count, 3);
+    assert_eq!(after.lifecycle.usage_outcome.succeeded_count, 1);
+    assert_eq!(after.lifecycle.usage_outcome.mismatch_count, 1);
+    assert_eq!(after.procedural_content, before.procedural_content);
+    assert_eq!(after.intrinsic_contract, before.intrinsic_contract);
+    assert_eq!(after.privacy_class, before.privacy_class);
+    assert_eq!(
+        after.lifecycle.lineage.predecessor,
+        Some(RuntimeSkillOwnerBinding::from_record(&before).unwrap())
+    );
+    let failed = after.apply_usage_feedback(&[Outcome::Failed], 120).unwrap();
+    assert_eq!(
+        failed.lifecycle.usage_outcome.last_outcome,
+        Some(RuntimeSkillUsageOutcome::Neutral)
+    );
+    assert_eq!(failed.lifecycle.usage_outcome.mismatch_count, 1);
+    assert!(before
+        .retire(110)
+        .unwrap()
+        .apply_usage_feedback(&[Outcome::Succeeded], 120)
+        .is_err());
+}
+
 fn owner_record_with_intrinsic(
     scope: RuntimeSkillOwningScope,
     intrinsic_contract: RuntimeSkillIntrinsicContract,

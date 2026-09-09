@@ -3,6 +3,14 @@
 
 use std::path::Path;
 
+/// Canonical evidence text preserves LF without accepting other control characters.
+/// This is a predicate, not normalization: callers retain the original digest input.
+pub(crate) fn is_canonical_evidence_text(value: &str) -> bool {
+    !value.is_empty()
+        && value == value.trim()
+        && !value.chars().any(|ch| ch.is_control() && ch != '\n')
+}
+
 /// 按字符边界截断内容至最多 max 个字符；不截断时零分配返回借用。
 /// Truncate to at most `max` chars; returns `Cow::Borrowed` (zero alloc) when no truncation needed.
 pub fn truncate_content_to_max(s: &str, max: usize) -> std::borrow::Cow<'_, str> {

@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use bm_entry::EntryOperationCapability;
 use bm_sdk::{
     ConversationScope, MemoryProjectionRequest, MemoryTurnProtocol, MemoryTurnSource,
-    ProviderModelContextLimit, RuntimeLifecycleModeInput, TranscriptInputMessage,
+    ProceduralProjectionBindingV1, ProviderModelContextLimit, RuntimeLifecycleModeInput,
+    TranscriptInputMessage,
 };
 use serde_json::{Map, Value};
 
@@ -15,8 +16,9 @@ use crate::projection::render_model_facing_projection;
 use crate::provider::select_provider_for_kind;
 use crate::{
     maintenance::{
-        run_json_maintenance, GatewayInputTranscript, GatewayMaintenancePlan,
-        GatewayMaintenancePlanInput, GatewayMaintenanceRunOutcome, OpenAiDeferredMaintenance,
+        canonical_gateway_turn_id, ensure_gateway_request_id, run_json_maintenance,
+        GatewayInputTranscript, GatewayMaintenancePlan, GatewayMaintenancePlanInput,
+        GatewayMaintenanceRunOutcome, OpenAiDeferredMaintenance,
     },
     probe_openai_provider_capabilities, GatewayAuditOutcome, GatewayAuditReport, GatewayAuditStage,
     GatewayConfig, GatewayError, GatewayProviderConfig, GatewayProviderKind,
@@ -420,6 +422,7 @@ fn handle_chat_completion(
     if request.scope.model_alias.is_none() {
         request.scope.model_alias = Some(model_alias.to_string());
     }
+    ensure_gateway_request_id(&mut request.scope.request_id_hint)?;
 
     let scope = GatewayScopeResolver::new(config.scope.clone()).resolve(&request.scope)?;
     let mut audit = GatewayAuditReport::new(
@@ -436,6 +439,25 @@ fn handle_chat_completion(
         || body_object.get("tools").is_some();
     let provider_limit = provider_model_context_limit(provider, model_alias);
     let runtime_budget = context.report();
+    let model = provider_model_name(provider, model_alias);
+    let runtime_scope = runtime.runtime().scope();
+    let conversation = ConversationScope {
+        channel: runtime_scope.channel.clone(),
+        chat_id: runtime_scope.chat_id.clone(),
+        conversation_id: runtime_scope.conversation_id.clone(),
+    };
+    let turn_source = MemoryTurnSource {
+        ingress: bm_sdk::IngressKind::User,
+        channel: scope.channel.clone(),
+        provider: Some(provider.kind.as_str().to_string()),
+        protocol: MemoryTurnProtocol::OpenAiChat,
+        endpoint: Some("/v1/chat/completions".to_string()),
+        model_alias: Some(model_alias.to_string()),
+        model_resolved: Some(model.clone()),
+        request_id: request.scope.request_id_hint.clone(),
+        client_conversation_hint: request.scope.client_conversation_hint.clone(),
+    };
+    let turn_id = canonical_gateway_turn_id(&conversation, &turn_source)?;
     let tool_registry_refs = if let Some(registry) =
         request_scoped_agent_tool_registry("openai-compatible", body_object.get("tools"))
     {
@@ -452,6 +474,9 @@ fn handle_chat_completion(
     let projection = runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            binding: ProceduralProjectionBindingV1::Turn {
+                turn_id: turn_id.clone(),
+            },
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: extracted_user_text.clone(),
@@ -478,40 +503,19 @@ fn handle_chat_completion(
         .get("stream")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let model = provider_model_name(provider, model_alias);
     let upstream_body = build_upstream_chat_body(
         &body,
         projection.provider_payload().system_memory_block(),
         &model,
     )?;
-    let carry = projection.provider_payload().maintenance_carry();
     let maintenance_plan = GatewayMaintenancePlan::new(GatewayMaintenancePlanInput {
         runtime,
-        user_content: extracted_user_text.clone(),
         input_messages: input_transcript.messages.clone(),
-        conversation: ConversationScope {
-            channel: scope.channel.clone(),
-            chat_id: scope.chat_id.clone(),
-            conversation_id: request
-                .scope
-                .client_conversation_hint
-                .clone()
-                .or_else(|| request.scope.body_conversation_hint.clone()),
-        },
-        turn_source: MemoryTurnSource {
-            ingress: bm_sdk::IngressKind::User,
-            channel: scope.channel.clone(),
-            provider: Some(provider.kind.as_str().to_string()),
-            protocol: MemoryTurnProtocol::OpenAiChat,
-            endpoint: Some("/v1/chat/completions".to_string()),
-            model_alias: Some(model_alias.to_string()),
-            model_resolved: Some(model.clone()),
-            request_id: request.scope.request_id_hint.clone(),
-            client_conversation_hint: request.scope.client_conversation_hint.clone(),
-        },
+        conversation,
+        turn_source,
+        turn_id,
         external_content_used,
-        runtime_skill_selected_ids: carry.runtime_skill_selected_ids().to_vec(),
-        task_learning_selected_ids: carry.task_learning_selected_ids().to_vec(),
+        selection_receipt: projection.report().selection_receipt().cloned(),
         pressure: config.projection.pressure,
         mode_input: RuntimeLifecycleModeInput::default(),
         budget: context.report().maintenance_budget,
@@ -569,6 +573,7 @@ fn handle_responses(
     if request.scope.model_alias.is_none() {
         request.scope.model_alias = Some(model_alias.to_string());
     }
+    ensure_gateway_request_id(&mut request.scope.request_id_hint)?;
 
     let scope = GatewayScopeResolver::new(config.scope.clone()).resolve(&request.scope)?;
     let mut audit = GatewayAuditReport::new(
@@ -588,6 +593,25 @@ fn handle_responses(
         || body_object.get("tools").is_some();
     let provider_limit = provider_model_context_limit(provider, model_alias);
     let runtime_budget = context.report();
+    let model = provider_model_name(provider, model_alias);
+    let runtime_scope = runtime.runtime().scope();
+    let conversation = ConversationScope {
+        channel: runtime_scope.channel.clone(),
+        chat_id: runtime_scope.chat_id.clone(),
+        conversation_id: runtime_scope.conversation_id.clone(),
+    };
+    let turn_source = MemoryTurnSource {
+        ingress: bm_sdk::IngressKind::User,
+        channel: scope.channel.clone(),
+        provider: Some(provider.kind.as_str().to_string()),
+        protocol: MemoryTurnProtocol::OpenAiResponses,
+        endpoint: Some("/v1/responses".to_string()),
+        model_alias: Some(model_alias.to_string()),
+        model_resolved: Some(model.clone()),
+        request_id: request.scope.request_id_hint.clone(),
+        client_conversation_hint: request.scope.client_conversation_hint.clone(),
+    };
+    let turn_id = canonical_gateway_turn_id(&conversation, &turn_source)?;
     let tool_registry_refs = if let Some(registry) =
         request_scoped_agent_tool_registry("openai-compatible", body_object.get("tools"))
     {
@@ -604,6 +628,9 @@ fn handle_responses(
     let projection = runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            binding: ProceduralProjectionBindingV1::Turn {
+                turn_id: turn_id.clone(),
+            },
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: extracted_user_text.clone(),
@@ -630,40 +657,19 @@ fn handle_responses(
         .get("stream")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let model = provider_model_name(provider, model_alias);
     let upstream_body = build_upstream_responses_body(
         &body,
         projection.provider_payload().system_memory_block(),
         &model,
     )?;
-    let carry = projection.provider_payload().maintenance_carry();
     let maintenance_plan = GatewayMaintenancePlan::new(GatewayMaintenancePlanInput {
         runtime,
-        user_content: extracted_user_text.clone(),
         input_messages: input_transcript.messages,
-        conversation: ConversationScope {
-            channel: scope.channel.clone(),
-            chat_id: scope.chat_id.clone(),
-            conversation_id: request
-                .scope
-                .client_conversation_hint
-                .clone()
-                .or_else(|| request.scope.body_conversation_hint.clone()),
-        },
-        turn_source: MemoryTurnSource {
-            ingress: bm_sdk::IngressKind::User,
-            channel: scope.channel.clone(),
-            provider: Some(provider.kind.as_str().to_string()),
-            protocol: MemoryTurnProtocol::OpenAiResponses,
-            endpoint: Some("/v1/responses".to_string()),
-            model_alias: Some(model_alias.to_string()),
-            model_resolved: Some(model.clone()),
-            request_id: request.scope.request_id_hint.clone(),
-            client_conversation_hint: request.scope.client_conversation_hint.clone(),
-        },
+        conversation,
+        turn_source,
+        turn_id,
         external_content_used,
-        runtime_skill_selected_ids: carry.runtime_skill_selected_ids().to_vec(),
-        task_learning_selected_ids: carry.task_learning_selected_ids().to_vec(),
+        selection_receipt: projection.report().selection_receipt().cloned(),
         pressure: config.projection.pressure,
         mode_input: RuntimeLifecycleModeInput::default(),
         budget: context.report().maintenance_budget,

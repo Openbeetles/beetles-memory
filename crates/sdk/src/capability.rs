@@ -164,6 +164,38 @@ impl GovernedStateMemoryCapability {
     }
 }
 
+/// Host-visible support for the full subject-scoped procedural learning loop.
+///
+/// This is deliberately separate from `GovernedStateMemoryCapability` because
+/// compact Runtime Skill recall does not imply that a profile may mount host
+/// skills, register tools, issue selection receipts, or accept feedback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProceduralLearningCapability {
+    pub standard_agent_skill_mount: MemoryOperationVisibility,
+    pub agent_tool_registry: MemoryOperationVisibility,
+    pub agent_tool_experience_read: MemoryOperationVisibility,
+    pub agent_tool_hint: MemoryOperationVisibility,
+    pub agent_tool_learning: MemoryOperationVisibility,
+    pub selection_receipt: MemoryOperationVisibility,
+    pub finalize_feedback: MemoryOperationVisibility,
+    pub worker: MemoryOperationVisibility,
+}
+
+impl ProceduralLearningCapability {
+    pub const fn hidden() -> Self {
+        Self {
+            standard_agent_skill_mount: MemoryOperationVisibility::hidden(),
+            agent_tool_registry: MemoryOperationVisibility::hidden(),
+            agent_tool_experience_read: MemoryOperationVisibility::hidden(),
+            agent_tool_hint: MemoryOperationVisibility::hidden(),
+            agent_tool_learning: MemoryOperationVisibility::hidden(),
+            selection_receipt: MemoryOperationVisibility::hidden(),
+            finalize_feedback: MemoryOperationVisibility::hidden(),
+            worker: MemoryOperationVisibility::hidden(),
+        }
+    }
+}
+
 impl MemoryIndexedRecallVisibility {
     pub const fn hidden() -> Self {
         Self {
@@ -329,6 +361,7 @@ pub struct MemoryCapabilityCatalog {
     pub entry: MemoryEntryRuntimeCapabilityCatalog,
     pub sqlite_index_recall: MemoryIndexedRecallVisibility,
     pub governed_state: GovernedStateMemoryCapability,
+    pub procedural_learning: ProceduralLearningCapability,
     pub lifecycle: MemoryRuntimeLifecycleCapability,
     pub validation: MemoryValidationCapability,
 }
@@ -361,6 +394,7 @@ impl MemoryCapabilityCatalog {
             entry: MemoryEntryRuntimeCapabilityCatalog::hidden(),
             sqlite_index_recall: MemoryIndexedRecallVisibility::hidden(),
             governed_state: GovernedStateMemoryCapability::hidden(),
+            procedural_learning: ProceduralLearningCapability::hidden(),
             lifecycle: MemoryRuntimeLifecycleCapability::hidden(),
             validation: MemoryValidationCapability::hidden(),
         }
@@ -703,6 +737,64 @@ impl MemoryCapabilityCatalog {
                     privacy.operator_inspection_allowed,
                 ),
                 runtime_skill_recall_transport,
+            },
+            procedural_learning: ProceduralLearningCapability {
+                standard_agent_skill_mount: visible(
+                    entry.procedural_learning.standard_agent_skill_mount,
+                    true,
+                    policy.projection_enabled,
+                    true,
+                    privacy.prompt_projection_allowed,
+                ),
+                agent_tool_registry: visible(
+                    entry.procedural_learning.agent_tool_registry,
+                    true,
+                    policy.recall_enabled,
+                    true,
+                    true,
+                ),
+                agent_tool_experience_read: visible(
+                    entry.procedural_learning.agent_tool_experience_read,
+                    true,
+                    policy.recall_enabled,
+                    true,
+                    privacy.prompt_projection_allowed,
+                ),
+                agent_tool_hint: visible(
+                    entry.procedural_learning.agent_tool_hint,
+                    true,
+                    policy.projection_enabled,
+                    true,
+                    privacy.prompt_projection_allowed,
+                ),
+                agent_tool_learning: visible(
+                    entry.procedural_learning.agent_tool_learning,
+                    true,
+                    policy.write_enabled,
+                    true,
+                    true,
+                ),
+                selection_receipt: visible(
+                    entry.procedural_learning.selection_receipt,
+                    true,
+                    policy.projection_enabled,
+                    true,
+                    privacy.prompt_projection_allowed,
+                ),
+                finalize_feedback: visible(
+                    entry.procedural_learning.finalize_feedback,
+                    true,
+                    policy.write_enabled,
+                    true,
+                    true,
+                ),
+                worker: visible(
+                    entry.procedural_learning.worker,
+                    true,
+                    policy.maintenance_enabled,
+                    true,
+                    true,
+                ),
             },
             sqlite_index_recall: MemoryIndexedRecallVisibility {
                 archive: indexed_visible(

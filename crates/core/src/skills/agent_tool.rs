@@ -1,15 +1,12 @@
 use crate::error::{Error, Result};
 use crate::feature_gate::ProfileId;
-use crate::platform::SkillStorage;
-use crate::skills::runtime::RuntimeSkillStorageMutation;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 pub const AGENT_TOOL_NO_EXPERIENCE_REASON: &str = "no_governed_tool_experience";
 pub const AGENT_TOOL_REGISTRY_FORBIDDEN_BY_PROFILE: &str =
     "agent_tool_registry_forbidden_by_profile";
 pub const AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH: &str =
     "agent_tool_registry_fingerprint_mismatch";
-const AGENT_TOOL_EXPERIENCE_PREFIX: &str = "agent_tool_experience__";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -26,6 +23,23 @@ pub enum AgentToolRegistryScope {
     Conversation {
         conversation_id: String,
     },
+}
+
+impl AgentToolRegistryScope {
+    pub fn validate_contract(&self) -> bool {
+        match self {
+            Self::Global | Self::Owner => true,
+            Self::Project { project_id } => canonical_registry_identifier(project_id),
+            Self::Workspace { workspace_id } => canonical_registry_identifier(workspace_id),
+            Self::Conversation { conversation_id } => {
+                canonical_registry_identifier(conversation_id)
+            }
+        }
+    }
+}
+
+fn canonical_registry_identifier(value: &str) -> bool {
+    !value.is_empty() && value == value.trim() && !value.chars().any(char::is_control)
 }
 
 #[derive(
@@ -244,6 +258,18 @@ pub struct AgentToolProjectionRejection {
     pub reason: String,
 }
 
+impl AgentToolProjectionRejection {
+    /// Denials must not disclose an inaccessible owner's identity or content.
+    fn safe(reason: &'static str) -> Self {
+        Self {
+            registry_id: String::new(),
+            tool_id: String::new(),
+            experience_id: None,
+            reason: reason.to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AgentToolProjectionAudit {
     pub selected: Vec<AgentToolHint>,
@@ -289,6 +315,7 @@ impl AgentToolExperienceStatusReport {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AgentToolSelectionReport {
     pub tool_hints: Vec<AgentToolHint>,
+    pub selection_bindings: Vec<crate::memory::AgentToolExperienceSelectionV1>,
     pub tool_experience_status: AgentToolExperienceStatusReport,
     pub audit: AgentToolProjectionAudit,
 }
@@ -297,6 +324,7 @@ impl AgentToolSelectionReport {
     pub fn empty(registry_refs_checked: usize, candidates: usize) -> Self {
         Self {
             tool_hints: Vec::new(),
+            selection_bindings: Vec::new(),
             tool_experience_status: AgentToolExperienceStatusReport::no_experience(
                 registry_refs_checked,
                 candidates,
@@ -325,41 +353,11 @@ pub struct AgentToolObservationDigest {
     pub completed_at: Option<u64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct AgentToolUsageFeedback {
-    pub registry_ref: AgentToolRegistryRef,
-    pub observations: Vec<AgentToolObservationDigest>,
-    pub user_visible_result_summary: Option<String>,
-    pub reuse_outcome: crate::skills::RuntimeSkillReuseOutcome,
-    pub operator_note: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentToolExperienceGovernanceDecision {
-    AcceptedAsEvidence,
-    DeferredUntilRepeated,
-    MergedIntoExistingExperience,
-    PromotedToRuntimeSkill,
-    RejectedByPrivacy,
-    RejectedBySchemaDrift,
-    RejectedByLowConfidence,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct AgentToolExperienceGovernanceReport {
-    pub accepted: bool,
-    pub changed: usize,
-    pub decision: AgentToolExperienceGovernanceDecision,
-    pub reason: String,
-    pub experience: Option<AgentToolExperienceRecord>,
-}
-
 pub fn agent_tool_registries_forbidden_by_profile(profile: ProfileId) -> bool {
-    matches!(
-        profile,
-        ProfileId::EspStandaloneMemory | ProfileId::EspEmbeddedSdk
-    )
+    crate::feature_gate::profile_capability_catalog()
+        .iter()
+        .find(|entry| entry.profile == profile)
+        .is_none_or(|entry| !entry.procedural_learning.agent_tool_registry)
 }
 
 pub fn validate_agent_tool_registry_snapshot(
@@ -372,33 +370,8 @@ pub fn validate_agent_tool_registry_snapshot(
             AGENT_TOOL_REGISTRY_FORBIDDEN_BY_PROFILE,
         ));
     }
-    if snapshot.registry_id.trim().is_empty() {
-        return Err(Error::config(
-            "agent_tool_registry",
-            "agent_tool_registry_id_empty",
-        ));
-    }
-    let mut seen = HashSet::new();
-    for tool in &snapshot.tools {
-        if tool.tool_id.trim().is_empty() {
-            return Err(Error::config("agent_tool_registry", "agent_tool_id_empty"));
-        }
-        if !seen.insert(tool.tool_id.as_str()) {
-            return Err(Error::config(
-                "agent_tool_registry",
-                "agent_tool_id_duplicate",
-            ));
-        }
-        if tool.schema_fingerprint.trim().is_empty() {
-            return Err(Error::config(
-                "agent_tool_registry",
-                "agent_tool_schema_fingerprint_empty",
-            ));
-        }
-    }
-    if !snapshot.fingerprint.trim().is_empty()
-        && snapshot.fingerprint != fingerprint_agent_tool_registry(snapshot)
-    {
+    validate_agent_tool_registry_identity(snapshot)?;
+    if snapshot.fingerprint != fingerprint_agent_tool_registry(snapshot) {
         return Err(Error::config(
             "agent_tool_registry",
             AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH,
@@ -407,95 +380,41 @@ pub fn validate_agent_tool_registry_snapshot(
     Ok(())
 }
 
-pub fn list_agent_tool_experience_records(
-    storage: &dyn SkillStorage,
-) -> Vec<AgentToolExperienceRecord> {
-    let mut records = Vec::new();
-    for name in super::list_skill_names(storage) {
-        if !name.starts_with(AGENT_TOOL_EXPERIENCE_PREFIX) {
-            continue;
+fn validate_agent_tool_registry_identity(snapshot: &AgentToolRegistrySnapshot) -> Result<()> {
+    if !canonical_registry_identifier(&snapshot.registry_id) {
+        return Err(Error::config(
+            "agent_tool_registry",
+            "agent_tool_registry_id_noncanonical",
+        ));
+    }
+    if !snapshot.scope.validate_contract() {
+        return Err(Error::config(
+            "agent_tool_registry",
+            "agent_tool_registry_scope_noncanonical",
+        ));
+    }
+    let mut seen = HashSet::new();
+    for tool in &snapshot.tools {
+        if !canonical_registry_identifier(&tool.tool_id) {
+            return Err(Error::config(
+                "agent_tool_registry",
+                "agent_tool_id_noncanonical",
+            ));
         }
-        let Some(content) = super::get_skill_content(storage, &name) else {
-            continue;
-        };
-        if let Ok(record) = serde_json::from_str::<AgentToolExperienceRecord>(&content) {
-            records.push(record);
+        if !seen.insert(tool.tool_id.as_str()) {
+            return Err(Error::config(
+                "agent_tool_registry",
+                "agent_tool_id_duplicate",
+            ));
+        }
+        if !canonical_registry_identifier(&tool.schema_fingerprint) {
+            return Err(Error::config(
+                "agent_tool_registry",
+                "agent_tool_schema_fingerprint_noncanonical",
+            ));
         }
     }
-    records.sort_by(|left, right| {
-        left.registry_id
-            .cmp(&right.registry_id)
-            .then_with(|| left.tool_id.cmp(&right.tool_id))
-            .then_with(|| left.experience_id.cmp(&right.experience_id))
-    });
-    records
-}
-
-pub fn write_agent_tool_experience_record(
-    storage: &dyn SkillStorage,
-    record: &AgentToolExperienceRecord,
-) -> Result<bool> {
-    if let Some((name, rendered)) = reconcile_agent_tool_experience_record(storage, record)? {
-        super::write_skill(storage, &name, &rendered)?;
-        Ok(true)
-    } else {
-        Ok(false)
-    }
-}
-
-pub fn plan_agent_tool_experience_record(
-    storage: &dyn SkillStorage,
-    record: &AgentToolExperienceRecord,
-) -> Result<Option<RuntimeSkillStorageMutation>> {
-    reconcile_agent_tool_experience_record(storage, record).map(|planned| {
-        planned.map(|(name, rendered)| RuntimeSkillStorageMutation::Upsert {
-            name,
-            content: rendered.into_bytes(),
-        })
-    })
-}
-
-fn reconcile_agent_tool_experience_record(
-    storage: &dyn SkillStorage,
-    record: &AgentToolExperienceRecord,
-) -> Result<Option<(String, String)>> {
-    let name = agent_tool_experience_storage_name(record);
-    let existing = super::get_skill_content(storage, &name)
-        .and_then(|content| serde_json::from_str::<AgentToolExperienceRecord>(&content).ok())
-        .filter(|existing| {
-            existing.experience_id == record.experience_id
-                && existing.created_at <= existing.updated_at
-        });
-    let mut post_image = record.clone();
-    if let Some(existing) = existing {
-        if agent_tool_experience_semantically_equal(&existing, record) {
-            return Ok(None);
-        }
-        post_image.created_at = existing.created_at;
-        let minimum_updated_at = existing.updated_at.checked_add(1).ok_or_else(|| {
-            Error::config(
-                "agent_tool_experience",
-                "updated_at cannot advance beyond u64::MAX",
-            )
-        })?;
-        post_image.updated_at = post_image.updated_at.max(minimum_updated_at);
-    }
-    let rendered = serde_json::to_string_pretty(&post_image)
-        .map_err(|error| Error::config("agent_tool_experience", error.to_string()))?;
-    Ok(Some((name, rendered)))
-}
-
-fn agent_tool_experience_semantically_equal(
-    left: &AgentToolExperienceRecord,
-    right: &AgentToolExperienceRecord,
-) -> bool {
-    let mut left = left.clone();
-    let mut right = right.clone();
-    left.created_at = 0;
-    left.updated_at = 0;
-    right.created_at = 0;
-    right.updated_at = 0;
-    left == right
+    Ok(())
 }
 
 pub fn build_agent_tool_registry_report(
@@ -534,13 +453,13 @@ pub fn build_agent_tool_registry_report(
     }
 }
 
-pub fn select_agent_tool_hints(
+fn select_agent_tool_hints(
     registries: &[AgentToolRegistrySnapshot],
     experiences: &[AgentToolExperienceRecord],
     registry_refs: &[AgentToolRegistryRef],
     max_hints: usize,
 ) -> AgentToolSelectionReport {
-    if max_hints == 0 || registries.is_empty() {
+    if max_hints == 0 {
         return AgentToolSelectionReport::empty(registry_refs.len(), 0);
     }
     let refs = if registry_refs.is_empty() {
@@ -554,26 +473,49 @@ pub fn select_agent_tool_hints(
     let mut rejected = Vec::new();
     let mut candidates = experiences
         .iter()
-        .filter(|experience| {
-            matches!(
+        .filter_map(|experience| {
+            if !matches!(
                 experience.status,
                 AgentToolExperienceStatus::Active | AgentToolExperienceStatus::Candidate
-            )
-        })
-        .filter(|experience| !experience.private_content_used)
-        .filter(|experience| {
-            refs.iter()
-                .any(|registry_ref| registry_ref.registry_id == experience.registry_id)
-        })
-        .filter_map(|experience| {
-            let registry = registries
+            ) {
+                rejected.push(AgentToolProjectionRejection::safe(
+                    "agent_tool_experience_status_ineligible",
+                ));
+                return None;
+            }
+            if experience.private_content_used {
+                rejected.push(AgentToolProjectionRejection::safe(
+                    "agent_tool_experience_privacy_blocked",
+                ));
+                return None;
+            }
+            let Some(registry) = registries
                 .iter()
-                .find(|registry| registry.registry_id == experience.registry_id)?;
-            if refs.iter().any(|registry_ref| {
-                registry_ref.registry_id == registry.registry_id
-                    && !registry_ref.fingerprint.trim().is_empty()
-                    && registry_ref.fingerprint != registry.fingerprint
-            }) {
+                .find(|registry| registry.registry_id == experience.registry_id)
+            else {
+                rejected.push(AgentToolProjectionRejection::safe(
+                    "agent_tool_registry_not_found",
+                ));
+                return None;
+            };
+            if registries
+                .iter()
+                .filter(|candidate| candidate.registry_id == registry.registry_id)
+                .count()
+                != 1
+            {
+                rejected.push(AgentToolProjectionRejection::safe(
+                    "agent_tool_registry_identity_ambiguous",
+                ));
+                return None;
+            }
+            if validate_agent_tool_registry_identity(registry).is_err() {
+                rejected.push(AgentToolProjectionRejection::safe(
+                    "agent_tool_registry_identity_invalid",
+                ));
+                return None;
+            }
+            if registry.fingerprint != fingerprint_agent_tool_registry(registry) {
                 rejected.push(AgentToolProjectionRejection {
                     registry_id: experience.registry_id.clone(),
                     tool_id: experience.tool_id.clone(),
@@ -582,10 +524,25 @@ pub fn select_agent_tool_hints(
                 });
                 return None;
             }
-            let tool = registry
+            if !refs
+                .iter()
+                .any(|reference| reference == &registry.registry_ref())
+            {
+                rejected.push(AgentToolProjectionRejection::safe(
+                    "agent_tool_registry_ref_mismatch",
+                ));
+                return None;
+            }
+            let Some(tool) = registry
                 .tools
                 .iter()
-                .find(|tool| tool.tool_id == experience.tool_id)?;
+                .find(|tool| tool.tool_id == experience.tool_id)
+            else {
+                rejected.push(AgentToolProjectionRejection::safe(
+                    "agent_tool_not_in_registry",
+                ));
+                return None;
+            };
             if tool.disabled {
                 rejected.push(AgentToolProjectionRejection {
                     registry_id: experience.registry_id.clone(),
@@ -657,6 +614,7 @@ pub fn select_agent_tool_hints(
         };
     }
     AgentToolSelectionReport {
+        selection_bindings: Vec::new(),
         tool_experience_status: AgentToolExperienceStatusReport::available(
             refs.len(),
             governed_candidates,
@@ -671,156 +629,234 @@ pub fn select_agent_tool_hints(
     }
 }
 
-pub fn govern_agent_tool_usage_feedback(
-    registries: &[AgentToolRegistrySnapshot],
-    feedback: &AgentToolUsageFeedback,
-    now_secs: u64,
-) -> AgentToolExperienceGovernanceReport {
-    if feedback.reuse_outcome == crate::skills::RuntimeSkillReuseOutcome::Mismatch {
-        return governance_report(
-            AgentToolExperienceGovernanceDecision::RejectedByLowConfidence,
-            "agent_tool_feedback_reuse_outcome_mismatch",
-            None,
-        );
+/// Selection consumes only the exact immutable subject closure. Registry capability and
+/// applicability are current authority even when the memory revision is historical.
+pub struct AgentToolExperienceSelectionInput<'a> {
+    pub query: &'a str,
+    pub memory_space_id: &'a str,
+    pub owning_scope: &'a super::AgentToolExperienceOwningScopeV1,
+    pub heads: &'a [super::AgentToolExperienceOwnerHeadV2],
+    pub materials: &'a [super::AgentToolExperienceRevisionMaterialV2],
+    pub registries: &'a [AgentToolRegistrySnapshot],
+    pub registry_refs: &'a [AgentToolRegistryRef],
+    pub applicability: &'a crate::memory::ProceduralApplicabilityContextV1,
+    pub as_of_time: Option<u64>,
+    pub max_hints: usize,
+}
+
+pub fn select_subject_agent_tool_hints(
+    input: AgentToolExperienceSelectionInput<'_>,
+) -> Result<AgentToolSelectionReport> {
+    if !input.applicability.validate_contract() || !input.owning_scope.validate_contract() {
+        return Err(Error::config(
+            "agent_tool_experience_selection",
+            "invalid applicability or subject scope",
+        ));
     }
-    let Some(registry) = registries
-        .iter()
-        .find(|registry| registry.registry_id == feedback.registry_ref.registry_id)
-    else {
-        return governance_report(
-            AgentToolExperienceGovernanceDecision::RejectedBySchemaDrift,
-            "agent_tool_registry_not_found",
-            None,
+    let mut selected = Vec::new();
+    let mut bindings = BTreeMap::new();
+    let mut rejected = Vec::new();
+    for head in input.heads {
+        if !head.validate_contract().accepted
+            || head.memory_space_id != input.memory_space_id
+            || &head.owning_scope != input.owning_scope
+        {
+            return Err(Error::config(
+                "agent_tool_experience_selection",
+                "owner does not match exact scope",
+            ));
+        }
+        if head.state == super::AgentToolExperienceHeadStateV2::Tombstoned {
+            rejected.push(AgentToolProjectionRejection::safe(
+                "agent_tool_experience_source_withdrawn",
+            ));
+            continue;
+        }
+        let history = input
+            .materials
+            .iter()
+            .filter(|material| material.owner_ref == head.owner_ref)
+            .cloned()
+            .collect::<Vec<_>>();
+        super::validate_agent_tool_experience_owner_history(&history)?;
+        let commitments = history
+            .iter()
+            .map(super::AgentToolExperienceRetainedRevisionDigestV2::from_material)
+            .collect::<Result<Vec<_>>>()?;
+        if commitments != head.retained_revisions
+            || history
+                .last()
+                .is_none_or(|material| material.owner_revision != head.current_revision)
+        {
+            return Err(Error::config(
+                "agent_tool_experience_selection",
+                "head and retained materials differ",
+            ));
+        }
+        let material = history.iter().rev().find(|material| {
+            input
+                .as_of_time
+                .is_none_or(|anchor| material.updated_at <= anchor)
+        });
+        let Some(material) = material else {
+            rejected.push(AgentToolProjectionRejection::safe(
+                "agent_tool_experience_no_revision_at_anchor",
+            ));
+            continue;
+        };
+        if material.memory_space_id != input.memory_space_id
+            || &material.owning_scope != input.owning_scope
+        {
+            return Err(Error::config(
+                "agent_tool_experience_selection",
+                "material does not match exact scope",
+            ));
+        }
+        if !material.privacy_class.projection_content_allowed() {
+            rejected.push(AgentToolProjectionRejection::safe(
+                "agent_tool_experience_privacy_blocked",
+            ));
+            continue;
+        }
+        if !input
+            .applicability
+            .permits_registry_scope(&material.registry_scope)
+        {
+            rejected.push(AgentToolProjectionRejection::safe(
+                "agent_tool_experience_applicability_blocked",
+            ));
+            continue;
+        }
+        let Some(registry) = input.registries.iter().find(|registry| {
+            registry.registry_id == material.registry_id
+                && registry.scope == material.registry_scope
+        }) else {
+            rejected.push(AgentToolProjectionRejection::safe(
+                "agent_tool_registry_not_found",
+            ));
+            continue;
+        };
+        if validate_agent_tool_registry_identity(registry).is_err() {
+            rejected.push(AgentToolProjectionRejection::safe(
+                "agent_tool_registry_identity_invalid",
+            ));
+            continue;
+        }
+        if registry.fingerprint != fingerprint_agent_tool_registry(registry) {
+            rejected.push(AgentToolProjectionRejection::safe(
+                AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH,
+            ));
+            continue;
+        }
+        if !input.registry_refs.is_empty()
+            && !input
+                .registry_refs
+                .iter()
+                .any(|reference| reference == &registry.registry_ref())
+        {
+            rejected.push(AgentToolProjectionRejection::safe(
+                "agent_tool_registry_ref_mismatch",
+            ));
+            continue;
+        }
+        bindings.insert(
+            material.owner_ref.owner_id.clone(),
+            crate::memory::AgentToolExperienceSelectionV1 {
+                registry_ref: registry.registry_ref(),
+                tool_id: material.tool_id.clone(),
+                schema_fingerprint: material.schema_fingerprint.clone(),
+                experience_owner_id: material.owner_ref.owner_id.clone(),
+                experience_revision: material.owner_revision,
+                experience_content_digest: material.content_digest.clone(),
+            },
         );
-    };
-    if !feedback.registry_ref.fingerprint.trim().is_empty()
-        && feedback.registry_ref.fingerprint != registry.fingerprint
-    {
-        return governance_report(
-            AgentToolExperienceGovernanceDecision::RejectedBySchemaDrift,
-            AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH,
-            None,
-        );
+        selected.push(AgentToolExperienceRecord {
+            experience_id: material.owner_ref.owner_id.clone(),
+            registry_id: material.registry_id.clone(),
+            tool_id: material.tool_id.clone(),
+            schema_fingerprint: material.schema_fingerprint.clone(),
+            task_signature: material.task_signature.clone(),
+            trigger_summary: material.trigger_summary.clone(),
+            usage_guidance: material.usage_guidance.clone(),
+            constraints: material.constraints.clone(),
+            evidence_count: material.evidence_count,
+            success_count: material.success_count,
+            failure_count: material.failure_count,
+            last_outcome: material.last_outcome,
+            confidence: material.confidence,
+            status: material.status,
+            evidence_refs: Vec::new(),
+            private_content_used: false,
+            created_at: material.created_at,
+            updated_at: material.updated_at,
+        });
     }
-    let valid_observations = feedback
-        .observations
+    // Task signatures are opaque identity: never tokenize them. Natural-language
+    // relevance uses only governed experience text and the shared recall scorer.
+    let texts = selected
         .iter()
-        .filter(|observation| !observation.summary.trim().is_empty())
+        .map(|experience| {
+            format!(
+                "{} {}",
+                experience.trigger_summary, experience.usage_guidance
+            )
+        })
         .collect::<Vec<_>>();
-    if valid_observations
+    let documents = selected
         .iter()
-        .any(|observation| observation.private_content_used)
-    {
-        return governance_report(
-            AgentToolExperienceGovernanceDecision::RejectedByPrivacy,
-            "agent_tool_feedback_private_content_requires_private_governance",
-            None,
-        );
-    }
-    let succeeded = valid_observations
-        .iter()
-        .filter(|observation| observation.outcome == AgentToolOutcome::Succeeded)
-        .count();
-    let operator_confirmed = feedback
-        .operator_note
-        .as_deref()
-        .map(str::trim)
-        .filter(|note| !note.is_empty())
-        .is_some();
-    if succeeded == 0 {
-        return governance_report(
-            AgentToolExperienceGovernanceDecision::RejectedByLowConfidence,
-            "agent_tool_feedback_has_no_successful_observation",
-            None,
-        );
-    }
-    if succeeded < 2 && !operator_confirmed {
-        return governance_report(
-            AgentToolExperienceGovernanceDecision::DeferredUntilRepeated,
-            "agent_tool_feedback_requires_repeated_success_or_operator_confirmation",
-            None,
-        );
-    }
-    let Some(first) = valid_observations.first() else {
-        return governance_report(
-            AgentToolExperienceGovernanceDecision::RejectedByLowConfidence,
-            "agent_tool_feedback_empty",
-            None,
-        );
-    };
-    if valid_observations.iter().any(|observation| {
-        observation.registry_id != registry.registry_id
-            || observation.tool_id != first.tool_id
-            || observation.schema_fingerprint != first.schema_fingerprint
-    }) {
-        return governance_report(
-            AgentToolExperienceGovernanceDecision::RejectedBySchemaDrift,
-            "agent_tool_feedback_mixed_registry_tool_or_schema",
-            None,
-        );
-    }
-    let Some(tool) = registry
-        .tools
-        .iter()
-        .find(|tool| tool.tool_id == first.tool_id)
-    else {
-        return governance_report(
-            AgentToolExperienceGovernanceDecision::RejectedBySchemaDrift,
-            "agent_tool_feedback_tool_not_in_registry",
-            None,
-        );
-    };
-    if tool.schema_fingerprint != first.schema_fingerprint {
-        return governance_report(
-            AgentToolExperienceGovernanceDecision::RejectedBySchemaDrift,
-            "agent_tool_feedback_schema_fingerprint_mismatch",
-            None,
-        );
-    }
-    let evidence_refs = valid_observations
-        .iter()
-        .map(|observation| observation.observation_id.clone())
+        .zip(&texts)
+        .map(|(experience, text)| crate::memory::RecallDeliveryText {
+            candidate_id: &experience.experience_id,
+            text,
+        })
         .collect::<Vec<_>>();
-    let experience = AgentToolExperienceRecord {
-        experience_id: stable_agent_tool_experience_id(
-            &registry.registry_id,
-            &first.tool_id,
-            &first.schema_fingerprint,
-            &first.task_signature,
-        ),
-        registry_id: registry.registry_id.clone(),
-        tool_id: first.tool_id.clone(),
-        schema_fingerprint: first.schema_fingerprint.clone(),
-        task_signature: first.task_signature.clone(),
-        trigger_summary: feedback
-            .user_visible_result_summary
-            .clone()
-            .unwrap_or_else(|| first.summary.clone()),
-        usage_guidance: feedback
-            .operator_note
-            .clone()
-            .unwrap_or_else(|| first.summary.clone()),
-        constraints: Vec::new(),
-        evidence_count: valid_observations.len() as u32,
-        success_count: succeeded as u32,
-        failure_count: valid_observations.len().saturating_sub(succeeded) as u32,
-        last_outcome: first.outcome,
-        confidence: if operator_confirmed || succeeded >= 3 {
-            AgentToolExperienceConfidence::High
-        } else {
-            AgentToolExperienceConfidence::Medium
-        },
-        status: AgentToolExperienceStatus::Active,
-        evidence_refs,
-        private_content_used: false,
-        created_at: now_secs,
-        updated_at: now_secs,
-    };
-    governance_report(
-        AgentToolExperienceGovernanceDecision::AcceptedAsEvidence,
-        "agent_tool_feedback_accepted_as_governed_experience",
-        Some(experience),
-    )
+    let lexical = crate::memory::score_recall_delivery_texts(input.query, &documents)
+        .into_iter()
+        .map(|score| (score.candidate_id, score.score))
+        .collect::<BTreeMap<_, _>>();
+    let anchored = documents
+        .iter()
+        .filter(|document| {
+            crate::memory::has_recall_delivery_lexical_anchor(input.query, document.text)
+        })
+        .map(|document| document.candidate_id.to_string())
+        .collect::<BTreeSet<_>>();
+    let mut relevance = BTreeMap::new();
+    selected.retain(|experience| {
+        let exact_signature = input.query.trim() == experience.task_signature;
+        let score = lexical.get(&experience.experience_id).copied().unwrap_or(0);
+        if !exact_signature && !anchored.contains(&experience.experience_id) {
+            rejected.push(AgentToolProjectionRejection::safe(
+                "agent_tool_experience_query_unrelated",
+            ));
+            return false;
+        }
+        relevance.insert(experience.experience_id.clone(), (exact_signature, score));
+        true
+    });
+    let mut report =
+        select_agent_tool_hints(input.registries, &selected, input.registry_refs, usize::MAX);
+    report.tool_hints.sort_by(|left, right| {
+        relevance
+            .get(&right.experience_id)
+            .cmp(&relevance.get(&left.experience_id))
+    });
+    report.audit.budget_limited = report.tool_hints.len() > input.max_hints;
+    report.tool_hints.truncate(input.max_hints);
+    report.selection_bindings = report
+        .tool_hints
+        .iter()
+        .filter_map(|hint| bindings.remove(&hint.experience_id))
+        .collect();
+    report.audit.selected = report.tool_hints.clone();
+    report.audit.rejected.extend(rejected);
+    if report.tool_hints.is_empty() {
+        report.tool_experience_status = AgentToolExperienceStatusReport::no_experience(
+            report.tool_experience_status.registry_refs_checked,
+            report.tool_experience_status.governed_experience_candidates,
+        );
+    }
+    Ok(report)
 }
 
 pub fn fingerprint_agent_tool_descriptor(descriptor: &AgentToolDescriptor) -> String {
@@ -875,25 +911,6 @@ pub fn fingerprint_agent_tool_registry(snapshot: &AgentToolRegistrySnapshot) -> 
     format!("{:016x}", fnv1a64(buffer.as_bytes()))
 }
 
-fn governance_report(
-    decision: AgentToolExperienceGovernanceDecision,
-    reason: impl Into<String>,
-    experience: Option<AgentToolExperienceRecord>,
-) -> AgentToolExperienceGovernanceReport {
-    AgentToolExperienceGovernanceReport {
-        accepted: matches!(
-            decision,
-            AgentToolExperienceGovernanceDecision::AcceptedAsEvidence
-                | AgentToolExperienceGovernanceDecision::MergedIntoExistingExperience
-                | AgentToolExperienceGovernanceDecision::PromotedToRuntimeSkill
-        ),
-        changed: usize::from(experience.is_some()),
-        decision,
-        reason: reason.into(),
-        experience,
-    }
-}
-
 fn tool_exists_with_schema(
     registries: &[AgentToolRegistrySnapshot],
     experience: &AgentToolExperienceRecord,
@@ -909,23 +926,6 @@ fn tool_exists_with_schema(
         })
         .map(|tool| tool.schema_fingerprint == experience.schema_fingerprint)
         .unwrap_or(false)
-}
-
-fn stable_agent_tool_experience_id(
-    registry_id: &str,
-    tool_id: &str,
-    schema_fingerprint: &str,
-    task_signature: &str,
-) -> String {
-    let seed = format!("{registry_id}:{tool_id}:{schema_fingerprint}:{task_signature}");
-    format!("agent_tool_exp_{:016x}", fnv1a64(seed.as_bytes()))
-}
-
-fn agent_tool_experience_storage_name(record: &AgentToolExperienceRecord) -> String {
-    format!(
-        "{AGENT_TOOL_EXPERIENCE_PREFIX}{:016x}",
-        fnv1a64(record.experience_id.as_bytes())
-    )
 }
 
 fn push_hash_part(buffer: &mut String, value: &str) {
@@ -977,77 +977,6 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-
-    #[derive(Default)]
-    struct TestSkillStorage {
-        files: Mutex<HashMap<String, Vec<u8>>>,
-    }
-
-    impl TestSkillStorage {
-        fn seed_record(&self, record: &AgentToolExperienceRecord) {
-            self.files
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .insert(
-                    agent_tool_experience_storage_name(record),
-                    serde_json::to_vec_pretty(record).expect("serialize experience fixture"),
-                );
-        }
-
-        fn seed_raw(&self, name: String, content: &[u8]) {
-            self.files
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .insert(name, content.to_vec());
-        }
-    }
-
-    impl SkillStorage for TestSkillStorage {
-        fn list_names(&self) -> Result<Vec<String>> {
-            Ok(self
-                .files
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .keys()
-                .cloned()
-                .collect())
-        }
-
-        fn read(&self, name: &str) -> Result<Vec<u8>> {
-            self.files
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .get(name)
-                .cloned()
-                .ok_or_else(|| Error::config("agent_tool_test_storage", "missing"))
-        }
-
-        fn write(&self, name: &str, content: &[u8]) -> Result<()> {
-            self.files
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .insert(name.to_string(), content.to_vec());
-            Ok(())
-        }
-
-        fn remove(&self, name: &str) -> Result<()> {
-            self.files
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .remove(name);
-            Ok(())
-        }
-    }
-
-    fn planned_experience(mutation: RuntimeSkillStorageMutation) -> AgentToolExperienceRecord {
-        let RuntimeSkillStorageMutation::Upsert { content, .. } = mutation else {
-            panic!("experience planner must use an upsert");
-        };
-        serde_json::from_slice(&content).expect("parse planned experience")
-    }
-
     fn registry() -> AgentToolRegistrySnapshot {
         let mut tool =
             AgentToolDescriptor::compact("pdf.extract", "Extract PDF text", "schema-pdf-v1");
@@ -1085,90 +1014,6 @@ mod tests {
         assert_eq!(report.tool_hints[0].tool_id, "pdf.extract");
         assert!(report.tool_hints[0].host_execution_required);
         assert!(!report.audit.cold_start_selection_used);
-    }
-
-    #[test]
-    fn identical_experience_semantics_across_time_are_a_noop() {
-        let storage = TestSkillStorage::default();
-        let existing = AgentToolExperienceRecord::active(
-            "exp-stable",
-            "host-tools",
-            "pdf.extract",
-            "schema-pdf-v1",
-            "Use the governed PDF path.",
-            100,
-        );
-        storage.seed_record(&existing);
-        let mut repeated = existing.clone();
-        repeated.created_at = 200;
-        repeated.updated_at = 200;
-
-        assert!(plan_agent_tool_experience_record(&storage, &repeated)
-            .expect("plan repeated experience")
-            .is_none());
-    }
-
-    #[test]
-    fn changed_experience_preserves_creation_and_advances_update_time() {
-        let storage = TestSkillStorage::default();
-        let existing = AgentToolExperienceRecord::active(
-            "exp-changing",
-            "host-tools",
-            "pdf.extract",
-            "schema-pdf-v1",
-            "Use the governed PDF path.",
-            100,
-        );
-        storage.seed_record(&existing);
-        let mut changed = existing.clone();
-        changed.usage_guidance = "Use the governed PDF path with OCR evidence.".to_string();
-        changed.created_at = 50;
-        changed.updated_at = 50;
-
-        let planned = planned_experience(
-            plan_agent_tool_experience_record(&storage, &changed)
-                .expect("plan changed experience")
-                .expect("semantic change needs an upsert"),
-        );
-        assert_eq!(planned.created_at, 100);
-        assert!(planned.updated_at > 100);
-        assert_eq!(planned.usage_guidance, changed.usage_guidance);
-    }
-
-    #[test]
-    fn malformed_or_mismatched_existing_record_is_replaced_without_time_inheritance() {
-        let candidate = AgentToolExperienceRecord::active(
-            "exp-repair",
-            "host-tools",
-            "pdf.extract",
-            "schema-pdf-v1",
-            "Use the governed PDF path.",
-            200,
-        );
-        let name = agent_tool_experience_storage_name(&candidate);
-
-        let malformed = TestSkillStorage::default();
-        malformed.seed_raw(name.clone(), b"not-json");
-        let repaired = planned_experience(
-            plan_agent_tool_experience_record(&malformed, &candidate)
-                .expect("plan malformed repair")
-                .expect("malformed record must not suppress repair"),
-        );
-        assert_eq!(repaired, candidate);
-
-        let mismatched = TestSkillStorage::default();
-        let mut other = candidate.clone();
-        other.experience_id = "exp-other".to_string();
-        mismatched.seed_raw(
-            name,
-            &serde_json::to_vec_pretty(&other).expect("serialize mismatched record"),
-        );
-        let repaired = planned_experience(
-            plan_agent_tool_experience_record(&mismatched, &candidate)
-                .expect("plan mismatched repair")
-                .expect("mismatched record must not suppress repair"),
-        );
-        assert_eq!(repaired, candidate);
     }
 
     #[test]
@@ -1213,142 +1058,5 @@ mod tests {
         right.fingerprint = fingerprint_agent_tool_registry(&right);
 
         assert_eq!(left.fingerprint, right.fingerprint);
-    }
-
-    #[test]
-    fn single_success_without_operator_confirmation_is_deferred() {
-        let registry = registry();
-        let feedback = AgentToolUsageFeedback {
-            registry_ref: registry.registry_ref(),
-            observations: vec![AgentToolObservationDigest {
-                observation_id: "obs-1".to_string(),
-                registry_id: "host-tools".to_string(),
-                tool_id: "pdf.extract".to_string(),
-                schema_fingerprint: "schema-pdf-v1".to_string(),
-                call_id: None,
-                task_signature: "pdf review".to_string(),
-                summary: "extracted text".to_string(),
-                outcome: AgentToolOutcome::Succeeded,
-                error_code: None,
-                external_content: true,
-                private_content_used: false,
-                permission_tags: Vec::new(),
-                risk_tags: Vec::new(),
-                started_at: None,
-                completed_at: None,
-            }],
-            user_visible_result_summary: None,
-            reuse_outcome: crate::skills::RuntimeSkillReuseOutcome::Succeeded,
-            operator_note: None,
-        };
-        let report = govern_agent_tool_usage_feedback(&[registry], &feedback, 300);
-        assert_eq!(
-            report.decision,
-            AgentToolExperienceGovernanceDecision::DeferredUntilRepeated
-        );
-        assert!(report.experience.is_none());
-    }
-
-    #[test]
-    fn mixed_tool_or_schema_observations_are_rejected() {
-        let mut registry = registry();
-        registry.tools.push(AgentToolDescriptor::compact(
-            "image.resize",
-            "Resize image",
-            "schema-image-v1",
-        ));
-        registry.fingerprint = fingerprint_agent_tool_registry(&registry);
-        let feedback = AgentToolUsageFeedback {
-            registry_ref: registry.registry_ref(),
-            observations: vec![
-                AgentToolObservationDigest {
-                    observation_id: "obs-1".to_string(),
-                    registry_id: "host-tools".to_string(),
-                    tool_id: "pdf.extract".to_string(),
-                    schema_fingerprint: "schema-pdf-v1".to_string(),
-                    call_id: None,
-                    task_signature: "document task".to_string(),
-                    summary: "extracted text".to_string(),
-                    outcome: AgentToolOutcome::Succeeded,
-                    error_code: None,
-                    external_content: true,
-                    private_content_used: false,
-                    permission_tags: Vec::new(),
-                    risk_tags: Vec::new(),
-                    started_at: None,
-                    completed_at: None,
-                },
-                AgentToolObservationDigest {
-                    observation_id: "obs-2".to_string(),
-                    registry_id: "host-tools".to_string(),
-                    tool_id: "image.resize".to_string(),
-                    schema_fingerprint: "schema-image-v1".to_string(),
-                    call_id: None,
-                    task_signature: "document task".to_string(),
-                    summary: "resized preview".to_string(),
-                    outcome: AgentToolOutcome::Succeeded,
-                    error_code: None,
-                    external_content: true,
-                    private_content_used: false,
-                    permission_tags: Vec::new(),
-                    risk_tags: Vec::new(),
-                    started_at: None,
-                    completed_at: None,
-                },
-            ],
-            user_visible_result_summary: None,
-            reuse_outcome: crate::skills::RuntimeSkillReuseOutcome::Succeeded,
-            operator_note: None,
-        };
-        let report = govern_agent_tool_usage_feedback(&[registry], &feedback, 300);
-        assert_eq!(
-            report.decision,
-            AgentToolExperienceGovernanceDecision::RejectedBySchemaDrift
-        );
-        assert_eq!(
-            report.reason,
-            "agent_tool_feedback_mixed_registry_tool_or_schema"
-        );
-        assert!(report.experience.is_none());
-    }
-
-    #[test]
-    fn mismatch_reuse_outcome_rejects_feedback() {
-        let registry = registry();
-        let mut feedback = AgentToolUsageFeedback {
-            registry_ref: registry.registry_ref(),
-            observations: vec![AgentToolObservationDigest {
-                observation_id: "obs-1".to_string(),
-                registry_id: "host-tools".to_string(),
-                tool_id: "pdf.extract".to_string(),
-                schema_fingerprint: "schema-pdf-v1".to_string(),
-                call_id: None,
-                task_signature: "document task".to_string(),
-                summary: "extracted text".to_string(),
-                outcome: AgentToolOutcome::Succeeded,
-                error_code: None,
-                external_content: true,
-                private_content_used: false,
-                permission_tags: Vec::new(),
-                risk_tags: Vec::new(),
-                started_at: None,
-                completed_at: None,
-            }],
-            user_visible_result_summary: None,
-            reuse_outcome: crate::skills::RuntimeSkillReuseOutcome::Mismatch,
-            operator_note: Some("operator confirmed".to_string()),
-        };
-        let report =
-            govern_agent_tool_usage_feedback(std::slice::from_ref(&registry), &feedback, 300);
-        assert_eq!(
-            report.decision,
-            AgentToolExperienceGovernanceDecision::RejectedByLowConfidence
-        );
-        assert_eq!(report.reason, "agent_tool_feedback_reuse_outcome_mismatch");
-        assert!(report.experience.is_none());
-
-        feedback.reuse_outcome = crate::skills::RuntimeSkillReuseOutcome::Succeeded;
-        let accepted = govern_agent_tool_usage_feedback(&[registry], &feedback, 300);
-        assert!(accepted.accepted);
     }
 }

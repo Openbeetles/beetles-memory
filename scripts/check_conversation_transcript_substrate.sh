@@ -88,11 +88,21 @@ require_fixed "MemoryTranscriptActivityRequest" dev-docs/conversation-transcript
 require_fixed "query_transcript_activity" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md crates/sdk/src/runtime.rs
 require_fixed "TranscriptTimelineAnchor" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md crates/core/src/memory/transcript.rs crates/sdk/src/lib.rs
 require_fixed "TranscriptUtcRange" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md crates/core/src/memory/transcript.rs crates/sdk/src/lib.rs
-require_fixed "beetle-memory.platform.capability.v4" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md crates/sdk/src/capability_snapshot.rs
+# Historical substrate/release documents may retain their original v4/v11/v12
+# evidence. Current implementation truth must come from its exact code owner,
+# never an OR-match against one of those historical documents.
+require_fixed "beetle-memory.platform.capability.v5" crates/sdk/src/capability_snapshot.rs
 require_fixed "transcript_search" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md crates/sdk/src/capability.rs crates/sdk/src/capability_snapshot.rs
 require_fixed "transcript_activity" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md crates/sdk/src/capability.rs crates/sdk/src/capability_snapshot.rs
 require_fixed "beetle_memory_store_schema_v11" dev-docs/conversation-transcript-substrate-plan.md
-require_fixed "beetle_memory_store_schema_v12" docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md crates/sdk/src/store_internal/schema.rs
+require_fixed "beetle_memory_store_schema_v13" crates/sdk/src/store_internal/schema.rs
+require_fixed "CanonicalTurnAppendIntent" crates/core/src/memory/transcript.rs
+require_fixed "append_canonical_turn_intent" crates/core/src/memory/turn_commit.rs
+require_fixed "append_canonical_turn_intent" crates/sdk/src/store_internal/platform.rs
+require_fixed "validate_canonical_intake" crates/core/src/memory/transcript.rs
+require_fixed "validate_canonical_intake" crates/sdk/src/store_internal/procedural_selection.rs
+require_fixed "canonical_existing_turn_rejects_divergent_payload_without_mutation" crates/core/tests/conversation_transcript_contract.rs
+require_fixed "canonical_atomic_admission_rejection_leaves_session_and_transcript_unchanged" crates/core/tests/conversation_transcript_contract.rs
 require_fixed "MemoryTranscriptLifecycleRequest" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md
 require_fixed "MemoryTranscriptExportRequest" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md
 require_fixed "MemoryTranscriptRepairRequest" docs/en/api.md docs/zh-CN/api.md docs/en/replay-and-archive.md docs/zh-CN/replay-and-archive.md crates/sdk/src/ops.rs crates/sdk/src/runtime.rs crates/sdk/src/lib.rs

@@ -158,6 +158,39 @@ fn non_streaming_response_finalizes_turn_into_session_store() {
         .runtime_for_scope(resolved.entry_scope)
         .expect("scoped runtime");
     let replay = replay_model_context(runtime.runtime());
+    assert_eq!(
+        replay.slice.turns.len(),
+        1,
+        "tool proposal must not reject the turn"
+    );
+    #[cfg(feature = "nonproduction-replay-harness")]
+    {
+        let snapshot = runtime
+            .runtime()
+            .replay_harness()
+            .export_store_snapshot()
+            .unwrap();
+        let turns = snapshot
+            .json_docs
+            .iter()
+            .filter(|doc| {
+                doc.namespace == "conversation_transcript" && doc.value.get("turn_id").is_some()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(turns.len(), 1);
+        let evidence = &turns[0].value["learning_evidence"];
+        assert_eq!(evidence["tool_call_count"], 0);
+        for field in [
+            "runtime_skill_feedback",
+            "agent_skill_feedback",
+            "task_learning_feedback",
+            "agent_tool_feedback",
+        ] {
+            assert_eq!(evidence[field], json!([]), "{field}");
+        }
+        assert_eq!(turns[0].value["external_content_used"], false);
+        assert!(turns[0].value.get("tool_observations").is_none());
+    }
     let user_message = replay
         .slice
         .turns
@@ -188,6 +221,52 @@ fn non_streaming_response_finalizes_turn_into_session_store() {
         .iter()
         .filter_map(|turn| turn.assistant_message.as_ref())
         .any(|message| message.content.as_deref() == Some("I will verify artifacts first.")));
+}
+
+#[test]
+fn identical_requests_without_client_request_id_receive_distinct_execution_turns() {
+    let config = gateway_config();
+    let gateway = GatewayRuntime::open(config.clone()).expect("gateway");
+
+    for _ in 0..2 {
+        let mut upstream = MockOpenAiUpstream::default();
+        let response = handle_openai_request(
+            &gateway,
+            OpenAiGatewayRequest::post_json(
+                "/v1/chat/completions",
+                scope_request(),
+                json!({
+                    "model": "local",
+                    "messages": [{
+                        "role": "user",
+                        "content": "repeat the exact same real request"
+                    }]
+                }),
+            ),
+            &mut upstream,
+        )
+        .expect("chat response");
+        assert_eq!(response.status_code, 200);
+    }
+
+    let resolved = GatewayScopeResolver::new(config.scope.clone())
+        .resolve(&scope_request())
+        .expect("scope");
+    let runtime = gateway
+        .runtime_for_scope(resolved.entry_scope)
+        .expect("scoped runtime");
+    let replay = replay_model_context(runtime.runtime());
+    let turn_ids = replay
+        .slice
+        .turns
+        .iter()
+        .map(|turn| turn.turn_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(turn_ids.len(), 2, "{:#?}", replay.slice.turns);
+    assert_ne!(turn_ids[0], turn_ids[1], "{turn_ids:?}");
+    assert!(turn_ids
+        .iter()
+        .all(|turn_id| turn_id.starts_with("gateway-request-sha256:")));
 }
 
 #[test]

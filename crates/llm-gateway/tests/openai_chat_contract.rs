@@ -77,7 +77,6 @@ fn seed_gateway_memory(
                     reason: "OpenAI projection fixture".to_string(),
                 }),
             }],
-            runtime_skill_owning_scope: None,
         })
         .expect("seed gateway memory");
     assert!(write.accepted, "{write:#?}");

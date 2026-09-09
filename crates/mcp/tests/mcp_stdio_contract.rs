@@ -21,6 +21,7 @@ fn runtime() -> EntryRuntime {
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "mcp-stdio".to_string(),
             chat_id: "chat-1".to_string(),
         },
@@ -143,6 +144,7 @@ fn project_schema_comes_from_governed_adapter_owner_and_inspect_remains_strict()
     assert_eq!(
         project.pointer("/inputSchema/required"),
         Some(&serde_json::json!([
+            "binding",
             "temporal_operation",
             "user_query",
             "system_max_len"

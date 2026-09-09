@@ -1,7 +1,8 @@
 use bm_entry::{EntryAuthConfig, EntryAuthDecision, EntryLocalTransport};
+use bm_sdk::{default_agent_subject_id, ProfileId, RuntimeSkillOwningScope};
+#[cfg(feature = "nonproduction-replay-harness")]
 use bm_sdk::{
-    default_agent_subject_id, GovernedRuntimeSkillWriteInput, MemoryPrivacyClass, ProfileId,
-    RuntimeSkillCreationRef, RuntimeSkillOwningScope, RuntimeSkillWrite,
+    GovernedRuntimeSkillWriteInput, MemoryPrivacyClass, RuntimeSkillCreationRef, RuntimeSkillWrite,
 };
 
 #[allow(dead_code)]
@@ -30,6 +31,7 @@ pub fn host_production_profile() -> ProfileId {
 }
 
 #[allow(dead_code)]
+#[cfg(feature = "nonproduction-replay-harness")]
 pub fn governed_runtime_skill_write(write: RuntimeSkillWrite) -> GovernedRuntimeSkillWriteInput {
     GovernedRuntimeSkillWriteInput {
         write,

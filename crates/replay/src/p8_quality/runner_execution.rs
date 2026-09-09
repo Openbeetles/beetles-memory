@@ -1348,8 +1348,6 @@ pub(super) fn execute_real_fixture_receipt_set(
                                 deletes: Vec::new(),
                                 skill_writes: Vec::new(),
                             },
-                            governed_skill_writes: Vec::new(),
-                            runtime_skill_owning_scope: None,
                         })
                         .map_err(|_| P8QualityContractFailure::ReceiptChainMismatch)?;
                     let forgetting_authority = runtime

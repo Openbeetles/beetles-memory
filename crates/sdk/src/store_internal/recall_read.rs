@@ -30,7 +30,12 @@ use bm_core::memory::{
 };
 use bm_core::platform::SkillStorage;
 use bm_core::skills::{
-    runtime_skill_scope_manifest_key, RuntimeSkillOwnerBinding, RuntimeSkillOwnerRecord,
+    agent_tool_experience_head_key, agent_tool_experience_material_key,
+    agent_tool_experience_scope_manifest_key, runtime_skill_scope_manifest_key,
+    validate_agent_tool_experience_owner_history, validate_agent_tool_experience_scope_closure,
+    AgentToolExperienceHeadStateV2, AgentToolExperienceOwnerHeadV2,
+    AgentToolExperienceOwningScopeV1, AgentToolExperienceRevisionMaterialV2,
+    AgentToolExperienceScopeManifestV1, RuntimeSkillOwnerBinding, RuntimeSkillOwnerRecord,
     RuntimeSkillOwningScope, RuntimeSkillPremise, RuntimeSkillScopeManifest,
 };
 use bm_core::task_execution::{TaskLearningRecord, TaskLearningStore, TaskRunRecord, TaskRunStore};
@@ -52,6 +57,22 @@ use super::transaction::{
 use crate::StoreReadReceipt;
 
 type RecallJsonRead = ((String, String), Option<serde_json::Value>);
+
+#[derive(Clone, Debug)]
+pub(crate) struct MaterializedAgentToolExperienceScopeClosure {
+    heads: Vec<AgentToolExperienceOwnerHeadV2>,
+    materials: Vec<AgentToolExperienceRevisionMaterialV2>,
+}
+
+impl MaterializedAgentToolExperienceScopeClosure {
+    pub(crate) fn heads(&self) -> &[AgentToolExperienceOwnerHeadV2] {
+        &self.heads
+    }
+
+    pub(crate) fn materials(&self) -> &[AgentToolExperienceRevisionMaterialV2] {
+        &self.materials
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct MaterializedLongTermOwnerClosure {
@@ -108,6 +129,10 @@ pub(crate) struct RecallImmutableReadContext<'a> {
     long_term_owner_closures: BTreeMap<GovernedMemoryOwnerRef, MaterializedLongTermOwnerClosure>,
     runtime_skill_scope_closures:
         BTreeMap<(String, RuntimeSkillOwningScope), MaterializedRuntimeSkillScopeClosure>,
+    agent_tool_experience_scope_closures: BTreeMap<
+        (String, AgentToolExperienceOwningScopeV1),
+        MaterializedAgentToolExperienceScopeClosure,
+    >,
     runtime_skill_premise_evidence: BTreeMap<GovernedOwnerRevisionRef, bool>,
     runtime_skill_task_evidence: BTreeMap<(PremiseTypedSource, String), (String, String, String)>,
 }
@@ -187,6 +212,7 @@ impl<'a> RecallImmutableReadContext<'a> {
             blob_observations: BTreeMap::new(),
             long_term_owner_closures: BTreeMap::new(),
             runtime_skill_scope_closures: BTreeMap::new(),
+            agent_tool_experience_scope_closures: BTreeMap::new(),
             runtime_skill_premise_evidence: BTreeMap::new(),
             runtime_skill_task_evidence: BTreeMap::new(),
         }
@@ -904,6 +930,153 @@ impl<'a> RecallImmutableReadContext<'a> {
         )
     }
 
+    pub(crate) fn materialize_agent_tool_experience_scope(
+        &mut self,
+        memory_space_id: &str,
+        owning_scope: &AgentToolExperienceOwningScopeV1,
+        max_owners_per_scope: usize,
+        max_revisions_per_owner: usize,
+    ) -> Result<()> {
+        use crate::store_internal::schema::{
+            AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE, AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE,
+            AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE,
+        };
+
+        let invalid = || {
+            Error::config(
+                "recall_agent_tool_experience_scope",
+                "Agent Tool experience scope closure is missing, invalid, or exceeds its pinned bound",
+            )
+        };
+        if max_owners_per_scope == 0 || max_revisions_per_owner == 0 {
+            return Err(invalid());
+        }
+        // Derive the address before consulting the cache: even an empty scope must
+        // have canonical identity, and no stored address can redirect this read.
+        let manifest_key = agent_tool_experience_scope_manifest_key(memory_space_id, owning_scope)?;
+        let scope_key = (memory_space_id.to_string(), owning_scope.clone());
+        if let Some(closure) = self.agent_tool_experience_scope_closures.get(&scope_key) {
+            if closure.heads.len() > max_owners_per_scope
+                || closure
+                    .heads
+                    .iter()
+                    .any(|head| head.retained_revisions.len() > max_revisions_per_owner)
+            {
+                return Err(invalid());
+            }
+            return Ok(());
+        }
+        let Some(value) = self.read_json_value(
+            AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE,
+            &manifest_key,
+        )?
+        else {
+            self.agent_tool_experience_scope_closures.insert(
+                scope_key,
+                MaterializedAgentToolExperienceScopeClosure {
+                    heads: Vec::new(),
+                    materials: Vec::new(),
+                },
+            );
+            return Ok(());
+        };
+        let manifest: AgentToolExperienceScopeManifestV1 =
+            serde_json::from_value(value).map_err(|_| invalid())?;
+        if manifest.physical_key != manifest_key
+            || manifest.memory_space_id != memory_space_id
+            || &manifest.owning_scope != owning_scope
+            || manifest.owner_count > max_owners_per_scope
+        {
+            return Err(invalid());
+        }
+        manifest.validate_exact(manifest.bindings.clone(), max_owners_per_scope)?;
+        let mut head_addresses = Vec::with_capacity(manifest.bindings.len());
+        for binding in &manifest.bindings {
+            let head_key =
+                agent_tool_experience_head_key(memory_space_id, owning_scope, &binding.owner_ref)?;
+            let material_key = agent_tool_experience_material_key(
+                memory_space_id,
+                owning_scope,
+                &binding.owner_ref,
+                binding.current_revision,
+            )?;
+            if head_key != binding.head_key || material_key != binding.material_key {
+                return Err(invalid());
+            }
+            head_addresses.push((AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE.to_string(), head_key));
+        }
+        let heads = self
+            .read_json_values(&head_addresses)?
+            .into_iter()
+            .map(|(_, value)| {
+                serde_json::from_value::<AgentToolExperienceOwnerHeadV2>(value.ok_or_else(invalid)?)
+                    .map_err(|_| invalid())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut material_addresses = Vec::new();
+        for (head, binding) in heads.iter().zip(&manifest.bindings) {
+            if !head.validate_contract().accepted
+                || head.memory_space_id != memory_space_id
+                || &head.owning_scope != owning_scope
+                || head.owner_ref != binding.owner_ref
+                || head.physical_key != binding.head_key
+                || head.content_digest != binding.head_digest
+                || head.current_revision != binding.current_revision
+                || head.retained_revisions.len() > max_revisions_per_owner
+            {
+                return Err(invalid());
+            }
+            if head.state == AgentToolExperienceHeadStateV2::Tombstoned {
+                continue;
+            }
+            for retained in &head.retained_revisions {
+                let key = agent_tool_experience_material_key(
+                    memory_space_id,
+                    owning_scope,
+                    &head.owner_ref,
+                    retained.owner_revision,
+                )?;
+                if key != retained.material_key {
+                    return Err(invalid());
+                }
+                material_addresses
+                    .push((AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE.to_string(), key));
+            }
+        }
+        let materials = self
+            .read_json_values(&material_addresses)?
+            .into_iter()
+            .map(|(_, value)| {
+                serde_json::from_value::<AgentToolExperienceRevisionMaterialV2>(
+                    value.ok_or_else(invalid)?,
+                )
+                .map_err(|_| invalid())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        validate_agent_tool_experience_scope_closure(
+            &manifest,
+            &heads,
+            &materials,
+            max_owners_per_scope,
+        )?;
+        for head in &heads {
+            if head.state == AgentToolExperienceHeadStateV2::Tombstoned {
+                continue;
+            }
+            let history = materials
+                .iter()
+                .filter(|material| material.owner_ref == head.owner_ref)
+                .cloned()
+                .collect::<Vec<_>>();
+            validate_agent_tool_experience_owner_history(&history)?;
+        }
+        self.agent_tool_experience_scope_closures.insert(
+            scope_key,
+            MaterializedAgentToolExperienceScopeClosure { heads, materials },
+        );
+        Ok(())
+    }
+
     pub(crate) fn materialize_runtime_skill_scope(
         &mut self,
         memory_space_id: &str,
@@ -1413,6 +1586,9 @@ impl<'a> RecallImmutableReadContext<'a> {
             blobs: std::mem::take(&mut self.blob_cache),
             long_term_owner_closures: std::mem::take(&mut self.long_term_owner_closures),
             runtime_skill_scope_closures: std::mem::take(&mut self.runtime_skill_scope_closures),
+            agent_tool_experience_scope_closures: std::mem::take(
+                &mut self.agent_tool_experience_scope_closures,
+            ),
             runtime_skill_premise_evidence: std::mem::take(
                 &mut self.runtime_skill_premise_evidence,
             ),
@@ -1480,6 +1656,10 @@ pub(crate) struct RecallReadView {
     long_term_owner_closures: BTreeMap<GovernedMemoryOwnerRef, MaterializedLongTermOwnerClosure>,
     runtime_skill_scope_closures:
         BTreeMap<(String, RuntimeSkillOwningScope), MaterializedRuntimeSkillScopeClosure>,
+    agent_tool_experience_scope_closures: BTreeMap<
+        (String, AgentToolExperienceOwningScopeV1),
+        MaterializedAgentToolExperienceScopeClosure,
+    >,
     runtime_skill_premise_evidence: BTreeMap<GovernedOwnerRevisionRef, bool>,
     runtime_skill_task_evidence: BTreeMap<(PremiseTypedSource, String), (String, String, String)>,
 }
@@ -1490,6 +1670,15 @@ pub(crate) struct RecallReadJsonDoc {
 }
 
 impl RecallReadView {
+    pub(crate) fn agent_tool_experience_scope(
+        &self,
+        memory_space_id: &str,
+        owning_scope: &AgentToolExperienceOwningScopeV1,
+    ) -> Option<&MaterializedAgentToolExperienceScopeClosure> {
+        self.agent_tool_experience_scope_closures
+            .get(&(memory_space_id.to_string(), owning_scope.clone()))
+    }
+
     #[cfg(feature = "nonproduction-replay-harness")]
     pub(crate) fn retained_long_term_counterfactual_inputs(
         &self,
@@ -2164,6 +2353,13 @@ impl LongTermMemoryReadStore for RecallReadView {
 }
 
 impl ConversationTranscriptStore for RecallReadView {
+    fn append_canonical_turn_intent(
+        &self,
+        _intent: &bm_core::memory::CanonicalTurnAppendIntent,
+    ) -> Result<TranscriptCommitReport> {
+        self.reject_write()
+    }
+
     fn append_turn_intent(
         &self,
         _intent: &TranscriptAppendIntent,
@@ -2507,6 +2703,45 @@ mod tests {
         json: BTreeMap<(String, String), serde_json::Value>,
     }
 
+    struct RecordedJsonMapSession {
+        source: JsonMapSession,
+        read: crate::store_internal::transaction::StoreReadSessionState,
+    }
+
+    impl StoreImmutableReadSession for RecordedJsonMapSession {
+        fn read_json_known_keys(
+            &mut self,
+            addresses: &[(String, String)],
+        ) -> Result<Vec<StoreBoundedKnownJsonRead>> {
+            self.source
+                .read_json_known_keys(addresses)?
+                .into_iter()
+                .map(|value| {
+                    self.read
+                        .record_json(&value.namespace, &value.key, value.value)
+                })
+                .collect()
+        }
+
+        fn read_blob_known_keys(
+            &mut self,
+            addresses: &[(String, String)],
+        ) -> Result<Vec<StoreBoundedKnownBlobRead>> {
+            self.source
+                .read_blob_known_keys(addresses)?
+                .into_iter()
+                .map(|value| {
+                    self.read
+                        .record_blob(&value.namespace, &value.key, value.value)
+                })
+                .collect()
+        }
+
+        fn receipt(&self) -> Result<StoreReadReceipt> {
+            self.read.receipt()
+        }
+    }
+
     impl StoreImmutableReadSession for JsonMapSession {
         fn read_json_known_keys(
             &mut self,
@@ -2539,6 +2774,243 @@ mod tests {
         fn receipt(&self) -> Result<StoreReadReceipt> {
             Ok(StoreReadReceipt::default())
         }
+    }
+
+    fn agent_tool_scope_fixture() -> (
+        AgentToolExperienceRevisionMaterialV2,
+        AgentToolExperienceOwnerHeadV2,
+        AgentToolExperienceScopeManifestV1,
+        JsonMapSession,
+    ) {
+        use crate::store_internal::schema::{
+            AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE, AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE,
+            AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE,
+        };
+        use bm_core::skills::{
+            AgentToolExperienceConfidence, AgentToolExperienceHeadBindingV1,
+            AgentToolExperienceRetainedRevisionDigestV2, AgentToolExperienceStatus,
+            AgentToolOutcome, AgentToolRegistryScope,
+        };
+
+        let scope = AgentToolExperienceOwningScopeV1::Subject {
+            mounted_subject_id: "agent-a".into(),
+        };
+        let material = AgentToolExperienceRevisionMaterialV2::build(
+            "space-1",
+            scope.clone(),
+            "tools",
+            AgentToolRegistryScope::Global,
+            "search",
+            "schema-v1",
+            "search-task",
+            1,
+            "Find facts",
+            "Search then verify",
+            Vec::new(),
+            2,
+            2,
+            0,
+            AgentToolOutcome::Succeeded,
+            AgentToolExperienceConfidence::Medium,
+            AgentToolExperienceStatus::Active,
+            vec!["observation-a".into(), "observation-b".into()],
+            MemoryPrivacyClass::SharedWithSubject,
+            100,
+            100,
+            None,
+        )
+        .unwrap();
+        let head = AgentToolExperienceOwnerHeadV2::build(
+            "space-1",
+            scope.clone(),
+            material.owner_ref.clone(),
+            1,
+            vec![AgentToolExperienceRetainedRevisionDigestV2::from_material(&material).unwrap()],
+        )
+        .unwrap();
+        let manifest = AgentToolExperienceScopeManifestV1::build(
+            1,
+            "space-1",
+            scope,
+            vec![
+                AgentToolExperienceHeadBindingV1::from_head_and_material(&head, &material).unwrap(),
+            ],
+            8,
+        )
+        .unwrap();
+        let json = BTreeMap::from([
+            (
+                (
+                    AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE.into(),
+                    manifest.physical_key.clone(),
+                ),
+                serde_json::to_value(&manifest).unwrap(),
+            ),
+            (
+                (
+                    AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE.into(),
+                    head.physical_key.clone(),
+                ),
+                serde_json::to_value(&head).unwrap(),
+            ),
+            (
+                (
+                    AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE.into(),
+                    material.physical_key.clone(),
+                ),
+                serde_json::to_value(&material).unwrap(),
+            ),
+        ]);
+        (material, head, manifest, JsonMapSession { json })
+    }
+
+    #[test]
+    fn agent_tool_scope_materializes_exact_owner_history_in_the_read_receipt() {
+        let (material, head, _, session) = agent_tool_scope_fixture();
+        let mut context = RecallImmutableReadContext::new(Box::new(RecordedJsonMapSession {
+            source: session,
+            read: crate::store_internal::transaction::StoreReadSessionState::new(
+                crate::StoreCapacityBudget::full(),
+            ),
+        }));
+        context
+            .materialize_agent_tool_experience_scope("space-1", &material.owning_scope, 8, 4)
+            .unwrap();
+        assert_eq!(context.cached_address_counts(), (3, 0));
+        context
+            .materialize_agent_tool_experience_scope("space-1", &material.owning_scope, 1, 1)
+            .unwrap();
+        assert_eq!(context.cached_address_counts(), (3, 0));
+        let view = context.take_materialized_view();
+        let closure = view
+            .agent_tool_experience_scope("space-1", &material.owning_scope)
+            .unwrap();
+        assert_eq!(closure.heads(), &[head]);
+        assert_eq!(closure.materials(), &[material]);
+        assert!(context.finish().unwrap().1.read_set_exact);
+    }
+
+    #[test]
+    fn agent_tool_scope_other_subject_only_reads_its_absent_manifest() {
+        let (_, _, _, session) = agent_tool_scope_fixture();
+        let mut context = RecallImmutableReadContext::new(Box::new(session));
+        let scope = AgentToolExperienceOwningScopeV1::Subject {
+            mounted_subject_id: "agent-b".into(),
+        };
+        context
+            .materialize_agent_tool_experience_scope("space-1", &scope, 8, 4)
+            .unwrap();
+        context
+            .materialize_agent_tool_experience_scope("space-1", &scope, 8, 4)
+            .unwrap();
+        assert_eq!(context.cached_address_counts(), (1, 0));
+        let view = context.take_materialized_view();
+        let closure = view.agent_tool_experience_scope("space-1", &scope).unwrap();
+        assert!(closure.heads().is_empty());
+        assert!(closure.materials().is_empty());
+    }
+
+    #[test]
+    fn agent_tool_scope_rejects_noncanonical_identity_before_any_read() {
+        let (_, _, _, session) = agent_tool_scope_fixture();
+        let mut context = RecallImmutableReadContext::new(Box::new(session));
+        let scope = AgentToolExperienceOwningScopeV1::Subject {
+            mounted_subject_id: " agent-a".into(),
+        };
+        assert!(context
+            .materialize_agent_tool_experience_scope("space-1", &scope, 8, 4)
+            .is_err());
+        assert_eq!(context.cached_address_counts(), (0, 0));
+    }
+
+    #[test]
+    fn agent_tool_scope_rejects_redirected_manifest_before_reading_any_head() {
+        use crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE;
+        let (_, _, manifest, mut session) = agent_tool_scope_fixture();
+        let mut bindings = manifest.bindings.clone();
+        bindings[0].head_key = "outside-scope-head".into();
+        let redirected = AgentToolExperienceScopeManifestV1::build(
+            1,
+            "space-1",
+            manifest.owning_scope.clone(),
+            bindings,
+            8,
+        )
+        .unwrap();
+        session.json.insert(
+            (
+                AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE.into(),
+                manifest.physical_key.clone(),
+            ),
+            serde_json::to_value(redirected).unwrap(),
+        );
+        let mut context = RecallImmutableReadContext::new(Box::new(session));
+        assert!(context
+            .materialize_agent_tool_experience_scope("space-1", &manifest.owning_scope, 8, 4,)
+            .is_err());
+        assert_eq!(context.cached_address_counts(), (1, 0));
+    }
+
+    #[test]
+    fn agent_tool_scope_missing_bound_material_fails_closed() {
+        use crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE;
+        let (material, _, _, mut session) = agent_tool_scope_fixture();
+        session.json.remove(&(
+            AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE.into(),
+            material.physical_key,
+        ));
+        let mut context = RecallImmutableReadContext::new(Box::new(session));
+        assert!(context
+            .materialize_agent_tool_experience_scope("space-1", &material.owning_scope, 8, 4,)
+            .is_err());
+        assert!(context
+            .take_materialized_view()
+            .agent_tool_experience_scope("space-1", &material.owning_scope)
+            .is_none());
+    }
+
+    #[test]
+    fn agent_tool_scope_tombstone_never_reads_retained_material() {
+        use crate::store_internal::schema::{
+            AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE, AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE,
+        };
+        use bm_core::skills::AgentToolExperienceHeadBindingV1;
+        let (material, mut head, _, mut session) = agent_tool_scope_fixture();
+        head.state = AgentToolExperienceHeadStateV2::Tombstoned;
+        head.content_digest = head.canonical_content_digest().unwrap();
+        let manifest = AgentToolExperienceScopeManifestV1::build(
+            2,
+            "space-1",
+            material.owning_scope.clone(),
+            vec![AgentToolExperienceHeadBindingV1::from_head(&head).unwrap()],
+            8,
+        )
+        .unwrap();
+        session.json.insert(
+            (
+                AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE.into(),
+                head.physical_key.clone(),
+            ),
+            serde_json::to_value(&head).unwrap(),
+        );
+        session.json.insert(
+            (
+                AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE.into(),
+                manifest.physical_key.clone(),
+            ),
+            serde_json::to_value(&manifest).unwrap(),
+        );
+        let mut context = RecallImmutableReadContext::new(Box::new(session));
+        context
+            .materialize_agent_tool_experience_scope("space-1", &material.owning_scope, 8, 4)
+            .unwrap();
+        assert_eq!(context.cached_address_counts(), (2, 0));
+        let view = context.take_materialized_view();
+        let closure = view
+            .agent_tool_experience_scope("space-1", &material.owning_scope)
+            .unwrap();
+        assert_eq!(closure.heads(), &[head]);
+        assert!(closure.materials().is_empty());
     }
 
     fn runtime_skill_digest(byte: char) -> String {

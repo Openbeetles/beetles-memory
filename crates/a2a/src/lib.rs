@@ -14,8 +14,8 @@ use serde::Serialize;
 
 #[cfg(feature = "bridge-http")]
 use bm_adapter::{
-    decode_json_adapter_command, AdapterJsonCommandOptions, AdapterRequestIdentityOwner,
-    AdapterResponse, AdapterSdkReport, TransportKind, TransportMode,
+    decode_json_adapter_command, AdapterRequestIdentityOwner, AdapterResponse, AdapterSdkReport,
+    TransportKind, TransportMode,
 };
 #[cfg(feature = "bridge-http")]
 use bm_entry::{
@@ -207,12 +207,7 @@ impl A2aBridge {
         let operation = spec.operation.ok_or_else(|| {
             bm_sdk::Error::config("a2a_bridge", "message has no memory operation")
         })?;
-        reject_missing_remote_source_scope(runtime, operation, &message.payload)?;
-        let command = decode_json_adapter_command(
-            operation,
-            &message.payload,
-            &a2a_command_options(runtime),
-        )?;
+        let command = decode_json_adapter_command(operation, &message.payload)?;
         let request_identity = AdapterRequestIdentityOwner::new(
             TransportKind::A2a,
             &self.bridge_id,
@@ -247,40 +242,6 @@ impl A2aBridge {
             permissions: vec![A2aPermission::MemoryReport],
         })
     }
-}
-
-#[cfg(feature = "bridge-http")]
-fn a2a_command_options(runtime: &EntryRuntime) -> AdapterJsonCommandOptions {
-    let options = AdapterJsonCommandOptions::new("bm-a2a");
-    if runtime.uses_local_default_scope_policy() {
-        options.with_default_source_chat_id(runtime.runtime().scope().chat_id.clone())
-    } else {
-        options
-    }
-}
-
-#[cfg(feature = "bridge-http")]
-fn reject_missing_remote_source_scope(
-    runtime: &EntryRuntime,
-    operation: AdapterOperation,
-    body: &str,
-) -> bm_sdk::Result<()> {
-    if runtime.uses_local_default_scope_policy() || operation != AdapterOperation::Write {
-        return Ok(());
-    }
-    let value: Value = serde_json::from_str(body)
-        .map_err(|err| bm_sdk::Error::config("adapter_json_command", err.to_string()))?;
-    if value
-        .get("source_chat_id")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
-    {
-        return Ok(());
-    }
-    Err(bm_sdk::Error::config(
-        "adapter_json_command",
-        "remote adapter write payload missing source_chat_id; refusing implicit chat-1 scope",
-    ))
 }
 
 #[cfg(feature = "bridge-http")]
@@ -558,6 +519,7 @@ mod scope_tests {
                 owner_id: "owner-default".to_string(),
             },
             scope: EntryScope {
+                conversation_id: None,
                 channel: "a2a.remote".to_string(),
                 chat_id: "chat-remote".to_string(),
             },
@@ -601,7 +563,7 @@ mod scope_tests {
     }
 
     #[test]
-    fn a2a_remote_write_without_explicit_source_scope_is_rejected() {
+    fn a2a_remote_write_rejects_legacy_untyped_payload() {
         let runtime = remote_runtime();
         let bridge = A2aBridge::new("remote-peer");
         let lease = runtime
@@ -622,10 +584,10 @@ mod scope_tests {
                     "a2a_peer",
                 )
             })
-            .expect_err("remote A2A write must not silently fall back to chat-1");
+            .expect_err("remote A2A write must reject the legacy untyped payload");
 
         assert_eq!(error.stage(), "adapter_json_command");
-        assert!(error.to_string().contains("source_chat_id"), "{error}");
+        assert!(error.to_string().contains("kind"), "{error}");
     }
 }
 
@@ -650,6 +612,14 @@ fn render_response(response: AdapterResponse<AdapterSdkReport>) -> String {
                 );
             }
             omit_null_receipt(match report {
+                AdapterSdkReport::Write(report) => json!({
+                    "status": "accepted",
+                    "operation": report.operation,
+                    "accepted": report.accepted,
+                    "changed": report.changed,
+                    "reason": report.reason,
+                    "receipt": receipt,
+                }).to_string(),
                 AdapterSdkReport::Recall(_) | AdapterSdkReport::Project(_) => {
                     unreachable!("governed DTO handled above")
                 }

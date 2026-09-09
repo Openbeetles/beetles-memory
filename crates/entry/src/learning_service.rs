@@ -1074,8 +1074,7 @@ fn run_attachment_cycle(inner: &Arc<ServiceInner>, attachment: &AttachedRuntime)
         }
         Ok(MemoryLearningCycleOutcome::Blocked(report)) => {
             let changed = attachment_report.state != "blocked"
-                || attachment_report.last_job_id.as_deref() != Some(&report.job.job_id)
-                || attachment_report.reason != report.reason;
+                || attachment_report.last_job_id.as_deref() != Some(&report.job.job_id);
             if changed {
                 service_report.blocked_jobs = service_report.blocked_jobs.saturating_add(1);
             }
@@ -1094,6 +1093,30 @@ fn run_attachment_cycle(inner: &Arc<ServiceInner>, attachment: &AttachedRuntime)
             true
         }
         Ok(MemoryLearningCycleOutcome::Failed(report)) => {
+            service_report.failed_jobs = service_report.failed_jobs.saturating_add(1);
+            service_report.reason = report.reason.clone();
+            attachment_report.state = "failed".to_string();
+            attachment_report.last_job_id = Some(report.job.job_id);
+            attachment_report.reason = report.reason;
+            true
+        }
+        Ok(MemoryLearningCycleOutcome::ProceduralCompleted(report)) => {
+            service_report.completed_jobs = service_report.completed_jobs.saturating_add(1);
+            service_report.reason = "procedural_feedback_job_succeeded".to_string();
+            attachment_report.state = "idle".to_string();
+            attachment_report.last_job_id = Some(report.job.job_id);
+            attachment_report.reason = "procedural_feedback_job_succeeded".to_string();
+            true
+        }
+        Ok(MemoryLearningCycleOutcome::ProceduralRetrying(report)) => {
+            service_report.retrying_jobs = service_report.retrying_jobs.saturating_add(1);
+            service_report.reason = report.reason.clone();
+            attachment_report.state = "retrying".to_string();
+            attachment_report.last_job_id = Some(report.job.job_id);
+            attachment_report.reason = report.reason;
+            true
+        }
+        Ok(MemoryLearningCycleOutcome::ProceduralFailed(report)) => {
             service_report.failed_jobs = service_report.failed_jobs.saturating_add(1);
             service_report.reason = report.reason.clone();
             attachment_report.state = "failed".to_string();

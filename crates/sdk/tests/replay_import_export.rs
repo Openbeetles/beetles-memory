@@ -204,6 +204,7 @@ fn continuity_import_preserves_soul_private_without_public_delivery_or_graph_mem
     assert!(!delivered.contains(PRIVATE_SENTINEL));
     let projection = target_runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "How should release artifacts be published?".to_string(),

@@ -6,7 +6,7 @@ use bm_entry::{
 };
 use bm_sdk::{
     MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryRecallRequest, MemoryWriteRequest,
-    RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
+    StoreBackendConfig,
 };
 
 mod support;
@@ -30,6 +30,7 @@ fn runtime_with_auth(auth: EntryAuthConfig) -> EntryRuntime {
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "remote".to_string(),
             chat_id: "chat-remote".to_string(),
         },
@@ -70,19 +71,8 @@ fn recall_command() -> AdapterCommand {
 }
 
 fn write_command() -> AdapterCommand {
-    AdapterCommand::Write(MemoryWriteRequest::Procedural {
-        writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
-            name: "runtime_skill__auth_capability".to_string(),
-            topic: "auth".to_string(),
-            title: "Capability gate".to_string(),
-            summary: "Capability denial must precede idempotency".to_string(),
-            content: "Reject the operation before reserving the caller key.".to_string(),
-            citations: Vec::new(),
-            source_chat_id: Some("chat-remote".to_string()),
-            observed_at: 1_800_000_000,
-        })],
-        owning_scope: support::runtime_skill_subject_scope("agent-main"),
-        source: RuntimeSkillWriteSource::Manual,
+    AdapterCommand::Write(MemoryWriteRequest::Candidates {
+        candidates: Vec::new(),
     })
 }
 

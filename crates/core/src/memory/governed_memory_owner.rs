@@ -22,6 +22,7 @@ pub enum GovernedMemoryOwnerPlane {
     ConversationTranscript,
     MemoryGraph,
     RuntimeSkill,
+    AgentToolExperience,
 }
 
 impl GovernedMemoryOwnerPlane {
@@ -32,6 +33,7 @@ impl GovernedMemoryOwnerPlane {
             Self::ConversationTranscript => "conversation_transcript",
             Self::MemoryGraph => "memory_graph",
             Self::RuntimeSkill => "runtime_skill",
+            Self::AgentToolExperience => "agent_tool_experience",
         }
     }
 }

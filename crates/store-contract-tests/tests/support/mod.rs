@@ -19,7 +19,7 @@ use bm_sdk::{
     MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryRuntime, MemoryScope, MemoryStoreHandle,
     MemoryWriteRequest, NoopMemoryAuditSink, ParsedLongTermMemoryExtraction, Result,
     RuntimeLifecycleModeInput, RuntimeSkillCreationRef, RuntimeSkillOwningScope, RuntimeSkillWrite,
-    RuntimeSkillWriteSource, StoreBackendConfig,
+    StoreBackendConfig,
 };
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -121,15 +121,14 @@ pub fn seed_runtime_skill(platform: &StorePlatform, name: &str) -> RuntimeSkillO
         verification_receipt_digest,
     };
     let report = runtime
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![GovernedRuntimeSkillWriteInput {
+        .seed_runtime_skills_for_replay(
+            vec![GovernedRuntimeSkillWriteInput {
                 write,
                 creation_ref: creation_ref.clone(),
                 privacy_class: MemoryPrivacyClass::SharedWithSubject,
             }],
-            owning_scope: owning_scope.clone(),
-            source: RuntimeSkillWriteSource::Manual,
-        })
+            owning_scope.clone(),
+        )
         .expect("seed typed runtime skill");
     assert!(report.accepted);
     assert_eq!(report.changed, 1);
@@ -204,8 +203,6 @@ pub fn seed_scoped_long_term(
     let runtime = runtime_for_scope(platform, memory_space_id, now_secs);
     let report = runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![draft.clone()],
                 deletes: Vec::new(),

@@ -6,9 +6,8 @@ pub mod agent_rules;
 
 use agent_rules::{render_agent_rules_export, AgentRulesExportRequest, AgentRulesTarget};
 use bm_adapter::{
-    decode_json_adapter_command, AdapterCommand, AdapterJsonCommandOptions,
-    AdapterMutationReliability, AdapterOperation, AdapterRequestIdentityOwner, AdapterResponse,
-    AdapterSdkReport,
+    decode_json_adapter_command, AdapterCommand, AdapterMutationReliability, AdapterOperation,
+    AdapterRequestIdentityOwner, AdapterResponse, AdapterSdkReport,
 };
 use bm_entry::{
     EntryAuthConfig, EntryConsoleRuntimeSkillEdit, EntryConsoleSkillSetEnabled,
@@ -17,16 +16,15 @@ use bm_entry::{
 };
 use bm_sdk::{
     platform_capability_snapshot, platform_capability_snapshot_file_name,
-    resolve_memory_capabilities, GovernedRuntimeSkillWriteInput, LongTermMemoryKind,
-    LongTermMemoryQuery, MemoryCapabilityCatalog, MemoryCapabilityPolicy,
-    MemoryGovernancePolicyMutation, MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration,
-    MemoryInspectionRequest, MemoryLongTermControlView, MemoryLongTermListRequest,
-    MemoryLongTermMutation, MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest,
-    MemoryLongTermTarget, MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryProjectionRequest,
-    MemoryRecallRequest, MemoryReplayRequest, MemoryTranscriptAttrWriteRequest, MemoryWriteRequest,
-    PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillCreationRef,
-    RuntimeSkillOwnerLocator, RuntimeSkillOwningScope, RuntimeSkillWrite, RuntimeSkillWriteSource,
-    StoreBackendConfig, StoreBackendKind, TranscriptAttrEnvelope,
+    resolve_memory_capabilities, LongTermMemoryKind, LongTermMemoryQuery, MemoryCapabilityCatalog,
+    MemoryCapabilityPolicy, MemoryGovernancePolicyMutation, MemoryGovernanceSelector,
+    MemoryGovernanceSuppressionDuration, MemoryInspectionRequest, MemoryLongTermControlView,
+    MemoryLongTermListRequest, MemoryLongTermMutation, MemoryLongTermMutationRequest,
+    MemoryLongTermPolicyRequest, MemoryLongTermTarget, MemoryPrivacyPolicy,
+    MemoryProjectionRequest, MemoryRecallRequest, MemoryReplayRequest,
+    MemoryTranscriptAttrWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput,
+    RuntimeSkillOwnerLocator, RuntimeSkillOwningScope, StoreBackendConfig, StoreBackendKind,
+    TranscriptAttrEnvelope,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -39,6 +37,11 @@ pub struct CommandSpec {
 }
 
 const COMMAND_SPECS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "write",
+        usage: "bm memory write --input <request.json> --idempotency-key <stable-non-sensitive-key>",
+        operation: AdapterOperation::Write,
+    },
     CommandSpec {
         name: "capabilities",
         usage: "bm memory capabilities",
@@ -63,11 +66,6 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         name: "replay",
         usage: "bm memory replay --chat-id <chat_id> --limit <n>",
         operation: AdapterOperation::Replay,
-    },
-    CommandSpec {
-        name: "write-procedural",
-        usage: "bm memory write-procedural --idempotency-key <stable-non-sensitive-key> --name <name> --content <content> --runtime-skill-subject <subject-id>|--runtime-skill-shared-program --replay-candidate-ref <safe-ref> --verification-receipt-digest <sha256> --runtime-skill-privacy <public-runtime|shared-with-subject>",
-        operation: AdapterOperation::Write,
     },
     CommandSpec {
         name: "finalize-turn",
@@ -451,9 +449,6 @@ struct CliOptions {
     runtime_skill_owning_scope: Option<RuntimeSkillOwningScope>,
     runtime_skill_owner_id: String,
     runtime_skill_owner_revision: Option<u64>,
-    replay_candidate_ref: String,
-    verification_receipt_digest: String,
-    runtime_skill_privacy: Option<MemoryPrivacyClass>,
     idempotency_key: Option<String>,
 }
 
@@ -494,9 +489,6 @@ impl CliOptions {
         let mut runtime_skill_owning_scope = None;
         let mut runtime_skill_owner_id = String::new();
         let mut runtime_skill_owner_revision = None;
-        let mut replay_candidate_ref = String::new();
-        let mut verification_receipt_digest = String::new();
-        let mut runtime_skill_privacy = None;
         let mut idempotency_key = None;
         let mut index = 0;
         while index < args.len() {
@@ -564,21 +556,6 @@ impl CliOptions {
                             "runtime skill owner revision must be a positive integer".to_string()
                         })?)
                 }
-                "--replay-candidate-ref" => {
-                    replay_candidate_ref = next_value(args, &mut index, key)?.to_string()
-                }
-                "--verification-receipt-digest" => {
-                    verification_receipt_digest = next_value(args, &mut index, key)?.to_string()
-                }
-                "--runtime-skill-privacy" => {
-                    runtime_skill_privacy = Some(match next_value(args, &mut index, key)? {
-                        "public-runtime" => MemoryPrivacyClass::PublicRuntime,
-                        "shared-with-subject" => MemoryPrivacyClass::SharedWithSubject,
-                        other => {
-                            return Err(format!("unsupported runtime skill privacy class: {other}"))
-                        }
-                    });
-                }
                 "--record-id" => record_id = next_value(args, &mut index, key)?.to_string(),
                 "--idempotency-key" => {
                     idempotency_key =
@@ -618,9 +595,6 @@ impl CliOptions {
             runtime_skill_owning_scope,
             runtime_skill_owner_id,
             runtime_skill_owner_revision,
-            replay_candidate_ref,
-            verification_receipt_digest,
-            runtime_skill_privacy,
             idempotency_key,
         })
     }
@@ -634,6 +608,7 @@ impl CliOptions {
                 owner_id: self.owner.clone(),
             },
             scope: EntryScope {
+                conversation_id: None,
                 channel: self.channel.clone(),
                 chat_id: self.chat.clone(),
             },
@@ -692,39 +667,16 @@ impl CliOptions {
     fn adapter_command(&self, command: &str) -> Result<AdapterCommand, String> {
         match command {
             "capabilities" => Ok(AdapterCommand::Capabilities),
-            "write-procedural" => Ok(AdapterCommand::Write(MemoryWriteRequest::Procedural {
-                writes: vec![GovernedRuntimeSkillWriteInput {
-                    write: RuntimeSkillWrite {
-                        name: self.name.clone(),
-                        topic: self.topic.clone(),
-                        title: self.title.clone(),
-                        summary: self.summary.clone(),
-                        content: self.content.clone(),
-                        citations: vec!["bm-cli".to_string()],
-                        source_chat_id: Some(self.chat.clone()),
-                        observed_at: 1_800_000_000,
-                    },
-                    creation_ref: RuntimeSkillCreationRef::ReplayPromotion {
-                        candidate_ref: required_value(
-                            &self.replay_candidate_ref,
-                            "--replay-candidate-ref",
-                        )?
-                        .to_string(),
-                        verification_receipt_digest: required_value(
-                            &self.verification_receipt_digest,
-                            "--verification-receipt-digest",
-                        )?
-                        .to_string(),
-                    },
-                    privacy_class: self.runtime_skill_privacy.ok_or_else(|| {
-                        "write-procedural requires --runtime-skill-privacy".to_string()
-                    })?,
-                }],
-                owning_scope: self.runtime_skill_owning_scope.clone().ok_or_else(|| {
-                    "write-procedural requires an explicit runtime skill owning scope".to_string()
-                })?,
-                source: RuntimeSkillWriteSource::Manual,
-            })),
+            "write" => {
+                let path = self
+                    .input_path
+                    .as_ref()
+                    .ok_or_else(|| "write requires --input <request.json>".to_string())?;
+                let raw = std::fs::read_to_string(path)
+                    .map_err(|err| format!("failed to read memory write request: {err}"))?;
+                decode_json_adapter_command(AdapterOperation::Write, &raw)
+                    .map_err(|err| err.to_string())
+            }
             "finalize-turn" => {
                 let path = self
                     .input_path
@@ -732,13 +684,8 @@ impl CliOptions {
                     .ok_or_else(|| "finalize-turn requires --input <request.json>".to_string())?;
                 let raw = std::fs::read_to_string(path)
                     .map_err(|err| format!("failed to read finalize turn request: {err}"))?;
-                decode_json_adapter_command(
-                    AdapterOperation::FinalizeTurn,
-                    &raw,
-                    &AdapterJsonCommandOptions::new("bm-cli")
-                        .with_default_source_chat_id(self.chat.clone()),
-                )
-                .map_err(|err| err.to_string())
+                decode_json_adapter_command(AdapterOperation::FinalizeTurn, &raw)
+                    .map_err(|err| err.to_string())
             }
             "long-term-list" => Ok(AdapterCommand::LongTermList(MemoryLongTermListRequest {
                 query: LongTermMemoryQuery {
@@ -818,6 +765,7 @@ impl CliOptions {
                 tool_registry_refs: Vec::new(),
             })),
             "project" => Ok(AdapterCommand::Project(MemoryProjectionRequest {
+                binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
                 temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 structured_query_facets: Vec::new(),
                 user_query: self.query.clone(),

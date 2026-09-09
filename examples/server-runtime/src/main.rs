@@ -54,6 +54,7 @@ fn entry_runtime(profile: ProfileId) -> bm_sdk::Result<EntryRuntime> {
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "server".to_string(),
             chat_id: "chat-1".to_string(),
         },

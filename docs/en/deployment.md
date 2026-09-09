@@ -31,6 +31,7 @@ let runtime = EntryRuntime::open(EntryRuntimeConfig {
         owner_id: "owner-default".to_string(),
     },
     scope: EntryScope {
+        conversation_id: None,
         channel: "gateway".to_string(),
         chat_id: "chat-1".to_string(),
     },
@@ -60,7 +61,7 @@ Memory routes declared by the crate:
 | Route | Method | Operation |
 | --- | --- | --- |
 | `/memory/profile/capabilities` | `GET` | capabilities |
-| `/memory/write` | `POST` | write procedural memory |
+| `/memory/write` | `POST` | submit factual candidates, long-term extraction, or governed evidence; procedural creation is rejected |
 | `/memory/recall` | `POST` | recall |
 | `/memory/project` | `POST` | project contract |
 | `/memory/maintain` | `POST` | maintain contract |
@@ -89,20 +90,28 @@ Example write body:
 
 ```json
 {
-  "name": "runtime_skill__server_entry_guard",
-  "topic": "server-entry",
-  "title": "Server entry guard",
-  "summary": "Server runtime accepts HTTP entry requests through bm-entry.",
-  "content": "Decode HTTP requests into adapter commands and dispatch through the SDK runtime.",
-  "source": "manual",
-  "source_chat_id": "local-console",
-  "owning_scope": {"kind": "shared_program"},
-  "creation_ref": {
-    "kind": "replay_promotion",
-    "candidate_ref": "example:server-entry-guard",
-    "verification_receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-  },
-  "privacy_class": "public_runtime"
+  "kind": "candidates",
+  "candidates": [{
+    "candidate_id": "server-entry-fact",
+    "authority": "user_asserted",
+    "target": {"target": "long_term_memory", "kind": "project", "topic": "server-entry"},
+    "long_term_subject_visibility": "all_subjects",
+    "privacy": "shared_with_subject",
+    "content": {
+      "kind": "text",
+      "topic": "server-entry",
+      "body": "Server runtime accepts HTTP entry requests through bm-entry.",
+      "keywords": ["server", "entry"]
+    },
+    "evidence_refs": [],
+    "canonical_entities": [],
+    "semantic_judgment": {
+      "source": "runtime_gate",
+      "decision": "accept",
+      "governed_target": {"target": "long_term_memory", "kind": "project", "topic": "server-entry"},
+      "reason": "explicit factual intake"
+    }
+  }]
 }
 ```
 

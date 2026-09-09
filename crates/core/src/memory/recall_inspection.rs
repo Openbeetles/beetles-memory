@@ -261,7 +261,8 @@ pub fn inspect_working_recall(input: WorkingRecallInspectionInput<'_>) -> Workin
             input.chat_id,
             input.query,
             input.system_max_len.min(520),
-        ),
+        )
+        .map(|bundle| bundle.rendered_text),
         _ => None,
     };
     let task_recall_report = match (

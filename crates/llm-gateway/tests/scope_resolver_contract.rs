@@ -21,6 +21,35 @@ fn remote_auth(
 }
 
 #[test]
+fn body_conversation_is_stable_across_requests_and_client_hint_has_precedence() {
+    let resolver = GatewayScopeResolver::new(GatewayScopeResolverConfig::default_for_local_dev());
+    let mut request = support::loopback_scope_request("conversation-binding");
+    request.body_conversation_hint = Some("body-thread".into());
+    request.request_id_hint = Some("request-one".into());
+    let first = resolver.resolve(&request).unwrap();
+    request.request_id_hint = Some("request-two".into());
+    let second = resolver.resolve(&request).unwrap();
+    assert_eq!(first.entry_scope, second.entry_scope);
+    assert_eq!(
+        first.entry_scope.scope.conversation_id.as_deref(),
+        Some("body-thread")
+    );
+    request.client_conversation_hint = Some("client-thread".into());
+    assert_eq!(
+        resolver
+            .resolve(&request)
+            .unwrap()
+            .entry_scope
+            .scope
+            .conversation_id
+            .as_deref(),
+        Some("client-thread")
+    );
+    request.client_conversation_hint = Some("   ".into());
+    assert!(resolver.resolve(&request).is_err());
+}
+
+#[test]
 fn scope_resolver_never_accepts_owner_from_untrusted_headers() {
     let resolver = GatewayScopeResolver::new(GatewayScopeResolverConfig {
         local_owner_id: Some("local-owner".to_string()),

@@ -51,7 +51,7 @@ pub fn project_adapter_report(
 pub fn dispatch_adapter_command_with_services(
     runtime: &MemoryRuntime,
     lease: &RuntimeBudgetLease,
-    mut envelope: AdapterEnvelope<AdapterCommand>,
+    envelope: AdapterEnvelope<AdapterCommand>,
     services: AdapterRuntimeServices<'_>,
 ) -> Result<AdapterResponse<AdapterSdkReport>> {
     if envelope.protocol_version == ExternalAiMemoryProtocolVersion::V1
@@ -100,9 +100,6 @@ pub fn dispatch_adapter_command_with_services(
             reason: reason.to_string(),
         });
     }
-    envelope
-        .payload
-        .pin_accepted_at(runtime.config().clock.now_secs());
     runtime.execute_with_runtime_budget_lease(lease, || {
         dispatch_adapter_command_with_services_in_lease(runtime, envelope, services)
     })

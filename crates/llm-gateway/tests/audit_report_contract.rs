@@ -14,9 +14,9 @@ use bm_llm_gateway::{
 #[cfg(feature = "nonproduction-replay-harness")]
 use bm_sdk::{
     default_agent_subject_id, MemoryAuditSink, MemoryClock, MemoryIdentity, MemoryPrivacyPolicy,
-    MemoryProjectionRequest, MemoryRuntime, MemoryScope, MemoryStoreHandle, MemoryWriteRequest,
-    NoopMemoryAuditSink, PressureLevel, PrivateDocEntry, PrivateDocWorkspace, ProfileId,
-    RuntimeLifecycleModeInput, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
+    MemoryProjectionRequest, MemoryRuntime, MemoryScope, MemoryStoreHandle, NoopMemoryAuditSink,
+    PressureLevel, PrivateDocEntry, PrivateDocWorkspace, ProceduralProjectionBindingV1, ProfileId,
+    RuntimeLifecycleModeInput, RuntimeSkillWrite, StoreBackendConfig,
 };
 
 #[cfg(feature = "nonproduction-replay-harness")]
@@ -111,6 +111,7 @@ fn raw_projection_audit_records_redacted_final_sdk_projection_to_local_diagnosti
         .expect("runtime");
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "gateway private audit".to_string(),
@@ -268,8 +269,8 @@ fn procedural_provider_payload_is_exact_zero_in_gateway_audit_and_local_diagnost
         .expect("runtime");
     let procedural_sentinel = "GATEWAY_PROCEDURAL_AUDIT_EXACT_ZERO_SENTINEL";
     let procedural_write = runtime
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
+        .seed_runtime_skills_for_replay(
+            vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
                 name: "gateway_procedural_audit_guard".to_string(),
                 topic: "gateway procedural audit".to_string(),
                 title: "Gateway procedural audit guard".to_string(),
@@ -281,14 +282,14 @@ fn procedural_provider_payload_is_exact_zero_in_gateway_audit_and_local_diagnost
                 source_chat_id: Some("chat-a".to_string()),
                 observed_at: 1_800_000_000,
             })],
-            owning_scope: support::runtime_skill_subject_scope("agent-main"),
-            source: RuntimeSkillWriteSource::Manual,
-        })
+            support::runtime_skill_subject_scope("agent-main"),
+        )
         .expect("write governed procedure for audit");
     assert!(procedural_write.accepted, "{procedural_write:#?}");
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "gateway procedural audit".to_string(),

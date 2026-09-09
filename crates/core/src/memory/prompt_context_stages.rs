@@ -42,7 +42,7 @@ pub(crate) struct PromptSessionStage {
     pub execution_state_text: Option<String>,
     pub active_task_run: Option<Box<TaskRunRecord>>,
     pub task_workspace_text: Option<String>,
-    pub task_recall_text: Option<String>,
+    pub task_recall_bundle: Option<crate::task_execution::TaskRecallBundle>,
 }
 
 pub(crate) struct PromptConstitutionalStage {
@@ -344,7 +344,7 @@ pub(crate) fn load_session_stage(
         });
         render_task_workspace_block(record, &artifacts, 600)
     });
-    let task_recall_text = active_task_run.as_ref().and_then(|record| {
+    let task_recall_bundle = active_task_run.as_ref().and_then(|record| {
         build_task_recall_bundle(
             record,
             params.task_learning_store,
@@ -363,7 +363,7 @@ pub(crate) fn load_session_stage(
         execution_state_text,
         active_task_run,
         task_workspace_text,
-        task_recall_text,
+        task_recall_bundle,
     })
 }
 

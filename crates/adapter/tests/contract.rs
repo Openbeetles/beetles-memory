@@ -3,24 +3,26 @@ use std::sync::Arc;
 use bm_adapter::{
     decode_json_adapter_command, dispatch_adapter_command, dispatch_adapter_command_with_services,
     governed_adapter_json_command_schema, AdapterAuthContext, AdapterCommand, AdapterEnvelope,
-    AdapterErrorKey, AdapterJsonCommandOptions, AdapterMutationReliability, AdapterOperation,
-    AdapterProtocolBinding, AdapterRequestIdentityError, AdapterRequestIdentityOwner,
-    AdapterResponse, AdapterRuntimeServices, AdapterSdkReport, AdapterSource, TransportKind,
-    TransportMode,
+    AdapterErrorKey, AdapterMutationReliability, AdapterOperation, AdapterProtocolBinding,
+    AdapterRequestIdentityError, AdapterRequestIdentityOwner, AdapterResponse,
+    AdapterRuntimeServices, AdapterSdkReport, AdapterSource, TransportKind, TransportMode,
 };
 use bm_sdk::{
-    CanonicalTurnDelta, ConversationKey, ConversationScope, HostRefVisibility, LlmClient,
-    LlmHttpClient, LlmModelCompat, LlmResponse, LongTermMemoryKind, MemoryCandidateContent,
-    MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
-    MemoryCapabilityPolicy, MemoryClock, MemoryCloseRequest, MemoryEvidenceAuthority,
-    MemoryIdentity, MemoryLongTermControlView, MemoryLongTermListRequest, MemoryPrivacyClass,
-    MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime, MemoryScope,
-    MemorySemanticJudgmentSource, MemoryStoreHandle, MemorySubjectVisibilityPolicy,
-    MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitRequest, MemoryTranscriptReplayRequest,
-    MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource,
-    MemoryWriteCandidate, MemoryWriteRequest, Message, NoopMemoryAuditSink, PressureLevel,
-    ProfileId, QueryFacetInput, ResponseBody, RuntimeLifecycleModeInput, StopReason,
-    StoreBackendConfig, ToolChoicePolicy, ToolSpec, TranscriptAttrEnvelope,
+    AgentToolDescriptor, AgentToolObservationDigest, AgentToolOutcome, AgentToolRegistrySnapshot,
+    AgentToolUsageFeedbackV2, CanonicalTurnDelta, ConversationKey, ConversationScope,
+    HostRefVisibility, LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, LongTermMemoryKind,
+    MemoryCandidateContent, MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment,
+    MemoryCandidateTarget, MemoryCapabilityPolicy, MemoryClock, MemoryCloseRequest,
+    MemoryEvidenceAuthority, MemoryIdentity, MemoryLongTermControlView, MemoryLongTermListRequest,
+    MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest,
+    MemoryRuntime, MemoryScope, MemorySemanticJudgmentSource, MemoryStoreHandle,
+    MemorySubjectVisibilityPolicy, MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitRequest,
+    MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest,
+    MemoryTurnProtocol, MemoryTurnSource, MemoryWriteCandidate, MemoryWriteRequest, Message,
+    NoopMemoryAuditSink, PostTurnLearningInputV1, PressureLevel, ProceduralApplicabilityContextV1,
+    ProceduralExecutionOutcomeV1, ProfileId, QueryFacetInput, ResponseBody,
+    RuntimeLifecycleModeInput, RuntimeSkillListRequest, RuntimeSkillOwningScope, StopReason,
+    StoreBackendConfig, ToolChoicePolicy, ToolObservationDigest, ToolSpec, TranscriptAttrEnvelope,
     TranscriptAttrGovernance, TranscriptAttrLink, TranscriptAttrRedactionPolicy,
     TranscriptAttrScope, TranscriptAttrSource, TranscriptAttrSourceKind, TranscriptAttrTarget,
     TranscriptAttrValueKind, TranscriptInputMessage, TranscriptReplayView,
@@ -263,33 +265,17 @@ fn mutation_reliability_inventory_is_exhaustive_and_distinguishes_durable_receip
 }
 
 #[test]
-fn adapter_write_time_is_runtime_owned_and_payload_time_is_rejected() {
-    let options = AdapterJsonCommandOptions::new("accepted-at-contract");
+fn legacy_flat_procedural_adapter_write_shape_is_not_deserializable() {
     let error = decode_json_adapter_command(
         AdapterOperation::Write,
-        r#"{"name":"runtime_skill__clock","topic":"clock","title":"Clock","summary":"Clock","content":"Clock","owning_scope":{"kind":"subject","mounted_subject_id":"agent:agent-main"},"creation_ref":{"kind":"replay_promotion","candidate_ref":"test:adapter-clock","verification_receipt_digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},"privacy_class":"shared_with_subject","observed_at":1800000000}"#,
-        &options,
+        r#"{"name":"runtime_skill__clock","content":"Clock"}"#,
     )
-    .expect_err("payload observed_at must not be part of the adapter contract");
+    .expect_err("legacy flat procedural write must not remain public");
     assert_eq!(error.stage(), "adapter_json_command");
-    assert!(error.to_string().contains("unknown field `observed_at`"));
-
-    let mut command = decode_json_adapter_command(
-        AdapterOperation::Write,
-        r#"{"name":"runtime_skill__clock","topic":"clock","title":"Clock","summary":"Clock","content":"Clock","owning_scope":{"kind":"subject","mounted_subject_id":"agent:agent-main"},"creation_ref":{"kind":"replay_promotion","candidate_ref":"test:adapter-clock","verification_receipt_digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},"privacy_class":"shared_with_subject"}"#,
-        &options,
-    )
-    .expect("write command");
-    command.pin_accepted_at(1_912_345_678);
-    let AdapterCommand::Write(MemoryWriteRequest::Procedural { writes, .. }) = command else {
-        panic!("procedural write");
-    };
-    assert_eq!(writes[0].write.observed_at, 1_912_345_678);
 }
 
 #[test]
 fn long_term_mutation_and_policy_fingerprints_are_stable_and_field_sensitive() {
-    let options = AdapterJsonCommandOptions::new("idempotency-contract");
     for (operation, body, different_body) in [
         (
             AdapterOperation::LongTermMutate,
@@ -302,10 +288,10 @@ fn long_term_mutation_and_policy_fingerprints_are_stable_and_field_sensitive() {
             r#"{"operation":{"resume":{"selector":{"topic_pattern":"security-*"}}},"reason":"resume release memory","dry_run":true}"#,
         ),
     ] {
-        let first = decode_json_adapter_command(operation, body, &options).expect("first command");
-        let retry = decode_json_adapter_command(operation, body, &options).expect("retry command");
-        let different = decode_json_adapter_command(operation, different_body, &options)
-            .expect("different command");
+        let first = decode_json_adapter_command(operation, body).expect("first command");
+        let retry = decode_json_adapter_command(operation, body).expect("retry command");
+        let different =
+            decode_json_adapter_command(operation, different_body).expect("different command");
         assert_eq!(
             first
                 .idempotency_fingerprint_material()
@@ -486,8 +472,96 @@ fn durable_write_command(summary: &str) -> AdapterCommand {
                 reason: "adapter V2 durable receipt fixture".to_string(),
             }),
         }],
-        runtime_skill_owning_scope: None,
     })
+}
+
+#[test]
+fn adapter_decodes_the_typed_factual_memory_write_contract() {
+    let AdapterCommand::Write(request) = durable_write_command("typed factual adapter write")
+    else {
+        panic!("fixture must be a typed write command");
+    };
+    let body = serde_json::to_string(&request).expect("serialize typed write request");
+
+    let decoded = decode_json_adapter_command(AdapterOperation::Write, &body)
+        .expect("typed factual write must cross the thin adapter");
+    let AdapterCommand::Write(MemoryWriteRequest::Candidates { candidates }) = decoded else {
+        panic!("adapter must preserve the SDK write request variant");
+    };
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].candidate_id, "adapter-v2-candidate");
+}
+
+#[test]
+fn adapter_rejects_procedural_candidate_without_creating_a_runtime_skill() {
+    let runtime = runtime();
+    let mounted_subject_id = runtime.scoped_runtime().mounted_subject_id.clone();
+    let target = MemoryCandidateTarget::ProceduralMemory {
+        name: "runtime_skill__adapter_forbidden".to_string(),
+        topic: "forbidden adapter procedure".to_string(),
+    };
+    let request = MemoryWriteRequest::Candidates {
+        candidates: vec![MemoryWriteCandidate {
+            candidate_id: "adapter-forbidden-procedural-candidate".to_string(),
+            authority: MemoryEvidenceAuthority::ProgramMemoryCanonical,
+            target: target.clone(),
+            long_term_subject_visibility: None,
+            privacy: MemoryPrivacyClass::SharedWithSubject,
+            content: MemoryCandidateContent::RuntimeSkill {
+                name: "runtime_skill__adapter_forbidden".to_string(),
+                topic: "forbidden adapter procedure".to_string(),
+                title: "Forbidden adapter procedure".to_string(),
+                summary: "Caller-authored procedures do not establish learning authority."
+                    .to_string(),
+                content: "1. Attempt an adapter write.\n2. Verify exact rejection.".to_string(),
+                citations: vec!["synthetic:adapter-negative".to_string()],
+            },
+            evidence_refs: vec!["synthetic:adapter-negative".to_string()],
+            canonical_entities: Vec::new(),
+            semantic_judgment: Some(MemoryCandidateSemanticJudgment {
+                source: MemorySemanticJudgmentSource::RuntimeGate,
+                decision: MemoryCandidateSemanticDecision::Accept,
+                governed_target: Some(target),
+                reason: "negative transport authority contract".to_string(),
+            }),
+        }],
+    };
+    let body = serde_json::to_string(&request).expect("serialize procedural request");
+    let command = decode_json_adapter_command(AdapterOperation::Write, &body)
+        .expect("adapter must decode before the SDK authority owner decides");
+    #[cfg(feature = "nonproduction-replay-harness")]
+    let before = runtime.replay_harness().export_store_snapshot().unwrap();
+    let rejection = dispatch_adapter_command(
+        &runtime,
+        envelope(&runtime, AdapterOperation::Write, command),
+    )
+    .expect_err("SDK authority rejects before an adapter report can be formed");
+    #[cfg(feature = "nonproduction-replay-harness")]
+    assert!(
+        runtime.replay_harness().export_store_snapshot().unwrap() == before,
+        "rejected procedural intent must leave all Store documents and events unchanged"
+    );
+    let bm_sdk::Error::Other { source, .. } = rejection else {
+        panic!("typed SDK rejection")
+    };
+    let rejection = source
+        .downcast_ref::<bm_sdk::ProceduralLearningSdkError>()
+        .unwrap();
+    assert_eq!(
+        rejection.key,
+        bm_sdk::ProceduralLearningErrorKeyV1::TransitionRequiresGovernance
+    );
+    let report = runtime
+        .list_runtime_skills(RuntimeSkillListRequest {
+            owning_scope: RuntimeSkillOwningScope::Subject { mounted_subject_id },
+            query: None,
+            include_disabled: true,
+            include_retired: true,
+            limit: 16,
+        })
+        .expect("runtime skill list");
+    assert_eq!(report.total, 0);
+    assert!(report.skills.is_empty());
 }
 
 #[test]
@@ -560,11 +634,7 @@ fn v1_rejects_every_mutation_reliability_class_but_keeps_reads() {
                 external_content_used: false,
                 candidate_ids: Vec::new(),
             },
-            tool_calls: 0,
-            runtime_skill_selected_ids: Vec::new(),
-            task_learning_selected_ids: Vec::new(),
-            reuse_outcome_note: String::new(),
-            tool_usage_feedback: None,
+            learning: bm_sdk::PostTurnLearningInputV1::empty(),
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
         })),
@@ -708,6 +778,7 @@ fn project_command_returns_only_the_adapter_projection_contract() {
             &runtime,
             AdapterOperation::Project,
             AdapterCommand::Project(MemoryProjectionRequest {
+                binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
                 temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 structured_query_facets: Vec::new(),
                 user_query: "release".to_string(),
@@ -787,7 +858,6 @@ fn operation_mismatch_is_rejected_before_runtime_call() {
 
 #[test]
 fn json_adapter_preserves_structured_query_facets_for_recall_and_projection() {
-    let options = AdapterJsonCommandOptions::new("adapter-test");
     let recall = decode_json_adapter_command(
         AdapterOperation::Recall,
         r#"{
@@ -797,7 +867,6 @@ fn json_adapter_preserves_structured_query_facets_for_recall_and_projection() {
                 {"kind":"unresolved_entity","value":"Alice"}
             ]
         }"#,
-        &options,
     )
     .expect("decode typed recall");
     let AdapterCommand::Recall(recall) = recall else {
@@ -811,6 +880,7 @@ fn json_adapter_preserves_structured_query_facets_for_recall_and_projection() {
     let project = decode_json_adapter_command(
         AdapterOperation::Project,
         r#"{
+            "binding":{"kind":"preview"},
             "temporal_operation":{"kind":"current"},
             "user_query":"typed temporal",
             "system_max_len":4096,
@@ -818,7 +888,6 @@ fn json_adapter_preserves_structured_query_facets_for_recall_and_projection() {
                 {"kind":"unresolved_temporal","value":"last week"}
             ]
         }"#,
-        &options,
     )
     .expect("decode typed projection");
     let AdapterCommand::Project(project) = project else {
@@ -832,14 +901,12 @@ fn json_adapter_preserves_structured_query_facets_for_recall_and_projection() {
 
 #[test]
 fn recall_and_project_json_require_strict_typed_temporal_operation() {
-    let options = AdapterJsonCommandOptions::new("adapter-temporal-contract");
     let recall = decode_json_adapter_command(
         AdapterOperation::Recall,
         r#"{
             "temporal_operation":{"kind":"historical_as_of","as_of_time":1700000000},
             "query":"typed historical recall"
         }"#,
-        &options,
     )
     .expect("typed historical recall");
     let AdapterCommand::Recall(recall) = recall else {
@@ -858,7 +925,7 @@ fn recall_and_project_json_require_strict_typed_temporal_operation() {
         r#"{"temporal_operation":{"kind":"current"},"query":"unknown field","legacy":true}"#,
     ] {
         assert!(
-            decode_json_adapter_command(AdapterOperation::Recall, body, &options).is_err(),
+            decode_json_adapter_command(AdapterOperation::Recall, body).is_err(),
             "strict recall payload unexpectedly accepted: {body}"
         );
     }
@@ -866,11 +933,11 @@ fn recall_and_project_json_require_strict_typed_temporal_operation() {
     let project = decode_json_adapter_command(
         AdapterOperation::Project,
         r#"{
+            "binding":{"kind":"preview"},
             "temporal_operation":{"kind":"historical_as_of","as_of_time":1700000001},
             "user_query":"typed historical project",
             "system_max_len":4096
         }"#,
-        &options,
     )
     .expect("typed historical project");
     let AdapterCommand::Project(project) = project else {
@@ -885,11 +952,20 @@ fn recall_and_project_json_require_strict_typed_temporal_operation() {
     assert!(decode_json_adapter_command(
         AdapterOperation::Project,
         r#"{
+            "binding":{"kind":"preview"},
             "temporal_operation":{"kind":"current"},
             "query":"legacy alias",
             "system_max_len":4096
         }"#,
-        &options,
+    )
+    .is_err());
+    assert!(decode_json_adapter_command(
+        AdapterOperation::Project,
+        r#"{
+            "temporal_operation":{"kind":"current"},
+            "user_query":"missing projection binding",
+            "system_max_len":4096
+        }"#,
     )
     .is_err());
 }
@@ -957,6 +1033,26 @@ fn adapter_safe_dto_is_strict_and_all_protocol_sources_delegate_to_its_owner() {
 
 #[test]
 fn governed_request_schema_is_owned_once_by_the_adapter_contract() {
+    let write =
+        governed_adapter_json_command_schema(AdapterOperation::Write).expect("write schema");
+    assert_eq!(
+        write.field_names,
+        ["kind", "candidates", "extraction", "mutations"]
+    );
+    assert!(write.input_schema["oneOf"].is_array());
+    assert_eq!(
+        write.input_schema["oneOf"][0]["required"],
+        json!(["kind", "candidates"])
+    );
+    assert_eq!(
+        write.input_schema["oneOf"][1]["required"],
+        json!(["kind", "extraction"])
+    );
+    assert_eq!(
+        write.input_schema["oneOf"][2]["required"],
+        json!(["kind", "mutations"])
+    );
+
     let recall =
         governed_adapter_json_command_schema(AdapterOperation::Recall).expect("recall schema");
     assert_eq!(
@@ -974,6 +1070,7 @@ fn governed_request_schema_is_owned_once_by_the_adapter_contract() {
         json!(["temporal_operation", "query"])
     );
     assert_eq!(recall.input_schema["additionalProperties"], false);
+    assert!(recall.input_schema["properties"].get("binding").is_none());
     assert!(recall.input_schema["properties"]["temporal_operation"]["oneOf"].is_array());
     assert_eq!(
         recall.input_schema["properties"]["temporal_operation"]["oneOf"][1]["properties"]
@@ -986,6 +1083,7 @@ fn governed_request_schema_is_owned_once_by_the_adapter_contract() {
     assert_eq!(
         project.field_names,
         [
+            "binding",
             "temporal_operation",
             "user_query",
             "system_max_len",
@@ -998,16 +1096,33 @@ fn governed_request_schema_is_owned_once_by_the_adapter_contract() {
     );
     assert_eq!(
         project.input_schema["required"],
-        json!(["temporal_operation", "user_query", "system_max_len"])
+        json!([
+            "binding",
+            "temporal_operation",
+            "user_query",
+            "system_max_len"
+        ])
     );
     assert_eq!(project.input_schema["additionalProperties"], false);
+    assert!(project.input_schema["properties"]["binding"]["oneOf"].is_array());
+    assert_eq!(
+        project.input_schema["properties"]["binding"]["oneOf"][1]["required"],
+        json!(["kind", "turn_id"])
+    );
 
     let finalize = governed_adapter_json_command_schema(AdapterOperation::FinalizeTurn)
         .expect("finalize turn schema");
-    assert_eq!(finalize.input_schema["required"], json!(["turn"]));
+    assert_eq!(
+        finalize.input_schema["required"],
+        json!(["turn", "learning"])
+    );
     assert_eq!(finalize.input_schema["additionalProperties"], false);
     assert_eq!(
         finalize.input_schema["properties"]["turn"]["type"],
+        "object"
+    );
+    assert_eq!(
+        finalize.input_schema["properties"]["learning"]["type"],
         "object"
     );
     assert!(governed_adapter_json_command_schema(AdapterOperation::Inspect).is_none());
@@ -1134,6 +1249,68 @@ fn transcript_turn() -> CanonicalTurnDelta {
     }
 }
 
+fn runtime_with_tool_registry() -> (MemoryRuntime, AgentToolRegistrySnapshot) {
+    let mut tool = AgentToolDescriptor::compact("pdf.extract", "Extract PDF text", "schema-pdf-v1");
+    tool.permission_tags = vec!["filesystem.read".to_string()];
+    tool.risk_tags = vec!["external_content".to_string()];
+    let registry =
+        AgentToolRegistrySnapshot::compact("host-tools", "host", vec![tool], 1_800_000_000);
+    let profile = host_test_profile();
+    let store = MemoryStoreHandle::open_in_memory(
+        StoreBackendConfig::in_memory(profile).expect("store config"),
+    )
+    .expect("store");
+    let runtime = MemoryRuntime::builder()
+        .identity(MemoryIdentity::new("agent-main", "owner-default").expect("identity"))
+        .scope(MemoryScope::new("local", "chat-1").expect("scope"))
+        .store(store)
+        .clock(Arc::new(FixedClock))
+        .capability_policy(MemoryCapabilityPolicy::strict_profile())
+        .privacy_policy(MemoryPrivacyPolicy::standard_private_boundary())
+        .audit_sink(Arc::new(NoopMemoryAuditSink))
+        .procedural_applicability_context(
+            ProceduralApplicabilityContextV1::try_new(
+                None,
+                None,
+                Some("conversation-a".to_string()),
+            )
+            .expect("procedural applicability"),
+        )
+        .agent_tool_registry(registry.clone())
+        .build()
+        .expect("runtime with tool registry");
+    (runtime, registry)
+}
+
+fn adapter_finalize_report_json(
+    runtime: &MemoryRuntime,
+    turn: CanonicalTurnDelta,
+    learning: PostTurnLearningInputV1,
+) -> serde_json::Value {
+    let response = dispatch_adapter_command(
+        runtime,
+        envelope(
+            runtime,
+            AdapterOperation::FinalizeTurn,
+            AdapterCommand::FinalizeTurn(Box::new(MemoryTurnFinalizeRequest {
+                turn,
+                learning,
+                pressure: PressureLevel::Normal,
+                mode_input: RuntimeLifecycleModeInput::default(),
+            })),
+        ),
+    )
+    .expect("finalize dispatch");
+    let AdapterResponse::Accepted {
+        report: AdapterSdkReport::FinalizeTurn(report),
+        ..
+    } = response
+    else {
+        panic!("unexpected finalize response: {response:?}");
+    };
+    serde_json::to_value(report).expect("serialize adapter finalize report")
+}
+
 #[test]
 fn transcript_attr_write_command_dispatches_through_memory_runtime() {
     let runtime = runtime();
@@ -1194,20 +1371,14 @@ fn transcript_attr_write_command_dispatches_through_memory_runtime() {
 
 #[test]
 fn json_decoder_covers_adapter_memory_operations() {
-    let options =
-        AdapterJsonCommandOptions::new("test-adapter").with_default_source_chat_id("chat-1");
     let cases = [
-        (
-            AdapterOperation::Write,
-            r#"{"name":"runtime_skill__adapter_write","topic":"adapter","title":"Adapter write","summary":"Adapter write summary","content":"1. Decode write payload.\n2. Dispatch common adapter command.","owning_scope":{"kind":"subject","mounted_subject_id":"agent:agent-main"},"creation_ref":{"kind":"replay_promotion","candidate_ref":"test:adapter-write","verification_receipt_digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"},"privacy_class":"shared_with_subject"}"#,
-        ),
         (
             AdapterOperation::Recall,
             r#"{"temporal_operation":{"kind":"current"},"query":"release","limit":2}"#,
         ),
         (
             AdapterOperation::Project,
-            r#"{"temporal_operation":{"kind":"current"},"user_query":"release","system_max_len":1024,"recent_messages_limit":2}"#,
+            r#"{"binding":{"kind":"preview"},"temporal_operation":{"kind":"current"},"user_query":"release","system_max_len":1024,"recent_messages_limit":2}"#,
         ),
         (
             AdapterOperation::Maintain,
@@ -1245,37 +1416,48 @@ fn json_decoder_covers_adapter_memory_operations() {
     ];
 
     for (operation, body) in cases {
-        let command =
-            decode_json_adapter_command(operation, body, &options).expect("decode command");
+        let command = decode_json_adapter_command(operation, body).expect("decode command");
         assert_eq!(command.operation(), operation);
     }
 
-    let finalize_body = json!({"turn": transcript_turn()}).to_string();
-    let finalize =
-        decode_json_adapter_command(AdapterOperation::FinalizeTurn, &finalize_body, &options)
-            .expect("decode finalize turn command");
+    let finalize_body = json!({
+        "turn": transcript_turn(),
+        "learning": bm_sdk::PostTurnLearningInputV1::empty()
+    })
+    .to_string();
+    let finalize = decode_json_adapter_command(AdapterOperation::FinalizeTurn, &finalize_body)
+        .expect("decode finalize turn command");
     assert_eq!(finalize.operation(), AdapterOperation::FinalizeTurn);
+
+    let incomplete_learning = json!({
+        "turn": transcript_turn(),
+        "learning": {}
+    })
+    .to_string();
+    let error = decode_json_adapter_command(AdapterOperation::FinalizeTurn, &incomplete_learning)
+        .expect_err("typed finalize learning payload must remain strict");
+    assert_eq!(error.stage(), "adapter_json_command");
+    assert!(error.to_string().contains("tool_call_count"));
 }
 
 #[test]
 fn projection_and_inspection_require_runtime_owned_render_budget() {
-    let options = AdapterJsonCommandOptions::new("test-adapter");
     for (operation, body) in [
         (
             AdapterOperation::Project,
-            r#"{"temporal_operation":{"kind":"current"},"user_query":"release"}"#,
+            r#"{"binding":{"kind":"preview"},"temporal_operation":{"kind":"current"},"user_query":"release"}"#,
         ),
         (AdapterOperation::Inspect, r#"{"query":"release"}"#),
     ] {
-        let error = decode_json_adapter_command(operation, body, &options)
+        let error = decode_json_adapter_command(operation, body)
             .expect_err("adapter must not invent a projection render budget");
         assert!(error.to_string().contains("system_max_len"), "{error}");
     }
 }
 
 #[test]
-fn json_decoder_accepts_agent_tool_usage_feedback_as_write_payload() {
-    let command = decode_json_adapter_command(
+fn json_decoder_rejects_agent_tool_feedback_outside_finalize() {
+    let error = decode_json_adapter_command(
         AdapterOperation::Write,
         r#"{
             "tool_usage_feedback": {
@@ -1306,17 +1488,15 @@ fn json_decoder_accepts_agent_tool_usage_feedback_as_write_payload() {
                 "operator_note": null
             }
         }"#,
-        &AdapterJsonCommandOptions::new("test-adapter"),
     )
-    .expect("decode feedback");
-
-    match command {
-        AdapterCommand::Write(MemoryWriteRequest::AgentToolUsageFeedback { feedback }) => {
-            assert_eq!(feedback.registry_ref.registry_id, "host-tools");
-            assert_eq!(feedback.observations[0].tool_id, "pdf.extract");
+    .expect_err("tool feedback must enter the canonical finalize evidence contract");
+    assert!(matches!(
+        error,
+        bm_sdk::Error::Config {
+            stage: "adapter_json_command",
+            ..
         }
-        other => panic!("unexpected command: {other:?}"),
-    }
+    ));
 }
 
 #[test]
@@ -1327,7 +1507,6 @@ fn maintain_dispatch_uses_injected_runtime_services() {
     let command = decode_json_adapter_command(
         AdapterOperation::Maintain,
         r#"{"user_content":"remember the release process","reply_content":"I will verify artifacts first."}"#,
-        &AdapterJsonCommandOptions::new("test-adapter"),
     )
     .expect("maintain command");
 
@@ -1363,8 +1542,11 @@ fn finalize_dispatch_queues_governance_even_when_request_services_are_injected()
     let llm = StaticLlmClient;
     let command = decode_json_adapter_command(
         AdapterOperation::FinalizeTurn,
-        &json!({"turn": transcript_turn()}).to_string(),
-        &AdapterJsonCommandOptions::new("test-adapter"),
+        &json!({
+            "turn": transcript_turn(),
+            "learning": bm_sdk::PostTurnLearningInputV1::empty()
+        })
+        .to_string(),
     )
     .expect("finalize command");
     let lease = runtime
@@ -1395,6 +1577,85 @@ fn finalize_dispatch_queues_governance_even_when_request_services_are_injected()
         }
         other => panic!("unexpected response: {other:?}"),
     }
+}
+
+#[test]
+fn finalize_report_serializes_distinct_procedural_learning_intent() {
+    let no_feedback_runtime = runtime();
+    let no_feedback = adapter_finalize_report_json(
+        &no_feedback_runtime,
+        transcript_turn(),
+        PostTurnLearningInputV1::empty(),
+    );
+    assert_eq!(no_feedback["proceduralLearning"]["state"], "not_scheduled");
+    assert!(no_feedback["proceduralLearning"]["jobId"].is_null());
+    assert_eq!(
+        no_feedback["proceduralLearning"]["reason"],
+        "no_actionable_procedural_feedback"
+    );
+
+    let (queued_runtime, registry) = runtime_with_tool_registry();
+    let observation = AgentToolObservationDigest {
+        observation_id: "adapter-tool-observation-1".to_string(),
+        registry_id: registry.registry_id.clone(),
+        tool_id: "pdf.extract".to_string(),
+        schema_fingerprint: "schema-pdf-v1".to_string(),
+        call_id: Some("adapter-tool-call-1".to_string()),
+        task_signature: "extract_pdf_text_for_release_notes".to_string(),
+        summary: "PDF extraction produced usable release note text.".to_string(),
+        outcome: AgentToolOutcome::Succeeded,
+        error_code: None,
+        external_content: true,
+        private_content_used: false,
+        permission_tags: vec!["filesystem.read".to_string()],
+        risk_tags: vec!["external_content".to_string()],
+        started_at: Some(1_800_000_010),
+        completed_at: Some(1_800_000_011),
+    };
+    let mut queued_turn = transcript_turn();
+    queued_turn.turn_id = "turn-adapter-procedural-1".to_string();
+    queued_turn.source.request_id = Some("adapter-req-procedural-1".to_string());
+    queued_turn.tool_observations = vec![ToolObservationDigest {
+        observation_id: observation.observation_id.clone(),
+        tool_name: observation.tool_id.clone(),
+        summary: observation.summary.clone(),
+        external_content: observation.external_content,
+    }];
+    queued_turn.external_content_used = true;
+    let queued = adapter_finalize_report_json(
+        &queued_runtime,
+        queued_turn,
+        PostTurnLearningInputV1 {
+            tool_call_count: 1,
+            selection_receipt: None,
+            runtime_skill_feedback: Vec::new(),
+            agent_skill_feedback: Vec::new(),
+            task_learning_feedback: Vec::new(),
+            agent_tool_feedback: vec![AgentToolUsageFeedbackV2 {
+                registry_ref: registry.registry_ref(),
+                tool_id: observation.tool_id.clone(),
+                schema_fingerprint: observation.schema_fingerprint.clone(),
+                observations: vec![observation],
+                outcome: ProceduralExecutionOutcomeV1::Succeeded,
+                user_visible_result_summary: Some(
+                    "PDF extraction supported the release-note task.".to_string(),
+                ),
+                operator_note: None,
+            }],
+            authority: bm_sdk::ProceduralFeedbackAuthorityInputV1::HostRuntimeObservation,
+        },
+    );
+    assert_eq!(queued["proceduralLearning"]["state"], "queued");
+    assert!(queued["proceduralLearning"]["jobId"]
+        .as_str()
+        .is_some_and(|job_id| !job_id.is_empty()));
+    assert!(queued["proceduralLearning"]["reason"]
+        .as_str()
+        .is_some_and(|reason| !reason.is_empty()));
+    assert_ne!(
+        queued["proceduralLearning"]["jobId"],
+        queued["memoryConsolidation"]["jobId"]
+    );
 }
 
 struct StaticHttpClient;

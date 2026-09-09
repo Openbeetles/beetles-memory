@@ -1,8 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bm_desktop::{
-    DesktopConsoleInvokeRequest, DesktopConsoleRequest, DesktopConsoleState,
-    DesktopMemoryAuthority, DesktopRuntimeConfig,
+    DesktopConsoleRequest, DesktopConsoleState, DesktopMemoryAuthority, DesktopRuntimeConfig,
 };
 use bm_entry::{
     EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
@@ -10,9 +9,9 @@ use bm_entry::{
 };
 use bm_sdk::{
     default_agent_subject_id, GovernedRuntimeSkillWriteInput, MemoryCapabilityPolicy,
-    MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryWriteRequest,
-    PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillCreationRef,
-    RuntimeSkillOwningScope, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
+    MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryProjectionRequest, PressureLevel,
+    ProceduralProjectionBindingV1, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillCreationRef,
+    RuntimeSkillOwningScope, RuntimeSkillWrite, StoreBackendConfig,
 };
 use serde_json::Value;
 
@@ -57,7 +56,37 @@ fn desktop_console_serves_ollama_transparent_status_without_404() {
 
 #[test]
 fn desktop_console_mutates_skills_through_entry_runtime() {
-    let state = desktop_state("skills-mutation");
+    let data_dir = test_store_dir("skills-mutation");
+    let seed_runtime = runtime_for_store(data_dir.join("store"));
+    seed_runtime
+        .runtime()
+        .seed_runtime_skills_for_replay(
+            vec![GovernedRuntimeSkillWriteInput {
+                write: RuntimeSkillWrite {
+                    name: "runtime_skill__desktop_console".to_string(),
+                    topic: "desktop_console".to_string(),
+                    title: "Desktop direct skill".to_string(),
+                    summary: "Desktop commands must use the in-process entry runtime.".to_string(),
+                    content: "1. open the Tauri app\n2. call the shared console API\n3. verify the returned report".to_string(),
+                    citations: vec!["desktop contract test".to_string()],
+                    source_chat_id: Some("local-desktop".to_string()),
+                    observed_at: 1_800_000_000,
+                },
+                creation_ref: RuntimeSkillCreationRef::ReplayPromotion {
+                    candidate_ref: "desktop-test:runtime-skill".to_string(),
+                    verification_receipt_digest:
+                        "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                            .to_string(),
+                },
+                privacy_class: MemoryPrivacyClass::SharedWithSubject,
+            }],
+            RuntimeSkillOwningScope::Subject {
+                mounted_subject_id: default_agent_subject_id("bm-desktop"),
+            },
+        )
+        .expect("seed runtime skill");
+    drop(seed_runtime);
+    let state = DesktopConsoleState::open(desktop_config(data_dir)).expect("desktop state");
 
     let create_forbidden = state
         .handle_console_request(DesktopConsoleRequest::post_json(
@@ -72,37 +101,6 @@ fn desktop_console_mutates_skills_through_entry_runtime() {
         ))
         .unwrap();
     assert_eq!(create_forbidden.status_code, 405);
-
-    let seed_body = serde_json::json!({
-        "name": "runtime_skill__desktop_console",
-        "topic": "desktop_console",
-        "title": "Desktop direct skill",
-        "summary": "Desktop commands must use the in-process entry runtime.",
-        "content": "1. open the Tauri app\n2. call the shared console API\n3. verify the returned report",
-        "source": "manual",
-        "citations": ["desktop contract test"],
-        "owning_scope": {
-            "kind": "subject",
-            "mounted_subject_id": default_agent_subject_id("bm-desktop"),
-        },
-        "creation_ref": RuntimeSkillCreationRef::ReplayPromotion {
-            candidate_ref: "desktop-test:runtime-skill".to_string(),
-            verification_receipt_digest:
-                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-                    .to_string(),
-        },
-        "privacy_class": MemoryPrivacyClass::SharedWithSubject,
-    })
-    .to_string();
-    let seed_request = DesktopConsoleRequest::try_from(DesktopConsoleInvokeRequest {
-        method: "POST".to_string(),
-        path: "/memory/write".to_string(),
-        body: seed_body,
-        idempotency_key: "desktop-console-runtime-skill-seed".to_string(),
-    })
-    .expect("desktop invoke request");
-    let seeded = state.handle_console_request(seed_request).unwrap();
-    assert_eq!(seeded.status_code, 200, "{}", seeded.body);
 
     let list = state
         .handle_console_request(DesktopConsoleRequest::get("/console/skills?query=desktop"))
@@ -291,6 +289,7 @@ fn runtime_for_store(path: std::path::PathBuf) -> EntryRuntime {
             owner_id: "local-owner".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "desktop".to_string(),
             chat_id: "local-desktop".to_string(),
         },
@@ -309,8 +308,8 @@ fn runtime_for_store(path: std::path::PathBuf) -> EntryRuntime {
 fn seed_memory_runtime_activity(runtime: &EntryRuntime) {
     runtime
         .runtime()
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![GovernedRuntimeSkillWriteInput {
+        .seed_runtime_skills_for_replay(
+            vec![GovernedRuntimeSkillWriteInput {
                 write: RuntimeSkillWrite {
                     name: "desktop_ollama_overview".to_string(),
                     topic: "desktop ollama overview".to_string(),
@@ -331,15 +330,15 @@ fn seed_memory_runtime_activity(runtime: &EntryRuntime) {
                 },
                 privacy_class: MemoryPrivacyClass::SharedWithSubject,
             }],
-            owning_scope: RuntimeSkillOwningScope::Subject {
+            RuntimeSkillOwningScope::Subject {
                 mounted_subject_id: default_agent_subject_id("bm-desktop"),
             },
-            source: RuntimeSkillWriteSource::Manual,
-        })
+        )
         .expect("write");
     runtime
         .runtime()
         .project(MemoryProjectionRequest {
+            binding: ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "How should Desktop overview count transparent Ollama?".to_string(),

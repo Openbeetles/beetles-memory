@@ -1,5 +1,5 @@
 {
-  "schema": "beetle-memory.platform.capability.v4",
+  "schema": "beetle-memory.platform.capability.v5",
   "profile": "profile-esp-standalone-memory",
   "target": "target-esp",
   "role": "role-standalone-memory",
@@ -164,5 +164,47 @@
       "visible": false
     },
     "runtime_skill_recall_transport": "unavailable"
+  },
+  "procedural_learning": {
+    "standard_agent_skill_mount": {
+      "profile_allowed": false,
+      "compiled": true,
+      "visible": false
+    },
+    "agent_tool_registry": {
+      "profile_allowed": false,
+      "compiled": true,
+      "visible": false
+    },
+    "agent_tool_experience_read": {
+      "profile_allowed": false,
+      "compiled": true,
+      "visible": false
+    },
+    "agent_tool_hint": {
+      "profile_allowed": false,
+      "compiled": true,
+      "visible": false
+    },
+    "agent_tool_learning": {
+      "profile_allowed": false,
+      "compiled": true,
+      "visible": false
+    },
+    "selection_receipt": {
+      "profile_allowed": false,
+      "compiled": true,
+      "visible": false
+    },
+    "finalize_feedback": {
+      "profile_allowed": false,
+      "compiled": true,
+      "visible": false
+    },
+    "worker": {
+      "profile_allowed": false,
+      "compiled": true,
+      "visible": false
+    }
   }
 }

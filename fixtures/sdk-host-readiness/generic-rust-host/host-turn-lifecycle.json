@@ -30,9 +30,15 @@
         "kind": "text",
         "topic": "sdk_host_readiness",
         "body": "Host turn lifecycle uses MemoryRuntime candidate governance before migration dry-run.",
-        "keywords": ["sdk", "host", "migration"]
+        "keywords": [
+          "sdk",
+          "host",
+          "migration"
+        ]
       },
-      "evidence_refs": ["fixture:generic-rust-host:turn-1"],
+      "evidence_refs": [
+        "fixture:generic-rust-host:turn-1"
+      ],
       "canonical_entities": [],
       "semantic_judgment": {
         "source": "llm_governance",
@@ -44,37 +50,28 @@
         },
         "reason": "fixture_semantic_accept"
       }
-    },
+    }
+  ],
+  "runtime_skill_fixtures": [
     {
-      "candidate_id": "generic-turn-1:sdk-release-guard",
-      "authority": "user_asserted",
-      "target": {
-        "target": "procedural_memory",
-        "name": "",
-        "topic": "sdk_release"
-      },
-      "privacy": "shared_with_subject",
-      "content": {
-        "kind": "runtime_skill",
+      "write": {
         "name": "runtime_skill__sdk_release_guard",
         "topic": "sdk_release",
         "title": "SDK release guard",
         "summary": "Run the SDK host release migration dry-run before release.",
         "content": "- export the source memory space through the public SDK\n- preview the migration and stop if loss risk is reported\n- apply and import the snapshot into a fresh target store\n- inspect, project, and replay the target before release",
-        "citations": ["fixture:generic-rust-host:release-guard"]
+        "citations": [
+          "fixture:generic-rust-host:release-guard"
+        ],
+        "source_chat_id": "generic-turn-1",
+        "observed_at": 1800000000
       },
-      "evidence_refs": ["fixture:generic-rust-host:release-guard"],
-      "canonical_entities": [],
-      "semantic_judgment": {
-        "source": "llm_governance",
-        "decision": "accept",
-        "governed_target": {
-          "target": "procedural_memory",
-          "name": "",
-          "topic": "sdk_release"
-        },
-        "reason": "fixture_semantic_accept"
-      }
+      "creation_ref": {
+        "kind": "replay_promotion",
+        "candidate_ref": "generic-turn-1:sdk-release-guard",
+        "verification_receipt_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+      },
+      "privacy_class": "shared_with_subject"
     }
   ]
 }

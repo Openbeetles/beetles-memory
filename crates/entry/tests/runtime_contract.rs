@@ -33,6 +33,7 @@ fn config() -> EntryRuntimeConfig {
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "local".to_string(),
             chat_id: "chat-1".to_string(),
         },
@@ -93,7 +94,6 @@ fn write_command(name: &str, chat_id: &str, marker: &str) -> AdapterCommand {
                 reason: "entry runtime shared-store fixture".to_string(),
             }),
         }],
-        runtime_skill_owning_scope: None,
     })
 }
 
@@ -204,6 +204,7 @@ fn entry_runtime_factory_builds_scoped_runtimes_on_shared_store() {
         .runtime_for_scope(EntryRuntimeScope {
             identity: config.identity.clone(),
             scope: EntryScope {
+                conversation_id: None,
                 channel: "local".to_string(),
                 chat_id: "chat-a".to_string(),
             },
@@ -213,6 +214,7 @@ fn entry_runtime_factory_builds_scoped_runtimes_on_shared_store() {
         .runtime_for_scope(EntryRuntimeScope {
             identity: config.identity.clone(),
             scope: EntryScope {
+                conversation_id: None,
                 channel: "local".to_string(),
                 chat_id: "chat-b".to_string(),
             },
@@ -338,6 +340,7 @@ fn entry_runtime_manager_bounds_cache_without_splitting_active_scope() {
     let scope_b = EntryRuntimeScope {
         identity: config.identity.clone(),
         scope: EntryScope {
+            conversation_id: None,
             channel: "local".to_string(),
             chat_id: "chat-b".to_string(),
         },

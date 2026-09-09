@@ -44,6 +44,7 @@ fn projection_report_exposes_sdk_owned_safe_budget_and_privacy_audit() {
 
     let report = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "How should release safety work?".to_string(),
@@ -132,6 +133,7 @@ fn projection_runtime_envelope_replaces_flat_internal_sections() {
 
     let report = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "Prepare the release checklist without drifting into roleplay.".to_string(),
@@ -199,6 +201,7 @@ fn projection_report_exposes_disclosure_integrity_for_runtime_surfaces() {
 
     let report = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "Prepare the release checklist.".to_string(),
@@ -225,6 +228,7 @@ fn empty_store_projection_degrades_subject_mount_without_inventing_personality()
 
     let report = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "Summarize what you know before answering.".to_string(),
@@ -268,6 +272,7 @@ fn empty_store_greeting_projection_does_not_leak_identity_meta_terms() {
 
     let report = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "你好".to_string(),

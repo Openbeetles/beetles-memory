@@ -23,22 +23,24 @@ use bm_core::task_execution::{
 };
 use bm_sdk::{
     default_agent_subject_id, AgentToolDescriptor, AgentToolObservationDigest, AgentToolOutcome,
-    AgentToolRegistrySnapshot, AgentToolUsageFeedback, EvidenceBacklink, IngressKind,
-    LongTermMemoryDraft, LongTermMemoryKind, LongTermMemoryProvenance, LongTermMemoryQuery,
-    LongTermMemorySourceScope, MemoryCandidateContent, MemoryCandidateSemanticDecision,
-    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryClock, MemoryEvidenceAuthority,
-    MemoryGovernancePolicyMutation, MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration,
-    MemoryGraphEdge, MemoryGraphEdgeKind, MemoryGraphNode, MemoryGraphNodeKind, MemoryIdentity,
+    AgentToolRegistrySnapshot, AgentToolUsageFeedbackV2, CanonicalTurnDelta, ConversationScope,
+    EvidenceBacklink, IngressKind, LongTermMemoryDraft, LongTermMemoryKind,
+    LongTermMemoryProvenance, LongTermMemoryQuery, LongTermMemorySourceScope,
+    MemoryCandidateContent, MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment,
+    MemoryCandidateTarget, MemoryClock, MemoryEvidenceAuthority, MemoryGovernancePolicyMutation,
+    MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration, MemoryGraphEdge,
+    MemoryGraphEdgeKind, MemoryGraphNode, MemoryGraphNodeKind, MemoryIdentity,
     MemoryLongTermControlView, MemoryLongTermListRequest, MemoryLongTermMutation,
     MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryLongTermTarget,
     MemoryMaintenanceRequest, MemoryMutationExecution, MemoryPrivacyClass, MemoryProjectionRequest,
     MemoryRecallRequest, MemoryScope, MemorySemanticJudgmentSource, MemoryStoreHandle,
-    MemorySubjectVisibilityPolicy, MemoryTranscriptLifecycleRequest, MemoryWriteCandidate,
-    MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel,
-    ProceduralMemoryPromotionInput, RuntimeLifecycleModeInput, RuntimeSkillReuseOutcome,
-    RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig, StoreRuntimeBudget,
-    SubjectDescriptor, SubjectRegistry, TemporalMemoryGraphNodeOwnerRef,
-    TemporalMemoryGraphWriteRequest, TemporalValidity, TranscriptLifecycleTransition,
+    MemorySubjectVisibilityPolicy, MemoryTranscriptLifecycleRequest, MemoryTurnDeliveryStatus,
+    MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteCandidate,
+    MemoryWriteRequest, ParsedLongTermMemoryExtraction, PostTurnLearningInputV1, PressureLevel,
+    ProceduralExecutionOutcomeV1, RuntimeLifecycleModeInput, RuntimeSkillWrite, StoreBackendConfig,
+    StoreRuntimeBudget, SubjectDescriptor, SubjectRegistry, TemporalMemoryGraphNodeOwnerRef,
+    TemporalMemoryGraphWriteRequest, TemporalValidity, ToolObservationDigest,
+    TranscriptInputMessage, TranscriptLifecycleTransition,
 };
 
 use support::{empty_store_platform, test_runtime_with_scope, StaticHttpClient, StaticLlmClient};
@@ -53,16 +55,57 @@ impl AdjustableTransactionClock {
             now_secs: AtomicU64::new(now_secs),
         }
     }
-
-    fn set(&self, now_secs: u64) {
-        self.now_secs.store(now_secs, Ordering::SeqCst);
-    }
 }
 
 impl MemoryClock for AdjustableTransactionClock {
     fn now_secs(&self) -> u64 {
         self.now_secs.load(Ordering::SeqCst)
     }
+}
+
+struct AdvancingTransactionClock(AtomicU64);
+
+impl MemoryClock for AdvancingTransactionClock {
+    fn now_secs(&self) -> u64 {
+        self.0.fetch_add(1, Ordering::SeqCst)
+    }
+}
+
+#[test]
+fn operation_write_uses_one_commit_timestamp_when_runtime_clock_advances() {
+    let (platform, runtime) = runtime_with_registry_event_budget_and_clock(
+        registry(),
+        256,
+        Arc::new(AdvancingTransactionClock(AtomicU64::new(1_800_000_000))),
+    );
+    let committed = runtime
+        .write_operation(
+            "advancing-clock-write",
+            long_term_write_request("advancing_clock"),
+        )
+        .expect("clock advancement cannot split one transaction timestamp");
+    let MemoryMutationExecution::Committed { report, receipt } = committed else {
+        panic!("first write commits")
+    };
+    assert_eq!(report.changed, 1);
+    let events = platform.replay_harness().read_events().unwrap();
+    let transaction_events = events
+        .iter()
+        .filter(|event| event.payload.get("transaction_id") == Some(&receipt.transaction_id))
+        .collect::<Vec<_>>();
+    assert!(!transaction_events.is_empty());
+    assert!(transaction_events
+        .iter()
+        .all(|event| event.timestamp_unix_secs == receipt.committed_at_unix_secs));
+    assert!(matches!(
+        runtime
+            .write_operation(
+                "advancing-clock-write",
+                long_term_write_request("advancing_clock")
+            )
+            .unwrap(),
+        MemoryMutationExecution::Replayed { .. }
+    ));
 }
 
 #[test]
@@ -154,10 +197,6 @@ fn maintenance_long_term_write_keeps_owner_and_facet_in_one_governed_path() {
                 reply_content: "recorded".to_string(),
                 tool_calls: 0,
                 external_content_used: false,
-                runtime_skill_selected_ids: Vec::new(),
-                task_learning_selected_ids: Vec::new(),
-                reuse_outcome: RuntimeSkillReuseOutcome::Neutral,
-                reuse_outcome_note: String::new(),
                 pressure: PressureLevel::Normal,
                 mode_input: RuntimeLifecycleModeInput::default(),
             },
@@ -323,32 +362,25 @@ fn long_term_candidate() -> MemoryWriteCandidate {
     }
 }
 
-fn runtime_skill_candidate() -> MemoryWriteCandidate {
+fn secondary_long_term_candidate() -> MemoryWriteCandidate {
+    let target = MemoryCandidateTarget::LongTermMemory {
+        kind: LongTermMemoryKind::Project,
+        topic: "transaction_project".to_string(),
+    };
     MemoryWriteCandidate {
-        candidate_id: "candidate-transaction-skill".to_string(),
+        candidate_id: "candidate-transaction-project".to_string(),
         authority: MemoryEvidenceAuthority::UserAsserted,
-        target: MemoryCandidateTarget::ProceduralMemory {
-            name: String::new(),
-            topic: "transaction_skill".to_string(),
-        },
-        long_term_subject_visibility: None,
+        target: target.clone(),
+        long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
         privacy: MemoryPrivacyClass::SharedWithSubject,
-        content: MemoryCandidateContent::RuntimeSkill {
-            name: "runtime_skill__transaction_contract".to_string(),
-            topic: "transaction_skill".to_string(),
-            title: "transaction contract".to_string(),
-            summary: "Reject an entire memory write batch when admission fails.".to_string(),
-            content:
-                "- preflight every mutation\n- commit the batch once\n- report transaction ids"
-                    .to_string(),
-            citations: vec!["fixture:transaction-contract".to_string()],
+        content: MemoryCandidateContent::Text {
+            topic: "transaction_project".to_string(),
+            body: "The project requires preflight before committing its memory batch.".to_string(),
+            keywords: vec!["transaction".to_string(), "preflight".to_string()],
         },
         evidence_refs: vec!["chat-a:turn-2".to_string()],
         canonical_entities: Vec::new(),
-        semantic_judgment: Some(llm_accept(MemoryCandidateTarget::ProceduralMemory {
-            name: String::new(),
-            topic: "transaction_skill".to_string(),
-        })),
+        semantic_judgment: Some(llm_accept(target)),
     }
 }
 
@@ -400,25 +432,6 @@ fn manual_runtime_skill_write(name: &str) -> RuntimeSkillWrite {
     }
 }
 
-fn promotion_input(task_id: &str) -> ProceduralMemoryPromotionInput {
-    ProceduralMemoryPromotionInput {
-        task_id: task_id.to_string(),
-        learning_id: format!("learning:{task_id}"),
-        learning_digest: "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-            .to_string(),
-        trigger: "transaction promotion checklist".to_string(),
-        procedure: "Promote procedural memory only through the transaction planner.".to_string(),
-        constraints: vec!["commit once".to_string()],
-        failure_modes: vec!["partial skill without lifecycle".to_string()],
-        counterfactual_fix: "plan mutations before store writes".to_string(),
-        evidence_refs: vec!["task:first".to_string(), "task:second".to_string()],
-        quality_score: 90,
-        repeated_evidence_count: 2,
-        capability_affinity: vec!["memory".to_string()],
-        privacy_class: MemoryPrivacyClass::SharedWithSubject,
-    }
-}
-
 fn extraction_draft() -> LongTermMemoryDraft {
     LongTermMemoryDraft {
         kind: LongTermMemoryKind::Profile,
@@ -439,6 +452,30 @@ fn extraction_draft() -> LongTermMemoryDraft {
         evidence_count: Some(1),
         observed_at: Some(1_800_000_000),
         source_revision: Some(1),
+    }
+}
+
+fn secondary_extraction_draft() -> LongTermMemoryDraft {
+    let mut draft = extraction_draft();
+    draft.kind = LongTermMemoryKind::Project;
+    draft.topic = "transaction_extraction_project".to_string();
+    draft.content = "A second extraction owner must share the same atomic transaction.".to_string();
+    draft.keywords = vec!["transaction".to_string(), "project".to_string()];
+    draft.supporting_citations = vec!["fixture:long-term-extraction-project".to_string()];
+    draft.source_revision = Some(2);
+    draft
+}
+
+fn long_term_write_request(topic: &str) -> MemoryWriteRequest {
+    let mut draft = extraction_draft();
+    draft.topic = topic.to_string();
+    draft.content = format!("Durable operation intent for {topic}.");
+    MemoryWriteRequest::LongTermExtraction {
+        extraction: ParsedLongTermMemoryExtraction {
+            upserts: vec![draft],
+            deletes: Vec::new(),
+            skill_writes: Vec::new(),
+        },
     }
 }
 
@@ -504,15 +541,75 @@ fn observation(observation_id: &str) -> AgentToolObservationDigest {
     }
 }
 
-fn feedback(registry: &AgentToolRegistrySnapshot) -> AgentToolUsageFeedback {
-    AgentToolUsageFeedback {
+fn feedback(registry: &AgentToolRegistrySnapshot) -> AgentToolUsageFeedbackV2 {
+    AgentToolUsageFeedbackV2 {
         registry_ref: registry.registry_ref(),
+        tool_id: "pdf.extract".to_string(),
+        schema_fingerprint: "schema-pdf-v1".to_string(),
         observations: vec![observation("obs-1"), observation("obs-2")],
         user_visible_result_summary: Some(
             "PDF extraction helped produce release notes from a local artifact.".to_string(),
         ),
-        reuse_outcome: RuntimeSkillReuseOutcome::Succeeded,
+        outcome: ProceduralExecutionOutcomeV1::Succeeded,
         operator_note: None,
+    }
+}
+
+fn feedback_finalize_request(
+    runtime: &bm_sdk::MemoryRuntime,
+    turn_id: &str,
+    feedback: AgentToolUsageFeedbackV2,
+) -> MemoryTurnFinalizeRequest {
+    let tool_call_count = feedback.observations.len() as u32;
+    let tool_observations = feedback
+        .observations
+        .iter()
+        .map(|observation| ToolObservationDigest {
+            observation_id: observation.observation_id.clone(),
+            tool_name: observation.tool_id.clone(),
+            summary: observation.summary.clone(),
+            external_content: observation.external_content,
+        })
+        .collect();
+    MemoryTurnFinalizeRequest {
+        turn: CanonicalTurnDelta {
+            turn_id: turn_id.to_string(),
+            conversation: ConversationScope {
+                channel: runtime.scope().channel.clone(),
+                chat_id: runtime.scope().chat_id.clone(),
+                conversation_id: Some(runtime.scope().conversation_id_or_chat_id().to_string()),
+            },
+            subject: runtime.subject_id().to_string(),
+            delivery_status: MemoryTurnDeliveryStatus::Delivered,
+            source: MemoryTurnSource {
+                ingress: IngressKind::User,
+                channel: runtime.scope().channel.clone(),
+                provider: None,
+                protocol: MemoryTurnProtocol::Native,
+                endpoint: None,
+                model_alias: None,
+                model_resolved: None,
+                request_id: Some(format!("request-{turn_id}")),
+                client_conversation_hint: None,
+            },
+            actor: None,
+            input_messages: vec![TranscriptInputMessage::user("synthetic tool execution")],
+            assistant_message: Some(TranscriptInputMessage::assistant("synthetic result")),
+            tool_observations,
+            external_content_used: true,
+            candidate_ids: Vec::new(),
+        },
+        learning: PostTurnLearningInputV1 {
+            tool_call_count,
+            selection_receipt: None,
+            runtime_skill_feedback: Vec::new(),
+            agent_skill_feedback: Vec::new(),
+            task_learning_feedback: Vec::new(),
+            agent_tool_feedback: vec![feedback],
+            authority: bm_sdk::ProceduralFeedbackAuthorityInputV1::HostRuntimeObservation,
+        },
+        pressure: PressureLevel::Normal,
+        mode_input: RuntimeLifecycleModeInput::default(),
     }
 }
 
@@ -682,8 +779,7 @@ fn candidate_write_event_budget_rejects_without_partial_memory() {
 
     let err = runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: Some(support::runtime_skill_subject_scope()),
-            candidates: vec![long_term_candidate(), runtime_skill_candidate()],
+            candidates: vec![long_term_candidate(), secondary_long_term_candidate()],
         })
         .expect_err("event budget should reject the whole memory write transaction");
 
@@ -723,8 +819,7 @@ fn candidate_write_success_reports_transaction_lineage() {
 
     let report = runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: Some(support::runtime_skill_subject_scope()),
-            candidates: vec![long_term_candidate(), runtime_skill_candidate()],
+            candidates: vec![long_term_candidate(), secondary_long_term_candidate()],
         })
         .expect("candidate write");
 
@@ -771,18 +866,13 @@ fn candidate_write_success_reports_transaction_lineage() {
         .as_array()
         .is_some_and(|subjects| !subjects.is_empty()));
     assert!(facet_doc["owner_revision"].as_u64().unwrap_or(0) > 0);
-    let runtime_skill_owners = platform
-        .replay_harness()
-        .read_json_namespace("runtime_skill_records")
-        .expect("typed runtime skill owners");
-    assert_eq!(runtime_skill_owners.len(), 1);
-    assert!(platform
-        .replay_harness()
-        .skill_storage()
-        .list_names()
-        .expect("generic skills")
+    let project_owner_id = long_term_records
         .iter()
-        .all(|name| !name.starts_with("runtime_skill__")));
+        .find(|entry| entry.topic == "transaction_project")
+        .expect("accepted project entry")
+        .id
+        .clone();
+    assert_facet_index_doc_for_owner(&platform, &project_owner_id);
 }
 
 #[test]
@@ -828,7 +918,6 @@ fn candidate_to_draft_to_entry_to_exact_entity_posting_to_typed_query_is_reachab
 
     runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: None,
             candidates: vec![candidate],
         })
         .expect("typed entity candidate write");
@@ -881,7 +970,6 @@ fn content_change_replaces_entities_and_removes_old_exact_posting() {
     };
     runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: None,
             candidates: vec![typed_entity_candidate(
                 "The governed entity payload is version one.",
                 old_key.clone(),
@@ -892,7 +980,6 @@ fn content_change_replaces_entities_and_removes_old_exact_posting() {
         .expect("seed old entity");
     runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: None,
             candidates: vec![typed_entity_candidate(
                 "The governed entity payload is version two.",
                 new_key.clone(),
@@ -965,7 +1052,6 @@ fn same_content_candidate_reinforcement_unions_entity_aliases_and_evidence() {
     ] {
         runtime
             .write(MemoryWriteRequest::Candidates {
-                runtime_skill_owning_scope: None,
                 candidates: vec![candidate],
             })
             .expect("reinforce entity payload");
@@ -1003,7 +1089,6 @@ fn rejected_candidate_does_not_write_recallable_facet_index() {
 
     let report = runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: None,
             candidates: vec![candidate],
         })
         .expect("rejected candidate write");
@@ -1046,13 +1131,12 @@ fn procedural_write_event_budget_rejects_without_partial_skill() {
         .expect("skills before");
 
     let err = runtime
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![support::governed_runtime_skill_write(
+        .seed_runtime_skills_for_replay(
+            vec![support::governed_runtime_skill_write(
                 manual_runtime_skill_write("runtime_skill__transaction_manual"),
             )],
-            owning_scope: support::runtime_skill_subject_scope(),
-            source: RuntimeSkillWriteSource::Manual,
-        })
+            support::runtime_skill_subject_scope(),
+        )
         .expect_err("event budget should reject skill write and lifecycle together");
 
     assert_eq!(err.stage(), "memory_write_transaction_preflight_failed");
@@ -1081,19 +1165,18 @@ fn procedural_write_success_reports_transaction_lineage() {
     );
 
     let report = runtime
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![support::governed_runtime_skill_write(
+        .seed_runtime_skills_for_replay(
+            vec![support::governed_runtime_skill_write(
                 manual_runtime_skill_write("runtime_skill__transaction_manual"),
             )],
-            owning_scope: support::runtime_skill_subject_scope(),
-            source: RuntimeSkillWriteSource::Manual,
-        })
+            support::runtime_skill_subject_scope(),
+        )
         .expect("procedural write");
 
     assert!(report.accepted);
     assert_eq!(report.changed, 1);
     let transaction = report.transaction.expect("transaction");
-    assert_eq!(transaction.operation, "write.procedural");
+    assert_eq!(transaction.operation, "replay.seed_runtime_skills");
     assert_eq!(
         transaction.planned_mutations,
         transaction.committed_mutations
@@ -1102,7 +1185,7 @@ fn procedural_write_success_reports_transaction_lineage() {
     assert_transaction_events(
         &platform,
         &transaction.transaction_id,
-        "write.procedural",
+        "replay.seed_runtime_skills",
         transaction.event_ids.len(),
     );
 }
@@ -1124,25 +1207,13 @@ fn durable_write_identity_binds_the_exact_scoped_actor_on_one_shared_store() {
         "agent:delegated-b",
         "chat-a",
     );
-    let request = |name: &str| MemoryWriteRequest::Procedural {
-        writes: vec![support::governed_runtime_skill_write(
-            manual_runtime_skill_write(name),
-        )],
-        owning_scope: support::runtime_skill_subject_scope(),
-        source: RuntimeSkillWriteSource::Manual,
-    };
+    let request = long_term_write_request;
 
     let first = runtime_a
-        .write_operation(
-            "same-caller-operation-id",
-            request("runtime_skill__actor_bound_a"),
-        )
+        .write_operation("same-caller-operation-id", request("actor_bound_a"))
         .expect("actor A commit");
     let second = runtime_b
-        .write_operation(
-            "same-caller-operation-id",
-            request("runtime_skill__actor_bound_b"),
-        )
+        .write_operation("same-caller-operation-id", request("actor_bound_b"))
         .expect("actor B commit must not collide with actor A");
     let (
         MemoryMutationExecution::Committed {
@@ -1171,26 +1242,20 @@ fn durable_write_identity_binds_the_exact_scoped_actor_on_one_shared_store() {
     );
     assert!(matches!(
         runtime_a
-            .write_operation(
-                "same-caller-operation-id",
-                request("runtime_skill__actor_bound_a"),
-            )
+            .write_operation("same-caller-operation-id", request("actor_bound_a"),)
             .expect("actor A replay"),
         MemoryMutationExecution::Replayed { .. }
     ));
     assert!(matches!(
         runtime_b
-            .write_operation(
-                "same-caller-operation-id",
-                request("runtime_skill__actor_bound_b"),
-            )
+            .write_operation("same-caller-operation-id", request("actor_bound_b"),)
             .expect("actor B replay"),
         MemoryMutationExecution::Replayed { .. }
     ));
 }
 
 #[test]
-fn operation_aware_procedural_write_replays_and_rejects_intent_collision() {
+fn operation_aware_long_term_write_replays_and_rejects_intent_collision() {
     let platform = store_with_event_budget(32);
     let runtime = test_runtime_with_scope(
         platform,
@@ -1198,19 +1263,10 @@ fn operation_aware_procedural_write_replays_and_rejects_intent_collision() {
         "llm.gateway",
         "chat-a",
     );
-    let request = |name: &str| MemoryWriteRequest::Procedural {
-        writes: vec![support::governed_runtime_skill_write(
-            manual_runtime_skill_write(name),
-        )],
-        owning_scope: support::runtime_skill_subject_scope(),
-        source: RuntimeSkillWriteSource::Manual,
-    };
+    let request = long_term_write_request;
 
     let first = runtime
-        .write_operation(
-            "sdk-write-operation-1",
-            request("runtime_skill__operation_aware"),
-        )
+        .write_operation("sdk-write-operation-1", request("operation_aware"))
         .expect("first operation write");
     let MemoryMutationExecution::Committed { report, receipt } = first else {
         panic!("first operation must commit")
@@ -1219,28 +1275,24 @@ fn operation_aware_procedural_write_replays_and_rejects_intent_collision() {
     assert_eq!(receipt.changed_count, 1);
 
     let replay = runtime
-        .write_operation(
-            "sdk-write-operation-1",
-            request("runtime_skill__operation_aware"),
-        )
+        .write_operation("sdk-write-operation-1", request("operation_aware"))
         .expect("same operation replay");
     assert!(matches!(replay, MemoryMutationExecution::Replayed { .. }));
 
     let collision = runtime
-        .write_operation(
-            "sdk-write-operation-1",
-            request("runtime_skill__different_intent"),
-        )
+        .write_operation("sdk-write-operation-1", request("different_intent"))
         .expect_err("same operation identity with another request must conflict");
     assert_eq!(collision.class(), Some(bm_sdk::ErrorClass::Conflict));
 
     let noop = runtime
         .write_operation(
             "sdk-write-operation-noop",
-            MemoryWriteRequest::Procedural {
-                writes: Vec::new(),
-                owning_scope: support::runtime_skill_subject_scope(),
-                source: RuntimeSkillWriteSource::Manual,
+            MemoryWriteRequest::LongTermExtraction {
+                extraction: ParsedLongTermMemoryExtraction {
+                    upserts: Vec::new(),
+                    deletes: Vec::new(),
+                    skill_writes: Vec::new(),
+                },
             },
         )
         .expect("zero-effect operation write");
@@ -1253,7 +1305,7 @@ fn operation_aware_procedural_write_replays_and_rejects_intent_collision() {
     let zero_effect_collision = runtime
         .write_operation(
             "sdk-write-operation-noop",
-            request("runtime_skill__must_not_escape_noop_collision"),
+            request("must_not_escape_noop_collision"),
         )
         .expect_err("zero-effect receipt must reserve the operation identity");
     assert_eq!(
@@ -1263,67 +1315,16 @@ fn operation_aware_procedural_write_replays_and_rejects_intent_collision() {
 }
 
 #[test]
-fn operation_aware_public_write_variants_commit_noop_replay_and_reject_collisions() {
+fn operation_aware_long_term_extraction_commits_noop_replays_and_rejects_collisions() {
     let registry = registry();
     let clock = Arc::new(AdjustableTransactionClock::new(1_800_000_000));
     let (platform, runtime) =
         runtime_with_registry_event_budget_and_clock(registry.clone(), 256, clock.clone());
-    let owning_scope = bm_sdk::RuntimeSkillOwningScope::Subject {
-        mounted_subject_id: default_agent_subject_id("transaction-agent"),
-    };
-
-    let promotion_request = |task_id: &str| MemoryWriteRequest::ProceduralPromotions {
-        promotions: vec![promotion_input(task_id)],
-        owning_scope: owning_scope.clone(),
-        source: RuntimeSkillWriteSource::TaskLearning,
-    };
-    let promotion = runtime
-        .write_operation(
-            "sdk-write-promotion-changed",
-            promotion_request("operation-promotion"),
-        )
-        .expect("operation-aware promotion");
-    let MemoryMutationExecution::Committed { report, receipt } = promotion else {
-        panic!("promotion must commit")
-    };
-    assert_eq!(report.changed, 1);
-    assert_eq!(receipt.changed_count, 1);
-    let before_replay = store_fingerprints(&platform);
-    assert!(matches!(
-        runtime
-            .write_operation(
-                "sdk-write-promotion-changed",
-                promotion_request("operation-promotion")
-            )
-            .expect("promotion replay"),
-        MemoryMutationExecution::Replayed { .. }
-    ));
-    assert_eq!(store_fingerprints(&platform), before_replay);
-    let collision = runtime
-        .write_operation(
-            "sdk-write-promotion-changed",
-            promotion_request("operation-promotion-collision"),
-        )
-        .expect_err("promotion intent collision");
-    assert_eq!(collision.class(), Some(bm_sdk::ErrorClass::Conflict));
-    let promotion_noop = runtime
-        .write_operation(
-            "sdk-write-promotion-noop",
-            promotion_request("operation-promotion"),
-        )
-        .expect("operation-aware promotion noop");
-    let MemoryMutationExecution::Committed { report, receipt } = promotion_noop else {
-        panic!("promotion noop must commit its receipt")
-    };
-    assert_eq!(report.changed, 0);
-    assert_eq!(receipt.changed_count, 0);
 
     let extraction_request = |topic: &str| {
         let mut draft = extraction_draft();
         draft.topic = topic.to_string();
         MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![draft],
                 deletes: Vec::new(),
@@ -1364,8 +1365,6 @@ fn operation_aware_public_write_variants_commit_noop_replay_and_reject_collision
         .write_operation(
             "sdk-write-extraction-noop",
             MemoryWriteRequest::LongTermExtraction {
-                governed_skill_writes: Vec::new(),
-                runtime_skill_owning_scope: None,
                 extraction: ParsedLongTermMemoryExtraction {
                     upserts: Vec::new(),
                     deletes: Vec::new(),
@@ -1379,50 +1378,10 @@ fn operation_aware_public_write_variants_commit_noop_replay_and_reject_collision
     };
     assert_eq!(report.changed, 0);
     assert_eq!(receipt.changed_count, 0);
-
-    let feedback_request = || MemoryWriteRequest::AgentToolUsageFeedback {
-        feedback: feedback(&registry),
-    };
-    let feedback_write = runtime
-        .write_operation("sdk-write-feedback-changed", feedback_request())
-        .expect("operation-aware feedback");
-    let MemoryMutationExecution::Committed { report, receipt } = feedback_write else {
-        panic!("feedback must commit")
-    };
-    assert_eq!(report.changed, 1);
-    assert_eq!(receipt.changed_count, 1);
-    let before_replay = store_fingerprints(&platform);
-    assert!(matches!(
-        runtime
-            .write_operation("sdk-write-feedback-changed", feedback_request())
-            .expect("feedback replay"),
-        MemoryMutationExecution::Replayed { .. }
-    ));
-    assert_eq!(store_fingerprints(&platform), before_replay);
-    let mut colliding_feedback = feedback(&registry);
-    colliding_feedback.operator_note = Some("different intent".to_string());
-    let collision = runtime
-        .write_operation(
-            "sdk-write-feedback-changed",
-            MemoryWriteRequest::AgentToolUsageFeedback {
-                feedback: colliding_feedback,
-            },
-        )
-        .expect_err("feedback intent collision");
-    assert_eq!(collision.class(), Some(bm_sdk::ErrorClass::Conflict));
-    clock.set(1_800_000_001);
-    let feedback_noop = runtime
-        .write_operation("sdk-write-feedback-noop", feedback_request())
-        .expect("operation-aware feedback noop");
-    let MemoryMutationExecution::Committed { report, receipt } = feedback_noop else {
-        panic!("feedback noop must commit its receipt")
-    };
-    assert_eq!(report.changed, 0);
-    assert_eq!(receipt.changed_count, 0);
 }
 
 #[test]
-fn operation_aware_procedural_write_replays_after_file_store_reopen() {
+fn operation_aware_long_term_write_replays_after_file_store_reopen() {
     let root = std::env::temp_dir().join(format!(
         "bm-sdk-write-operation-reopen-{}-{}",
         std::process::id(),
@@ -1431,13 +1390,7 @@ fn operation_aware_procedural_write_replays_after_file_store_reopen() {
             .expect("clock")
             .as_nanos()
     ));
-    let request = || MemoryWriteRequest::Procedural {
-        writes: vec![support::governed_runtime_skill_write(
-            manual_runtime_skill_write("runtime_skill__operation_file_reopen"),
-        )],
-        owning_scope: support::runtime_skill_subject_scope(),
-        source: RuntimeSkillWriteSource::Manual,
-    };
+    let request = || long_term_write_request("operation_file_reopen");
 
     {
         let platform = support::open_memory_store(
@@ -1483,7 +1436,7 @@ fn operation_aware_procedural_write_replays_after_file_store_reopen() {
 }
 
 #[test]
-fn procedural_promotion_event_budget_rejects_without_partial_skill() {
+fn replay_skill_event_budget_rejects_without_partial_skill() {
     let platform = store_with_event_budget(2);
     let runtime = test_runtime_with_scope(
         platform.clone(),
@@ -1502,11 +1455,12 @@ fn procedural_promotion_event_budget_rejects_without_partial_skill() {
         .expect("skills before");
 
     let err = runtime
-        .write(MemoryWriteRequest::ProceduralPromotions {
-            promotions: vec![promotion_input("promotion-budget")],
-            owning_scope: support::runtime_skill_subject_scope(),
-            source: RuntimeSkillWriteSource::TaskLearning,
-        })
+        .seed_runtime_skills_for_replay(
+            vec![support::governed_runtime_skill_write(
+                manual_runtime_skill_write("runtime_skill__promotion_budget"),
+            )],
+            support::runtime_skill_subject_scope(),
+        )
         .expect_err("event budget should reject promotion and lifecycle together");
 
     assert_eq!(err.stage(), "memory_write_transaction_preflight_failed");
@@ -1525,7 +1479,7 @@ fn procedural_promotion_event_budget_rejects_without_partial_skill() {
 }
 
 #[test]
-fn procedural_promotion_success_reports_transaction_lineage() {
+fn replay_skill_success_reports_transaction_lineage() {
     let platform = store_with_event_budget(16);
     let runtime = test_runtime_with_scope(
         platform.clone(),
@@ -1535,22 +1489,23 @@ fn procedural_promotion_success_reports_transaction_lineage() {
     );
 
     let report = runtime
-        .write(MemoryWriteRequest::ProceduralPromotions {
-            promotions: vec![promotion_input("promotion-success")],
-            owning_scope: support::runtime_skill_subject_scope(),
-            source: RuntimeSkillWriteSource::TaskLearning,
-        })
+        .seed_runtime_skills_for_replay(
+            vec![support::governed_runtime_skill_write(
+                manual_runtime_skill_write("runtime_skill__promotion_success"),
+            )],
+            support::runtime_skill_subject_scope(),
+        )
         .expect("promotion write");
 
     assert!(report.accepted);
     assert_eq!(report.changed, 1);
     let transaction = report.transaction.expect("transaction");
-    assert_eq!(transaction.operation, "write.procedural_promotions");
+    assert_eq!(transaction.operation, "replay.seed_runtime_skills");
     assert!(!transaction.partial_write);
     assert_transaction_events(
         &platform,
         &transaction.transaction_id,
-        "write.procedural_promotions",
+        "replay.seed_runtime_skills",
         transaction.event_ids.len(),
     );
 }
@@ -1577,8 +1532,6 @@ fn long_term_extraction_event_budget_rejects_without_partial_memory() {
 
     let err = runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![extraction_draft()],
                 deletes: Vec::new(),
@@ -1613,17 +1566,12 @@ fn long_term_extraction_success_reports_transaction_lineage() {
         "chat-a",
     );
 
-    let extracted_skill = manual_runtime_skill_write("runtime_skill__transaction_extraction");
     let report = runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: vec![support::governed_runtime_skill_write(
-                extracted_skill.clone(),
-            )],
-            runtime_skill_owning_scope: Some(support::runtime_skill_subject_scope()),
             extraction: ParsedLongTermMemoryExtraction {
-                upserts: vec![extraction_draft()],
+                upserts: vec![extraction_draft(), secondary_extraction_draft()],
                 deletes: Vec::new(),
-                skill_writes: vec![extracted_skill],
+                skill_writes: Vec::new(),
             },
         })
         .expect("extraction write");
@@ -1654,6 +1602,13 @@ fn long_term_extraction_success_reports_transaction_lineage() {
         .clone();
     let facet_doc = assert_facet_index_doc_for_owner(&platform, &owner_id);
     assert_eq!(facet_doc["owner_revision"], 1);
+    let project_owner_id = long_term_records
+        .iter()
+        .find(|entry| entry.topic == "transaction_extraction_project")
+        .expect("accepted second extraction entry")
+        .id
+        .clone();
+    assert_facet_index_doc_for_owner(&platform, &project_owner_id);
 }
 
 #[test]
@@ -1668,8 +1623,6 @@ fn long_term_extraction_delete_removes_facet_index_in_same_transaction() {
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![extraction_draft()],
                 deletes: Vec::new(),
@@ -1691,8 +1644,6 @@ fn long_term_extraction_delete_removes_facet_index_in_same_transaction() {
 
     let report = runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: Vec::new(),
                 deletes: vec![LongTermMemorySlot {
@@ -1760,8 +1711,6 @@ fn long_term_extraction_delete_binds_the_scoped_human_actor_to_the_tombstone() {
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![extraction_draft()],
                 deletes: Vec::new(),
@@ -1774,8 +1723,6 @@ fn long_term_extraction_delete_binds_the_scoped_human_actor_to_the_tombstone() {
     refreshed.source_revision = Some(2);
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![refreshed],
                 deletes: Vec::new(),
@@ -1785,8 +1732,6 @@ fn long_term_extraction_delete_binds_the_scoped_human_actor_to_the_tombstone() {
         .expect("refresh with scoped human actor");
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: Vec::new(),
                 deletes: vec![LongTermMemorySlot {
@@ -1839,8 +1784,6 @@ fn long_term_extraction_plans_delete_and_upsert_against_one_facet_manifest_state
     );
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![extraction_draft()],
                 deletes: Vec::new(),
@@ -1856,8 +1799,6 @@ fn long_term_extraction_plans_delete_and_upsert_against_one_facet_manifest_state
     replacement.supporting_citations = vec!["fixture:replacement-extraction".to_string()];
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![replacement],
                 deletes: vec![LongTermMemorySlot {
@@ -1926,8 +1867,6 @@ fn transcript_mask_fails_closed_when_facet_source_ref_would_be_redacted() {
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![draft],
                 deletes: Vec::new(),
@@ -1963,34 +1902,26 @@ fn transcript_mask_fails_closed_when_facet_source_ref_would_be_redacted() {
 }
 
 #[test]
-fn agent_tool_feedback_event_budget_rejects_without_partial_experience() {
+fn finalize_feedback_event_budget_rejects_without_partial_turn_or_job() {
     let registry = registry();
     let (platform, runtime) = runtime_with_registry_and_event_budget(registry.clone(), 2);
     let before_events = platform
         .replay_harness()
         .read_events()
         .expect("events before");
-    let before_skill_names = platform
-        .replay_harness()
-        .skill_storage()
-        .list_names()
-        .expect("skills before");
+    let before = store_fingerprints(&platform);
 
-    let err = runtime
-        .write(MemoryWriteRequest::AgentToolUsageFeedback {
-            feedback: feedback(&registry),
-        })
-        .expect_err("event budget should reject tool experience and lifecycle together");
+    let err = match runtime.finalize_turn(feedback_finalize_request(
+        &runtime,
+        "feedback-budget-reject",
+        feedback(&registry),
+    )) {
+        Ok(_) => panic!("event budget should reject turn and procedural job together"),
+        Err(error) => error,
+    };
 
     assert_eq!(err.stage(), "memory_write_transaction_preflight_failed");
-    assert_eq!(
-        platform
-            .replay_harness()
-            .skill_storage()
-            .list_names()
-            .unwrap(),
-        before_skill_names
-    );
+    assert_eq!(store_fingerprints(&platform), before);
     assert_eq!(
         platform.replay_harness().read_events().unwrap(),
         before_events
@@ -1998,27 +1929,31 @@ fn agent_tool_feedback_event_budget_rejects_without_partial_experience() {
 }
 
 #[test]
-fn agent_tool_feedback_success_reports_transaction_lineage() {
+fn finalize_feedback_success_commits_turn_and_durable_job() {
     let registry = registry();
-    let (platform, runtime) = runtime_with_registry_and_event_budget(registry.clone(), 16);
+    let (platform, runtime) = runtime_with_registry_and_event_budget(registry.clone(), 128);
 
     let report = runtime
-        .write(MemoryWriteRequest::AgentToolUsageFeedback {
-            feedback: feedback(&registry),
-        })
-        .expect("agent tool feedback");
+        .finalize_turn(feedback_finalize_request(
+            &runtime,
+            "feedback-success",
+            feedback(&registry),
+        ))
+        .expect("finalize tool feedback");
 
-    assert!(report.accepted);
-    assert_eq!(report.changed, 1);
-    let transaction = report.transaction.expect("transaction");
-    assert_eq!(transaction.operation, "write.agent_tool_usage_feedback");
-    assert!(!transaction.partial_write);
-    assert_transaction_events(
-        &platform,
-        &transaction.transaction_id,
-        "write.agent_tool_usage_feedback",
-        transaction.event_ids.len(),
-    );
+    assert!(report.session_commit.committed);
+    assert!(report.transcript_commit.is_some());
+    assert!(report.procedural_learning.job_id.is_some());
+    let events = platform.replay_harness().read_events().expect("events");
+    for job_id in [
+        report.procedural_learning.job_id.as_deref().unwrap(),
+        report.memory_consolidation.job_id.as_deref().unwrap(),
+    ] {
+        assert!(events.iter().any(|event| event.record_key == job_id
+            && event.plane == "procedural_feedback"
+            && event.payload.get("operation").map(String::as_str)
+                == Some("post_turn.learning.enqueue")));
+    }
 }
 
 #[test]
@@ -2072,8 +2007,6 @@ fn temporal_memory_graph_write_success_reports_transaction_lineage() {
     verify_owner.supporting_citations = vec!["turn:release".to_string()];
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![release_owner, verify_owner],
                 deletes: Vec::new(),
@@ -2177,8 +2110,6 @@ fn long_term_control_event_budget_rejects_without_partial_tombstone() {
     );
     seed_runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![extraction_draft()],
                 deletes: Vec::new(),
@@ -2277,8 +2208,6 @@ fn subject_visibility_event_budget_rejects_without_partial_owner_or_indexes() {
     );
     seed_runtime_a
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![extraction_draft()],
                 deletes: Vec::new(),
@@ -2390,8 +2319,6 @@ fn long_term_control_delete_removes_facet_index_in_same_transaction() {
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![extraction_draft()],
                 deletes: Vec::new(),
@@ -2468,8 +2395,6 @@ fn long_term_control_correct_updates_facet_index_revision_in_same_transaction() 
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![extraction_draft()],
                 deletes: Vec::new(),
@@ -2555,8 +2480,6 @@ fn long_term_control_supersede_replaces_owner_facet_index_in_same_transaction() 
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![extraction_draft()],
                 deletes: Vec::new(),
@@ -2641,8 +2564,6 @@ fn restricted_supersede_persists_successor_policy_material_and_facet_exactly() {
     );
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![extraction_draft()],
                 deletes: Vec::new(),
@@ -2731,8 +2652,6 @@ fn long_term_control_change_scope_persists_visibility_with_owner_and_facet_revis
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![extraction_draft()],
                 deletes: Vec::new(),
@@ -2872,8 +2791,6 @@ fn explicit_privacy_transition_updates_owner_facet_and_postings_atomically() {
         "SOUL_PRIVATE_TRANSITION_SENTINEL must leave every public delivery surface.".to_string();
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![draft],
                 deletes: Vec::new(),
@@ -3011,6 +2928,7 @@ fn explicit_privacy_transition_updates_owner_facet_and_postings_atomically() {
     assert!(!format!("{:?}", recall.delivery_report).contains("SOUL_PRIVATE_TRANSITION_SENTINEL"));
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "What is the transaction extraction privacy policy?".to_string(),

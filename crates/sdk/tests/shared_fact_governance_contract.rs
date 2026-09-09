@@ -4,6 +4,10 @@ use bm_core::memory::{
     LongTermMemoryConfidence, LongTermMemoryFreshness, LongTermMemorySourceScope,
     LongTermMemorySourceType, LongTermMemoryStaleHint, SharedMemoryWriteReason,
 };
+use bm_core::skills::{
+    govern_runtime_skill_write_shapes, RuntimeSkillWrite, RuntimeSkillWriteAction,
+    RuntimeSkillWriteSource,
+};
 use bm_sdk::{
     default_agent_subject_id, default_memory_space_id, LongTermMemoryDraft, LongTermMemoryKind,
     LongTermMemoryProvenance, MemoryCandidateContent, MemoryCandidateSemanticDecision,
@@ -44,30 +48,16 @@ fn accepted_fact_candidate(id: &str, body: &str) -> MemoryWriteCandidate {
     }
 }
 
-fn accepted_procedural_candidate(id: &str, body: &str) -> MemoryWriteCandidate {
-    let target = MemoryCandidateTarget::ProceduralMemory {
+fn weak_runtime_skill_write(id: &str, body: &str) -> RuntimeSkillWrite {
+    RuntimeSkillWrite {
         name: format!("runtime_skill__{id}"),
         topic: "release_procedure".to_string(),
-    };
-    MemoryWriteCandidate {
-        candidate_id: id.to_string(),
-        authority: MemoryEvidenceAuthority::UserAsserted,
-        target: target.clone(),
-        long_term_subject_visibility: None,
-        privacy: MemoryPrivacyClass::PublicRuntime,
-        content: MemoryCandidateContent::Text {
-            topic: "release_procedure".to_string(),
-            body: body.to_string(),
-            keywords: vec!["release".to_string()],
-        },
-        evidence_refs: vec![format!("turn:{id}")],
-        canonical_entities: Vec::new(),
-        semantic_judgment: Some(MemoryCandidateSemanticJudgment {
-            source: MemorySemanticJudgmentSource::LlmGovernance,
-            decision: MemoryCandidateSemanticDecision::Accept,
-            governed_target: Some(target),
-            reason: "llm_confirmed_procedural_candidate".to_string(),
-        }),
+        title: "Release procedure".to_string(),
+        summary: body.to_string(),
+        content: body.to_string(),
+        citations: vec![format!("turn:{id}")],
+        source_chat_id: Some("chat-a".to_string()),
+        observed_at: 1_800_000_000,
     }
 }
 
@@ -105,8 +95,6 @@ fn write_shared_fact(
                 deletes: Vec::new(),
                 skill_writes: Vec::new(),
             },
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
         })
         .expect("shared fact write")
 }
@@ -124,7 +112,6 @@ fn subject_candidate_shared_fact_is_owned_by_memory_space_governance() {
 
     let report = runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: None,
             candidates: vec![accepted_fact_candidate(
                 "candidate-fact-1",
                 "Shared factual records belong to the MemorySpace governance plane.",
@@ -164,7 +151,6 @@ fn candidate_report_rejects_semantically_accepted_but_non_durable_shared_fact() 
 
     let report = runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: None,
             candidates: vec![accepted_fact_candidate(
                 "candidate-structured-1",
                 "# Copied block\n- first item\n- second item\n- third item\n- fourth item",
@@ -193,7 +179,6 @@ fn candidate_report_exposes_partial_durable_shared_fact_admission() {
 
     let report = runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: None,
             candidates: vec![
                 accepted_fact_candidate(
                     "candidate-fact-accepted",
@@ -218,7 +203,22 @@ fn candidate_report_exposes_partial_durable_shared_fact_admission() {
 }
 
 #[test]
-fn candidate_report_rejects_semantically_accepted_but_weak_procedural_candidate() {
+fn core_shape_governance_rejects_a_weak_procedural_method() {
+    let report = govern_runtime_skill_write_shapes(
+        &[weak_runtime_skill_write(
+            "weak-procedure",
+            "This is a bare factual sentence.",
+        )],
+        RuntimeSkillWriteSource::Extraction,
+    );
+
+    assert_eq!(report.accepted, 0);
+    assert_eq!(report.rejected, 1);
+    assert_eq!(report.reports[0].action, RuntimeSkillWriteAction::Rejected);
+}
+
+#[test]
+fn public_fact_admission_and_core_procedural_shape_rejection_keep_distinct_owners() {
     let profile = support::host_test_profile();
     let runtime = MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-alpha", "owner-a").expect("identity"))
@@ -229,53 +229,14 @@ fn candidate_report_rejects_semantically_accepted_but_weak_procedural_candidate(
 
     let report = runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: Some(bm_sdk::RuntimeSkillOwningScope::Subject {
-                mounted_subject_id: bm_sdk::default_agent_subject_id("agent-alpha"),
-            }),
-            candidates: vec![accepted_procedural_candidate(
-                "weak-procedure",
-                "This is a bare factual sentence.",
+            candidates: vec![accepted_fact_candidate(
+                "candidate-fact-accepted",
+                "The release owner is the memory-space governance plane.",
             )],
         })
         .expect("write");
 
-    assert!(!report.accepted, "{report:#?}");
-    assert_eq!(report.changed, 0);
-    assert_eq!(
-        report
-            .procedural_evolution
-            .expect("procedural governance")
-            .rejected,
-        vec!["runtime_skill__weak-procedure".to_string()]
-    );
-}
-
-#[test]
-fn candidate_report_rejects_mixed_batch_with_a_final_plane_rejection() {
-    let profile = support::host_test_profile();
-    let runtime = MemoryRuntime::builder()
-        .identity(MemoryIdentity::new("agent-alpha", "owner-a").expect("identity"))
-        .scope(MemoryScope::new("sdk.direct", "chat-a").expect("scope"))
-        .store(empty_store_platform(profile))
-        .build()
-        .expect("runtime");
-
-    let report = runtime
-        .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: Some(bm_sdk::RuntimeSkillOwningScope::Subject {
-                mounted_subject_id: bm_sdk::default_agent_subject_id("agent-alpha"),
-            }),
-            candidates: vec![
-                accepted_fact_candidate(
-                    "candidate-fact-accepted",
-                    "The release owner is the memory-space governance plane.",
-                ),
-                accepted_procedural_candidate("weak-procedure", "This is a bare factual sentence."),
-            ],
-        })
-        .expect("write");
-
-    assert!(!report.accepted, "{report:#?}");
+    assert!(report.accepted, "{report:#?}");
     assert_eq!(report.changed, 1);
     assert_eq!(
         report
@@ -284,13 +245,15 @@ fn candidate_report_rejects_mixed_batch_with_a_final_plane_rejection() {
             .accepted,
         1
     );
-    assert_eq!(
-        report
-            .procedural_evolution
-            .expect("procedural governance")
-            .rejected,
-        vec!["runtime_skill__weak-procedure".to_string()]
+    let procedural = govern_runtime_skill_write_shapes(
+        &[weak_runtime_skill_write(
+            "weak-procedure",
+            "This is a bare factual sentence.",
+        )],
+        RuntimeSkillWriteSource::Extraction,
     );
+    assert_eq!(procedural.accepted, 0);
+    assert_eq!(procedural.rejected, 1);
 }
 
 #[test]
@@ -324,7 +287,6 @@ fn candidate_write_rejects_duplicate_durable_owner_identity_before_commit() {
 
     let error = runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: None,
             candidates: vec![first, second],
         })
         .expect_err("duplicate durable owner must fail closed");

@@ -9,8 +9,9 @@ use bm_core::memory::{
     MemoryWriteCandidate, MemoryWriteDomain, SoulCandidateDisposition,
 };
 use bm_sdk::{
+    LongTermMemoryQuery, MemoryLongTermControlView, MemoryLongTermListRequest,
     MemoryProjectionRequest, MemorySubjectVisibilityPolicy, MemoryWriteRequest, PressureLevel,
-    RuntimeLifecycleModeInput, RuntimeSkillListRequest,
+    RuntimeLifecycleModeInput,
 };
 
 use support::{empty_store_platform, test_runtime_with_scope};
@@ -69,7 +70,6 @@ fn sdk_candidate_write_mutates_only_llm_governed_plane_not_host_claimed_target()
 
     let report = runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: Some(support::runtime_skill_subject_scope()),
             candidates: vec![MemoryWriteCandidate {
                 candidate_id: "candidate-release-routine".to_string(),
                 authority: MemoryEvidenceAuthority::UserAsserted,
@@ -77,15 +77,12 @@ fn sdk_candidate_write_mutates_only_llm_governed_plane_not_host_claimed_target()
                     kind: LongTermMemoryKind::Profile,
                     topic: "host_claimed_profile".to_string(),
                 },
-                long_term_subject_visibility: None,
+                long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
                 privacy: MemoryPrivacyClass::SharedWithSubject,
-                content: MemoryCandidateContent::RuntimeSkill {
-                    name: "runtime_skill__sdk_host_readiness_check".to_string(),
+                content: MemoryCandidateContent::Text {
                     topic: "sdk_host_readiness_check".to_string(),
-                    title: "SDK host readiness check".to_string(),
-                    summary: "Run readiness checks before claiming SDK host readiness.".to_string(),
-                    content: "- run cargo test\n- verify artifacts\n- cite evidence".to_string(),
-                    citations: vec!["turn:candidate-release-routine".to_string()],
+                    body: "The SDK host requires readiness checks before release.".to_string(),
+                    keywords: vec!["readiness".to_string(), "release".to_string()],
                 },
                 evidence_refs: vec![
                     "turn:candidate-release-routine".to_string(),
@@ -94,11 +91,11 @@ fn sdk_candidate_write_mutates_only_llm_governed_plane_not_host_claimed_target()
                 canonical_entities: Vec::new(),
                 semantic_judgment: Some(llm_judgment(
                     MemoryCandidateSemanticDecision::Accept,
-                    MemoryCandidateTarget::ProceduralMemory {
-                        name: "runtime_skill__sdk_host_readiness_check".to_string(),
+                    MemoryCandidateTarget::LongTermMemory {
+                        kind: LongTermMemoryKind::Project,
                         topic: "sdk_host_readiness_check".to_string(),
                     },
-                    "llm_routed_to_procedural_memory",
+                    "llm_routed_to_project_memory",
                 )),
             }],
         })
@@ -109,24 +106,28 @@ fn sdk_candidate_write_mutates_only_llm_governed_plane_not_host_claimed_target()
         .expect("semantic governance report");
     assert_eq!(semantic.accepted_count, 1);
     let plane = semantic.plane_reports.first().expect("plane report");
-    assert_eq!(plane.domain, MemoryWriteDomain::Procedural);
-    assert_eq!(plane.plane, "runtime_skill");
+    assert_eq!(plane.domain, MemoryWriteDomain::Program);
+    assert_eq!(plane.plane, "long_term_memory");
     assert_eq!(plane.decision, GovernedWriteDecision::Accepted);
 
     assert_eq!(report.changed, 1);
     let records = runtime
-        .list_runtime_skills(RuntimeSkillListRequest {
-            owning_scope: support::runtime_skill_subject_scope(),
-            query: None,
-            include_disabled: false,
-            include_retired: false,
+        .list_long_term_memory(MemoryLongTermListRequest {
+            query: LongTermMemoryQuery::default(),
+            cursor: None,
             limit: 10,
+            view: MemoryLongTermControlView::HostUi,
         })
-        .expect("typed RuntimeSkill list");
+        .expect("typed long-term memory list");
     assert!(records
-        .skills
+        .records
         .iter()
-        .any(|record| record.title == "SDK host readiness check"));
+        .any(|report| report.record.kind == LongTermMemoryKind::Project
+            && report.record.topic == "sdk_host_readiness_check"));
+    assert!(!records.records.iter().any(|report| {
+        report.record.kind == LongTermMemoryKind::Profile
+            && report.record.topic == "host_claimed_profile"
+    }));
 }
 
 #[test]
@@ -137,7 +138,6 @@ fn sdk_candidate_write_without_llm_judgment_reports_deferred_and_does_not_mutate
 
     let report = runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: None,
             candidates: vec![text_candidate(
                 "candidate-host-only",
                 MemoryCandidateTarget::LongTermMemory {
@@ -161,6 +161,7 @@ fn sdk_candidate_write_without_llm_judgment_reports_deferred_and_does_not_mutate
     let runtime_b = test_runtime_with_scope(platform, profile, "llm.gateway", "chat-b");
     let projection = runtime_b
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "我叫什么？".to_string(),
@@ -185,7 +186,6 @@ fn sdk_candidate_write_reports_soul_handoff_without_long_term_or_procedural_muta
 
     let report = runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: None,
             candidates: vec![MemoryWriteCandidate {
                 candidate_id: "candidate-soul".to_string(),
                 authority: MemoryEvidenceAuthority::SoulGovernance,
@@ -233,7 +233,6 @@ fn sdk_candidate_write_keeps_private_garden_out_of_common_candidate_mutation() {
 
     let report = runtime
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: None,
             candidates: vec![MemoryWriteCandidate {
                 candidate_id: "candidate-private".to_string(),
                 authority: MemoryEvidenceAuthority::PrivateGardenInternal,

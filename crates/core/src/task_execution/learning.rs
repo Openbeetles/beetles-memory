@@ -156,6 +156,37 @@ pub struct TaskLearningRecord {
     pub observed_at: u64,
 }
 
+impl TaskLearningRecord {
+    pub fn permits_usage_feedback(&self, channel: &str, chat_id: &str) -> bool {
+        self.source_channel == channel
+            && self.source_chat_id == chat_id
+            && self.route != TaskLearningRoute::Rejected
+    }
+    pub fn canonical_content_digest(&self) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        let bytes = serde_json::to_vec(self)
+            .map_err(|error| Error::config("task_learning_digest", error.to_string()))?;
+        let mut hash = Sha256::new();
+        hash.update(b"beetle.task-learning.record.v1\0");
+        hash.update((bytes.len() as u64).to_be_bytes());
+        hash.update(bytes);
+        Ok(format!("sha256:{:x}", hash.finalize()))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskRecallEntryBinding {
+    pub learning_id: String,
+    pub learning_digest: String,
+    pub rendered_text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskRecallBundle {
+    pub rendered_text: String,
+    pub entries: Vec<TaskRecallEntryBinding>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TaskLearningHit {
     pub record: TaskLearningRecord,
@@ -805,7 +836,7 @@ pub(crate) fn retrieve_task_learning_hits_with_backend(
         task_learning_index_hints(&records, &normalized_query, &terms, active_run_id);
     let mut hits = records
         .into_iter()
-        .filter(|record| record.route != TaskLearningRoute::Rejected)
+        .filter(|record| record.permits_usage_feedback(channel, chat_id))
         .filter_map(|record| {
             let index_hint = index_hints.get(record.learning_id.as_str());
             score_task_learning_record(
@@ -1183,7 +1214,7 @@ pub fn build_task_recall_bundle(
     chat_id: &str,
     query: &str,
     max_len: usize,
-) -> Option<String> {
+) -> Option<TaskRecallBundle> {
     if max_len < MIN_TASK_RECALL_BLOCK_LEN {
         return None;
     }
@@ -1214,6 +1245,7 @@ pub fn build_task_recall_bundle(
         active_run.run.run_id,
         backend.label()
     ));
+    let mut entries = Vec::new();
     for hit in hits {
         let reason_preview = hit
             .reasons
@@ -1242,8 +1274,16 @@ pub fn build_task_recall_bundle(
         }
         out.push_str(&line);
         out.push('\n');
+        entries.push(TaskRecallEntryBinding {
+            learning_id: hit.record.learning_id.clone(),
+            learning_digest: hit.record.canonical_content_digest().ok()?,
+            rendered_text: line,
+        });
     }
-    Some(out.trim_end().to_string())
+    Some(TaskRecallBundle {
+        rendered_text: out.trim_end().to_string(),
+        entries,
+    })
 }
 
 pub fn build_task_learning_operator_snapshot(
@@ -2502,10 +2542,43 @@ mod tests {
         )
         .expect("task recall bundle should be built");
 
-        assert!(bundle.contains("## Task Recall Bundle"));
-        assert!(bundle.contains("apply_release_patch"));
-        assert!(bundle.contains("runtime_skill"));
-        assert!(bundle.contains("release_blocker"));
+        assert!(bundle.rendered_text.contains("## Task Recall Bundle"));
+        assert!(bundle.rendered_text.contains("apply_release_patch"));
+        assert!(bundle.rendered_text.contains("runtime_skill"));
+        assert!(bundle.rendered_text.contains("release_blocker"));
+        assert!(!bundle.entries.is_empty());
+        for entry in &bundle.entries {
+            assert!(bundle.rendered_text.contains(&entry.rendered_text));
+            let record = store.get(&entry.learning_id).unwrap().unwrap();
+            assert_eq!(
+                entry.learning_digest,
+                record.canonical_content_digest().unwrap()
+            );
+        }
+        let first = &bundle.entries[0];
+        let first_offset = bundle.rendered_text.find(&first.rendered_text).unwrap();
+        let partial = build_task_recall_bundle(
+            &active_run,
+            &store,
+            "chat_channel",
+            "chat-1",
+            "Need the release fix path",
+            first_offset + first.rendered_text.len() - 1,
+        )
+        .unwrap();
+        assert!(
+            !partial
+                .entries
+                .iter()
+                .any(|entry| entry.learning_id == first.learning_id),
+            "a partially rendered entry cannot authorize usage feedback"
+        );
+        let mut changed = store.get(&first.learning_id).unwrap().unwrap();
+        changed.content.push_str(" changed factual source");
+        assert_ne!(
+            first.learning_digest,
+            changed.canonical_content_digest().unwrap()
+        );
     }
 
     #[test]

@@ -42,7 +42,8 @@ Commands：
 | Command | 用途 |
 | --- | --- |
 | `capabilities` | 输出 runtime capability catalog。 |
-| `write-procedural` | 写入一条 procedural memory。 |
+| `write` | 从 `--input <request.json>` 提交类型化事实 `MemoryWriteRequest`；必须提供 `--idempotency-key`。 |
+| `finalize-turn` | 从 `--input <request.json>` 提交 canonical turn 与类型化学习证据。 |
 | `recall` | 按 query 召回 memory hits。 |
 | `project` | 生成模型上下文 memory block。 |
 | `inspect` | 返回 operator inspection 数据。 |
@@ -135,24 +136,8 @@ Attr JSON 必须指向已存在的 transcript turn/message。不要把 raw promp
 
 这些命令只管理已经存在的运行时 procedural memory record，不执行 skill，也不提供插件安装器。标准 Agent Skill 目录由宿主自己管理；独立部署时可通过 `BM_AGENT_SKILL_DIRS` 挂载目录，运行时只扫描和召回，不新增、不编辑、不导入。
 
-```bash
-bm \
-  memory write-procedural \
-  --profile "$BM_HOST_PROFILE" \
-  --store-file /tmp/beetle-memory-store \
-  --chat chat-1 \
-  --runtime-skill-subject agent:agent-main \
-  --replay-candidate-ref cli:release_guard \
-  --verification-receipt-digest sha256:<64-hex> \
-  --runtime-skill-privacy shared-with-subject \
-  --name runtime_skill__release_guard \
-  --title "Release guard" \
-  --topic release \
-  --summary "Verify release artifacts before publishing." \
-  --content "1. run gates
-2. inspect artifacts
-3. dry run publish"
-```
+CLI 有意不提供 Runtime Skill memory 的 create/import 命令。初始 owner 只能由受治理的
+post-turn learning worker 创建；以下命令只查看或修改已经存在的 owner。
 
 先用同一 owning scope（`--runtime-skill-subject <subject-id>` 或 `--runtime-skill-shared-program`）执行 `skill-list`，从结果读取 `ownerId` 和 `locator.owner_revision_ref.owner_revision`。后续每次 mutation 都必须继续使用上一次返回的 `currentLocator`；CLI 不接受名称到 owner 的兼容翻译。
 
@@ -182,24 +167,7 @@ bm \
 3. inspect changelog"
 ```
 
-## 用 File Store 写入并召回
-
-```bash
-bm \
-  memory write-procedural \
-  --profile "$BM_HOST_PROFILE" \
-  --store-file /tmp/beetle-memory-store \
-  --chat chat-1 \
-  --runtime-skill-subject agent:agent-main \
-  --replay-candidate-ref cli:file_store_release_guard \
-  --verification-receipt-digest sha256:<64-hex> \
-  --runtime-skill-privacy shared-with-subject \
-  --name release_guard \
-  --topic release \
-  --title "Release guard" \
-  --summary "Verify release artifacts before publishing." \
-  --content "Run examples, platform gates, and publish dry-run."
-```
+## 使用 File Store 召回
 
 ```bash
 bm \

@@ -9,11 +9,11 @@ use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bm_sdk::{
-    GovernedRuntimeSkillWriteInput, MemoryMutationExecution, MemoryMutationReceipt,
-    MemoryPrivacyClass, MemoryRuntime, MemoryWriteRequest, RuntimeSkillCreationRef,
-    RuntimeSkillOwningScope, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
+    LongTermMemoryDraft, LongTermMemoryKind, LongTermMemoryProvenance, MemoryEvidenceAuthority,
+    MemoryMutationExecution, MemoryMutationReceipt, MemoryPrivacyClass, MemoryRuntime,
+    MemorySubjectVisibilityPolicy, MemoryWriteRequest, ParsedLongTermMemoryExtraction,
+    StoreBackendConfig,
 };
-use sha2::{Digest, Sha256};
 
 const OPERATION_ID: &str = "store-contract-durable-operation";
 const MEMORY_SPACE_ID: &str = "space:test";
@@ -40,37 +40,32 @@ fn sqlite_config(path: &Path) -> StoreBackendConfig {
     StoreBackendConfig::sqlite(path, support::native_persistent_profile()).expect("sqlite config")
 }
 
-fn operation_request(runtime: &MemoryRuntime) -> MemoryWriteRequest {
-    let write = RuntimeSkillWrite {
-        name: "runtime_skill__durable_operation_recovery".to_string(),
-        topic: "durable operation recovery".to_string(),
-        title: "Durable operation recovery".to_string(),
-        summary: "One operation identity must commit one durable effect.".to_string(),
-        content: "1. Persist the governed effect with its receipt and authoritative audit.\n2. Retry the same operation identity and verify that no second effect is committed."
-            .to_string(),
-        citations: vec!["store-contract:durable-operation".to_string()],
-        source_chat_id: Some("chat-a".to_string()),
-        observed_at: 100,
-    };
-    let owning_scope = RuntimeSkillOwningScope::Subject {
-        mounted_subject_id: runtime.subject_id().to_string(),
-    };
-    let candidate_ref = "store-contract:durable-operation-recovery".to_string();
-    let verification_receipt_digest = format!(
-        "sha256:{:x}",
-        Sha256::digest(format!("{candidate_ref}\n{}\n{}", write.title, write.content).as_bytes())
-    );
-    MemoryWriteRequest::Procedural {
-        writes: vec![GovernedRuntimeSkillWriteInput {
-            write,
-            creation_ref: RuntimeSkillCreationRef::ReplayPromotion {
-                candidate_ref,
-                verification_receipt_digest,
-            },
-            privacy_class: MemoryPrivacyClass::SharedWithSubject,
-        }],
-        owning_scope,
-        source: RuntimeSkillWriteSource::Manual,
+fn operation_request(_runtime: &MemoryRuntime) -> MemoryWriteRequest {
+    MemoryWriteRequest::LongTermExtraction {
+        extraction: ParsedLongTermMemoryExtraction {
+            upserts: vec![LongTermMemoryDraft {
+                kind: LongTermMemoryKind::Project,
+                privacy: MemoryPrivacyClass::SharedWithSubject,
+                topic: "durable_operation_recovery".to_string(),
+                content: "One operation identity must commit one durable effect.".to_string(),
+                keywords: vec!["durable".to_string(), "operation".to_string()],
+                source_chat_id: Some("chat-a".to_string()),
+                source_type: None,
+                source_scope: None,
+                subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                provenance: LongTermMemoryProvenance::new(MemoryEvidenceAuthority::UserAsserted),
+                confidence: None,
+                freshness: None,
+                stale_hint: None,
+                supporting_citations: vec!["store-contract:durable-operation".to_string()],
+                canonical_entities: Vec::new(),
+                evidence_count: Some(1),
+                observed_at: Some(100),
+                source_revision: Some(1),
+            }],
+            deletes: Vec::new(),
+            skill_writes: Vec::new(),
+        },
     }
 }
 

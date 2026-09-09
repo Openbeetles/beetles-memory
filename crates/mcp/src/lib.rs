@@ -13,8 +13,8 @@ use bm_adapter::{governed_adapter_json_command_schema, AdapterOperation};
 
 #[cfg(feature = "server-stdio")]
 use bm_adapter::{
-    decode_json_adapter_command, AdapterJsonCommandOptions, AdapterRequestIdentityOwner,
-    AdapterResponse, AdapterSdkReport, TransportKind, TransportMode,
+    decode_json_adapter_command, AdapterRequestIdentityOwner, AdapterResponse, AdapterSdkReport,
+    TransportKind, TransportMode,
 };
 #[cfg(feature = "server-stdio")]
 use bm_entry::{
@@ -71,11 +71,7 @@ pub fn tool_specs() -> Vec<McpToolSpec> {
             AdapterOperation::Replay,
             &["chat_id", "limit"],
         ),
-        tool(
-            "memory_write_candidate",
-            AdapterOperation::Write,
-            &["name", "topic", "title", "summary", "content"],
-        ),
+        governed_tool("memory_write_candidate", AdapterOperation::Write),
         tool(
             "memory_long_term_list",
             AdapterOperation::LongTermList,
@@ -382,10 +378,8 @@ impl McpToolServer {
         let spec = snapshot
             .tool(&call.name)
             .ok_or_else(|| bm_sdk::Error::config("mcp_runtime", "unsupported tool"))?;
-        reject_missing_remote_source_scope(runtime, spec.operation, &call.arguments)?;
         let arguments = normalize_typed_tool_arguments(spec.name, &call.arguments)?;
-        let command =
-            decode_json_adapter_command(spec.operation, &arguments, &mcp_command_options(runtime))?;
+        let command = decode_json_adapter_command(spec.operation, &arguments)?;
         let request_identity = AdapterRequestIdentityOwner::new(
             TransportKind::Mcp,
             &self.server_id,
@@ -512,8 +506,7 @@ impl McpToolServer {
     ) -> bm_sdk::Result<EntryResponse> {
         let command = decode_json_adapter_command(
             AdapterOperation::Project,
-            r#"{"temporal_operation":{"kind":"current"},"user_query":"projection preview","system_max_len":1200}"#,
-            &mcp_command_options(runtime),
+            r#"{"binding":{"kind":"preview"},"temporal_operation":{"kind":"current"},"user_query":"projection preview","system_max_len":1200}"#,
         )?;
         let request_identity = AdapterRequestIdentityOwner::new(
             TransportKind::Mcp,
@@ -538,40 +531,6 @@ impl McpToolServer {
             lease,
         )
     }
-}
-
-#[cfg(feature = "server-stdio")]
-fn mcp_command_options(runtime: &EntryRuntime) -> AdapterJsonCommandOptions {
-    let options = AdapterJsonCommandOptions::new("bm-mcp");
-    if runtime.uses_local_default_scope_policy() {
-        options.with_default_source_chat_id(runtime.runtime().scope().chat_id.clone())
-    } else {
-        options
-    }
-}
-
-#[cfg(feature = "server-stdio")]
-fn reject_missing_remote_source_scope(
-    runtime: &EntryRuntime,
-    operation: AdapterOperation,
-    body: &str,
-) -> bm_sdk::Result<()> {
-    if runtime.uses_local_default_scope_policy() || operation != AdapterOperation::Write {
-        return Ok(());
-    }
-    let value: Value = serde_json::from_str(body)
-        .map_err(|err| bm_sdk::Error::config("adapter_json_command", err.to_string()))?;
-    if value
-        .get("source_chat_id")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
-    {
-        return Ok(());
-    }
-    Err(bm_sdk::Error::config(
-        "adapter_json_command",
-        "remote adapter write payload missing source_chat_id; refusing implicit chat-1 scope",
-    ))
 }
 
 #[cfg(feature = "server-stdio")]
@@ -1406,7 +1365,9 @@ fn tool_description(name: &str) -> &'static str {
         "memory_project" => "Build a bounded memory projection preview for an explicit query.",
         "memory_inspect" => "Inspect governed memory state without exposing raw private planes.",
         "memory_replay" => "Replay safe memory timeline events for a chat scope.",
-        "memory_write_candidate" => "Submit a governed procedural memory write candidate.",
+        "memory_write_candidate" => {
+            "Submit typed factual candidates, long-term extraction, or governed evidence. Procedural feedback belongs to memory_finalize_turn."
+        }
         _ => "Beetle Memory MCP tool.",
     }
 }
@@ -1459,6 +1420,14 @@ fn render_tool_result(response: AdapterResponse<AdapterSdkReport>) -> McpToolRes
                 )
             } else {
                 omit_null_receipt(match report {
+                    AdapterSdkReport::Write(report) => json!({
+                        "status": "accepted",
+                        "operation": report.operation,
+                        "accepted": report.accepted,
+                        "changed": report.changed,
+                        "reason": report.reason,
+                        "receipt": receipt,
+                    }).to_string(),
                     AdapterSdkReport::Recall(_) | AdapterSdkReport::Project(_) => {
                         unreachable!("governed DTO handled above")
                     }
@@ -1506,9 +1475,9 @@ fn render_tool_result(response: AdapterResponse<AdapterSdkReport>) -> McpToolRes
                 budget_report_id: String::new(),
             }
         }
-        AdapterResponse::Rejected { reason, .. } => McpToolResult {
+        AdapterResponse::Rejected { reason, error_key, .. } => McpToolResult {
             status: "rejected".to_string(),
-            content: json!({"status":"rejected","reason":reason}).to_string(),
+            content: json!({"status":"rejected","reason":reason,"error_key":error_key.as_str()}).to_string(),
             private_raw_allowed: false,
             budget_report_id: String::new(),
         },

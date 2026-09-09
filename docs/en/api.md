@@ -21,7 +21,7 @@ The SDK API is the primary entry point. Host projects should enter through `bm-s
 
 | Operation | SDK method | Purpose |
 | --- | --- | --- |
-| Write | `MemoryRuntime::write` | Store procedural memory or long-term extraction results. |
+| Write | `MemoryRuntime::write` | Submit typed factual candidates, long-term extraction results, or governed evidence. Public writes cannot create procedural owners. |
 | Recall | `MemoryRuntime::recall` | Retrieve memory hits for a query. |
 | Project | `MemoryRuntime::project` | Build a bounded memory block for model context. |
 | Maintain | `MemoryRuntime::maintain` | Run explicit post-reply memory maintenance when an LLM client is configured. |
@@ -109,15 +109,15 @@ SDK-facing transcript operations:
 
 `MemoryTranscriptReplayRequest` and `MemoryTranscriptExportRequest` take `limit` plus optional `cursor`; their reports return `next_cursor` and `has_more`. SDK callers should page through transcript replay/export through `MemoryRuntime` instead of reaching into the core/store trait. Runtime profile budgets may clamp page size, visible host refs per turn, visible attrs per turn/message, redaction items, lifecycle derived refs, and repair issues, but they do not relax redaction, lifecycle, or privacy policy. Lifecycle and repair reports set `profile_budget_applied=true` when those report lists are clipped.
 
-CTQ1 query surfaces use the Store-owned `TranscriptQueryCursor`. Treat it as opaque: do not decode, mint, sign, persist claims, or inject host cursor authority. Cursor validation binds the operation, exact MemorySpace, mounted subject, filters, view, query digest, direction/anchor, Store incarnation, and owner/index generation. Every page re-runs capability, subject, lifecycle, privacy, and disclosure checks. Catalog and timeline remain governed by `transcript_replay`; indexed search and activity additionally require their own `transcript_search` and `transcript_activity` capability switches. Platform capability snapshots expose these switches in `beetle-memory.platform.capability.v4`.
+CTQ1 query surfaces use the Store-owned `TranscriptQueryCursor`. Treat it as opaque: do not decode, mint, sign, persist claims, or inject host cursor authority. Cursor validation binds the operation, exact MemorySpace, mounted subject, filters, view, query digest, direction/anchor, Store incarnation, and owner/index generation. Every page re-runs capability, subject, lifecycle, privacy, and disclosure checks. Catalog and timeline remain governed by `transcript_replay`; indexed search and activity additionally require their own `transcript_search` and `transcript_activity` capability switches. Platform capability snapshots expose these switches in `beetle-memory.platform.capability.v5`.
 
 `HostUi` is only the host-presentable redacted disclosure view. It is not a chat-window API, pagination direction, product name, transcript index owner, or authorization token. Catalog, timeline, search, and activity return only candidates that remain visible after Runtime hydration and redaction for the requested view. Search hits contain a governed Unicode-safe excerpt and durable `TranscriptAnchor`; pass that anchor to `TranscriptTimelineAnchor::Around` instead of asking the host UI to scan or re-match transcript text.
 
-Store v12 is the only accepted Store generation in 0.6.0. There is no public Store migration API, compatibility reader, dual write, or automatic migration. Store v11, governance V2, partial v12 closure, and foreign schema payloads fail closed. Development data from an older generation must be explicitly discarded and recreated by its owner; archive export/import is not schema migration.
+Store v13 is the only accepted Store generation in the current unreleased source candidate. There is no public Store migration API, compatibility reader, dual write, or automatic migration. Older, partial, and foreign schema payloads fail closed. Development data from an older generation must be explicitly discarded and recreated by its owner; archive export/import is not schema migration.
 
 Timeline supports latest, before, after, around-anchor, around-sequence, around-time, and first-visible-in-range queries. Page turns stay in sequence order and reports may carry opaque older/newer cursors. Calendar conversion stays with the host: resolve the user's IANA time zone and local date into a canonical UTC `[start_inclusive, end_exclusive)` range before calling Memory. Do not assume every local day is 86,400 seconds; DST days can be 23 or 25 hours. Beetle Memory does not store or guess the host time zone.
 
-The 0.6.0 source candidate keeps the CTQ1 public query shapes and capability snapshot v4 while moving the Store to v12 for PL2 Job/Index/Binding closure. InMemory/File/SQLite contracts cover query and learning persistence, reopen, repair/archive closure, and privacy exact-zero. This engineering claim is not a real-data, Provider, GUI/UAT, crates.io, or hosted Release receipt.
+The current source candidate keeps the CTQ1 public query shapes and uses capability snapshot v5 for the governed procedural-learning matrix while moving the Store to v13 for PFI1 owner closure. InMemory/File/SQLite contracts cover query and learning persistence, reopen, repair/archive closure, and privacy exact-zero. This engineering claim is not a real-data, Provider, GUI/UAT, crates.io, or hosted Release receipt.
 
 Transcript attrs are Memory-owned transcript metadata, not a host business object store. Every attr has a `TranscriptAttrTarget`, namespaced key, `TranscriptAttrValueKind`, JSON value, `HostRefVisibility`, `TranscriptAttrSource`, `TranscriptAttrGovernance`, and optional `TranscriptAttrLink` refs. `HostUi` replay returns only HostUi-visible attrs, `ModelContext` returns only model-context attrs, `OperatorAudit` returns audit-visible attrs, and `Export` returns only export-visible attrs with `export_allowed=true`. `RawOwnerOnly` remains internal. Store repair reports missing target turns/messages, mismatched attr source keys, invalid keys, oversized values, and corrupt attr records as fail-closed issues. `DeleteRaw` hides attrs by default; `OperatorAuditOnlyAfterMask` may leave only redacted audit metadata and never returns the original attr value after raw deletion.
 
@@ -144,7 +144,7 @@ Core release-surface concepts:
 Privacy and projection boundaries:
 
 - Transcript evidence is not automatically a canonical fact, soul mutation, procedural skill, or task experience.
-- Accepted long-term, shared factual, procedural skill, private garden, and soul-candidate handoff writes produced through governed candidate writes, manual extraction, or automatic post-turn extraction record structured transcript-derived refs for lifecycle impact review.
+- Accepted long-term, shared factual, private garden, soul-candidate handoff, and governed post-turn procedural writes record structured transcript-derived refs for lifecycle impact review.
 - Runtime recall, projection, maintenance, long-term refresh, and operator inspection use transcript-backed evidence before the legacy `SessionStore(chat_id)` shadow; if transcript content is masked, raw-deleted, or its legacy `chat_id` alias cannot be trusted, these paths fail closed instead of falling back to the session shadow.
 - Assistant self-claims remain low-authority transcript evidence until governed by the relevant memory plane.
 - `HostUi` replay must not expose private garden, inner-life, soul-private raw material, backend traces, or operator-only audit content.
@@ -158,12 +158,12 @@ The most common SDK request types are:
 
 | Request type | Required fields | Notes |
 | --- | --- | --- |
-| `MemoryWriteRequest::Procedural` | `writes`, `owning_scope`, `source` | Every item carries a `RuntimeSkillWrite`, typed creation ref, and privacy class. `name` is display input and is not owner identity. |
-| `MemoryWriteRequest::AgentToolUsageFeedback` | `feedback` | Host reports tool execution observations with `registry_ref`; the SDK may turn repeated governed evidence into tool experience. |
+| `MemoryWriteRequest::Candidates` | `candidates` | Submits typed factual candidates. Procedural targets are rejected on the public write surface; Runtime Skill and Agent Tool experience can only be created by governed post-turn learning. |
 | `MemoryWriteRequest::LongTermExtraction` | `extraction` | Use when an extraction pipeline has produced a validated long-term memory extraction. |
 | `MemoryWriteRequest::GovernedEvidenceDocuments` | `mutations` | Atomically creates, revises, or deletes governed evidence owners together with source claims and derived indexes. `Upsert` carries a bounded `GovernedEvidenceDocumentDraft`; `Delete` requires an expected owner revision. |
 | `MemoryRecallRequest` | `temporal_operation`, `query`, `limit`, `structured_query_facets`, `tool_registry_refs` | Returns runtime skill hits, standard Agent Skill hits, working recall inspection data, and experience-backed `agent_tool_hints`; structured facets are typed query constraints, and without governed experience tool hints are empty. |
-| `MemoryProjectionRequest` | `temporal_operation`, `user_query`, `system_max_len`, `recent_messages_limit`, `pressure`, `mode_input`, `structured_query_facets`, `tool_registry_refs` | Returns `system_memory_block` bounded by `system_max_len`; structured facets use the same governed query contract as recall, standard Agent Skills enter only as read-only hint summaries, and Agent Tools enter only as experience hints without full schemas. |
+| `MemoryProjectionRequest` | `binding`, `temporal_operation`, `user_query`, `system_max_len`, `recent_messages_limit`, `pressure`, `mode_input`, `structured_query_facets`, `tool_registry_refs` | `Preview` performs a read-only projection. `Turn { turn_id }` binds a current execution projection and its signed selection receipt to the exact turn later passed to `finalize_turn`. |
+| `MemoryTurnFinalizeRequest` | `turn`, `learning`, `pressure`, `mode_input` | Atomically commits the canonical turn and durable post-turn intent. `learning` carries the optional signed selection receipt, typed execution feedback, tool-call count, and authority; callers cannot write procedural owners directly. |
 | `MemoryEvidenceDocumentReadRequest` | `memory_space_id`, `document_ids` | Reads an exact bounded set of governed evidence documents through `MemoryRuntime::read_governed_evidence_documents(request)`. The runtime rejects a memory-space mismatch, empty/duplicate document ids, and requests above the current profile read budget; each result is privacy-filtered and carries typed owner identity, revision, canonical evidence binding, safe source metadata, and bounded body/chunks. |
 | `MemoryInspectionRequest` | `query`, `system_max_len`, `pressure`, `mode_input` | Returns capability, lifecycle, operator inspection data, the Agent Skill directory report, and the Agent Tool registry report. |
 | `RuntimeSkillListRequest` | `owning_scope`, `query`, `include_disabled`, `include_retired`, `limit` | Lists only exact typed owners bound by the explicit Subject or SharedProgram scope manifest. |
@@ -186,7 +186,21 @@ The most common SDK request types are:
 | `MemoryRecoverRequest` | `trigger`, `mode_input` | Runs recoverable lifecycle recovery. |
 | `MemoryCloseRequest` | `reason` | Emits a close lifecycle report. |
 
+`Preview` never mints a selection receipt and must not be used as an execution
+identity. For an actual execution, the host chooses one stable turn id at request
+ingress, uses `Turn { turn_id }`, keeps the returned receipt intact, and submits it
+with the same canonical turn to `finalize_turn`. Retries of that turn reuse the id
+and receipt; a later turn receives a new id even when its text is identical. Hosts
+must not reconstruct a receipt from selected ids, digests, or logs.
+
 Generic adapter dispatch supports write, recall, project, inspect, recover, replay, long-term list/detail/mutate/policy, transcript attr write, capabilities, and close. Governed memory-space export/import is runtime-scoped and is not exposed through the legacy free-form snapshot commands. Maintain is supported only through dispatch paths that supply `AdapterRuntimeServices` with explicit LLM/HTTP services; dispatch without services returns a structured rejection.
+
+`governed_adapter_json_command_schema` is a top-level transport discovery schema,
+not a second schema for nested Core requests. Fields such as `turn`, `learning`,
+`mode_input`, and registry refs remain shallow objects there; the strict typed serde
+decoder is authoritative and rejects missing or unknown nested fields. Consumers
+must use the exported SDK request types rather than treating the discovery schema as
+a complete payload generator.
 
 Transport helper crates use the shared JSON adapter decoder for their declared memory operations, while stream-only operations such as subscribe stay transport-specific. Check [Deployment Guide](deployment.md) for each protocol's route/frame/tool/message surface.
 
@@ -235,25 +249,11 @@ Standalone HTTP deployments expose these registry routes:
 | `/agent-tool-registries/{id}` | `GET` | Return one registry snapshot. |
 | `/agent-tool-registries/{id}` | `DELETE` | Delete a registry snapshot. Historical experience remains stored, but future projection rejects it if the registry is missing or the fingerprint drifts. |
 
-`/memory/write` can submit:
-
-```json
-{
-  "tool_usage_feedback": {
-    "registry_ref": {
-      "registry_id": "host-tools",
-      "fingerprint": "current-fingerprint",
-      "scope": "global"
-    },
-    "observations": [],
-    "user_visible_result_summary": "Tool execution summary",
-    "reuse_outcome": "succeeded",
-    "operator_note": null
-  }
-}
-```
-
-`observations` must be structured execution summaries, not raw full results, secrets, or complete schemas.
+For an actual turn, `/memory/project` uses `binding: {"kind":"turn","turn_id":"..."}`.
+The host executes tools, then submits the same canonical turn id, the returned signed
+`selection_receipt`, and typed bounded feedback through `/memory/finalize-turn`.
+`/memory/write` does not accept tool feedback or procedural owner creation.
+Execution summaries must never contain raw full results, secrets, or complete schemas.
 
 ## Console API
 

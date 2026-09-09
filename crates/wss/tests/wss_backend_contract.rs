@@ -23,6 +23,7 @@ fn runtime() -> EntryRuntime {
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "wss-backend".to_string(),
             chat_id: "chat-1".to_string(),
         },

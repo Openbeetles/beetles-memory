@@ -220,12 +220,14 @@ pub enum CanonicalEntityKind {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
 pub struct CanonicalEntityKey {
     pub kind: CanonicalEntityKind,
     pub canonical_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(deny_unknown_fields)]
 pub struct CanonicalEvidenceRef {
     pub source_ref: String,
     pub canonical_evidence_group: String,
@@ -235,6 +237,7 @@ pub struct CanonicalEvidenceRef {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(deny_unknown_fields)]
 pub struct CanonicalEntityRef {
     pub key: CanonicalEntityKey,
     pub display_label: Option<String>,
@@ -643,6 +646,7 @@ pub enum MemorySemanticJudgmentSource {
 
 /// 当前 long-term owner revision 的来源分类。精确证据仍由 transcript/evidence owner 持有。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LongTermMemoryProvenance {
     pub source_authority: MemoryEvidenceAuthority,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -765,6 +769,7 @@ pub struct LongTermMemoryDraft {
 
 /// 长期记忆槽位键，用于更新/删除同一条结构化记忆。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct LongTermMemorySlot {
     pub kind: LongTermMemoryKind,
     pub topic: String,

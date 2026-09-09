@@ -8,17 +8,19 @@ use bm_core::llm::{
 };
 use bm_core::memory::LongTermMemoryKind;
 use bm_core::platform::ResponseBody;
-#[cfg(feature = "nonproduction-replay-harness")]
-use bm_sdk::NonproductionRuntimeBudgetLimits;
 use bm_sdk::{
-    default_agent_subject_id, default_memory_space_id, GovernedRuntimeSkillWriteInput,
-    LongTermMemoryDraft, LongTermMemoryProvenance, MemoryCapabilityPolicy, MemoryClock,
-    MemoryEvidenceAuthority, MemoryIdentity, MemoryPrivacyClass, MemoryPrivacyPolicy,
-    MemoryRuntime, MemoryScope, MemorySemanticJudgmentSource, MemoryStoreHandle,
-    MemorySubjectVisibilityPolicy, MemoryWriteRequest, NoopMemoryAuditSink,
-    ParsedLongTermMemoryExtraction, ProfileId, Result, RuntimeSkillCreationRef,
-    RuntimeSkillOwningScope, RuntimeSkillWrite, StoreBackendConfig, SubjectDescriptor,
-    SubjectRegistry, SubjectScopedRuntime,
+    default_agent_subject_id, default_memory_space_id, LongTermMemoryDraft,
+    LongTermMemoryProvenance, MemoryCapabilityPolicy, MemoryClock, MemoryEvidenceAuthority,
+    MemoryIdentity, MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryRuntime, MemoryScope,
+    MemorySemanticJudgmentSource, MemoryStoreHandle, MemorySubjectVisibilityPolicy,
+    MemoryWriteRequest, NoopMemoryAuditSink, ParsedLongTermMemoryExtraction, ProfileId, Result,
+    RuntimeSkillOwningScope, StoreBackendConfig, SubjectDescriptor, SubjectRegistry,
+    SubjectScopedRuntime,
+};
+#[cfg(feature = "nonproduction-replay-harness")]
+use bm_sdk::{
+    GovernedRuntimeSkillWriteInput, NonproductionRuntimeBudgetLimits, RuntimeSkillCreationRef,
+    RuntimeSkillWrite,
 };
 
 struct FixedMemoryClock {
@@ -55,6 +57,7 @@ pub fn runtime_skill_subject_scope() -> RuntimeSkillOwningScope {
     }
 }
 
+#[cfg(feature = "nonproduction-replay-harness")]
 pub fn governed_runtime_skill_write(write: RuntimeSkillWrite) -> GovernedRuntimeSkillWriteInput {
     GovernedRuntimeSkillWriteInput {
         write,
@@ -108,8 +111,6 @@ pub fn seeded_store_platform(profile: ProfileId) -> MemoryStoreHandle {
     let runtime = test_runtime(platform.clone(), profile);
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![LongTermMemoryDraft {
                     kind: LongTermMemoryKind::Project,

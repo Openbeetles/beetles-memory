@@ -174,8 +174,6 @@ fn assert_subject_visibility(open: impl Fn() -> MemoryStoreHandle) {
                     deletes: Vec::new(),
                     skill_writes: Vec::new(),
                 },
-                governed_skill_writes: Vec::new(),
-                runtime_skill_owning_scope: None,
             })
             .expect("seed owner");
         let materials = platform
@@ -327,6 +325,7 @@ fn assert_subject_visibility(open: impl Fn() -> MemoryStoreHandle) {
     let runtime_c = runtime(platform.clone(), registry(), "agent-c");
     assert!(runtime_a
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: vec![QueryFacetInput::Keyword("psv1".to_string())],
             user_query: "PSV1_REOPEN_SENTINEL".to_string(),
@@ -350,6 +349,7 @@ fn assert_subject_visibility(open: impl Fn() -> MemoryStoreHandle) {
     );
     let denied_projection = runtime_b
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: vec![QueryFacetInput::Keyword("psv1".to_string())],
             user_query: "PSV1_REOPEN_SENTINEL".to_string(),
@@ -493,8 +493,6 @@ fn initial_visibility_unknown_subject_rejects_before_any_write() {
                 deletes: Vec::new(),
                 skill_writes: Vec::new(),
             },
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
         })
         .expect_err("unknown visibility subject must fail before planning or commit");
 
@@ -525,7 +523,6 @@ fn candidate_visibility_unknown_subject_rejects_before_any_write() {
 
     let error = runtime_a
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: None,
             candidates: vec![MemoryWriteCandidate {
                 candidate_id: "candidate-unknown-subject".to_string(),
                 authority: MemoryEvidenceAuthority::UserAsserted,
@@ -579,7 +576,6 @@ fn candidate_initial_only_subjects_is_revision_one_and_plain_update_cannot_chang
 
     runtime_a
         .write(MemoryWriteRequest::Candidates {
-            runtime_skill_owning_scope: None,
             candidates: vec![MemoryWriteCandidate {
                 candidate_id: "candidate-initial-only-subjects".to_string(),
                 authority: MemoryEvidenceAuthority::UserAsserted,
@@ -674,8 +670,6 @@ fn candidate_initial_only_subjects_is_revision_one_and_plain_update_cannot_chang
                 deletes: Vec::new(),
                 skill_writes: Vec::new(),
             },
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
         })
         .expect_err("plain upsert visibility transition must require control mutation");
 

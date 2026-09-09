@@ -39,6 +39,25 @@ pub(crate) enum GovernanceIntentEnsureOutcome {
     AlreadyPresent,
 }
 
+#[cfg(all(test, feature = "nonproduction-replay-harness"))]
+fn ensure_governance_intent(
+    platform: &StorePlatform,
+    scope: StoreEventScope,
+    runtime_budget: &RuntimeBudgetReport,
+    job: &PostTurnGovernanceJobV3,
+    now_secs: u64,
+) -> Result<GovernanceIntentEnsureOutcome> {
+    let (outcome, _) = super::procedural_feedback::ensure_post_turn_learning_intents(
+        platform,
+        scope,
+        runtime_budget,
+        job,
+        None,
+        now_secs,
+    )?;
+    Ok(outcome)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GovernanceRecoveryOutcome {
     pub(crate) job: PostTurnGovernanceJobV3,
@@ -80,151 +99,33 @@ pub(crate) fn governance_recovery_operation_was_committed(
     Ok(true)
 }
 
-pub(crate) fn ensure_governance_intent(
-    platform: &StorePlatform,
-    scope: StoreEventScope,
-    runtime_budget: &RuntimeBudgetReport,
-    job: &PostTurnGovernanceJobV3,
-    now_secs: u64,
-) -> Result<GovernanceIntentEnsureOutcome> {
-    job.validate()?;
-    let existing = read_job(platform, &job.job_id)?;
-    if let Some(existing) = existing {
-        if existing == *job {
-            return Ok(GovernanceIntentEnsureOutcome::AlreadyPresent);
-        }
-        if existing.identity == job.identity
-            && existing.transcript_sequence == job.transcript_sequence
-            && existing.transcript_digest == job.transcript_digest
-        {
-            return Ok(GovernanceIntentEnsureOutcome::AlreadyPresent);
-        }
-        return Err(Error::conflict(
-            "post_turn_governance_intent",
-            "deterministic job identity has divergent transcript authority",
-        ));
-    }
-
-    let before_index = read_scope_index(platform, &job.scope_index_key)?;
-    let mut after_index = before_index
-        .clone()
-        .unwrap_or_else(|| PostTurnGovernanceScopeIndexV3::empty(&job.identity, now_secs));
-    if after_index.active_jobs.len() >= MAX_POST_TURN_GOVERNANCE_ACTIVE_JOBS {
-        return Err(Error::config(
-            "post_turn_governance_intent",
-            "exact governance scope active-job budget is exhausted",
-        ));
-    }
-    if after_index.recent_terminal_jobs.len() >= MAX_POST_TURN_GOVERNANCE_RECENT_TERMINAL_JOBS {
-        return Err(Error::config(
-            "post_turn_governance_intent",
-            "exact governance scope terminal-receipt retention is exhausted",
-        ));
-    }
-    after_index
-        .active_jobs
-        .push(PostTurnGovernanceJobRefV2::from_job(job));
-    after_index.active_jobs.sort_by(|left, right| {
-        left.created_at
-            .cmp(&right.created_at)
-            .then_with(|| left.job_id.cmp(&right.job_id))
-    });
-    if before_index.is_some() {
-        after_index.index_revision =
-            after_index.index_revision.checked_add(1).ok_or_else(|| {
-                Error::config(
-                    "post_turn_governance_intent",
-                    "governance scope index revision overflow",
-                )
-            })?;
-    }
-    after_index.updated_at = now_secs;
-    after_index.validate()?;
-
-    let job_value = serde_json::to_value(job)
-        .map_err(|error| Error::config("post_turn_governance_intent", error.to_string()))?;
-    let index_value = serde_json::to_value(&after_index)
-        .map_err(|error| Error::config("post_turn_governance_intent", error.to_string()))?;
-    let mut preconditions = vec![
-        StoreJsonPrecondition::Absent {
-            namespace: POST_TURN_GOVERNANCE_JOB_NAMESPACE.to_string(),
-            key: job.job_id.clone(),
-        },
-        json_precondition(
-            POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
-            &job.scope_index_key,
-            before_index.as_ref(),
-        )?,
-    ];
-    let mut mutations = vec![
-        put_json(POST_TURN_GOVERNANCE_JOB_NAMESPACE, &job.job_id, job_value),
-        put_json(
-            POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
-            &job.scope_index_key,
-            index_value,
-        ),
-    ];
-    append_binding_reference_mutation(
-        platform,
-        &job.execution_binding,
-        now_secs,
-        &mut mutations,
-        &mut preconditions,
-    )?;
-    let batch = StoreMutationBatch {
-        transaction_id: format!("post_turn_governance_enqueue_{}", job.job_id),
-        operation: "post_turn.governance.enqueue".to_string(),
-        scope,
-        mutations,
-    };
-    let commit = platform.commit_governed_memory_transaction_with_runtime_budget_at(
-        batch,
-        &preconditions,
-        runtime_budget,
-        now_secs,
-    );
-    if let Err(error) = commit {
-        let concurrent_job = read_job(platform, &job.job_id)?;
-        let concurrent_index = read_scope_index(platform, &job.scope_index_key)?;
-        let same_intent = concurrent_job.as_ref().is_some_and(|existing| {
-            existing.identity == job.identity
-                && existing.transcript_sequence == job.transcript_sequence
-                && existing.transcript_digest == job.transcript_digest
-        });
-        let indexed_exactly = concurrent_job.as_ref().is_some_and(|existing| {
-            concurrent_index.as_ref().is_some_and(|index| {
-                index.active_jobs.iter().any(|reference| {
-                    reference.job_id == existing.job_id
-                        && reference.status == existing.status
-                        && reference.state_revision == existing.state_revision
-                })
-            })
-        });
-        if same_intent && indexed_exactly {
-            return Ok(GovernanceIntentEnsureOutcome::AlreadyPresent);
-        }
-        return Err(error);
-    }
-    Ok(GovernanceIntentEnsureOutcome::Created)
-}
-
 pub(crate) fn reconcile_governance_intents(
     platform: &StorePlatform,
     scope: StoreEventScope,
     runtime_budget: &RuntimeBudgetReport,
     jobs: &[PostTurnGovernanceJobV3],
+    cursor_source: &bm_core::memory::TranscriptTurnRecord,
     now_secs: u64,
 ) -> Result<usize> {
-    let first = jobs.first().ok_or_else(|| {
-        Error::invalid_input(
+    let identity = &bm_core::memory::PostTurnGovernanceIdentityV2::new(
+        &scope.memory_space_id,
+        &scope.subject_id,
+        &scope.channel,
+        &scope.chat_id,
+        &cursor_source.key.conversation_id,
+        &cursor_source.turn_id,
+    )?;
+    if cursor_source.key.memory_space_id != scope.memory_space_id
+        || cursor_source.subject != scope.subject_id
+        || cursor_source.key.channel_id != scope.channel
+    {
+        return Err(Error::config(
             "post_turn_governance_reconcile",
-            "a non-empty bounded transcript page is required",
-        )
-    })?;
-    let last = jobs.last().expect("non-empty reconciliation page");
-    let identity = &first.identity;
-    let cursor_sequence = last.transcript_sequence;
-    let cursor_turn_id = &last.identity.turn_id;
+            "cursor source crosses exact scope",
+        ));
+    }
+    let cursor_sequence = cursor_source.sequence;
+    let cursor_turn_id = &cursor_source.turn_id;
     let scope_index_key = identity.scope_id();
     let before_index = read_scope_index(platform, &scope_index_key)?;
     let mut after_index = before_index
@@ -252,6 +153,20 @@ pub(crate) fn reconcile_governance_intents(
         before_index.as_ref(),
     )?];
     let mut mutations = Vec::new();
+    preconditions.push(StoreJsonPrecondition::Exact {
+        namespace: "conversation_transcript".to_string(),
+        key: super::transcript_turn_storage_key(
+            &cursor_source.key,
+            &cursor_source.subject,
+            &cursor_source.turn_id,
+        ),
+        value: serde_json::to_value(cursor_source).map_err(|_| {
+            Error::config(
+                "post_turn_governance_reconcile",
+                "cursor source cannot be encoded",
+            )
+        })?,
+    });
     let mut referenced_bindings = BTreeSet::new();
     let mut created = 0usize;
     for job in jobs {
@@ -308,6 +223,14 @@ pub(crate) fn reconcile_governance_intents(
                 ));
             }
             None => {
+                merge_completion_preconditions(
+                    &mut preconditions,
+                    vec![
+                        super::procedural_feedback::semantic_learning_transcript_precondition(
+                            platform, job,
+                        )?,
+                    ],
+                )?;
                 preconditions.push(StoreJsonPrecondition::Absent {
                     namespace: POST_TURN_GOVERNANCE_JOB_NAMESPACE.to_string(),
                     key: job.job_id.clone(),
@@ -2426,7 +2349,7 @@ fn governance_recovery_operation_identity(
     )
 }
 
-fn append_binding_reference_mutation(
+pub(crate) fn append_binding_reference_mutation(
     platform: &StorePlatform,
     execution_binding: &PostTurnGovernanceExecutionBindingV1,
     now_secs: u64,
@@ -2622,7 +2545,53 @@ mod tests {
             .as_secs()
     }
 
-    fn pending_job(now_secs: u64) -> PostTurnGovernanceJobV3 {
+    fn pending_job(platform: &StorePlatform, now_secs: u64) -> PostTurnGovernanceJobV3 {
+        use bm_core::memory::{
+            CanonicalTurnDelta, ConversationKey, ConversationScope, ConversationTranscriptStore,
+            IngressKind, MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource,
+            TranscriptInputMessage, TranscriptTurnRecord,
+        };
+        let delta = CanonicalTurnDelta {
+            turn_id: "turn:atomic".into(),
+            conversation: ConversationScope {
+                channel: "llm.gateway".into(),
+                chat_id: "chat:atomic".into(),
+                conversation_id: Some("conversation:atomic".into()),
+            },
+            subject: "subject:atomic".into(),
+            delivery_status: MemoryTurnDeliveryStatus::Delivered,
+            source: MemoryTurnSource {
+                ingress: IngressKind::User,
+                channel: "llm.gateway".into(),
+                provider: None,
+                protocol: MemoryTurnProtocol::Native,
+                endpoint: None,
+                model_alias: None,
+                model_resolved: None,
+                request_id: None,
+                client_conversation_hint: None,
+            },
+            actor: None,
+            input_messages: vec![TranscriptInputMessage::user("Synthetic governance source")],
+            assistant_message: Some(TranscriptInputMessage::assistant(
+                "Synthetic delivered answer",
+            )),
+            tool_observations: Vec::new(),
+            external_content_used: false,
+            candidate_ids: Vec::new(),
+        };
+        let record = TranscriptTurnRecord::from_delta_with_learning_evidence(
+            &ConversationKey::from_delta("space:atomic", &delta).expect("canonical source key"),
+            1,
+            &delta,
+            Vec::new(),
+            None,
+            now_secs,
+        )
+        .expect("canonical source transcript");
+        platform
+            .append_turn(&record)
+            .expect("commit real source transcript");
         PostTurnGovernanceJobV3::pending(
             PostTurnGovernanceIdentityV2::new(
                 "space:atomic",
@@ -2634,7 +2603,8 @@ mod tests {
             )
             .expect("identity"),
             1,
-            "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            bm_core::memory::post_turn_governance_transcript_digest(&record)
+                .expect("canonical governance transcript digest"),
             "sha256:2222222222222222222222222222222222222222222222222222222222222222",
             PostTurnGovernanceExecutionBindingV1::Unbound,
             PostTurnGovernancePrivacyAuthorityV1 {
@@ -2713,7 +2683,7 @@ mod tests {
         .expect("store");
         let now_secs = now_secs();
         let budget = platform.current_runtime_budget(now_secs);
-        let pending = pending_job(now_secs);
+        let pending = pending_job(&platform, now_secs);
         ensure_governance_intent(&platform, scope(), &budget, &pending, now_secs)
             .expect("ensure intent");
         let leased = claim_governance_job(
@@ -2808,7 +2778,7 @@ mod tests {
         .expect("store");
         let now_secs = now_secs();
         let budget = platform.current_runtime_budget(now_secs);
-        let pending = pending_job(now_secs);
+        let pending = pending_job(&platform, now_secs);
         ensure_governance_intent(&platform, scope(), &budget, &pending, now_secs)
             .expect("ensure intent");
         let leased = claim_governance_job(
@@ -2918,7 +2888,8 @@ mod tests {
     #[test]
     fn typed_soul_completion_budget_failure_changes_nothing() {
         let mut capacity = StoreCapacityBudget::full();
-        capacity.event_log_max_items = 8;
+        capacity.event_log_max_items = 64;
+        let excess_event_count = capacity.event_log_max_items + 1;
         let config = StoreBackendConfig::in_memory(ProfileId::DesktopMacosEmbeddedSdk)
             .expect("store config")
             .try_with_nonproduction_store_budget_limit(capacity.into_runtime_budget())
@@ -2926,7 +2897,7 @@ mod tests {
         let platform = StorePlatform::open(config).expect("store");
         let now_secs = now_secs();
         let budget = platform.current_runtime_budget(now_secs);
-        let pending = pending_job(now_secs);
+        let pending = pending_job(&platform, now_secs);
         ensure_governance_intent(&platform, scope(), &budget, &pending, now_secs)
             .expect("ensure intent");
         let leased = claim_governance_job(
@@ -2952,6 +2923,20 @@ mod tests {
         let before = platform
             .export_store_snapshot()
             .expect("snapshot before composite budget rejection");
+        let over_budget_events = (0..excess_event_count)
+            .map(|index| StoreMutation::AppendEvent {
+                event: Box::new(
+                    crate::MemoryStoreEvent::new(
+                        format!("over-budget-governance-event:{index}"),
+                        MemoryStoreEventKind::MemoryWrite,
+                        scope(),
+                        now_secs + 1,
+                    )
+                    .with_plane("post_turn_memory")
+                    .with_record_key("over-budget-synthetic-plan"),
+                ),
+            })
+            .collect();
         let error = complete_governance_job_with_subject_soul_plan(
             &platform,
             scope(),
@@ -2961,7 +2946,7 @@ mod tests {
             leased.lease_epoch,
             decision_summary(),
             soul_plan,
-            Vec::new(),
+            over_budget_events,
             Vec::new(),
             Vec::new(),
             now_secs + 1,
@@ -2986,7 +2971,7 @@ mod tests {
         .expect("store");
         let now_secs = now_secs();
         let budget = platform.current_runtime_budget(now_secs);
-        let pending = pending_job(now_secs);
+        let pending = pending_job(&platform, now_secs);
         ensure_governance_intent(&platform, scope(), &budget, &pending, now_secs)
             .expect("ensure intent");
         let leased = claim_governance_job(

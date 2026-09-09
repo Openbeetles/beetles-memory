@@ -3225,6 +3225,10 @@ impl StoreEngine for FileStoreEngine {
                 if !deleted
                     .documents
                     .contains_key(&(doc.namespace.clone(), doc.key.clone()))
+                    && !crate::store_internal::transaction::existing_scoped_search_owner_is_replaceable(
+                        &doc.namespace, &doc.key, &existing, &request.scope,
+                        |namespace, key| self.get_json_value_unlocked(namespace, key),
+                    )?
                 {
                     return Err(Error::config(
                         "store_scoped_projection",

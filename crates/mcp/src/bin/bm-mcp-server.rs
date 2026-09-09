@@ -523,6 +523,7 @@ fn runtime(options: &McpServerOptions, http_mode: bool) -> Result<bm_entry::Entr
             owner_id: options.owner_id.clone(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: options.channel.clone(),
             chat_id: options.chat_id.clone(),
         },

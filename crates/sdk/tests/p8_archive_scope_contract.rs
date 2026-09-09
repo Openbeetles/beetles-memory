@@ -2,8 +2,8 @@
 use bm_sdk::{
     primary_human_subject_id, GovernedRuntimeSkillWriteInput, LongTermMemoryQuery,
     MemoryLongTermControlView, MemoryLongTermListRequest, MemoryLongTermMutation,
-    MemoryLongTermMutationRequest, MemoryLongTermTarget, MemoryPrivacyClass, MemoryWriteRequest,
-    RuntimeSkillCreationRef, RuntimeSkillOwningScope, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    MemoryLongTermMutationRequest, MemoryLongTermTarget, MemoryPrivacyClass,
+    RuntimeSkillCreationRef, RuntimeSkillOwningScope, RuntimeSkillWrite,
     SubjectSoulFoundingCharterSeedV1, SubjectSoulProvisionIntentV1, SubjectSoulReadSelectorV1,
 };
 use bm_sdk::{
@@ -390,15 +390,15 @@ fn include_private_subject_archive_excludes_and_preserves_subject_global_soul_ow
 
 #[cfg(feature = "nonproduction-replay-harness")]
 #[test]
-fn production_shared_program_archive_replaces_only_shared_program_owners() {
+fn public_shared_program_archive_preserves_local_runtime_skill_owners_without_cloning() {
     fn write_skill(
         runtime: &bm_sdk::MemoryRuntime,
         owning_scope: RuntimeSkillOwningScope,
         name: &str,
     ) {
         let report = runtime
-            .write(MemoryWriteRequest::Procedural {
-                writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
+            .seed_runtime_skills_for_replay(
+                vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
                     name: name.to_string(),
                     topic: "archive scope".to_string(),
                     title: format!("{name} title"),
@@ -409,14 +409,14 @@ fn production_shared_program_archive_replaces_only_shared_program_owners() {
                     observed_at: 1_800_000_000,
                 })],
                 owning_scope,
-                source: RuntimeSkillWriteSource::Manual,
-            })
+            )
             .expect("typed runtime skill write");
         assert!(report.accepted);
     }
 
     let profile = support::host_test_profile();
-    let source_runtime = support::test_runtime(support::empty_store_platform(profile), profile);
+    let source_platform = support::empty_store_platform(profile);
+    let source_runtime = support::test_runtime(source_platform.clone(), profile);
     write_skill(
         &source_runtime,
         RuntimeSkillOwningScope::SharedProgram,
@@ -431,6 +431,17 @@ fn production_shared_program_archive_replaces_only_shared_program_owners() {
         })
         .expect("SharedProgram export");
     assert_eq!(shared_archive.archive.root().scope, shared_scope);
+    let source_owners = source_platform
+        .replay_harness()
+        .read_json_namespace("runtime_skill_records")
+        .expect("source RuntimeSkill owners");
+    assert_eq!(source_owners.len(), 1, "real source owner positive");
+    for namespace in ["runtime_skill_records", "runtime_skill_scope_manifests"] {
+        assert!(
+            !shared_archive.archive.contains_json_namespace(namespace),
+            "public archive must not carry protected RuntimeSkill owner {namespace}"
+        );
+    }
 
     let target_platform = support::empty_store_platform(profile);
     let target_runtime = support::test_runtime(target_platform.clone(), profile);
@@ -439,20 +450,11 @@ fn production_shared_program_archive_replaces_only_shared_program_owners() {
         support::runtime_skill_subject_scope(),
         "subject_archive_sibling",
     );
-    let subject_scope = MemoryArchiveScope::subject(
-        target_runtime.memory_space_id(),
-        target_runtime.subject_id(),
-    )
-    .unwrap();
-    let subject_before = target_runtime
-        .export_memory_space(MemorySpaceExportRequest {
-            scope: subject_scope.clone(),
-            private_material_policy: MemorySpacePrivateMaterialPolicy::IncludePrivate,
-        })
-        .expect("Subject archive before SharedProgram restore")
-        .archive
-        .root()
-        .clone();
+    let target_owners_before = target_platform
+        .replay_harness()
+        .read_json_namespace("runtime_skill_records")
+        .expect("target RuntimeSkill owners before import");
+    assert_eq!(target_owners_before.len(), 1, "local owner positive");
 
     target_runtime
         .import_memory_space(MemorySpaceImportRequest {
@@ -462,44 +464,26 @@ fn production_shared_program_archive_replaces_only_shared_program_owners() {
         })
         .expect("SharedProgram restore");
 
-    let subject_after = target_runtime
-        .export_memory_space(MemorySpaceExportRequest {
-            scope: subject_scope,
-            private_material_policy: MemorySpacePrivateMaterialPolicy::IncludePrivate,
-        })
-        .expect("Subject archive after SharedProgram restore")
-        .archive
-        .root()
-        .clone();
-    assert_eq!(subject_after, subject_before);
-
-    let owners = target_platform
+    let target_owners_after = target_platform
         .replay_harness()
         .read_json_namespace("runtime_skill_records")
-        .expect("typed RuntimeSkill owners");
-    assert_eq!(owners.len(), 2);
-    let owning_kinds = owners
-        .iter()
-        .map(|doc| {
-            doc.value["owning_scope"]["kind"]
-                .as_str()
-                .expect("typed owning scope kind")
-        })
-        .collect::<std::collections::BTreeSet<_>>();
+        .expect("target RuntimeSkill owners after import");
     assert_eq!(
-        owning_kinds,
-        std::collections::BTreeSet::from(["shared_program", "subject"])
+        target_owners_after, target_owners_before,
+        "same-Store import must preserve the local protected RuntimeSkill owner exactly"
     );
+    assert_eq!(target_owners_after.len(), 1, "source owner was not cloned");
 }
 
 #[cfg(feature = "nonproduction-replay-harness")]
 #[test]
-fn exclude_private_rebuilds_runtime_skill_scope_closure_without_raw_owner() {
+fn public_subject_archive_excludes_private_runtime_skill_owner_without_cloning() {
     let profile = support::host_test_profile();
-    let source_runtime = support::test_runtime(support::empty_store_platform(profile), profile);
+    let source_platform = support::empty_store_platform(profile);
+    let source_runtime = support::test_runtime(source_platform.clone(), profile);
     let write = source_runtime
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![GovernedRuntimeSkillWriteInput {
+        .seed_runtime_skills_for_replay(
+            vec![GovernedRuntimeSkillWriteInput {
                 write: RuntimeSkillWrite {
                     name: "private_archive_skill".to_string(),
                     topic: "private archive".to_string(),
@@ -518,9 +502,8 @@ fn exclude_private_rebuilds_runtime_skill_scope_closure_without_raw_owner() {
                 },
                 privacy_class: MemoryPrivacyClass::SoulPrivate,
             }],
-            owning_scope: support::runtime_skill_subject_scope(),
-            source: RuntimeSkillWriteSource::Manual,
-        })
+            support::runtime_skill_subject_scope(),
+        )
         .expect("private RuntimeSkill write");
     assert!(write.accepted, "{write:?}");
 
@@ -535,9 +518,21 @@ fn exclude_private_rebuilds_runtime_skill_scope_closure_without_raw_owner() {
             private_material_policy: MemorySpacePrivateMaterialPolicy::ExcludePrivate,
         })
         .expect("private-excluding archive must rebuild the typed scope closure");
-    assert!(!exported
-        .archive
-        .contains_json_namespace("runtime_skill_records"));
+    assert_eq!(
+        source_platform
+            .replay_harness()
+            .read_json_namespace("runtime_skill_records")
+            .expect("source RuntimeSkill owners")
+            .len(),
+        1,
+        "real source owner positive"
+    );
+    for namespace in ["runtime_skill_records", "runtime_skill_scope_manifests"] {
+        assert!(
+            !exported.archive.contains_json_namespace(namespace),
+            "public archive must not carry protected RuntimeSkill owner {namespace}"
+        );
+    }
 
     let target_platform = support::empty_store_platform(profile);
     let target_runtime = support::test_runtime(target_platform.clone(), profile);
@@ -548,11 +543,16 @@ fn exclude_private_rebuilds_runtime_skill_scope_closure_without_raw_owner() {
             archive: exported.archive,
         })
         .expect("redacted archive remains exactly restorable");
-    assert!(target_platform
-        .replay_harness()
-        .read_json_namespace("runtime_skill_records")
-        .expect("target runtime owners")
-        .is_empty());
+    for namespace in ["runtime_skill_records", "runtime_skill_scope_manifests"] {
+        assert!(
+            target_platform
+                .replay_harness()
+                .read_json_namespace(namespace)
+                .expect("target RuntimeSkill owners")
+                .is_empty(),
+            "public archive must not clone protected RuntimeSkill owner {namespace}"
+        );
+    }
 }
 
 #[cfg(feature = "nonproduction-replay-harness")]

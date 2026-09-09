@@ -144,6 +144,16 @@ impl GatewayScopeResolver {
             request.workspace_root_digest.as_deref(),
             request.model_alias.as_deref(),
         );
+        if let Some(conversation_id) = request
+            .client_conversation_hint
+            .as_ref()
+            .or(request.body_conversation_hint.as_ref())
+        {
+            let scope = bm_sdk::MemoryScope::new(channel, &chat_id.chat_id)
+                .and_then(|scope| scope.with_conversation_id(conversation_id.clone()))
+                .map_err(|_| GatewayError::scope_resolution_failed("invalid conversation scope"))?;
+            resolution.entry_scope.scope.conversation_id = scope.conversation_id;
+        }
         if let Some(source) = chat_id.ollama_app_hint_source {
             resolution
                 .audit_safe_summary
@@ -168,6 +178,7 @@ impl GatewayScopeResolver {
         }
         let hint = first_non_empty([
             request.client_conversation_hint.as_deref(),
+            request.body_conversation_hint.as_deref(),
             request.request_id_hint.as_deref(),
         ]);
         ChatIdResolution {
@@ -285,6 +296,7 @@ impl GatewayScopeResolution {
                     owner_id: owner_id.to_string(),
                 },
                 scope: EntryScope {
+                    conversation_id: None,
                     channel: channel.to_string(),
                     chat_id: chat_id.to_string(),
                 },

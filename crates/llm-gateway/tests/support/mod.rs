@@ -3,9 +3,10 @@ use bm_entry::{
     EntryLocalTransport, EntryOperationCapability,
 };
 use bm_llm_gateway::GatewayScopeRequest;
+use bm_sdk::{default_agent_subject_id, RuntimeSkillOwningScope};
+#[cfg(feature = "nonproduction-replay-harness")]
 use bm_sdk::{
-    default_agent_subject_id, GovernedRuntimeSkillWriteInput, MemoryPrivacyClass,
-    RuntimeSkillCreationRef, RuntimeSkillOwningScope, RuntimeSkillWrite,
+    GovernedRuntimeSkillWriteInput, MemoryPrivacyClass, RuntimeSkillCreationRef, RuntimeSkillWrite,
 };
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -35,6 +36,7 @@ pub fn loopback_scope_request(principal: &str) -> GatewayScopeRequest {
 }
 
 #[allow(dead_code)]
+#[cfg(feature = "nonproduction-replay-harness")]
 pub fn governed_runtime_skill_write(write: RuntimeSkillWrite) -> GovernedRuntimeSkillWriteInput {
     GovernedRuntimeSkillWriteInput {
         write,

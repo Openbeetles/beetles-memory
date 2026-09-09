@@ -12,9 +12,7 @@ use bm_entry::{
     EntryTransportConfig,
 };
 use bm_http::{serve_http_accepted_stream, HttpConsoleServices};
-use bm_sdk::{
-    default_agent_subject_id, MemoryCapabilityPolicy, MemoryPrivacyPolicy, StoreBackendConfig,
-};
+use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, StoreBackendConfig};
 
 fn runtime() -> EntryRuntime {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
@@ -25,6 +23,7 @@ fn runtime() -> EntryRuntime {
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "http-backend".to_string(),
             chat_id: "chat-1".to_string(),
         },
@@ -86,6 +85,15 @@ fn real_http_socket_finalize_queues_then_reports_durable_configuration_block() {
                 "speaker_kind": "assistant"
             },
             "external_content_used": false
+        },
+        "learning": {
+            "tool_call_count": 0,
+            "selection_receipt": null,
+            "runtime_skill_feedback": [],
+            "agent_skill_feedback": [],
+            "task_learning_feedback": [],
+            "agent_tool_feedback": [],
+            "authority": {"kind": "host_runtime_observation"}
         }
     })
     .to_string();
@@ -149,8 +157,9 @@ fn remote_runtime(
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "http-backend".to_string(),
-            chat_id: "chat-1".to_string(),
+            chat_id: "chat-remote".to_string(),
         },
         store: StoreBackendConfig::in_memory(support::native_runtime_profile())
             .expect("store config")
@@ -348,28 +357,10 @@ fn forged_loopback_and_auth_subject_headers_cannot_authenticate_remote_http() {
 #[test]
 fn missing_http_operation_key_fails_closed_and_explicit_key_is_safe_and_replayable() {
     let runtime = remote_runtime([EntryOperationCapability::Write]);
-    let body = serde_json::json!({
-        "name": "runtime_skill__http_wire_idem",
-        "topic": "http",
-        "title": "HTTP idempotency",
-        "summary": "HTTP mutation operation receipt contract.",
-        "content": "- derive a stable caller operation id\n- commit effect and receipt once\n- replay the persisted receipt after retry",
-        "source": "manual",
-        "citations": ["http-backend-contract"],
-        "source_chat_id": "chat-1",
-        "owning_scope": {
-            "kind": "subject",
-            "mounted_subject_id": default_agent_subject_id("http-backend-agent"),
-        },
-        "creation_ref": {
-            "kind": "replay_promotion",
-            "candidate_ref": "http-backend-contract:idempotency",
-            "verification_receipt_digest":
-                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-        },
-        "privacy_class": "shared_with_subject",
-    })
-    .to_string();
+    let body = support::factual_memory_write_body(
+        "http-wire-idempotency",
+        "HTTP durable mutation identity commits one factual effect and receipt.",
+    );
     let request = || {
         format!(
             "POST /memory/write HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nAuthorization: Bearer secret-token\r\nx-bm-auth-subject: forged-owner\r\nx-idempotency-key: caller-secret-key\r\nContent-Length: {}\r\n\r\n{}",
@@ -410,4 +401,53 @@ fn missing_http_operation_key_fails_closed_and_explicit_key_is_safe_and_replayab
     assert!(!first.contains("caller-secret-key"), "{first}");
     assert!(!replay.contains("caller-secret-key"), "{replay}");
     assert!(replay.contains("explicit:v1:sha256:"), "{replay}");
+    let records = runtime
+        .runtime()
+        .list_long_term_memory(bm_sdk::MemoryLongTermListRequest {
+            query: Default::default(),
+            cursor: None,
+            limit: 8,
+            view: bm_sdk::MemoryLongTermControlView::RawOwner,
+        })
+        .unwrap()
+        .records;
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].record.source_chat_id.as_deref(),
+        Some("chat-remote")
+    );
+    assert_eq!(
+        records[0].record.content,
+        "HTTP durable mutation identity commits one factual effect and receipt."
+    );
+    #[cfg(feature = "nonproduction-replay-harness")]
+    let before = runtime
+        .runtime()
+        .replay_harness()
+        .export_store_snapshot()
+        .unwrap();
+    for field in ["source_chat_id", "owner_id", "subject_id"] {
+        let mut payload: serde_json::Value = serde_json::from_str(&body).unwrap();
+        payload[field] = "forged-scope".into();
+        let mut request =
+            bm_http::HttpRuntimeRequest::post_json("/memory/write", payload.to_string())
+                .with_idempotency_key("forged-scope");
+        request.authorization = Some("Bearer secret-token".into());
+        assert_eq!(
+            bm_http::handle_http_in_process_request(&runtime, request)
+                .expect_err("scope override rejected")
+                .stage(),
+            "adapter_json_command"
+        );
+    }
+    #[cfg(feature = "nonproduction-replay-harness")]
+    assert!(
+        runtime
+            .runtime()
+            .replay_harness()
+            .export_store_snapshot()
+            .unwrap()
+            == before,
+        "scope injection must not write"
+    );
 }

@@ -13,7 +13,7 @@ use super::{
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "target", rename_all = "snake_case")]
+#[serde(tag = "target", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MemoryCandidateTarget {
     LongTermMemory {
         kind: LongTermMemoryKind,
@@ -74,7 +74,7 @@ impl MemoryCandidateTarget {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MemoryCandidateContent {
     Text {
         topic: String,
@@ -126,6 +126,7 @@ pub enum MemoryCandidateSemanticDecision {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MemoryCandidateSemanticJudgment {
     pub source: MemorySemanticJudgmentSource,
     pub decision: MemoryCandidateSemanticDecision,
@@ -135,6 +136,7 @@ pub struct MemoryCandidateSemanticJudgment {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MemoryWriteCandidate {
     pub candidate_id: String,
     pub authority: MemoryEvidenceAuthority,
@@ -307,14 +309,45 @@ impl MemoryWriteCandidate {
     }
 }
 
+pub fn validate_write_candidate_identities(
+    candidates: &[MemoryWriteCandidate],
+) -> crate::Result<()> {
+    let mut identities = std::collections::BTreeSet::new();
+    if candidates.iter().any(|candidate| {
+        let id = candidate.candidate_id.as_str();
+        id.is_empty()
+            || id != id.trim()
+            || id.chars().any(char::is_control)
+            || !identities.insert(id)
+    }) {
+        return Err(crate::Error::invalid_input(
+            "memory_candidate_identity",
+            "candidate identities must be canonical, nonempty and unique",
+        ));
+    }
+    Ok(())
+}
+
 pub fn govern_write_candidates(
     candidates: &[MemoryWriteCandidate],
 ) -> PostTurnSemanticGovernanceReport {
     let mut accepted_count = 0;
+    let mut accepted_candidate_ids = Vec::new();
     let mut rejected_count = 0;
     let mut deferred_count = 0;
     let mut plane_reports = Vec::new();
     let mut soul_candidate_handoffs = Vec::new();
+
+    if validate_write_candidate_identities(candidates).is_err() {
+        return PostTurnSemanticGovernanceReport {
+            attempted: !candidates.is_empty(),
+            executed: false,
+            skipped_reason: Some("memory_candidate_identity_invalid".to_string()),
+            proposal_count: candidates.len(),
+            rejected_count: candidates.len(),
+            ..PostTurnSemanticGovernanceReport::skipped("memory_candidate_identity_invalid")
+        };
+    }
 
     for candidate in candidates {
         let mut evidence_refs = candidate.evidence_refs.clone();
@@ -458,7 +491,10 @@ pub fn govern_write_candidates(
         };
 
         match decision {
-            GovernedWriteDecision::Accepted => accepted_count += 1,
+            GovernedWriteDecision::Accepted => {
+                accepted_count += 1;
+                accepted_candidate_ids.push(candidate.candidate_id.clone());
+            }
             GovernedWriteDecision::Rejected => rejected_count += 1,
             GovernedWriteDecision::Deferred => deferred_count += 1,
             GovernedWriteDecision::Merged
@@ -484,6 +520,7 @@ pub fn govern_write_candidates(
         skipped_reason: None,
         proposal_count: candidates.len(),
         accepted_count,
+        accepted_candidate_ids,
         rejected_count,
         deferred_count,
         plane_reports,

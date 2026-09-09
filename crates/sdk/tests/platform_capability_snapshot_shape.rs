@@ -29,11 +29,14 @@ fn snapshot_shape_is_stable_and_reviewable() {
     let snapshot = platform_capability_snapshot(&catalog);
     let value = serde_json::to_value(&snapshot).expect("snapshot json");
 
-    assert_eq!(value["schema"], "beetle-memory.platform.capability.v4");
+    assert_eq!(value["schema"], "beetle-memory.platform.capability.v5");
     assert_eq!(value["profile"], "profile-esp-standalone-memory");
     assert_eq!(value["target"], "target-esp");
     assert_eq!(value["role"], "role-standalone-memory");
-    assert_eq!(value["compiled"]["sqlite_index_compiled"], false);
+    assert_eq!(
+        value["compiled"]["sqlite_index_compiled"],
+        bm_core::feature_gate::sqlite_index_compiled()
+    );
     assert_eq!(value["memory"]["write"], true);
     assert!(value["compiled"].get("target_desktop_linux").is_some());
     assert!(value["memory"].get("transcript_export").is_some());
@@ -57,5 +60,13 @@ fn snapshot_shape_is_stable_and_reviewable() {
     assert_eq!(
         value["governed_state"]["runtime_skill_recall_transport"],
         "unavailable"
+    );
+    assert_eq!(
+        value["procedural_learning"]["selection_receipt"]["profile_allowed"],
+        false
+    );
+    assert_eq!(
+        value["procedural_learning"]["worker"]["profile_allowed"],
+        false
     );
 }

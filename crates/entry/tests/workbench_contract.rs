@@ -19,6 +19,7 @@ fn config() -> EntryRuntimeConfig {
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "console".to_string(),
             chat_id: "workbench-chat".to_string(),
         },

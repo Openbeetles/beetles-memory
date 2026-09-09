@@ -21,6 +21,7 @@ fn scope(chat_id: &str) -> EntryRuntimeScope {
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "llm.gateway".to_string(),
             chat_id: chat_id.to_string(),
         },
@@ -42,6 +43,30 @@ fn gateway_runtime_uses_entry_runtime_manager_and_preserves_active_scope_cache()
         .expect("runtime a second");
 
     assert!(std::sync::Arc::ptr_eq(&runtime_a_first, &runtime_a_second));
+}
+
+#[test]
+fn runtime_cache_keeps_conversations_distinct_within_the_same_chat() {
+    let gateway = GatewayRuntime::open(config()).expect("gateway");
+    let mut first_scope = scope("shared-chat");
+    first_scope.scope.conversation_id = Some("conversation-a".into());
+    let mut second_scope = first_scope.clone();
+    second_scope.scope.conversation_id = Some("conversation-b".into());
+    let first = gateway.runtime_for_scope(first_scope.clone()).unwrap();
+    let second = gateway.runtime_for_scope(second_scope).unwrap();
+    assert!(!std::sync::Arc::ptr_eq(&first, &second));
+    assert_eq!(
+        first.runtime().scope().conversation_id.as_deref(),
+        Some("conversation-a")
+    );
+    assert_eq!(
+        second.runtime().scope().conversation_id.as_deref(),
+        Some("conversation-b")
+    );
+    assert!(std::sync::Arc::ptr_eq(
+        &first,
+        &gateway.runtime_for_scope(first_scope).unwrap()
+    ));
 }
 
 #[test]

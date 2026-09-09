@@ -146,6 +146,8 @@ pub struct PostTurnSemanticGovernanceReport {
     pub skipped_reason: Option<String>,
     pub proposal_count: usize,
     pub accepted_count: usize,
+    /// Exact candidate decisions; evidence references never confer write authority.
+    pub accepted_candidate_ids: Vec<String>,
     pub rejected_count: usize,
     pub deferred_count: usize,
     pub plane_reports: Vec<MemoryPlaneGovernanceReport>,
@@ -160,6 +162,7 @@ impl PostTurnSemanticGovernanceReport {
             skipped_reason: Some(reason.into()),
             proposal_count: 0,
             accepted_count: 0,
+            accepted_candidate_ids: Vec::new(),
             rejected_count: 0,
             deferred_count: 0,
             plane_reports: Vec::new(),
@@ -175,6 +178,7 @@ impl PostTurnSemanticGovernanceReport {
             skipped_reason: Some(reason.clone()),
             proposal_count: 1,
             accepted_count: 0,
+            accepted_candidate_ids: Vec::new(),
             rejected_count: 0,
             deferred_count: 1,
             plane_reports: vec![MemoryPlaneGovernanceReport {

@@ -49,31 +49,15 @@ The default single-agent entry only needs `owner_id + agent_id`. The SDK creates
 
 `add_agent_skill_dir` is optional. It mounts a standard Agent Skill directory read-only so recall and projection can use `SKILL.md` summaries without letting Beetle Memory add, edit, import, delete, or execute those skills.
 
-## Write, Recall, And Project
+## Recall And Project
 
 ```rust
 use bm_sdk::{
     MemoryProjectionRequest, MemoryRecallRequest, MemoryRecallTemporalOperation,
-    MemoryWriteRequest, PressureLevel, RuntimeLifecycleModeInput, RuntimeSkillWrite,
-    RuntimeSkillWriteSource,
+    PressureLevel, ProceduralProjectionBindingV1, RuntimeLifecycleModeInput,
 };
 
 let runtime = build_runtime()?;
-
-let write = runtime.write(MemoryWriteRequest::Procedural {
-    writes: vec![RuntimeSkillWrite {
-        name: "release_guard".to_string(),
-        topic: "release".to_string(),
-        title: "Release guard".to_string(),
-        summary: "Verify release artifacts before publishing.".to_string(),
-        content: "Run examples, platform gates, and publish dry-run.".to_string(),
-        citations: vec!["getting-started".to_string()],
-        source_chat_id: Some("chat-1".to_string()),
-        observed_at: 1_800_000_000,
-    }],
-    source: RuntimeSkillWriteSource::Manual,
-})?;
-assert!(write.accepted);
 
 let recall = runtime.recall(MemoryRecallRequest {
     temporal_operation: MemoryRecallTemporalOperation::Current,
@@ -82,12 +66,10 @@ let recall = runtime.recall(MemoryRecallRequest {
     structured_query_facets: Vec::new(),
     tool_registry_refs: Vec::new(),
 })?;
-assert!(recall
-    .procedural_delivery_reports
-    .iter()
-    .any(|delivery| delivery.selected));
+assert_eq!(recall.query, "release artifacts");
 
 let projection = runtime.project(MemoryProjectionRequest {
+    binding: ProceduralProjectionBindingV1::Preview,
     temporal_operation: MemoryRecallTemporalOperation::Current,
     user_query: "How should this host release?".to_string(),
     system_max_len: 4096,
@@ -97,8 +79,12 @@ let projection = runtime.project(MemoryProjectionRequest {
     structured_query_facets: Vec::new(),
     tool_registry_refs: Vec::new(),
 })?;
-assert!(projection.system_memory_block.len() <= 4096);
+assert!(projection.provider_payload().system_memory_block().len() <= 4096);
 ```
+
+Hosts submit typed long-term candidates or canonical turns. Runtime Skill and
+Agent Tool experience are created only by Beetle Memory's governed post-turn
+learning worker; there is no public manual procedural-write shortcut.
 
 ## Run Examples
 

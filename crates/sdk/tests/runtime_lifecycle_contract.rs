@@ -18,10 +18,9 @@ use bm_sdk::{
     MemoryRuntime, MemoryScope, MemoryStoreHandle, MemorySubjectVisibilityPolicy,
     MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel, ProfileId,
     RuntimeLifecycleDisposition, RuntimeLifecycleModeInput, RuntimeLifecycleOperation,
-    RuntimeLifecycleTrigger, RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource,
-    StoreBackendConfig, StoreRuntimeBudget, SubjectRegistry, SubjectRelationshipGraph,
-    SubjectScopedRuntime, SubjectSoulFoundingCharterSeedV1, SubjectSoulProvisionIntentV1,
-    SubjectSoulReadSelectorV1,
+    RuntimeLifecycleTrigger, RuntimeSkillWrite, StoreBackendConfig, StoreRuntimeBudget,
+    SubjectRegistry, SubjectRelationshipGraph, SubjectScopedRuntime,
+    SubjectSoulFoundingCharterSeedV1, SubjectSoulProvisionIntentV1, SubjectSoulReadSelectorV1,
 };
 
 use support::{
@@ -93,20 +92,20 @@ fn runtime_lifecycle_reports_wrap_sdk_operations() {
     let runtime = test_runtime(platform, support::host_test_profile());
 
     let write = runtime
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
+        .seed_runtime_skills_for_replay(
+            vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
                 name: "lifecycle_contract".to_string(),
                 topic: "runtime lifecycle".to_string(),
                 title: "Runtime lifecycle contract".to_string(),
                 summary: "Every SDK operation carries a lifecycle report.".to_string(),
-                content: "Call MemoryRuntime and consume structured reports.".to_string(),
+                content: "1. Call MemoryRuntime for the requested operation.\n2. Verify the structured lifecycle report.\n3. Report the exact operation identity."
+                    .to_string(),
                 citations: vec!["runtime lifecycle contract test".to_string()],
                 source_chat_id: Some("chat-1".to_string()),
                 observed_at: 1_800_000_000,
             })],
-            owning_scope: support::runtime_skill_subject_scope(),
-            source: RuntimeSkillWriteSource::Manual,
-        })
+            support::runtime_skill_subject_scope(),
+        )
         .expect("write");
     assert_eq!(
         write.lifecycle_report.operation,
@@ -135,6 +134,7 @@ fn runtime_lifecycle_reports_wrap_sdk_operations() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "How should SDK hosts use lifecycle?".to_string(),
@@ -163,8 +163,6 @@ fn runtime_lifecycle_events_record_memory_hit_telemetry_for_recall_and_projectio
 
     let write = runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![bm_sdk::LongTermMemoryDraft {
                     kind: bm_sdk::LongTermMemoryKind::Fact,
@@ -210,6 +208,7 @@ fn runtime_lifecycle_events_record_memory_hit_telemetry_for_recall_and_projectio
         .expect("recall");
     runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "How should Ollama transparent metrics be counted?".to_string(),
@@ -277,10 +276,6 @@ fn runtime_lifecycle_maintenance_defer_does_not_run_core_passes() {
                 reply_content: "maintenance should defer".to_string(),
                 tool_calls: 0,
                 external_content_used: false,
-                runtime_skill_selected_ids: Vec::new(),
-                task_learning_selected_ids: Vec::new(),
-                reuse_outcome: RuntimeSkillReuseOutcome::Neutral,
-                reuse_outcome_note: String::new(),
                 pressure: PressureLevel::Critical,
                 mode_input: RuntimeLifecycleModeInput::default(),
             },

@@ -52,7 +52,8 @@ use crate::store_internal::schema::{
     ControlPlaneScopeEntry, ControlPlaneScopeManifest, GovernedEvidenceSourceClaimManifest,
     RecallOwnerScopeBinding, StoreAddressAdmission, StoreBlobDecoderKind, StoreJsonDecoderKind,
     CONTROL_PLANE_SCOPE_MANIFEST_NAMESPACE, GOVERNED_EVIDENCE_SOURCE_CLAIM_MANIFEST_NAMESPACE,
-    RECALL_OWNER_SCOPE_BINDING_NAMESPACE,
+    PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE, PROCEDURAL_FEEDBACK_JOB_NAMESPACE,
+    PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE, RECALL_OWNER_SCOPE_BINDING_NAMESPACE,
 };
 #[cfg(feature = "nonproduction-replay-harness")]
 use crate::store_internal::schema::{store_blob_namespaces, store_json_namespaces};
@@ -907,6 +908,9 @@ impl StorePlatform {
         validate_post_turn_governance_engine_open_closure(platform.engine.as_ref()).map_err(
             |error| Error::config("store_governance_job_open_closure", error.to_string()),
         )?;
+        validate_procedural_feedback_engine_open_closure(platform.engine.as_ref()).map_err(
+            |error| Error::config("store_procedural_job_open_closure", error.to_string()),
+        )?;
         platform.append_validated_event(open_event)?;
         Ok((platform, report))
     }
@@ -1405,6 +1409,10 @@ impl StorePlatform {
             subject_soul_authorized,
         )?;
         validate_mutation_operation_closure(&batch, &preconditions, mutation_operation)?;
+        super::agent_tool_experience::validate_agent_tool_experience_transition_preconditions(
+            &batch,
+            &preconditions,
+        )?;
         validate_recall_index_mutation_closure(
             &batch,
             |namespace, key| self.engine.get_json_value(namespace, key),
@@ -1636,8 +1644,13 @@ impl StorePlatform {
             }
         }
 
-        let governed_json_reads =
+        let mut governed_json_reads =
             governed_transaction_dependency_json_reads(&batch, &preconditions)?;
+        governed_json_reads.extend(self.procedural_transaction_dependency_json_reads(
+            &batch,
+            &preconditions,
+            operation_capacity.kv_max_entries,
+        )?);
         let mut request = StoreTransactionRequest::new(
             batch.transaction_id.clone(),
             preconditions,
@@ -1655,7 +1668,38 @@ impl StorePlatform {
                 .governed_state_budget
                 .max_retained_runtime_skill_owners_per_scope,
         )
+        .with_agent_tool_experience_budget(
+            crate::store_internal::agent_tool_experience::AgentToolExperienceStoreBudget {
+                max_owners_per_subject: runtime_budget
+                    .governed_state_budget
+                    .max_agent_tool_experience_owners_per_subject,
+                max_revisions_per_owner: runtime_budget
+                    .governed_state_budget
+                    .max_agent_tool_experience_revisions_per_owner,
+                max_evidence_refs_per_owner: runtime_budget
+                    .governed_state_budget
+                    .max_agent_tool_experience_evidence_refs_per_owner,
+            },
+        )
         .include_governed_json_reads(governed_json_reads);
+        if batch.mutations.iter().any(|mutation| {
+            matches!(mutation,
+                StoreMutation::PutJson { namespace, .. } | StoreMutation::DeleteJson { namespace, .. }
+                    if matches!(namespace.as_str(),
+                        crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE
+                            | crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE
+                            | crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE))
+        }) {
+            request = request.include_governed_json_prefix_reads(
+                [
+                    crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE,
+                    crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE,
+                    crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE,
+                ]
+                .into_iter()
+                .map(|namespace| (namespace.to_string(), String::new())),
+            );
+        }
         if !graph_scopes.is_empty() {
             for (_, _, scope_digest) in &graph_scopes {
                 let prefix = format!("scope:{scope_digest}:doc:");
@@ -2008,6 +2052,470 @@ impl StorePlatform {
         self
     }
 
+    pub(crate) fn prepare_procedural_selection_authority(
+        &self,
+        memory_space_id: &str,
+        now: u64,
+        runtime_budget: &RuntimeBudgetReport,
+    ) -> Result<()> {
+        use super::procedural_selection::{authority_key, ProceduralSelectionAuthority, NAMESPACE};
+        let key = authority_key(memory_space_id);
+        if let Some(value) = self.engine.get_json_value(NAMESPACE, &key)? {
+            let authority: ProceduralSelectionAuthority =
+                serde_json::from_value(value).map_err(|_| {
+                    Error::config(
+                        "procedural_selection_authority",
+                        "invalid persisted authority",
+                    )
+                })?;
+            return authority.validate(&key);
+        }
+        let authority = ProceduralSelectionAuthority::fresh(memory_space_id, now)?;
+        let value = serde_json::to_value(authority).map_err(|_| {
+            Error::config(
+                "procedural_selection_authority",
+                "authority encoding failed",
+            )
+        })?;
+        let request = StoreTransactionRequest::new(
+            format!("procedural-selection-prepare:{}", current_unix_nanos()),
+            vec![StoreJsonPrecondition::Absent {
+                namespace: NAMESPACE.to_owned(),
+                key: key.clone(),
+            }],
+            vec![StoreEngineMutation::PutJson {
+                namespace: NAMESPACE.to_owned(),
+                key: key.clone(),
+                value,
+            }],
+            None,
+        )
+        .with_procedural_authority_initialization();
+        let admission = self.store_transaction_admission_for_report(runtime_budget)?;
+        match self
+            .engine
+            .commit_transaction_admitted(&request, &admission)
+        {
+            Ok(_) => Ok(()),
+            Err(error) if error.stage() == "memory_write_transaction_precondition_failed" => {
+                let winner = self
+                    .engine
+                    .get_json_value(NAMESPACE, &key)?
+                    .ok_or_else(|| {
+                        Error::config("procedural_selection_authority", "CAS winner is missing")
+                    })?;
+                let authority: ProceduralSelectionAuthority = serde_json::from_value(winner)
+                    .map_err(|_| {
+                        Error::config("procedural_selection_authority", "invalid CAS winner")
+                    })?;
+                authority.validate(&key)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn procedural_selection_authority(
+        &self,
+        space: &str,
+    ) -> Result<super::procedural_selection::ProceduralSelectionAuthority> {
+        use super::procedural_selection::{authority_key, ProceduralSelectionAuthority, NAMESPACE};
+        let key = authority_key(space);
+        let value = self
+            .engine
+            .get_json_value(NAMESPACE, &key)?
+            .ok_or_else(|| {
+                Error::config(
+                    "procedural_selection_authority",
+                    "authority was not prepared",
+                )
+            })?;
+        let authority: ProceduralSelectionAuthority =
+            serde_json::from_value(value).map_err(|_| {
+                Error::config(
+                    "procedural_selection_authority",
+                    "invalid persisted authority",
+                )
+            })?;
+        authority.validate(&key)?;
+        Ok(authority)
+    }
+
+    pub(crate) fn prepared_procedural_selection_signer(
+        &self,
+        space: &str,
+    ) -> Result<super::procedural_selection::ProceduralSelectionSigner> {
+        self.procedural_selection_authority(space)
+            .map(super::procedural_selection::ProceduralSelectionSigner::from_authority)
+    }
+
+    pub(crate) fn verify_procedural_selection_receipt(
+        &self,
+        receipt: &bm_core::memory::ProceduralSelectionReceiptV1,
+    ) -> Result<()> {
+        self.procedural_selection_authority(&receipt.identity.memory_space_id)?
+            .verify(receipt)
+    }
+
+    fn procedural_transaction_dependency_json_reads(
+        &self,
+        batch: &StoreMutationBatch,
+        preconditions: &[StoreJsonPrecondition],
+        max_entries: usize,
+    ) -> Result<BTreeSet<(String, String)>> {
+        use crate::store_internal::schema::{
+            AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE, AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE,
+            AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE, RUNTIME_SKILL_RECORD_NAMESPACE,
+        };
+        use bm_core::skills::{
+            agent_tool_experience_head_key, agent_tool_experience_scope_manifest_key,
+            AgentToolExperienceHeadStateV2, AgentToolExperienceOwnerHeadV2,
+            AgentToolExperienceOwningScopeV1, AgentToolExperienceRevisionMaterialV2,
+            AgentToolExperienceScopeManifestV1,
+        };
+        let stage = "procedural_transaction_dependency_read_set";
+        let relevant = |namespace: &str| {
+            matches!(
+                namespace,
+                PROCEDURAL_FEEDBACK_JOB_NAMESPACE
+                    | PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE
+                    | PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE
+                    | AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE
+                    | AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE
+                    | AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE
+                    | RUNTIME_SKILL_RECORD_NAMESPACE
+                    | MEMORY_MUTATION_RECEIPT_NAMESPACE
+                    | MEMORY_MUTATION_AUDIT_NAMESPACE
+                    | "conversation_transcript"
+                    | super::procedural_selection::NAMESPACE
+            )
+        };
+        let mut pending = Vec::new();
+        for mutation in &batch.mutations {
+            if let StoreMutation::PutJson {
+                namespace,
+                key,
+                value,
+                ..
+            } = mutation
+            {
+                if relevant(namespace) {
+                    pending.push((namespace.clone(), key.clone(), value.clone()));
+                }
+            }
+        }
+        for condition in preconditions {
+            if let StoreJsonPrecondition::Exact {
+                namespace,
+                key,
+                value,
+            } = condition
+            {
+                if relevant(namespace) {
+                    pending.push((namespace.clone(), key.clone(), value.clone()));
+                }
+            }
+        }
+        let mut scheduled = pending
+            .iter()
+            .map(|(namespace, key, _)| (namespace.clone(), key.clone()))
+            .collect::<BTreeSet<_>>();
+        if scheduled.len() > max_entries {
+            return Err(Error::config(
+                stage,
+                "procedural dependency closure exceeds Store KV budget",
+            ));
+        }
+        let mut reads = BTreeSet::new();
+        let scope = AgentToolExperienceOwningScopeV1::Subject {
+            mounted_subject_id: batch.scope.subject_id.clone(),
+        };
+        while let Some((namespace, key, value)) = pending.pop() {
+            admit_store_json_document(&namespace, &key, &value, stage)?;
+            let mut dependencies = Vec::<(String, String)>::new();
+            match namespace.as_str() {
+                RUNTIME_SKILL_RECORD_NAMESPACE => {
+                    use bm_core::skills::{
+                        RuntimeSkillCreationRef, RuntimeSkillEvidenceKind,
+                        RuntimeSkillLifecycleState,
+                    };
+                    let owner: RuntimeSkillOwnerRecord =
+                        decode_transaction_dependency(&value, "runtime promotion owner")?;
+                    if matches!(
+                        owner.creation_ref,
+                        RuntimeSkillCreationRef::AgentToolExperiencePromotion { .. }
+                    ) {
+                        let needs_live_source = !matches!(
+                            owner.lifecycle.state,
+                            RuntimeSkillLifecycleState::Retired
+                                | RuntimeSkillLifecycleState::Superseded
+                        );
+                        for source in &owner.intrinsic_contract.evidence_bindings {
+                            if source.kind != RuntimeSkillEvidenceKind::ProceduralFeedbackSource {
+                                continue;
+                            }
+                            dependencies.push((
+                                PROCEDURAL_FEEDBACK_JOB_NAMESPACE.to_owned(),
+                                source.safe_ref.clone(),
+                            ));
+                            dependencies.push((
+                                PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE.to_owned(),
+                                source.safe_ref.clone(),
+                            ));
+                            if needs_live_source {
+                                if let Some(value) = self.engine.get_json_value(
+                                    PROCEDURAL_FEEDBACK_JOB_NAMESPACE,
+                                    &source.safe_ref,
+                                )? {
+                                    admit_store_json_document(
+                                        PROCEDURAL_FEEDBACK_JOB_NAMESPACE,
+                                        &source.safe_ref,
+                                        &value,
+                                        stage,
+                                    )?;
+                                    let job: ProceduralFeedbackJobV1 =
+                                        decode_transaction_dependency(
+                                            &value,
+                                            "runtime promotion source job",
+                                        )?;
+                                    if job.identity.memory_space_id != batch.scope.memory_space_id
+                                        || job.identity.mounted_subject_id != batch.scope.subject_id
+                                    {
+                                        return Err(Error::config(
+                                            stage,
+                                            "runtime source dependency crosses exact subject scope",
+                                        ));
+                                    }
+                                    let conversation = ConversationKey::new(
+                                        &job.identity.memory_space_id,
+                                        &job.identity.channel_id,
+                                        &job.identity.conversation_id,
+                                    )?;
+                                    dependencies.push((
+                                        "conversation_transcript".to_owned(),
+                                        transcript_turn_storage_key(
+                                            &conversation,
+                                            &job.identity.mounted_subject_id,
+                                            &job.identity.turn_id,
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                "conversation_transcript" => {
+                    let record: TranscriptTurnRecord =
+                        decode_transaction_dependency(&value, "procedural receipt transcript")?;
+                    if record
+                        .learning_evidence
+                        .as_ref()
+                        .and_then(|evidence| evidence.selection_receipt.as_ref())
+                        .is_some()
+                    {
+                        dependencies.push((
+                            super::procedural_selection::NAMESPACE.to_owned(),
+                            super::procedural_selection::authority_key(&record.key.memory_space_id),
+                        ));
+                    }
+                    dependencies.extend(super::procedural_selection::intake_dependencies(&record)?);
+                }
+                PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE => {
+                    let index: ProceduralFeedbackScopeIndexV1 =
+                        decode_transaction_dependency(&value, "procedural scope index")?;
+                    if index.memory_space_id != batch.scope.memory_space_id
+                        || index.mounted_subject_id != batch.scope.subject_id
+                    {
+                        return Err(Error::config(
+                            stage,
+                            "procedural index dependency crosses exact subject scope",
+                        ));
+                    }
+                    dependencies.extend(
+                        index
+                            .active_jobs
+                            .iter()
+                            .chain(&index.recent_terminal_jobs)
+                            .map(|job| {
+                                (
+                                    PROCEDURAL_FEEDBACK_JOB_NAMESPACE.to_string(),
+                                    job.job_id.clone(),
+                                )
+                            }),
+                    );
+                }
+                PROCEDURAL_FEEDBACK_JOB_NAMESPACE => {
+                    let job: ProceduralFeedbackJobV1 =
+                        decode_transaction_dependency(&value, "procedural job")?;
+                    if job.identity.memory_space_id != batch.scope.memory_space_id
+                        || job.identity.mounted_subject_id != batch.scope.subject_id
+                    {
+                        return Err(Error::config(
+                            stage,
+                            "procedural job dependency crosses exact subject scope",
+                        ));
+                    }
+                    dependencies.push((
+                        PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE.to_string(),
+                        job.scope_index_key,
+                    ));
+                    if let Some(receipt) = job.receipt {
+                        dependencies.push((
+                            PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE.to_string(),
+                            job.job_id,
+                        ));
+                        dependencies.push((
+                            MEMORY_MUTATION_RECEIPT_NAMESPACE.to_string(),
+                            receipt.mutation_receipt_key.clone(),
+                        ));
+                        dependencies.push((
+                            MEMORY_MUTATION_AUDIT_NAMESPACE.to_string(),
+                            receipt.mutation_receipt_key,
+                        ));
+                    }
+                }
+                PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE => {
+                    let ledger: ProceduralFeedbackApplicationLedgerV1 =
+                        decode_transaction_dependency(&value, "procedural application ledger")?;
+                    if ledger.identity.memory_space_id != batch.scope.memory_space_id
+                        || ledger.identity.mounted_subject_id != batch.scope.subject_id
+                    {
+                        return Err(Error::config(
+                            stage,
+                            "procedural application dependency crosses exact subject scope",
+                        ));
+                    }
+                    dependencies
+                        .push((PROCEDURAL_FEEDBACK_JOB_NAMESPACE.to_string(), ledger.job_id));
+                    for applied in ledger.applied_owner_bindings {
+                        match applied {
+                            bm_core::memory::ProceduralAppliedOwnerBindingV1::AgentToolExperience { owner_revision, .. } => dependencies.push((
+                                AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE.to_string(),
+                                agent_tool_experience_head_key(&batch.scope.memory_space_id, &scope, &owner_revision.owner_ref)?,
+                            )),
+                            bm_core::memory::ProceduralAppliedOwnerBindingV1::RuntimeSkill { binding } => dependencies.push((
+                                super::schema::RUNTIME_SKILL_RECORD_NAMESPACE.to_owned(), binding.owner_physical_key,
+                            )),
+                        }
+                    }
+                }
+                AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE => {
+                    let manifest: AgentToolExperienceScopeManifestV1 =
+                        decode_transaction_dependency(&value, "experience scope manifest")?;
+                    if manifest.memory_space_id != batch.scope.memory_space_id
+                        || manifest.owning_scope != scope
+                    {
+                        return Err(Error::config(
+                            stage,
+                            "experience manifest dependency crosses exact subject scope",
+                        ));
+                    }
+                    for binding in manifest.bindings {
+                        let expected = agent_tool_experience_head_key(
+                            &batch.scope.memory_space_id,
+                            &scope,
+                            &binding.owner_ref,
+                        )?;
+                        if expected != binding.head_key {
+                            return Err(Error::config(
+                                stage,
+                                "experience binding redirects canonical head address",
+                            ));
+                        }
+                        dependencies
+                            .push((AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE.to_string(), expected));
+                    }
+                }
+                AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE => {
+                    let head: AgentToolExperienceOwnerHeadV2 =
+                        decode_transaction_dependency(&value, "experience head")?;
+                    if head.memory_space_id != batch.scope.memory_space_id
+                        || head.owning_scope != scope
+                    {
+                        return Err(Error::config(
+                            stage,
+                            "experience head dependency crosses exact subject scope",
+                        ));
+                    }
+                    dependencies.push((
+                        AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                        agent_tool_experience_scope_manifest_key(
+                            &batch.scope.memory_space_id,
+                            &scope,
+                        )?,
+                    ));
+                    if head.state == AgentToolExperienceHeadStateV2::Active {
+                        dependencies.extend(head.retained_revisions.into_iter().map(|revision| {
+                            (
+                                AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE.to_string(),
+                                revision.material_key,
+                            )
+                        }));
+                    }
+                }
+                AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE => {
+                    let material: AgentToolExperienceRevisionMaterialV2 =
+                        decode_transaction_dependency(&value, "experience material")?;
+                    if material.memory_space_id != batch.scope.memory_space_id
+                        || material.owning_scope != scope
+                    {
+                        return Err(Error::config(
+                            stage,
+                            "experience material dependency crosses exact subject scope",
+                        ));
+                    }
+                    dependencies.push((
+                        AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE.to_string(),
+                        agent_tool_experience_head_key(
+                            &batch.scope.memory_space_id,
+                            &scope,
+                            &material.owner_ref,
+                        )?,
+                    ));
+                }
+                MEMORY_MUTATION_RECEIPT_NAMESPACE => {
+                    let receipt: MemoryMutationReceipt =
+                        decode_transaction_dependency(&value, "procedural mutation receipt")?;
+                    if receipt.identity.memory_space_id() != batch.scope.memory_space_id
+                        || receipt.identity.mounted_subject_id() != batch.scope.subject_id
+                    {
+                        return Err(Error::config(
+                            stage,
+                            "mutation receipt dependency crosses exact subject scope",
+                        ));
+                    }
+                }
+                MEMORY_MUTATION_AUDIT_NAMESPACE => {
+                    let audit: MemoryMutationAuditRecord =
+                        decode_transaction_dependency(&value, "procedural mutation audit")?;
+                    if audit.identity.memory_space_id() != batch.scope.memory_space_id
+                        || audit.identity.mounted_subject_id() != batch.scope.subject_id
+                    {
+                        return Err(Error::config(
+                            stage,
+                            "mutation audit dependency crosses exact subject scope",
+                        ));
+                    }
+                }
+                _ => {}
+            }
+            for (namespace, key) in dependencies {
+                reads.insert((namespace.clone(), key.clone()));
+                if scheduled.insert((namespace.clone(), key.clone())) {
+                    if scheduled.len() > max_entries {
+                        return Err(Error::config(
+                            stage,
+                            "procedural dependency closure exceeds Store KV budget",
+                        ));
+                    }
+                    if let Some(value) = self.engine.get_json_value(&namespace, &key)? {
+                        pending.push((namespace, key, value));
+                    }
+                }
+            }
+        }
+        Ok(reads)
+    }
+
     #[cfg(feature = "nonproduction-replay-harness")]
     pub fn export_store_snapshot(&self) -> Result<StoreSnapshot> {
         self.export_store_snapshot_with_report()
@@ -2026,6 +2534,51 @@ impl StorePlatform {
                     value,
                 });
             }
+        }
+        Ok(docs)
+    }
+
+    pub(crate) fn read_procedural_application_ledgers_with_runtime_budget(
+        &self,
+        runtime_budget: &RuntimeBudgetReport,
+    ) -> Result<Vec<StoreSnapshotJsonDoc>> {
+        runtime_budget.validate_for_admission(current_unix_secs())?;
+        let namespace = PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE;
+        let stage = "procedural_application_ledger_read";
+        let budget = runtime_budget.store_budget;
+        let keys = self.engine.list_json_keys(namespace)?;
+        if keys.len() > budget.kv_max_entries {
+            return Err(store_budget_error(
+                "procedural ledger keys exceed request KV budget",
+            ));
+        }
+        let mut bytes = 0usize;
+        let mut docs = Vec::with_capacity(keys.len());
+        for key in keys {
+            let value = self
+                .engine
+                .get_json_value(namespace, &key)?
+                .ok_or_else(|| {
+                    Error::config(stage, "listed immutable procedural ledger is missing")
+                })?;
+            admit_store_json_document(namespace, &key, &value, stage)?;
+            let document = StoreSnapshotJsonDoc {
+                namespace: namespace.to_string(),
+                key,
+                value,
+            };
+            let document_bytes = serde_json::to_vec(&document)
+                .map_err(|_| Error::config(stage, "procedural ledger serialization failed"))?
+                .len();
+            bytes = bytes
+                .checked_add(document_bytes)
+                .ok_or_else(|| store_budget_error("procedural ledger byte count overflow"))?;
+            if bytes > budget.snapshot_max_bytes {
+                return Err(store_budget_error(
+                    "procedural ledger bytes exceed request snapshot budget",
+                ));
+            }
+            docs.push(document);
         }
         Ok(docs)
     }
@@ -2313,7 +2866,7 @@ impl StorePlatform {
             )? {
                 return Err(Error::config(
                     "memory_space_import",
-                    "typed memory-space archive must not contain protected Soul/Relationship state",
+                    "typed memory-space archive must not contain protected authoritative owner state",
                 ));
             }
         }
@@ -2324,7 +2877,7 @@ impl StorePlatform {
         {
             return Err(Error::config(
                 "memory_space_import",
-                "typed memory-space archive must not contain protected Soul/Relationship events",
+                "typed memory-space archive must not contain protected authoritative owner events",
             ));
         }
         let mut admitted_snapshot = snapshot.clone();
@@ -2442,18 +2995,23 @@ impl StorePlatform {
             Option<serde_json::Value>,
         )>,
     ) -> Result<StoreMutationBatchReport> {
-        self.commit_recall_indexed_mutations_at(operation, scope, owner_mutations, indexes, None)
+        self.commit_recall_indexed_mutations_with_preconditions(
+            operation,
+            scope,
+            owner_mutations,
+            indexes,
+            Vec::new(),
+        )
     }
 
-    fn commit_recall_indexed_mutations_at(
+    fn commit_recall_indexed_mutations_with_preconditions(
         &self,
         operation: &str,
         scope: StoreEventScope,
         mut owner_mutations: Vec<StoreMutation>,
         indexes: Vec<RecallIndexMutationPlan>,
-        runtime_timestamp_unix_secs: Option<u64>,
+        mut preconditions: Vec<StoreJsonPrecondition>,
     ) -> Result<StoreMutationBatchReport> {
-        let mut preconditions = Vec::with_capacity(indexes.len());
         for (namespace, key, value, before) in indexes {
             preconditions.push(match before {
                 Some(value) => StoreJsonPrecondition::Exact {
@@ -2485,7 +3043,7 @@ impl StorePlatform {
             StoreCommitPreconditions::new(&preconditions, &[]),
             None,
             None,
-            runtime_timestamp_unix_secs,
+            None,
             None,
         )
     }
@@ -4202,6 +4760,9 @@ fn validate_protected_json_mutation_preconditions(
         crate::store_internal::schema::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
         crate::store_internal::schema::RUNTIME_SKILL_RECORD_NAMESPACE,
         crate::store_internal::schema::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE,
+        crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE,
+        crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE,
+        crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE,
         GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE,
         GOVERNED_EVIDENCE_SOURCE_REF_NAMESPACE,
         GOVERNED_EVIDENCE_SOURCE_CLAIM_MANIFEST_NAMESPACE,
@@ -5436,13 +5997,20 @@ fn validate_evidence_lifecycle_closure(batch: &StoreMutationBatch) -> Result<()>
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct GovernedTransactionPostImageLimits {
+    pub(crate) long_term_retention: Option<usize>,
+    pub(crate) runtime_skill_owners: Option<usize>,
+    pub(crate) agent_tool_experience:
+        Option<crate::store_internal::agent_tool_experience::AgentToolExperienceStoreBudget>,
+}
+
 pub(crate) fn validate_governed_transaction_post_image(
     batch: &StoreMutationBatch,
     before: &BackendTransactionState,
     after: &BackendTransactionState,
     graph_repair_authorized: bool,
-    governed_long_term_retention_limit: Option<usize>,
-    governed_runtime_skill_owner_limit: Option<usize>,
+    limits: GovernedTransactionPostImageLimits,
     operation_capacity: StoreCapacityBudget,
 ) -> Result<()> {
     if batch_mutates_namespace(batch, POST_TURN_GOVERNANCE_JOB_NAMESPACE)
@@ -5459,13 +6027,31 @@ pub(crate) fn validate_governed_transaction_post_image(
         after,
         operation_capacity.kv_max_entries,
     )?;
-    validate_long_term_version_root_post_image(batch, after, governed_long_term_retention_limit)?;
-    validate_runtime_skill_owner_post_image(
+    validate_long_term_version_root_post_image(batch, after, limits.long_term_retention)?;
+    validate_runtime_skill_owner_post_image(batch, before, after, limits.runtime_skill_owners)?;
+    crate::store_internal::agent_tool_experience::validate_agent_tool_experience_transaction_post_image(
         batch,
-        before,
         after,
-        governed_runtime_skill_owner_limit,
+        limits.agent_tool_experience,
     )?;
+    if batch_mutates_namespace(batch, PROCEDURAL_FEEDBACK_JOB_NAMESPACE)
+        || batch_mutates_namespace(batch, PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE)
+        || batch_mutates_namespace(batch, PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE)
+        || batch_mutates_namespace(batch, super::schema::RUNTIME_SKILL_RECORD_NAMESPACE)
+        || batch_mutates_namespace(
+            batch,
+            crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE,
+        )
+        || batch_mutates_namespace(
+            batch,
+            crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE,
+        )
+    {
+        crate::store_internal::procedural_feedback::validate_procedural_feedback_store_image(
+            after,
+            "procedural_feedback_store_post_image",
+        )?;
+    }
     crate::store_internal::subject_soul::validate_subject_soul_transaction_post_image(
         batch,
         before,
@@ -5853,9 +6439,25 @@ fn validate_runtime_skill_owner_post_image(
             )
         })?;
 
+    let mutated_addresses = batch
+        .mutations
+        .iter()
+        .filter_map(|mutation| match mutation {
+            StoreMutation::PutJson { namespace, key, .. }
+            | StoreMutation::DeleteJson { namespace, key, .. }
+                if namespace == owner_namespace || namespace == manifest_namespace =>
+            {
+                Some((namespace.as_str(), key.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
     let mut scopes = BTreeSet::<(String, RuntimeSkillOwningScope)>::new();
     for state in [before, after] {
-        for ((namespace, _), value) in &state.json {
+        for ((namespace, key), value) in &state.json {
+            if !mutated_addresses.contains(&(namespace.as_str(), key.as_str())) {
+                continue;
+            }
             if namespace == owner_namespace {
                 if let Ok(record) = serde_json::from_value::<RuntimeSkillOwnerRecord>(value.clone())
                 {
@@ -8721,6 +9323,7 @@ pub(crate) fn snapshot_namespace_requires_private_export(namespace: &str) -> boo
             | crate::store_internal::transcript_query::TRANSCRIPT_SEARCH_ROOT_NAMESPACE
             | crate::store_internal::transcript_query::TRANSCRIPT_SEARCH_MESSAGE_MANIFEST_NAMESPACE
             | crate::store_internal::transcript_query::TRANSCRIPT_QUERY_KEYRING_NAMESPACE
+            | super::procedural_selection::NAMESPACE
             | GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE
             | GOVERNED_EVIDENCE_SOURCE_REF_NAMESPACE
             | GOVERNED_EVIDENCE_SOURCE_CLAIM_MANIFEST_NAMESPACE
@@ -10797,12 +11400,16 @@ impl StorePlatform {
     }
 }
 
-impl ConversationTranscriptStore for StorePlatform {
-    fn append_turn_intent(
+impl StorePlatform {
+    fn append_transcript_intake_atomic(
         &self,
         intent: &TranscriptAppendIntent,
+        canonical: Option<&CanonicalTurnAppendIntent>,
     ) -> Result<TranscriptCommitReport> {
         intent.validate()?;
+        if let Some(canonical) = canonical {
+            canonical.validate()?;
+        }
         let record = &intent.record;
         let _transaction_guard = self.lock_transaction("conversation_recall_manifest_append")?;
         let key = transcript_turn_storage_key(&record.key, &record.subject, &record.turn_id);
@@ -10842,11 +11449,11 @@ impl ConversationTranscriptStore for StorePlatform {
                     "transcript owner exists without its required page binding",
                 ));
             }
-            let mut requested = record.clone();
-            if requested.sequence == 0 {
-                requested.sequence = existing.sequence;
-            }
-            if requested != existing {
+            existing.validate_canonical_intake()?;
+            if record.canonical_turn_digest != existing.canonical_turn_digest
+                || record.host_refs != existing.host_refs
+                || record.learning_evidence != existing.learning_evidence
+            {
                 return Err(Error::config(
                     "conversation_transcript_append",
                     "turn id already exists with divergent payload",
@@ -10863,7 +11470,12 @@ impl ConversationTranscriptStore for StorePlatform {
                     .map_err(|error| {
                         Error::config("conversation_transcript_alias", error.to_string())
                     })?;
-                if stored.as_ref() != Some(alias) {
+                let exact_owner = stored.as_ref().is_some_and(|stored| {
+                    let mut requested = alias.clone();
+                    requested.updated_at = stored.updated_at;
+                    stored == &requested
+                });
+                if !exact_owner {
                     return Err(Error::config(
                         "conversation_transcript_query_repair_required",
                         "idempotent transcript retry is missing its exact conversation alias",
@@ -10993,11 +11605,185 @@ impl ConversationTranscriptStore for StorePlatform {
         scope.subject_id.clone_from(&record.subject);
         scope.channel.clone_from(&record.key.channel_id);
         scope.conversation_id = Some(record.key.conversation_id.clone());
-        self.commit_recall_indexed_mutations(
+        let mut owner_preconditions = Vec::new();
+        if let Some(canonical) = canonical {
+            scope.chat_id.clone_from(&canonical.session_chat_id);
+            let before = self
+                .engine
+                .get_json_value("session", &canonical.session_chat_id)?;
+            let persisted = before
+                .clone()
+                .map(serde_json::from_value::<Vec<SessionMessage>>)
+                .transpose()
+                .map_err(|error| Error::config("canonical_turn_intake", error.to_string()))?
+                .unwrap_or_default();
+            if persisted != canonical.session_before {
+                return Err(Error::conflict(
+                    "canonical_turn_intake",
+                    "exact session pre-image changed before atomic turn intake",
+                ));
+            }
+            if !persisted.is_empty() {
+                let binding_key =
+                    recall_owner_scope_binding_key("json", "session", &canonical.session_chat_id)?;
+                let binding_value = self
+                    .engine
+                    .get_json_value(RECALL_OWNER_SCOPE_BINDING_NAMESPACE, &binding_key)?
+                    .ok_or_else(|| {
+                        Error::config(
+                            "canonical_turn_intake",
+                            "nonempty session requires its exact owner scope binding",
+                        )
+                    })?;
+                let binding: RecallOwnerScopeBinding =
+                    serde_json::from_value(binding_value.clone()).map_err(|error| {
+                        Error::config("canonical_turn_intake", error.to_string())
+                    })?;
+                let source_value = before.as_ref().ok_or_else(|| {
+                    Error::config(
+                        "canonical_turn_intake",
+                        "nonempty session pre-image is missing",
+                    )
+                })?;
+                let source_address = RecallIndexAddress::json(
+                    "session",
+                    &canonical.session_chat_id,
+                    1,
+                    record.updated_at,
+                    source_value,
+                )?;
+                let expected_binding = RecallOwnerScopeBinding::build(
+                    &record.key.memory_space_id,
+                    &record.subject,
+                    "json",
+                    "session",
+                    &canonical.session_chat_id,
+                    &source_address.content_sha256,
+                )?;
+                if binding != expected_binding {
+                    return Err(Error::config(
+                        "canonical_turn_intake",
+                        "session pre-image is not owned by the exact mounted subject",
+                    ));
+                }
+                // A Session write receives this CAS from the shared recall
+                // binding closure. Backfill consumes the owner read-only.
+                if canonical.session_append.is_empty() {
+                    owner_preconditions.push(StoreJsonPrecondition::Exact {
+                        namespace: RECALL_OWNER_SCOPE_BINDING_NAMESPACE.into(),
+                        key: binding_key,
+                        value: binding_value,
+                    });
+                }
+            }
+            owner_preconditions.push(match before {
+                Some(value) => StoreJsonPrecondition::Exact {
+                    namespace: "session".into(),
+                    key: canonical.session_chat_id.clone(),
+                    value,
+                },
+                None => StoreJsonPrecondition::Absent {
+                    namespace: "session".into(),
+                    key: canonical.session_chat_id.clone(),
+                },
+            });
+            if !canonical.session_append.is_empty() {
+                let mut next_messages = persisted;
+                next_messages.extend(canonical.session_append.iter().cloned());
+                if next_messages.len() > MAX_SESSION_ENTRIES {
+                    next_messages.drain(..next_messages.len() - MAX_SESSION_ENTRIES);
+                }
+                let session_value = serde_json::to_value(&next_messages)
+                    .map_err(|error| Error::config("canonical_turn_intake", error.to_string()))?;
+                let manifest_key = ArchiveRecallManifest::build(
+                    1,
+                    &record.key.memory_space_id,
+                    &record.subject,
+                    std::iter::empty(),
+                )?
+                .physical_key;
+                let (previous, previous_value) =
+                    self.load_typed_recall_index::<ArchiveRecallManifest>(&manifest_key)?;
+                let address = RecallIndexAddress::json(
+                    "session",
+                    &canonical.session_chat_id,
+                    next_entry_revision(
+                        previous
+                            .as_ref()
+                            .map(|manifest| manifest.entries.as_slice())
+                            .unwrap_or(&[]),
+                        RecallIndexAddressKind::Json,
+                        "session",
+                        &canonical.session_chat_id,
+                    ),
+                    record.updated_at,
+                    &session_value,
+                )?;
+                // Session and the optional conversation alias share one archive
+                // root: merge their addresses into one revision/post-image.
+                if let Some(plan) = index_plans.iter_mut().find(|plan| {
+                    plan.0 == ArchiveRecallManifest::NAMESPACE && plan.1 == manifest_key
+                }) {
+                    if plan.3 != previous_value {
+                        return Err(Error::conflict(
+                            "canonical_turn_intake",
+                            "archive root changed during canonical intake planning",
+                        ));
+                    }
+                    let planned = decode_typed_recall_index::<ArchiveRecallManifest>(
+                        &manifest_key,
+                        plan.2.clone(),
+                    )?;
+                    let merged = ArchiveRecallManifest::build(
+                        planned.revision,
+                        &record.key.memory_space_id,
+                        &record.subject,
+                        replace_recall_index_address(&planned.entries, address),
+                    )?;
+                    plan.2 = serde_json::to_value(merged).map_err(|error| {
+                        Error::config("canonical_turn_intake", error.to_string())
+                    })?;
+                } else {
+                    let next = ArchiveRecallManifest::build(
+                        previous
+                            .as_ref()
+                            .map(|manifest| manifest.revision.saturating_add(1))
+                            .unwrap_or(1),
+                        &record.key.memory_space_id,
+                        &record.subject,
+                        replace_recall_index_address(
+                            previous
+                                .as_ref()
+                                .map(|manifest| manifest.entries.as_slice())
+                                .unwrap_or(&[]),
+                            address,
+                        ),
+                    )?;
+                    index_plans.push((
+                        ArchiveRecallManifest::NAMESPACE,
+                        manifest_key,
+                        serde_json::to_value(next).map_err(|error| {
+                            Error::config("canonical_turn_intake", error.to_string())
+                        })?,
+                        previous_value,
+                    ));
+                }
+                owner_mutations.push(StoreMutation::PutJson {
+                    namespace: "session".into(),
+                    key: canonical.session_chat_id.clone(),
+                    value: session_value,
+                    event_kind: MemoryStoreEventKind::MemoryWrite,
+                    plane: "session".into(),
+                    record_key: canonical.session_chat_id.clone(),
+                });
+            }
+        }
+        self.commit_recall_indexed_mutations_with_preconditions(
             "conversation.transcript.append",
             scope,
             owner_mutations,
             index_plans,
+            owner_preconditions,
         )?;
         Ok(TranscriptCommitReport {
             key: record.key,
@@ -11008,6 +11794,22 @@ impl ConversationTranscriptStore for StorePlatform {
             after_count: before_count.saturating_add(1),
             skipped_reason: None,
         })
+    }
+}
+
+impl ConversationTranscriptStore for StorePlatform {
+    fn append_turn_intent(
+        &self,
+        intent: &TranscriptAppendIntent,
+    ) -> Result<TranscriptCommitReport> {
+        self.append_transcript_intake_atomic(intent, None)
+    }
+
+    fn append_canonical_turn_intent(
+        &self,
+        intent: &CanonicalTurnAppendIntent,
+    ) -> Result<TranscriptCommitReport> {
+        self.append_transcript_intake_atomic(&intent.transcript, Some(intent))
     }
 
     fn remember_conversation_alias(&self, alias: &TranscriptConversationAlias) -> Result<()> {
@@ -12581,6 +13383,10 @@ impl ConversationTranscriptStore for StorePlatform {
                 }
                 owner_subject_id.get_or_insert_with(|| record.subject.clone());
                 let before_record = record.clone();
+                record.apply_lifecycle_transition(request.transition, request.requested_at);
+                if *record == before_record {
+                    continue;
+                }
                 affected_turn_ids.push(record.turn_id.clone());
                 for message in &record.input_messages {
                     affected_message_ids.push(message.message_id.clone());
@@ -12589,7 +13395,6 @@ impl ConversationTranscriptStore for StorePlatform {
                     affected_message_ids.push(message.message_id.clone());
                 }
                 affected_host_refs.extend(record.host_refs.clone());
-                record.apply_lifecycle_transition(request.transition, request.requested_at);
                 changed_records.push((before_record, record.clone()));
                 let page_id = Self::conversation_page_for_sequence(record.sequence)?;
                 if let std::collections::btree_map::Entry::Vacant(entry) = pages.entry(page_id) {
@@ -12688,13 +13493,83 @@ impl ConversationTranscriptStore for StorePlatform {
                 .memory_space_id
                 .clone_from(&request.key.memory_space_id);
             scope.subject_id = owner_subject_id.expect("affected turns have a subject owner");
+            scope.physical_owning_scope = super::StorePhysicalOwningScope::Subject {
+                mounted_subject_id: scope.subject_id.clone(),
+            };
             scope.channel.clone_from(&request.key.channel_id);
             scope.conversation_id = Some(request.key.conversation_id.clone());
-            self.commit_recall_indexed_mutations(
-                "conversation.transcript.lifecycle",
-                scope,
-                mutations,
-                indexes,
+            let learning = super::procedural_feedback::plan_transcript_learning_lifecycle(
+                self,
+                &scope,
+                &changed_records,
+                request.transition,
+                request.requested_at,
+            )?;
+            let mut preconditions = learning.preconditions;
+            mutations.extend(learning.mutations);
+            for (before, _) in &changed_records {
+                preconditions.push(StoreJsonPrecondition::Exact {
+                    namespace: "conversation_transcript".to_string(),
+                    key: transcript_turn_storage_key(
+                        &before.key,
+                        mounted_subject_id,
+                        &before.turn_id,
+                    ),
+                    value: serde_json::to_value(before).map_err(|error| {
+                        Error::config("transcript_lifecycle_plan", error.to_string())
+                    })?,
+                });
+            }
+            for (namespace, key, value, before) in indexes {
+                preconditions.push(match before {
+                    Some(value) => StoreJsonPrecondition::Exact {
+                        namespace: namespace.to_string(),
+                        key: key.clone(),
+                        value,
+                    },
+                    None => StoreJsonPrecondition::Absent {
+                        namespace: namespace.to_string(),
+                        key: key.clone(),
+                    },
+                });
+                mutations.push(StoreMutation::PutJson {
+                    namespace: namespace.to_string(),
+                    key: key.clone(),
+                    value,
+                    event_kind: MemoryStoreEventKind::MemoryWrite,
+                    plane: namespace.to_string(),
+                    record_key: key,
+                });
+            }
+            let intent_bytes = serde_json::to_vec(&(request, &mutations, &preconditions))
+                .map_err(|error| Error::config("transcript_lifecycle_plan", error.to_string()))?;
+            let intent_digest = format!("sha256:{:x}", Sha256::digest(&intent_bytes));
+            let identity = MemoryMutationOperationIdentity::new(
+                format!("transcript-lifecycle-{intent_digest}"),
+                &scope.memory_space_id,
+                &scope.subject_id,
+                &request.requested_by,
+                MemoryMutationOperationKind::ProceduralLifecycle,
+            )?;
+            let operation = StoreMutationOperationPlan::new(
+                identity,
+                intent_digest,
+                MemoryMutationEffect::Changed,
+                mutations.len(),
+                &request.requested_by,
+                request.requested_at,
+            )?;
+            let runtime_budget = self.current_runtime_budget(current_unix_secs());
+            self.commit_memory_mutation_operation_with_runtime_budget(
+                StoreMutationBatch {
+                    transaction_id: operation.transaction_id().to_string(),
+                    operation: "conversation.transcript.lifecycle".to_string(),
+                    scope,
+                    mutations,
+                },
+                &preconditions,
+                operation,
+                &runtime_budget,
             )?;
         }
         let mut derived_memory_refs = Vec::new();
@@ -13971,7 +14846,7 @@ impl TaskLearningStore for StorePlatform {
     }
 }
 
-fn current_unix_secs() -> u64 {
+pub(crate) fn current_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
@@ -14121,6 +14996,37 @@ fn validate_post_turn_governance_engine_open_closure(engine: &dyn StoreEngine) -
         }
     }
     validate_post_turn_governance_snapshot_closure(&json)
+}
+
+fn validate_procedural_feedback_engine_open_closure(engine: &dyn StoreEngine) -> Result<()> {
+    let mut state = BackendTransactionState::default();
+    for namespace in [
+        super::procedural_selection::NAMESPACE,
+        "conversation_transcript",
+        PROCEDURAL_FEEDBACK_JOB_NAMESPACE,
+        PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE,
+        PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE,
+        crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE,
+        crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE,
+        super::schema::RUNTIME_SKILL_RECORD_NAMESPACE,
+        MEMORY_MUTATION_RECEIPT_NAMESPACE,
+        MEMORY_MUTATION_AUDIT_NAMESPACE,
+    ] {
+        for key in engine.list_json_keys(namespace)? {
+            let value = engine.get_json_value(namespace, &key)?.ok_or_else(|| {
+                Error::config(
+                    "procedural_feedback_open_closure",
+                    "listed procedural owner disappeared during open closure read",
+                )
+            })?;
+            state.json.insert((namespace.to_string(), key), value);
+        }
+    }
+    super::procedural_selection::validate_store_image(&state.json)?;
+    crate::store_internal::procedural_feedback::validate_procedural_feedback_store_image(
+        &state,
+        "procedural_feedback_open_closure",
+    )
 }
 
 fn validate_post_turn_governance_transaction_closure(
@@ -15266,6 +16172,23 @@ fn validate_snapshot_import_contract(
         governed_state_budget.max_retained_runtime_skill_owners_per_scope,
         "store_snapshot_import",
     )?;
+    crate::store_internal::agent_tool_experience::validate_agent_tool_experience_store_image(
+        &typed_state,
+        crate::store_internal::agent_tool_experience::AgentToolExperienceStoreBudget {
+            max_owners_per_subject: governed_state_budget
+                .max_agent_tool_experience_owners_per_subject,
+            max_revisions_per_owner: governed_state_budget
+                .max_agent_tool_experience_revisions_per_owner,
+            max_evidence_refs_per_owner: governed_state_budget
+                .max_agent_tool_experience_evidence_refs_per_owner,
+        },
+        "store_snapshot_import",
+    )?;
+    crate::store_internal::procedural_feedback::validate_procedural_feedback_store_image(
+        &typed_state,
+        "store_snapshot_import",
+    )?;
+    super::procedural_selection::validate_store_image(&typed_state.json)?;
     crate::store_internal::transaction::validate_control_plane_manifest_set(
         &snapshot_json,
         capacity.kv_max_entries,
@@ -17071,6 +17994,435 @@ mod transaction_error_contract_tests {
                 unavailable_reason: None,
                 unavailable_detail: None,
             })
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "nonproduction-replay-harness")]
+    fn canonical_session_backfill_never_adopts_another_subject_owner() {
+        let root = SyntheticStoreDir::create("cross-subject-session-backfill");
+        for (backend, platform, _) in admission_test_platforms(&root.0, 60_000) {
+            let scoped = |subject: &str| {
+                platform.clone().with_runtime_event_scope(
+                    StoreEventScope::new("agent-a", "owner-a", "desktop", "shared-chat")
+                        .with_memory_space("space-a")
+                        .with_subject(subject)
+                        .with_conversation("conversation-a"),
+                )
+            };
+            let a = scoped("subject-a");
+            let mut delta: CanonicalTurnDelta = serde_json::from_value(serde_json::json!({
+                "turn_id": "turn-a", "conversation": {"channel":"desktop", "chat_id":"shared-chat", "conversation_id":"conversation-a"},
+                "subject":"subject-a", "delivery_status":"delivered",
+                "source":{"ingress":"user", "channel":"desktop", "provider":null, "protocol":"native", "endpoint":null,
+                    "model_alias":null, "model_resolved":null, "request_id":null, "client_conversation_hint":null},
+                "input_messages":[{"role":"user", "content":"same input text", "authority":"user_asserted", "observed_at":100,
+                    "speaker_id":"private-human-a", "speaker_kind":"human"}],
+                "assistant_message":{"role":"assistant", "content":"same reply text", "authority":"assistant_utterance", "observed_at":100,
+                    "speaker_id":"private-agent-a", "speaker_kind":"llm_agent"}
+            })).expect("canonical synthetic turn");
+            let options = || CanonicalTurnTranscriptCommitOptions {
+                host_refs: Vec::new(),
+                learning_evidence: None,
+                conversation_alias: None,
+                now_secs: 101,
+            };
+            let positive =
+                commit_canonical_turn_delta_with_transcript(&a, &a, "space-a", &delta, options())
+                    .expect("subject a positive");
+            assert!(positive.session_commit.committed);
+            assert!(
+                positive
+                    .transcript_commit
+                    .expect("positive transcript")
+                    .committed
+            );
+            let before = a
+                .export_store_snapshot()
+                .expect("before cross-subject attempt");
+            let b = scoped("subject-b");
+            delta.subject = "subject-b".into();
+            delta.turn_id = "turn-b".into();
+            commit_canonical_turn_delta_with_transcript(&b, &b, "space-a", &delta, options())
+                .expect_err("same-chat dedupe cannot promote another subject's Session evidence into Transcript");
+            let after = b
+                .export_store_snapshot()
+                .expect("after cross-subject rejection");
+            assert_eq!(
+                after.state_fingerprint(),
+                before.state_fingerprint(),
+                "{backend}: cross-subject backfill state"
+            );
+            assert_eq!(
+                after.event_fingerprint(),
+                before.event_fingerprint(),
+                "{backend}: cross-subject backfill events"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "nonproduction-replay-harness")]
+    fn canonical_intake_transcript_rejection_never_leaves_session_or_events() {
+        use super::super::procedural_selection::{tests::receipt, ProceduralSelectionAuthority};
+        use bm_core::memory::*;
+        let root = SyntheticStoreDir::create("atomic-canonical-intake");
+        for (backend, platform, probe) in admission_test_platforms(&root.0, 60_000) {
+            let platform = platform.with_runtime_event_scope(
+                StoreEventScope::new("agent-a", "owner-a", "desktop", "chat-a")
+                    .with_memory_space("space-a")
+                    .with_subject("subject-a")
+                    .with_conversation("conversation-a"),
+            );
+            SessionStore::append(&platform, "chat-a", "user", "positive existing session")
+                .unwrap_or_else(|error| panic!("{backend}: session positive: {error}"));
+            let delta = CanonicalTurnDelta {
+                turn_id: "turn-a".into(),
+                conversation: ConversationScope {
+                    channel: "desktop".into(),
+                    chat_id: "chat-a".into(),
+                    conversation_id: Some("conversation-a".into()),
+                },
+                subject: "subject-a".into(),
+                delivery_status: MemoryTurnDeliveryStatus::Delivered,
+                source: MemoryTurnSource {
+                    ingress: IngressKind::User,
+                    channel: "desktop".into(),
+                    provider: None,
+                    protocol: MemoryTurnProtocol::Native,
+                    endpoint: None,
+                    model_alias: None,
+                    model_resolved: None,
+                    request_id: None,
+                    client_conversation_hint: None,
+                },
+                actor: None,
+                input_messages: vec![TranscriptInputMessage::new(
+                    "user",
+                    "rejected intake private body",
+                    MemoryEvidenceAuthority::UserAsserted,
+                )],
+                assistant_message: Some(TranscriptInputMessage::new(
+                    "assistant",
+                    "rejected intake assistant body",
+                    MemoryEvidenceAuthority::AssistantUtterance,
+                )),
+                tool_observations: Vec::new(),
+                external_content_used: false,
+                candidate_ids: Vec::new(),
+            };
+            // This canonical receipt is from another Store incarnation. Core can
+            // validate its shape, but only the authoritative Store can reject it.
+            let mut selection = receipt();
+            ProceduralSelectionAuthority::fresh("space-a", 10)
+                .expect("foreign authority")
+                .sign(&mut selection)
+                .expect("canonical signed receipt");
+            let mut evidence = PostTurnLearningEvidenceV1 {
+                schema_version: POST_TURN_LEARNING_EVIDENCE_SCHEMA_VERSION,
+                memory_space_id: "space-a".into(),
+                mounted_subject_id: "subject-a".into(),
+                conversation_id: "conversation-a".into(),
+                turn_id: "turn-a".into(),
+                canonical_turn_digest: canonical_turn_learning_digest(&delta).expect("turn digest"),
+                tool_call_count: 0,
+                selection_receipt: Some(selection),
+                runtime_skill_feedback: Vec::new(),
+                agent_skill_feedback: Vec::new(),
+                task_learning_feedback: Vec::new(),
+                agent_tool_feedback: Vec::new(),
+                authority: ProceduralFeedbackAuthorityV1::HostRuntimeObservation,
+                learning_evidence_digest: String::new(),
+            };
+            evidence.learning_evidence_digest =
+                evidence.canonical_digest().expect("evidence digest");
+            assert!(evidence.validate_contract());
+            let before = platform.export_store_snapshot().expect("before");
+            let alias = TranscriptConversationAlias::new(
+                "space-a",
+                "subject-a",
+                "desktop",
+                "chat-a",
+                "conversation-a",
+                101,
+            )
+            .expect("alias");
+            let error = commit_canonical_turn_delta_with_transcript(
+                &platform,
+                &platform,
+                "space-a",
+                &delta,
+                CanonicalTurnTranscriptCommitOptions {
+                    host_refs: Vec::new(),
+                    learning_evidence: Some(evidence),
+                    conversation_alias: Some(alias.clone()),
+                    now_secs: 101,
+                },
+            )
+            .expect_err("Store authority closure must reject foreign receipt");
+            assert!(
+                error.to_string().contains("procedural"),
+                "{backend}: {error}"
+            );
+            let after = platform.export_store_snapshot().expect("after");
+            assert_eq!(
+                after.state_fingerprint(),
+                before.state_fingerprint(),
+                "{backend}: rejected Transcript must not leave Session/body/index"
+            );
+            assert_eq!(
+                after.event_fingerprint(),
+                before.event_fingerprint(),
+                "{backend}: rejected intake must not leave events"
+            );
+            let positive = commit_canonical_turn_delta_with_transcript(
+                &platform,
+                &platform,
+                "space-a",
+                &delta,
+                CanonicalTurnTranscriptCommitOptions {
+                    host_refs: Vec::new(),
+                    learning_evidence: None,
+                    conversation_alias: Some(alias.clone()),
+                    now_secs: 101,
+                },
+            )
+            .unwrap_or_else(|error| panic!("{backend}: atomic positive: {error}"));
+            assert!(positive.session_commit.committed);
+            assert!(
+                positive
+                    .transcript_commit
+                    .expect("transcript report")
+                    .committed
+            );
+            let key = ConversationKey::from_delta("space-a", &delta).expect("key");
+            let committed = platform.export_store_snapshot().expect("committed");
+            let retry = commit_canonical_turn_delta_with_transcript(
+                &platform,
+                &platform,
+                "space-a",
+                &delta,
+                CanonicalTurnTranscriptCommitOptions {
+                    host_refs: Vec::new(),
+                    learning_evidence: None,
+                    conversation_alias: Some(alias),
+                    now_secs: 101,
+                },
+            )
+            .expect("idempotent retry");
+            assert!(!retry.session_commit.committed);
+            assert!(!retry.transcript_commit.expect("retry transcript").committed);
+            let retried = platform.export_store_snapshot().expect("retried");
+            assert_eq!(retried.state_fingerprint(), committed.state_fingerprint());
+            assert_eq!(retried.event_fingerprint(), committed.event_fingerprint());
+            let mut racing_delta = delta.clone();
+            racing_delta.turn_id = "turn-after-concurrent-session-write".into();
+            let racing_record =
+                TranscriptTurnRecord::from_delta(&key, 0, &racing_delta, Vec::new(), 102)
+                    .expect("canonical racing record");
+            let racing_intent = CanonicalTurnAppendIntent {
+                session_chat_id: "chat-a".into(),
+                session_before: SessionStore::load_recent(&platform, "chat-a", usize::MAX)
+                    .expect("capture exact session"),
+                session_append: racing_record
+                    .input_messages
+                    .iter()
+                    .chain(racing_record.assistant_message.iter())
+                    .map(|message| {
+                        SessionMessage::new(
+                            &message.message_id,
+                            &message.role,
+                            &message.content,
+                            message.observed_at,
+                            message.created_at,
+                            &message.actor.speaker_id,
+                            &message.actor.speaker_kind,
+                        )
+                    })
+                    .collect(),
+                transcript: TranscriptAppendIntent {
+                    record: racing_record,
+                    conversation_alias: None,
+                },
+            };
+            racing_intent
+                .validate()
+                .expect("valid pending intent before competing write");
+            SessionStore::append(&platform, "chat-a", "user", "competing session append wins")
+                .expect("real competing session write");
+            let competed = platform.export_store_snapshot().expect("competed snapshot");
+            let error = platform
+                .append_canonical_turn_intent(&racing_intent)
+                .expect_err("stale exact session cannot commit any part of the new turn");
+            assert_eq!(error.stage(), "canonical_turn_intake");
+            let rejected_race = platform
+                .export_store_snapshot()
+                .expect("rejected race snapshot");
+            assert_eq!(
+                rejected_race.state_fingerprint(),
+                competed.state_fingerprint()
+            );
+            assert_eq!(
+                rejected_race.event_fingerprint(),
+                competed.event_fingerprint()
+            );
+            if backend == "file" || backend == "sqlite" {
+                let config = platform.config.clone();
+                drop(platform);
+                let reopened = StorePlatform::open_with_nonproduction_probe(
+                    config,
+                    probe as Arc<dyn RuntimeResourceProbe>,
+                )
+                .expect("atomic intake reopen");
+                assert_eq!(
+                    SessionStore::message_count(&reopened, "chat-a").expect("session count"),
+                    4
+                );
+                assert!(reopened
+                    .get_turn(&key, "subject-a", "turn-a")
+                    .expect("reopen transcript")
+                    .is_some());
+                assert_eq!(
+                    reopened
+                        .resolve_conversation_alias("space-a", "subject-a", "desktop", "chat-a")
+                        .expect("reopen alias"),
+                    Some("conversation-a".into())
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "nonproduction-replay-harness")]
+    fn procedural_selection_authority_prepare_cas_protection_and_backend_reopen() {
+        use super::super::procedural_selection::{authority_key, tests::receipt, NAMESPACE};
+        let root = SyntheticStoreDir::create("procedural-selection-authority");
+        for (backend, platform, probe) in admission_test_platforms(&root.0, 60_000) {
+            let now = current_unix_secs();
+            let budget = platform.current_runtime_budget(now);
+            std::thread::scope(|threads| {
+                let first = threads.spawn(|| {
+                    platform.prepare_procedural_selection_authority("space-a", now, &budget)
+                });
+                let second = threads.spawn(|| {
+                    platform.prepare_procedural_selection_authority("space-a", now, &budget)
+                });
+                first
+                    .join()
+                    .expect("first prepare thread")
+                    .unwrap_or_else(|error| panic!("{backend}: {error}"));
+                second
+                    .join()
+                    .expect("second prepare thread")
+                    .unwrap_or_else(|error| panic!("{backend}: {error}"));
+            });
+            let mut signed = receipt();
+            platform
+                .prepared_procedural_selection_signer("space-a")
+                .expect("prepared signer")
+                .sign(&mut signed)
+                .expect("sign");
+            platform
+                .verify_procedural_selection_receipt(&signed)
+                .expect("verify");
+            let key = authority_key("space-a");
+            let before = platform
+                .engine
+                .get_json_value(NAMESPACE, &key)
+                .expect("read")
+                .expect("durable authority");
+            platform
+                .prepare_procedural_selection_authority("space-a", now + 100_000, &budget)
+                .expect("no natural rotation");
+            assert_eq!(
+                platform
+                    .engine
+                    .get_json_value(NAMESPACE, &key)
+                    .expect("read"),
+                Some(before.clone())
+            );
+            let admission = platform
+                .store_transaction_admission_for_report(&budget)
+                .expect("admission");
+            let request = StoreTransactionRequest::new(
+                "forbidden-authority-delete",
+                vec![StoreJsonPrecondition::Exact {
+                    namespace: NAMESPACE.into(),
+                    key: key.clone(),
+                    value: before.clone(),
+                }],
+                vec![StoreEngineMutation::DeleteJson {
+                    namespace: NAMESPACE.into(),
+                    key: key.clone(),
+                }],
+                None,
+            );
+            platform
+                .engine
+                .commit_transaction_admitted(&request, &admission)
+                .expect_err("ordinary transaction cannot delete authority");
+            assert_eq!(
+                platform
+                    .engine
+                    .get_json_value(NAMESPACE, &key)
+                    .expect("read"),
+                Some(before.clone())
+            );
+            let fresh_space = authority_key("space-b");
+            let unauthorized = StoreTransactionRequest::new(
+                "forbidden-authority-create",
+                vec![StoreJsonPrecondition::Absent {
+                    namespace: NAMESPACE.into(),
+                    key: fresh_space.clone(),
+                }],
+                vec![StoreEngineMutation::PutJson {
+                    namespace: NAMESPACE.into(),
+                    key: fresh_space,
+                    value: before,
+                }],
+                None,
+            );
+            platform
+                .engine
+                .commit_transaction_admitted(&unauthorized, &admission)
+                .expect_err("public primitive cannot create signing authority");
+            let snapshot = platform
+                .export_store_snapshot()
+                .expect("synthetic exact snapshot");
+            let mut corrupt = snapshot.clone();
+            let authority_doc = corrupt
+                .json_docs
+                .iter_mut()
+                .find(|doc| doc.namespace == NAMESPACE)
+                .expect("snapshot authority");
+            authority_doc.value["incarnation"] = serde_json::Value::from("corrupt-incarnation");
+            platform
+                .import_store_snapshot(&corrupt)
+                .expect_err("static open/import closure must not repair damaged signing authority");
+            assert_eq!(
+                platform
+                    .export_store_snapshot()
+                    .expect("unchanged snapshot")
+                    .state_fingerprint(),
+                snapshot.state_fingerprint()
+            );
+            if backend == "file" || backend == "sqlite" {
+                let config = platform.config.clone();
+                drop(platform);
+                let reopened = StorePlatform::open_with_nonproduction_probe(
+                    config,
+                    probe as Arc<dyn RuntimeResourceProbe>,
+                )
+                .expect("persistent reopen");
+                reopened
+                    .verify_procedural_selection_receipt(&signed)
+                    .unwrap_or_else(|error| panic!("{backend} reopened: {error}"));
+            } else {
+                platform
+                    .clone()
+                    .verify_procedural_selection_receipt(&signed)
+                    .expect("second handle same Store");
+            }
         }
     }
 

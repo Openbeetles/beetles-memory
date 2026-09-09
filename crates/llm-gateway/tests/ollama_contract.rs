@@ -8,8 +8,7 @@ use bm_llm_gateway::{
 };
 use bm_sdk::{
     MemoryCapabilityPolicy, MemoryRuntime, MemoryTranscriptReplayReport,
-    MemoryTranscriptReplayRequest, MemoryWriteRequest, RuntimeSkillWrite, RuntimeSkillWriteSource,
-    TranscriptReplayView,
+    MemoryTranscriptReplayRequest, TranscriptReplayView,
 };
 use serde_json::{json, Value};
 
@@ -56,38 +55,6 @@ fn scope_request() -> GatewayScopeRequest {
         model_alias: Some("local".to_string()),
         ..GatewayScopeRequest::new(support::gateway_bearer_auth("owner-token"))
     }
-}
-
-fn seed_runtime_skill(
-    gateway: &GatewayRuntime,
-    config: &GatewayConfig,
-    scope: &GatewayScopeRequest,
-) {
-    let resolved = GatewayScopeResolver::new(config.scope.clone())
-        .resolve(scope)
-        .expect("scope");
-    let agent_id = resolved.entry_scope.identity.agent_id.clone();
-    let runtime = gateway
-        .runtime_for_scope(resolved.entry_scope)
-        .expect("runtime");
-    runtime
-        .runtime()
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
-                name: "ollama_gateway_style".to_string(),
-                topic: "llm_gateway".to_string(),
-                title: "Ollama gateway reply style".to_string(),
-                summary: "Always keep the Ollama native boundary explicit.".to_string(),
-                content: "When answering through Ollama native, keep protocol fields intact."
-                    .to_string(),
-                citations: Vec::new(),
-                source_chat_id: Some("thread-ollama".to_string()),
-                observed_at: 1,
-            })],
-            owning_scope: support::runtime_skill_subject_scope(&agent_id),
-            source: RuntimeSkillWriteSource::Manual,
-        })
-        .expect("seed skill");
 }
 
 #[derive(Default)]
@@ -272,7 +239,6 @@ fn chat_non_streaming_injects_memory_into_existing_system_and_preserves_native_s
     let config = gateway_config();
     let gateway = GatewayRuntime::open(config.clone()).expect("gateway");
     let scope = scope_request();
-    seed_runtime_skill(&gateway, &config, &scope);
     let mut upstream = MockOllamaUpstream::default();
 
     let response = handle_ollama_request(
@@ -467,7 +433,6 @@ fn generate_injects_system_field_without_prompt_prefix_when_supported() {
     let config = gateway_config();
     let gateway = GatewayRuntime::open(config.clone()).expect("gateway");
     let scope = scope_request();
-    seed_runtime_skill(&gateway, &config, &scope);
     let mut upstream = MockOllamaUpstream::default();
 
     let response = handle_ollama_request(
@@ -526,7 +491,6 @@ fn generate_prompt_prefix_fallback_is_explicitly_audited_when_system_is_unsuppor
         .ollama_generate_system_supported = false;
     let gateway = GatewayRuntime::open(config.clone()).expect("gateway");
     let scope = scope_request();
-    seed_runtime_skill(&gateway, &config, &scope);
     let mut upstream = MockOllamaUpstream::default();
 
     let response = handle_ollama_request(

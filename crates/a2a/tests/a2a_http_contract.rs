@@ -45,6 +45,7 @@ fn runtime_for_profile(profile: ProfileId) -> EntryRuntime {
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "a2a-http".to_string(),
             chat_id: "chat-1".to_string(),
         },
@@ -114,6 +115,83 @@ fn recall_request(authorization: Option<&str>) -> String {
         body.len(),
         body
     )
+}
+
+#[test]
+fn remote_a2a_factual_write_binds_entry_scope_and_rejects_overrides() {
+    let runtime = runtime();
+    let bridge = support::bridge("remote-factual");
+    let payload = support::factual_write_body();
+    let send = |payload: &serde_json::Value| {
+        let body = serde_json::json!({"name": "memory_write_candidate", "payload": payload, "idempotency_key": "remote-factual-operation"}).to_string();
+        let request = format!("POST /a2a/message HTTP/1.1\r\nHost: localhost\r\nAuthorization: {TEST_BEARER}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream.write_all(request.as_bytes()).unwrap();
+            stream.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response
+        });
+        let mut accepted = EntryAcceptedTcpStream::accept(&listener).unwrap();
+        let result = serve_a2a_http_accepted_stream(&runtime, &bridge, &mut accepted);
+        drop(accepted);
+        (result, client.join().unwrap())
+    };
+    let (result, response) = send(&payload);
+    result.expect("authenticated A2A factual write");
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    let records = runtime
+        .runtime()
+        .list_long_term_memory(bm_sdk::MemoryLongTermListRequest {
+            query: Default::default(),
+            cursor: None,
+            limit: 8,
+            view: bm_sdk::MemoryLongTermControlView::RawOwner,
+        })
+        .unwrap()
+        .records;
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].record.source_chat_id.as_deref(), Some("chat-1"));
+    assert_eq!(
+        records[0].record.content,
+        "The remote project uses the authenticated Entry scope."
+    );
+    #[cfg(any(
+        feature = "profile-desktop-macos-dev-full",
+        feature = "profile-desktop-windows-dev-full",
+        feature = "profile-server-linux-dev-full"
+    ))]
+    let before = runtime
+        .runtime()
+        .replay_harness()
+        .export_store_snapshot()
+        .unwrap();
+    for field in ["source_chat_id", "owner_id", "subject_id"] {
+        let mut forged = payload.clone();
+        forged[field] = "forged-scope".into();
+        let (result, _) = send(&forged);
+        assert_eq!(
+            result.expect_err("scope override rejected").stage(),
+            "adapter_json_command"
+        );
+    }
+    #[cfg(any(
+        feature = "profile-desktop-macos-dev-full",
+        feature = "profile-desktop-windows-dev-full",
+        feature = "profile-server-linux-dev-full"
+    ))]
+    assert!(
+        runtime
+            .runtime()
+            .replay_harness()
+            .export_store_snapshot()
+            .unwrap()
+            == before,
+        "scope injection must not write"
+    );
 }
 
 #[test]

@@ -126,6 +126,7 @@ fn seed_unowned_replay_harness_private_values(
 fn project(runtime: &MemoryRuntime) -> bm_sdk::MemoryProjectionOutput {
     runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "Summarize my private working context.".to_string(),

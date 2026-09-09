@@ -1958,7 +1958,7 @@ fn sqlite_store_reopens_with_transcript_catalog_timeline_search_and_activity() {
 
 #[cfg(feature = "sqlite-store")]
 #[test]
-fn sqlite_store_v11_is_rejected_read_only_by_v12_clean_break() {
+fn sqlite_store_v11_is_rejected_read_only_by_v13_clean_break() {
     let root = temp_root("query-sqlite-v11-clean-break");
     let path = root.join("memory.sqlite3");
     let config = StoreBackendConfig::sqlite(&path, support::native_persistent_profile()).unwrap();
@@ -2000,7 +2000,7 @@ fn sqlite_store_v11_is_rejected_read_only_by_v12_clean_break() {
 }
 
 #[test]
-fn file_store_v11_is_rejected_read_only_by_v12_clean_break() {
+fn file_store_v11_is_rejected_read_only_by_v13_clean_break() {
     let root = temp_root("query-file-v11-clean-break");
     let config = StoreBackendConfig::file(&root, support::native_persistent_profile()).unwrap();
     {

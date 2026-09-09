@@ -7,7 +7,13 @@ use bm_entry::{
     EntryAuthConfig, EntryIdempotencyConfig, EntryIdentity, EntryRuntime, EntryRuntimeConfig,
     EntryScope, EntryTransportConfig,
 };
-use bm_sdk::{MemoryCapabilityPolicy, MemoryPrivacyPolicy, ProfileId, StoreBackendConfig};
+use bm_sdk::{
+    LongTermMemoryKind, MemoryCandidateContent, MemoryCandidateSemanticDecision,
+    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryCapabilityPolicy,
+    MemoryEvidenceAuthority, MemoryPrivacyClass, MemoryPrivacyPolicy, MemorySemanticJudgmentSource,
+    MemorySubjectVisibilityPolicy, MemoryWriteCandidate, MemoryWriteRequest, ProfileId,
+    StoreBackendConfig,
+};
 
 fn native_runtime_profile() -> ProfileId {
     #[cfg(target_os = "macos")]
@@ -33,6 +39,7 @@ fn runtime() -> EntryRuntime {
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "a2a".to_string(),
             chat_id: "chat-1".to_string(),
         },
@@ -54,26 +61,33 @@ fn a2a_bridge_feature_enables_entry_governance_model_client() {
 }
 
 fn write_payload(name: &str, summary: &str) -> String {
-    serde_json::json!({
-        "name": name,
-        "topic": "a2a-idempotency",
-        "title": format!("A2A write {name}"),
-        "summary": summary,
-        "content": "1. Decode the A2A write payload.\n2. Dispatch it through the governed EntryRuntime path and verify the receipt.",
-        "source_chat_id": "chat-1",
-        "owning_scope": {
-            "kind": "subject",
-            "mounted_subject_id": "agent:a2a-agent",
-        },
-        "creation_ref": {
-            "kind": "replay_promotion",
-            "candidate_ref": format!("test:a2a:{name}"),
-            "verification_receipt_digest":
-                "sha256:5555555555555555555555555555555555555555555555555555555555555555",
-        },
-        "privacy_class": "shared_with_subject",
+    let target = MemoryCandidateTarget::LongTermMemory {
+        kind: LongTermMemoryKind::Fact,
+        topic: "a2a factual transport".to_string(),
+    };
+    serde_json::to_string(&MemoryWriteRequest::Candidates {
+        candidates: vec![MemoryWriteCandidate {
+            candidate_id: name.to_string(),
+            authority: MemoryEvidenceAuthority::ProgramMemoryCanonical,
+            target: target.clone(),
+            long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
+            privacy: MemoryPrivacyClass::SharedWithSubject,
+            content: MemoryCandidateContent::Text {
+                topic: "a2a factual transport".to_string(),
+                body: summary.to_string(),
+                keywords: vec!["a2a".to_string(), "factual".to_string()],
+            },
+            evidence_refs: vec!["synthetic:a2a-factual-transport".to_string()],
+            canonical_entities: Vec::new(),
+            semantic_judgment: Some(MemoryCandidateSemanticJudgment {
+                source: MemorySemanticJudgmentSource::RuntimeGate,
+                decision: MemoryCandidateSemanticDecision::Accept,
+                governed_target: Some(target),
+                reason: "typed factual A2A transport contract".to_string(),
+            }),
+        }],
     })
-    .to_string()
+    .expect("serialize factual A2A write")
 }
 
 fn finalize_payload() -> String {
@@ -107,7 +121,8 @@ fn finalize_payload() -> String {
                 "speaker_kind": "human"
             }],
             "external_content_used": false
-        }
+        },
+        "learning": bm_sdk::PostTurnLearningInputV1::empty()
     })
     .to_string()
 }
@@ -136,6 +151,82 @@ fn response_status(response: &bm_a2a::A2aRuntimeResponse) -> String {
         .as_str()
         .expect("A2A response status")
         .to_string()
+}
+
+#[test]
+fn a2a_factual_positive_and_procedural_rejection_share_the_sdk_authority() {
+    let runtime = runtime();
+    let bridge = support::bridge("wire-authority");
+    let positive = write_payload("wire-fact", "A real factual A2A write is retained.");
+    let response = bridge
+        .handle_in_process_request(
+            &runtime,
+            "wire-principal",
+            A2aRuntimeMessage::json("memory_write_candidate", positive.clone())
+                .with_idempotency_key("wire-fact-operation"),
+        )
+        .unwrap();
+    assert_eq!(
+        response_status(&response),
+        "accepted",
+        "{}",
+        response.payload
+    );
+    let value: serde_json::Value = serde_json::from_str(&response.payload).unwrap();
+    assert_eq!(value["changed"], 1);
+    let MemoryWriteRequest::Candidates { mut candidates } =
+        serde_json::from_str(&positive).unwrap()
+    else {
+        panic!("candidate fixture")
+    };
+    candidates[0].target = MemoryCandidateTarget::ProceduralMemory {
+        name: "runtime_skill__forbidden".into(),
+        topic: "forbidden".into(),
+    };
+    candidates[0].long_term_subject_visibility = None;
+    let denied = serde_json::to_string(&MemoryWriteRequest::Candidates { candidates }).unwrap();
+    #[cfg(any(
+        feature = "profile-desktop-macos-dev-full",
+        feature = "profile-desktop-windows-dev-full",
+        feature = "profile-server-linux-dev-full"
+    ))]
+    let before = runtime
+        .runtime()
+        .replay_harness()
+        .export_store_snapshot()
+        .unwrap();
+    let response = bridge
+        .handle_in_process_request(
+            &runtime,
+            "wire-principal",
+            A2aRuntimeMessage::json("memory_write_candidate", denied)
+                .with_idempotency_key("wire-denied-operation"),
+        )
+        .expect_err("typed SDK authority rejection");
+    let bm_sdk::Error::Other { source, .. } = response else {
+        panic!("typed SDK authority rejection");
+    };
+    assert_eq!(
+        source
+            .downcast_ref::<bm_sdk::ProceduralLearningSdkError>()
+            .unwrap()
+            .key,
+        bm_sdk::ProceduralLearningErrorKeyV1::TransitionRequiresGovernance
+    );
+    #[cfg(any(
+        feature = "profile-desktop-macos-dev-full",
+        feature = "profile-desktop-windows-dev-full",
+        feature = "profile-server-linux-dev-full"
+    ))]
+    assert!(
+        runtime
+            .runtime()
+            .replay_harness()
+            .export_store_snapshot()
+            .unwrap()
+            == before,
+        "A2A denied write must preserve all Store documents and events"
+    );
 }
 
 fn assert_exact_governed_result(payload: &str) {
@@ -311,29 +402,32 @@ fn a2a_bridge_dispatches_memory_request_without_executor_permissions() {
 fn a2a_bridge_decodes_declared_memory_operation_messages() {
     let runtime = runtime();
     let bridge = support::bridge("bridge-ops");
-    let messages = [
-        (
-            "memory_write_candidate",
-            r#"{"name":"runtime_skill__a2a_write","topic":"a2a","title":"A2A write","summary":"A2A write summary","content":"1. Decode A2A write.\n2. Dispatch through EntryRuntime.","source_chat_id":"chat-1","owning_scope":{"kind":"subject","mounted_subject_id":"agent:a2a-agent"},"creation_ref":{"kind":"replay_promotion","candidate_ref":"test:a2a:runtime_skill__a2a_write","verification_receipt_digest":"sha256:6666666666666666666666666666666666666666666666666666666666666666"},"privacy_class":"shared_with_subject"}"#,
-        ),
+    let messages = vec![
+        ("memory_write_candidate", write_payload("a2a-declared-write", "A2A declared factual write")),
         (
             "memory_projection_request",
-            r#"{"temporal_operation":{"kind":"current"},"user_query":"release","system_max_len":1024}"#,
+            r#"{"binding":{"kind":"preview"},"temporal_operation":{"kind":"current"},"user_query":"release","system_max_len":1024}"#.to_string(),
         ),
-        ("memory_long_term_list_request", r#"{"query":{},"limit":2}"#),
+        (
+            "memory_long_term_list_request",
+            r#"{"query":{},"limit":2}"#.to_string(),
+        ),
     ];
 
     for (name, payload) in messages {
+        let message = A2aRuntimeMessage::json(name, payload);
+        let message = if name == "memory_write_candidate" {
+            message.with_idempotency_key("a2a-declared-write")
+        } else {
+            message
+        };
         let response = bridge
-            .handle_in_process_request(
-                &runtime,
-                "a2a-in-process-principal",
-                A2aRuntimeMessage::json(name, payload),
-            )
+            .handle_in_process_request(&runtime, "a2a-in-process-principal", message)
             .unwrap_or_else(|err| panic!("{name} failed: {err}"));
         assert_eq!(response.kind, "memory_report");
-        assert!(
-            response.payload.contains("\"status\""),
+        assert_eq!(
+            response_status(&response),
+            "accepted",
             "{name}: {}",
             response.payload
         );

@@ -1,15 +1,43 @@
 //! 从 SkillStorage 加载 skill 描述；加载失败不阻塞启动。
 //! Load skill descriptions from SkillStorage; load failure does not block startup.
+//!
+//! Legacy direct mutation helpers are not public procedural intake contracts.
+//! Consumers submit governed evidence through the SDK; pure planning remains available.
+//!
+//! ```compile_fail
+//! use bm_core::skills::write_governed_runtime_skills;
+//! ```
+//! ```compile_fail
+//! use bm_core::skills::govern_runtime_skills;
+//! ```
+//! ```compile_fail
+//! use bm_core::skills::upsert_runtime_skill;
+//! ```
+//! ```compile_fail
+//! use bm_core::skills::record_runtime_skill_outcomes;
+//! ```
+//! ```compile_fail
+//! use bm_core::skills::touch_runtime_skill_hits;
+//! ```
 
 use crate::error::{Error, Result};
 use crate::platform::{SkillMetaStore, SkillStorage};
 
 mod agent_skill;
 mod agent_tool;
+mod agent_tool_experience_contract;
 mod capability_atoms;
 mod governed_runtime_contract;
 mod prompt_cache;
 mod runtime;
+mod tool_promotion;
+
+pub use tool_promotion::{
+    agent_tool_observation_matches_transcript, plan_runtime_skill_promotion_from_tool_evidence,
+    runtime_skill_applicability_for_tool_scope, RuntimeSkillToolPromotionDecision,
+    RuntimeSkillToolPromotionInput, RuntimeSkillToolPromotionReason,
+    RuntimeSkillToolPromotionSource,
+};
 
 pub use agent_skill::{
     agent_skill_dirs_forbidden_by_profile, build_agent_skill_registry_snapshot,
@@ -24,17 +52,26 @@ pub use agent_skill::{
 pub use agent_tool::{
     agent_tool_registries_forbidden_by_profile, build_agent_tool_registry_report,
     fingerprint_agent_tool_descriptor, fingerprint_agent_tool_registry,
-    govern_agent_tool_usage_feedback, list_agent_tool_experience_records,
-    plan_agent_tool_experience_record, select_agent_tool_hints,
-    validate_agent_tool_registry_snapshot, write_agent_tool_experience_record, AgentToolDescriptor,
-    AgentToolExperienceConfidence, AgentToolExperienceGovernanceDecision,
-    AgentToolExperienceGovernanceReport, AgentToolExperienceRecord, AgentToolExperienceStatus,
-    AgentToolExperienceStatusReport, AgentToolHint, AgentToolObservationDigest, AgentToolOutcome,
-    AgentToolProjectionAudit, AgentToolProjectionRejection, AgentToolRegistryOwner,
-    AgentToolRegistryRef, AgentToolRegistryReport, AgentToolRegistryScope,
-    AgentToolRegistrySnapshot, AgentToolSelectionReport, AgentToolUsageFeedback,
-    AGENT_TOOL_NO_EXPERIENCE_REASON, AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH,
-    AGENT_TOOL_REGISTRY_FORBIDDEN_BY_PROFILE,
+    select_subject_agent_tool_hints, validate_agent_tool_registry_snapshot, AgentToolDescriptor,
+    AgentToolExperienceConfidence, AgentToolExperienceRecord, AgentToolExperienceSelectionInput,
+    AgentToolExperienceStatus, AgentToolExperienceStatusReport, AgentToolHint,
+    AgentToolObservationDigest, AgentToolOutcome, AgentToolProjectionAudit,
+    AgentToolProjectionRejection, AgentToolRegistryOwner, AgentToolRegistryRef,
+    AgentToolRegistryReport, AgentToolRegistryScope, AgentToolRegistrySnapshot,
+    AgentToolSelectionReport, AGENT_TOOL_NO_EXPERIENCE_REASON,
+    AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH, AGENT_TOOL_REGISTRY_FORBIDDEN_BY_PROFILE,
+};
+pub use agent_tool_experience_contract::{
+    agent_tool_experience_head_key, agent_tool_experience_material_key,
+    agent_tool_experience_scope_manifest_key, canonical_agent_tool_experience_owner_id,
+    validate_agent_tool_experience_owner_history, validate_agent_tool_experience_scope_closure,
+    AgentToolExperienceContractFailure, AgentToolExperienceContractValidation,
+    AgentToolExperienceHeadBindingV1, AgentToolExperienceHeadStateV2,
+    AgentToolExperienceOwnerHeadV2, AgentToolExperienceOwnerLocatorV2,
+    AgentToolExperienceOwningScopeV1, AgentToolExperienceRetainedRevisionDigestV2,
+    AgentToolExperienceRevisionMaterialV2, AgentToolExperienceScopeManifestV1,
+    AGENT_TOOL_EXPERIENCE_HEAD_SCHEMA_VERSION, AGENT_TOOL_EXPERIENCE_MATERIAL_SCHEMA_VERSION,
+    AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_SCHEMA_VERSION,
 };
 pub use capability_atoms::{
     build_capability_atom_operator_summary, export_capability_atom_exchange_envelope,
@@ -76,23 +113,24 @@ pub use prompt_cache::SkillPromptCache;
 pub use runtime::{
     build_runtime_skill_doctrine_snapshot, build_runtime_skill_genome_snapshot,
     build_runtime_skill_operator_summary, build_runtime_skill_recall_block,
-    govern_runtime_skill_write_shapes, govern_runtime_skills, is_runtime_skill_name,
-    list_runtime_skill_records, plan_governed_runtime_skills, record_runtime_skill_outcomes,
-    retrieve_runtime_skill_hits, runtime_skill_owner_updated_at, touch_runtime_skill_hits,
-    upsert_runtime_skill, write_governed_runtime_skills, RuntimeSkillDoctrineClauseRecord,
-    RuntimeSkillDoctrineSnapshot, RuntimeSkillGenomeDisposition, RuntimeSkillGenomeLineageRecord,
-    RuntimeSkillGenomeNode, RuntimeSkillGenomeSnapshot, RuntimeSkillGovernanceOutcome,
-    RuntimeSkillHit, RuntimeSkillOperatorRecord, RuntimeSkillOperatorSummary, RuntimeSkillOrigin,
-    RuntimeSkillRecallScoreBreakdown, RuntimeSkillRecord, RuntimeSkillReuseOutcome,
-    RuntimeSkillStatus, RuntimeSkillStorageMutation, RuntimeSkillStrategyDiff,
-    RuntimeSkillStrategyDiffKind, RuntimeSkillWriteAction, RuntimeSkillWriteItemReport,
-    RuntimeSkillWriteOutcome, RuntimeSkillWritePlan, RuntimeSkillWriteReason,
-    RuntimeSkillWriteSource,
+    govern_runtime_skill_write_shapes, is_runtime_skill_name, list_runtime_skill_records,
+    plan_governed_runtime_skills, retrieve_runtime_skill_hits, runtime_skill_owner_updated_at,
+    RuntimeSkillDoctrineClauseRecord, RuntimeSkillDoctrineSnapshot, RuntimeSkillGenomeDisposition,
+    RuntimeSkillGenomeLineageRecord, RuntimeSkillGenomeNode, RuntimeSkillGenomeSnapshot,
+    RuntimeSkillGovernanceOutcome, RuntimeSkillHit, RuntimeSkillOperatorRecord,
+    RuntimeSkillOperatorSummary, RuntimeSkillOrigin, RuntimeSkillRecallScoreBreakdown,
+    RuntimeSkillRecord, RuntimeSkillReuseOutcome, RuntimeSkillStatus, RuntimeSkillStorageMutation,
+    RuntimeSkillStrategyDiff, RuntimeSkillStrategyDiffKind, RuntimeSkillWriteAction,
+    RuntimeSkillWriteItemReport, RuntimeSkillWriteOutcome, RuntimeSkillWritePlan,
+    RuntimeSkillWriteReason, RuntimeSkillWriteSource,
 };
 pub(crate) use runtime::{
-    retrieve_runtime_skill_hits_with_backend, runtime_skill_doctrine_event_at,
-    runtime_skill_genome_event_at,
+    govern_runtime_skills, retrieve_runtime_skill_hits_with_backend,
+    runtime_skill_doctrine_event_at, runtime_skill_genome_event_at, write_governed_runtime_skills,
 };
+
+#[cfg(test)]
+pub(crate) use runtime::{record_runtime_skill_outcomes, upsert_runtime_skill};
 
 fn is_skill_name_valid(name: &str) -> bool {
     !name.is_empty() && !name.contains("..") && !name.contains('/') && !name.contains('\\')
@@ -110,6 +148,7 @@ pub const ESP_PROMPT_SKILL_CAUTION_MAX_CHARS: usize = 1024;
 const RUNTIME_SKILL_PREFIX: &str = "runtime_skill__";
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeSkillWrite {
     pub name: String,
     pub topic: String,

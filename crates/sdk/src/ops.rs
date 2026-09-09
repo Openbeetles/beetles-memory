@@ -15,15 +15,14 @@ use bm_core::memory::{
     MemoryPrivacyClass, MemoryProjectionImpactReport, PostTurnGovernanceAttemptAuthorityV3,
     PostTurnGovernanceErrorClassV2, PostTurnGovernanceExecutionBlockAuthorityV1,
     PostTurnGovernanceJobV3, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
-    ProceduralMemoryPromotionInput, ProceduralMemoryPromotionReport, QueryFacetInput,
-    RedactedTranscriptSlice, RelationshipDisclosureCeilingV1, RelationshipSourceControlErrorKeyV1,
-    RelationshipSourceStateV1, SessionMessage, SessionTurnCommitReport, SkillEvolutionReport,
-    SubjectScopedRuntime, SubjectSoulLifecycleErrorKey, SubjectSoulReadSelectorV1,
-    TranscriptActivityReport, TranscriptAttrEnvelope, TranscriptAttrWriteRejection,
-    TranscriptCatalogLifecycle, TranscriptCommitReport, TranscriptEvidenceRef,
-    TranscriptLifecycleReport, TranscriptLifecycleTransition, TranscriptQueryCursor,
-    TranscriptRedactionReportItem, TranscriptRepairReport, TranscriptReplayView,
-    TranscriptSearchLifecycle, TranscriptSearchPage, TranscriptSearchSort,
+    QueryFacetInput, RedactedTranscriptSlice, RelationshipDisclosureCeilingV1,
+    RelationshipSourceControlErrorKeyV1, RelationshipSourceStateV1, SessionMessage,
+    SessionTurnCommitReport, SubjectScopedRuntime, SubjectSoulLifecycleErrorKey,
+    SubjectSoulReadSelectorV1, TranscriptActivityReport, TranscriptAttrEnvelope,
+    TranscriptAttrWriteRejection, TranscriptCatalogLifecycle, TranscriptCommitReport,
+    TranscriptEvidenceRef, TranscriptLifecycleReport, TranscriptLifecycleTransition,
+    TranscriptQueryCursor, TranscriptRedactionReportItem, TranscriptRepairReport,
+    TranscriptReplayView, TranscriptSearchLifecycle, TranscriptSearchPage, TranscriptSearchSort,
     TranscriptTimelineAnchor, TranscriptTimelinePage, TranscriptUtcRange,
 };
 use bm_core::memory::{
@@ -34,11 +33,12 @@ use bm_core::memory::{
 };
 use bm_core::skills::{
     AgentSkillDirectoryReport, AgentSkillProjectionAudit, AgentSkillRecallHit,
-    AgentToolExperienceGovernanceReport, AgentToolExperienceStatusReport, AgentToolHint,
-    AgentToolProjectionAudit, AgentToolRegistryRef, AgentToolRegistryReport,
-    AgentToolUsageFeedback, ProjectedAgentSkillHint, RuntimeSkillCreationRef,
-    RuntimeSkillDeliveryDropReason, RuntimeSkillOwnerLocator, RuntimeSkillOwningScope,
+    AgentToolExperienceStatusReport, AgentToolHint, AgentToolProjectionAudit, AgentToolRegistryRef,
+    AgentToolRegistryReport, ProjectedAgentSkillHint, RuntimeSkillDeliveryDropReason,
+    RuntimeSkillOwnerLocator, RuntimeSkillOwningScope,
 };
+#[cfg(feature = "nonproduction-replay-harness")]
+use bm_core::skills::{RuntimeSkillCreationRef, RuntimeSkillWrite};
 use bm_core::{
     budget::{RuntimeBudgetReport, RuntimeRetentionQuotaReport},
     feature_gate::ProfileId,
@@ -47,8 +47,7 @@ use bm_core::{
 
 use crate::{
     IntelligenceReplayInspection, MemoryCapabilityCatalog, ParsedLongTermMemoryExtraction,
-    PostReplyMemoryMaintenanceOutcome, RuntimeSkillReuseOutcome, RuntimeSkillWrite,
-    RuntimeSkillWriteOutcome, RuntimeSkillWriteSource, StoreSnapshot, WorkingRecallInspection,
+    PostReplyMemoryMaintenanceOutcome, StoreSnapshot, WorkingRecallInspection,
 };
 use crate::{
     RuntimeLifecycleDiagnosisReport, RuntimeLifecycleModeInput, RuntimeLifecycleReport,
@@ -269,6 +268,69 @@ impl std::error::Error for SubjectSoulSdkError {}
 
 pub type SubjectSoulSdkResult<T> = std::result::Result<T, SubjectSoulSdkError>;
 
+/// Stable public operation labels for the subject-scoped procedural learning lifecycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProceduralLearningSdkOperation {
+    WriteIntent,
+    Project,
+    FinalizeTurn,
+    ReadExperience,
+    MutateExperience,
+    Reconcile,
+    Wake,
+    Status,
+    Archive,
+    Delete,
+}
+
+/// Host-neutral typed failure keys. Message text is never a control surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProceduralLearningErrorKeyV1 {
+    CapabilityUnavailable,
+    RepairRequired,
+    ScopeMismatch,
+    ReceiptInvalid,
+    EvidenceConflict,
+    ConfirmationAuthorityInvalid,
+    TransitionRequiresGovernance,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProceduralLearningSdkErrorDisposition {
+    ContractRejected,
+    RegistryRejected,
+    AuthorityRejected,
+    ExpectedStateConflict,
+    RepairRequired,
+    CapacityRejected,
+    StoreCommitRejected,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProceduralLearningSdkError {
+    pub operation: ProceduralLearningSdkOperation,
+    pub key: ProceduralLearningErrorKeyV1,
+    pub disposition: ProceduralLearningSdkErrorDisposition,
+}
+
+impl std::fmt::Display for ProceduralLearningSdkError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "procedural learning {:?} failed: {:?} ({:?})",
+            self.operation, self.key, self.disposition
+        )
+    }
+}
+
+impl std::error::Error for ProceduralLearningSdkError {}
+
+pub type ProceduralLearningSdkResult<T> = std::result::Result<T, ProceduralLearningSdkError>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelationshipSourceSdkOperation {
@@ -358,7 +420,8 @@ pub struct MemoryGovernancePolicyMutationReport {
     pub core_report: CoreMemoryGovernancePolicyMutationReport,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum MemoryEvidenceDocumentMutation {
     Upsert {
         draft: Box<GovernedEvidenceDocumentDraft>,
@@ -369,36 +432,21 @@ pub enum MemoryEvidenceDocumentMutation {
     },
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MemoryWriteRequest {
-    Procedural {
-        writes: Vec<GovernedRuntimeSkillWriteInput>,
-        owning_scope: RuntimeSkillOwningScope,
-        source: RuntimeSkillWriteSource,
-    },
-    ProceduralPromotions {
-        promotions: Vec<ProceduralMemoryPromotionInput>,
-        owning_scope: RuntimeSkillOwningScope,
-        source: RuntimeSkillWriteSource,
-    },
     LongTermExtraction {
         extraction: ParsedLongTermMemoryExtraction,
-        governed_skill_writes: Vec<GovernedRuntimeSkillWriteInput>,
-        runtime_skill_owning_scope: Option<RuntimeSkillOwningScope>,
     },
     Candidates {
         candidates: Vec<bm_core::memory::MemoryWriteCandidate>,
-        runtime_skill_owning_scope: Option<RuntimeSkillOwningScope>,
     },
     GovernedEvidenceDocuments {
         mutations: Vec<MemoryEvidenceDocumentMutation>,
     },
-    AgentToolUsageFeedback {
-        feedback: AgentToolUsageFeedback,
-    },
 }
 
+#[cfg(feature = "nonproduction-replay-harness")]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GovernedRuntimeSkillWriteInput {
@@ -427,9 +475,6 @@ pub struct MemoryWriteReport {
     pub transaction: Option<MemoryWriteTransactionReport>,
     pub semantic_governance: Option<PostTurnSemanticGovernanceReport>,
     pub shared_fact_governance: Option<bm_core::memory::SharedMemoryWriteOutcome>,
-    pub procedural_evolution: Option<SkillEvolutionReport>,
-    pub procedural_promotions: Vec<ProceduralMemoryPromotionReport>,
-    pub agent_tool_experience: Option<AgentToolExperienceGovernanceReport>,
     pub evidence_documents: Option<MemoryEvidenceDocumentWriteSummary>,
 }
 
@@ -1069,6 +1114,7 @@ impl MemoryRecallReport {
 
 #[derive(Clone, Debug)]
 pub struct MemoryProjectionRequest {
+    pub binding: bm_core::memory::ProceduralProjectionBindingV1,
     pub temporal_operation: MemoryRecallTemporalOperation,
     pub user_query: String,
     pub system_max_len: usize,
@@ -1258,28 +1304,11 @@ pub struct MemoryRecallDeliverySafeView {
     pub delivery_drop_reasons: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProviderProjectionMaintenanceCarry {
-    pub(crate) runtime_skill_selected_ids: Vec<String>,
-    pub(crate) task_learning_selected_ids: Vec<String>,
-}
-
-impl ProviderProjectionMaintenanceCarry {
-    pub fn runtime_skill_selected_ids(&self) -> &[String] {
-        &self.runtime_skill_selected_ids
-    }
-
-    pub fn task_learning_selected_ids(&self) -> &[String] {
-        &self.task_learning_selected_ids
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct ProviderProjectionPayload {
     pub(crate) system_memory_block: String,
     pub(crate) recent_messages: Vec<SessionMessage>,
     pub(crate) agent_tool_hints: Vec<AgentToolHint>,
-    pub(crate) maintenance_carry: ProviderProjectionMaintenanceCarry,
 }
 
 impl ProviderProjectionPayload {
@@ -1293,10 +1322,6 @@ impl ProviderProjectionPayload {
 
     pub fn agent_tool_hints(&self) -> &[AgentToolHint] {
         &self.agent_tool_hints
-    }
-
-    pub fn maintenance_carry(&self) -> &ProviderProjectionMaintenanceCarry {
-        &self.maintenance_carry
     }
 }
 
@@ -1326,6 +1351,7 @@ impl ProviderProjectionPayload {
 /// }
 /// ```
 pub struct MemoryProjectionReport {
+    pub(crate) selection_receipt: Option<bm_core::memory::ProceduralSelectionReceiptV1>,
     pub(crate) temporal_operation: MemoryRecallTemporalOperation,
     pub(crate) ui_api_projection: String,
     pub(crate) ui_api_chars: usize,
@@ -1342,6 +1368,10 @@ pub struct MemoryProjectionReport {
 }
 
 impl MemoryProjectionReport {
+    pub fn selection_receipt(&self) -> Option<&bm_core::memory::ProceduralSelectionReceiptV1> {
+        self.selection_receipt.as_ref()
+    }
+
     pub const fn temporal_operation(&self) -> MemoryRecallTemporalOperation {
         self.temporal_operation
     }
@@ -1471,10 +1501,6 @@ pub struct MemoryMaintenanceRequest {
     pub reply_content: String,
     pub tool_calls: u32,
     pub external_content_used: bool,
-    pub runtime_skill_selected_ids: Vec<String>,
-    pub task_learning_selected_ids: Vec<String>,
-    pub reuse_outcome: RuntimeSkillReuseOutcome,
-    pub reuse_outcome_note: String,
     pub pressure: crate::PressureLevel,
     pub mode_input: RuntimeLifecycleModeInput,
 }
@@ -1489,11 +1515,7 @@ pub struct MemoryMaintenanceReport {
 #[derive(Clone, Debug)]
 pub struct MemoryTurnFinalizeRequest {
     pub turn: CanonicalTurnDelta,
-    pub tool_calls: u32,
-    pub runtime_skill_selected_ids: Vec<String>,
-    pub task_learning_selected_ids: Vec<String>,
-    pub reuse_outcome_note: String,
-    pub tool_usage_feedback: Option<AgentToolUsageFeedback>,
+    pub learning: bm_core::memory::PostTurnLearningInputV1,
     pub pressure: crate::PressureLevel,
     pub mode_input: RuntimeLifecycleModeInput,
 }
@@ -1505,6 +1527,7 @@ pub struct MemoryTurnFinalizeReport {
     pub private_garden_self_work: PostTurnPrivateGardenReport,
     pub semantic_governance: PostTurnSemanticGovernanceReport,
     pub memory_consolidation: MemoryConsolidationReport,
+    pub procedural_learning: MemoryProceduralLearningIntentReport,
     pub lifecycle_report: RuntimeLifecycleReport,
 }
 
@@ -1519,6 +1542,14 @@ pub enum MemoryConsolidationState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MemoryConsolidationReport {
+    pub state: MemoryConsolidationState,
+    pub job_id: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MemoryProceduralLearningIntentReport {
     pub state: MemoryConsolidationState,
     pub job_id: Option<String>,
     pub reason: String,
@@ -1677,6 +1708,9 @@ pub struct MemoryGovernanceReconcileReport {
     pub created: usize,
     pub cursor_sequence: u64,
     pub has_more: bool,
+    pub procedural_created: usize,
+    pub procedural_cursor_sequence: u64,
+    pub procedural_has_more: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2452,11 +2486,6 @@ pub struct MemorySpaceImportReport {
     pub inserted_json_docs: usize,
     pub deleted_events: usize,
     pub inserted_events: usize,
-}
-
-#[derive(Clone, Debug)]
-pub struct MemoryProceduralWriteReport {
-    pub outcome: RuntimeSkillWriteOutcome,
 }
 
 #[derive(Clone, Debug, Serialize)]

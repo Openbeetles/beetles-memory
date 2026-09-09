@@ -11,10 +11,9 @@ use bm_sdk::{
     MemoryAuditSink, MemoryClock, MemoryIdentity, MemoryInspectionRequest,
     MemoryMaintenanceRequest, MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryProjectionRequest,
     MemoryRecallRequest, MemoryRuntime, MemoryScope, MemoryTurnDeliveryStatus,
-    MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteRequest, Message,
-    NoopMemoryAuditSink, PressureLevel, ProfileId, Result, RuntimeLifecycleModeInput,
-    RuntimeSkillCreationRef, RuntimeSkillOwningScope, RuntimeSkillPremiseObservation,
-    RuntimeSkillReuseOutcome, RuntimeSkillWrite, RuntimeSkillWriteSource, StopReason,
+    MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, Message, NoopMemoryAuditSink,
+    PressureLevel, ProfileId, Result, RuntimeLifecycleModeInput, RuntimeSkillCreationRef,
+    RuntimeSkillOwningScope, RuntimeSkillPremiseObservation, RuntimeSkillWrite, StopReason,
     ToolChoicePolicy, ToolSpec, TranscriptInputMessage,
 };
 
@@ -107,11 +106,7 @@ fn seed_private_garden_with_production_owner(
             external_content_used: false,
             candidate_ids: Vec::new(),
         },
-        tool_calls: 0,
-        runtime_skill_selected_ids: Vec::new(),
-        task_learning_selected_ids: Vec::new(),
-        reuse_outcome_note: String::new(),
-        tool_usage_feedback: None,
+        learning: bm_sdk::PostTurnLearningInputV1::empty(),
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     };
@@ -135,8 +130,8 @@ fn runtime_write_recall_project_uses_sdk_entry_only() {
     let runtime = test_runtime(platform, profile);
 
     let write = runtime
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
+        .seed_runtime_skills_for_replay(
+            vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
                 name: "release_guard".to_string(),
                 topic: "release".to_string(),
                 title: "Release artifact guard".to_string(),
@@ -146,25 +141,15 @@ fn runtime_write_recall_project_uses_sdk_entry_only() {
                 source_chat_id: Some("chat-1".to_string()),
                 observed_at: 1_800_000_000,
             })],
-            owning_scope: support::runtime_skill_subject_scope(),
-            source: RuntimeSkillWriteSource::Manual,
-        })
+            support::runtime_skill_subject_scope(),
+        )
         .expect("write");
 
     assert!(write.accepted);
     assert_eq!(write.changed, 1);
-    let evolution = write
-        .procedural_evolution
-        .as_ref()
-        .expect("procedural evolution report");
-    assert!(evolution
-        .added
-        .iter()
-        .any(|name| name == "runtime_skill__release_guard"));
-    assert!(evolution
-        .reasons
-        .iter()
-        .any(|reason| reason.contains("procedural_memory")));
+    let transaction = write.transaction.as_ref().expect("fixture transaction");
+    assert_eq!(transaction.changed_count, 1);
+    assert!(!transaction.partial_write);
 
     let recall = runtime
         .recall(MemoryRecallRequest {
@@ -198,6 +183,7 @@ fn runtime_write_recall_project_uses_sdk_entry_only() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "How should I publish?".to_string(),
@@ -266,8 +252,8 @@ fn runtime_projection_drops_an_oversized_procedure_as_one_exact_item() {
     let procedure = vec!["PROCEDURAL_BUDGET_SENTINEL_STEP"; 96].join("\n");
 
     let write = runtime
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
+        .seed_runtime_skills_for_replay(
+            vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
                 name: "budget_guard".to_string(),
                 topic: "budget".to_string(),
                 title: "Budget guard".to_string(),
@@ -277,15 +263,15 @@ fn runtime_projection_drops_an_oversized_procedure_as_one_exact_item() {
                 source_chat_id: Some("chat-1".to_string()),
                 observed_at: 1_800_000_000,
             })],
-            owning_scope: support::runtime_skill_subject_scope(),
-            source: RuntimeSkillWriteSource::Manual,
-        })
+            support::runtime_skill_subject_scope(),
+        )
         .expect("write oversized governed procedure");
     assert!(write.accepted, "{write:#?}");
     assert_eq!(write.changed, 1, "{write:#?}");
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "budget workflow".to_string(),
@@ -339,8 +325,8 @@ fn runtime_projection_accepts_the_exact_procedural_ceiling_and_rejects_ceiling_m
     let runtime = test_runtime(platform, profile);
     let sentinel = "PROCEDURAL_EXACT_CEILING_SENTINEL";
     let write = runtime
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
+        .seed_runtime_skills_for_replay(
+            vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
                 name: "exact_ceiling_guard".to_string(),
                 topic: "exact procedural ceiling".to_string(),
                 title: "Exact procedural ceiling".to_string(),
@@ -351,15 +337,15 @@ fn runtime_projection_accepts_the_exact_procedural_ceiling_and_rejects_ceiling_m
                 source_chat_id: Some("chat-1".to_string()),
                 observed_at: 1_800_000_000,
             })],
-            owning_scope: support::runtime_skill_subject_scope(),
-            source: RuntimeSkillWriteSource::Manual,
-        })
+            support::runtime_skill_subject_scope(),
+        )
         .expect("write exact-ceiling governed procedure");
     assert!(write.accepted, "{write:#?}");
 
     let project = |system_max_len| {
         runtime
             .project(MemoryProjectionRequest {
+                binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
                 temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 structured_query_facets: Vec::new(),
                 user_query: "exact procedural ceiling".to_string(),
@@ -452,8 +438,8 @@ fn runtime_projection_keeps_the_fitting_item_and_drops_only_the_n_plus_one_item(
         input
     };
     let write = runtime
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![
+        .seed_runtime_skills_for_replay(
+            vec![
                 make_write(
                     "n_plus_one_small",
                     "1. N_PLUS_ONE_FITTING_SENTINEL\n2. Verify the accepted item.".to_string(),
@@ -467,15 +453,15 @@ fn runtime_projection_keeps_the_fitting_item_and_drops_only_the_n_plus_one_item(
                     '9',
                 ),
             ],
-            owning_scope: support::runtime_skill_subject_scope(),
-            source: RuntimeSkillWriteSource::Manual,
-        })
+            support::runtime_skill_subject_scope(),
+        )
         .expect("write N+1 governed procedures");
     assert!(write.accepted, "{write:#?}");
     assert_eq!(write.changed, 2, "{write:#?}");
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "n plus one budget".to_string(),
@@ -549,20 +535,20 @@ fn runtime_projection_attributes_identical_procedures_to_distinct_opaque_candida
         input
     };
     let write = runtime
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![
+        .seed_runtime_skills_for_replay(
+            vec![
                 make_write("duplicate_a", "test:duplicate-procedure-a", 'a'),
                 make_write("duplicate_b", "test:duplicate-procedure-b", 'b'),
             ],
-            owning_scope: support::runtime_skill_subject_scope(),
-            source: RuntimeSkillWriteSource::Manual,
-        })
+            support::runtime_skill_subject_scope(),
+        )
         .expect("write equal-content governed procedures");
     assert!(write.accepted, "{write:#?}");
     assert_eq!(write.changed, 2, "{write:#?}");
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "duplicate procedure".to_string(),
@@ -647,16 +633,13 @@ fn runtime_projection_keeps_private_runtime_skills_out_of_every_surface_and_rece
         };
         input.privacy_class = privacy_class;
         let write = runtime
-            .write(MemoryWriteRequest::Procedural {
-                writes: vec![input],
-                owning_scope: support::runtime_skill_subject_scope(),
-                source: RuntimeSkillWriteSource::Manual,
-            })
+            .seed_runtime_skills_for_replay(vec![input], support::runtime_skill_subject_scope())
             .expect("write private governed procedure");
         assert!(write.accepted, "{write:#?}");
 
         let projection = runtime
             .project(MemoryProjectionRequest {
+                binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
                 temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 structured_query_facets: Vec::new(),
                 user_query: name.replace('_', " "),
@@ -723,8 +706,8 @@ fn runtime_projection_applies_the_shared_program_privacy_matrix_to_every_surface
     let public_sentinel = "SHARED_PROGRAM_PUBLIC_RUNTIME_SENTINEL";
     let private_sentinel = "SHARED_PROGRAM_SHARED_WITH_SUBJECT_SENTINEL";
     let write = runtime
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![
+        .seed_runtime_skills_for_replay(
+            vec![
                 make_write(
                     "shared_program_public_runtime",
                     "orbit launch checklist",
@@ -740,9 +723,8 @@ fn runtime_projection_applies_the_shared_program_privacy_matrix_to_every_surface
                     '5',
                 ),
             ],
-            owning_scope: RuntimeSkillOwningScope::SharedProgram,
-            source: RuntimeSkillWriteSource::Manual,
-        })
+            RuntimeSkillOwningScope::SharedProgram,
+        )
         .expect("write SharedProgram privacy matrix");
     assert!(write.accepted, "{write:#?}");
     assert_eq!(write.changed, 2, "{write:#?}");
@@ -750,6 +732,7 @@ fn runtime_projection_applies_the_shared_program_privacy_matrix_to_every_surface
     let project = |query: &str| {
         runtime
             .project(MemoryProjectionRequest {
+                binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
                 temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 structured_query_facets: Vec::new(),
                 user_query: query.to_string(),
@@ -846,8 +829,8 @@ fn runtime_projection_does_not_read_cross_subject_or_cross_space_runtime_skills(
     );
     let seed = |runtime: &MemoryRuntime, name: &str, sentinel: &str| {
         let write = runtime
-            .write(MemoryWriteRequest::Procedural {
-                writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
+            .seed_runtime_skills_for_replay(
+                vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
                     name: name.to_string(),
                     topic: name.replace('_', " "),
                     title: name.replace('_', " "),
@@ -858,11 +841,10 @@ fn runtime_projection_does_not_read_cross_subject_or_cross_space_runtime_skills(
                     source_chat_id: Some("foreign-chat".to_string()),
                     observed_at: 1_800_000_000,
                 })],
-                owning_scope: bm_sdk::RuntimeSkillOwningScope::Subject {
+                bm_sdk::RuntimeSkillOwningScope::Subject {
                     mounted_subject_id: runtime.subject_id().to_string(),
                 },
-                source: RuntimeSkillWriteSource::Manual,
-            })
+            )
             .expect("seed foreign governed procedure");
         assert!(write.accepted, "{write:#?}");
     };
@@ -889,6 +871,7 @@ fn runtime_projection_does_not_read_cross_subject_or_cross_space_runtime_skills(
     ] {
         let projection = main
             .project(MemoryProjectionRequest {
+                binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
                 temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 structured_query_facets: Vec::new(),
                 user_query: query.to_string(),
@@ -926,8 +909,8 @@ fn runtime_projection_reports_same_scope_query_miss_without_exposing_owner_ident
     let platform = empty_store_platform(profile);
     let runtime = test_runtime(platform, profile);
     runtime
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
+        .seed_runtime_skills_for_replay(
+            vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
                 name: "release_guard".to_string(),
                 topic: "release".to_string(),
                 title: "Release guard".to_string(),
@@ -937,13 +920,13 @@ fn runtime_projection_reports_same_scope_query_miss_without_exposing_owner_ident
                 source_chat_id: Some("chat-1".to_string()),
                 observed_at: 1_800_000_000,
             })],
-            owning_scope: support::runtime_skill_subject_scope(),
-            source: RuntimeSkillWriteSource::Manual,
-        })
+            support::runtime_skill_subject_scope(),
+        )
         .expect("write governed procedure");
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "unrelated gardening question".to_string(),
@@ -997,8 +980,8 @@ fn runtime_rejects_host_asserted_governed_premise_presence() {
         .build()
         .expect("runtime");
     let write = runtime
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
+        .seed_runtime_skills_for_replay(
+            vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
                 name: "release_guard".to_string(),
                 topic: "release".to_string(),
                 title: "Release artifact guard".to_string(),
@@ -1008,9 +991,8 @@ fn runtime_rejects_host_asserted_governed_premise_presence() {
                 source_chat_id: Some("chat-1".to_string()),
                 observed_at: 1_800_000_000,
             })],
-            owning_scope: support::runtime_skill_subject_scope(),
-            source: RuntimeSkillWriteSource::Manual,
-        })
+            support::runtime_skill_subject_scope(),
+        )
         .expect("seed typed RuntimeSkill");
     assert!(write.accepted, "{write:#?}");
     assert_eq!(write.changed, 1);
@@ -1067,6 +1049,7 @@ fn runtime_projection_isolates_session_context_by_chat_scope_under_same_store_pl
     let project = |runtime: &MemoryRuntime, query: &str| {
         runtime
             .project(MemoryProjectionRequest {
+                binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
                 temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
                 structured_query_facets: Vec::new(),
                 user_query: query.to_string(),
@@ -1107,10 +1090,6 @@ fn runtime_maintain_and_inspect_return_structured_reports() {
                 reply_content: "I will verify artifacts first.".to_string(),
                 tool_calls: 0,
                 external_content_used: false,
-                runtime_skill_selected_ids: Vec::new(),
-                task_learning_selected_ids: Vec::new(),
-                reuse_outcome: RuntimeSkillReuseOutcome::Neutral,
-                reuse_outcome_note: String::new(),
                 pressure: PressureLevel::Normal,
                 mode_input: RuntimeLifecycleModeInput::default(),
             },
@@ -1159,6 +1138,7 @@ fn runtime_projection_includes_private_planes_when_policy_allows_it() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "release".to_string(),
@@ -1246,6 +1226,7 @@ fn runtime_projection_excludes_private_planes_when_policy_denies_it() {
 
     let projection = runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "release".to_string(),

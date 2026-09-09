@@ -80,6 +80,105 @@ fn governed_state_and_benchmark_profile_participation_totals_are_exact() {
 }
 
 #[test]
+fn procedural_learning_capability_snapshot_is_explicit_per_profile() {
+    let policy = MemoryCapabilityPolicy::strict_profile();
+    let privacy = MemoryPrivacyPolicy::standard_private_boundary();
+    let expectations = [
+        (ProfileId::EspStandaloneMemory, false),
+        (ProfileId::EspEmbeddedSdk, false),
+        (ProfileId::LinuxDeviceStandaloneMemory, true),
+        (ProfileId::DesktopMacosStandaloneMemory, true),
+        (ProfileId::DesktopMacosEmbeddedSdk, true),
+        (ProfileId::DesktopMacosDevFull, true),
+        (ProfileId::DesktopLinuxEmbeddedSdk, true),
+        (ProfileId::DesktopWindowsEmbeddedSdk, true),
+        (ProfileId::DesktopWindowsDevFull, true),
+        (ProfileId::ServerLinuxMemoryGateway, true),
+        (ProfileId::ServerLinuxDevFull, true),
+    ];
+
+    for (profile, full_learning_allowed) in expectations {
+        let catalog = resolve_memory_capabilities(profile, &policy, &privacy).expect("catalog");
+        let procedural = catalog.procedural_learning;
+        for operation in [
+            procedural.standard_agent_skill_mount,
+            procedural.agent_tool_registry,
+            procedural.agent_tool_experience_read,
+            procedural.agent_tool_hint,
+            procedural.agent_tool_learning,
+            procedural.selection_receipt,
+            procedural.finalize_feedback,
+            procedural.worker,
+        ] {
+            assert_eq!(
+                operation.profile_allowed, full_learning_allowed,
+                "{profile:?} profile matrix drifted"
+            );
+        }
+        if matches!(
+            profile,
+            ProfileId::EspStandaloneMemory | ProfileId::EspEmbeddedSdk
+        ) {
+            assert!(catalog.governed_state.procedural_recall.profile_allowed);
+        }
+    }
+}
+
+#[test]
+fn procedural_learning_visibility_uses_the_owning_policy_and_privacy_gate() {
+    let profile = ProfileId::DesktopMacosEmbeddedSdk;
+    let privacy = MemoryPrivacyPolicy::standard_private_boundary();
+
+    let mut policy = MemoryCapabilityPolicy::strict_profile();
+    policy.projection_enabled = false;
+    let catalog = resolve_memory_capabilities(profile, &policy, &privacy).expect("catalog");
+    assert!(
+        !catalog
+            .procedural_learning
+            .standard_agent_skill_mount
+            .visible
+    );
+    assert!(!catalog.procedural_learning.agent_tool_hint.visible);
+    assert!(!catalog.procedural_learning.selection_receipt.visible);
+    assert!(catalog.procedural_learning.agent_tool_registry.visible);
+    assert!(catalog.procedural_learning.agent_tool_learning.visible);
+
+    let mut policy = MemoryCapabilityPolicy::strict_profile();
+    policy.write_enabled = false;
+    let catalog = resolve_memory_capabilities(profile, &policy, &privacy).expect("catalog");
+    assert!(!catalog.procedural_learning.agent_tool_learning.visible);
+    assert!(!catalog.procedural_learning.finalize_feedback.visible);
+    assert!(catalog.procedural_learning.selection_receipt.visible);
+
+    let mut policy = MemoryCapabilityPolicy::strict_profile();
+    policy.maintenance_enabled = false;
+    let catalog = resolve_memory_capabilities(profile, &policy, &privacy).expect("catalog");
+    assert!(!catalog.procedural_learning.worker.visible);
+    assert!(catalog.procedural_learning.finalize_feedback.visible);
+
+    let mut privacy = MemoryPrivacyPolicy::standard_private_boundary();
+    privacy.prompt_projection_allowed = false;
+    let catalog =
+        resolve_memory_capabilities(profile, &MemoryCapabilityPolicy::strict_profile(), &privacy)
+            .expect("catalog");
+    assert!(
+        !catalog
+            .procedural_learning
+            .standard_agent_skill_mount
+            .visible
+    );
+    assert!(
+        !catalog
+            .procedural_learning
+            .agent_tool_experience_read
+            .visible
+    );
+    assert!(!catalog.procedural_learning.agent_tool_hint.visible);
+    assert!(!catalog.procedural_learning.selection_receipt.visible);
+    assert!(catalog.procedural_learning.agent_tool_learning.visible);
+}
+
+#[test]
 fn governed_state_profile_participation_matrix_is_typed_and_not_yet_advertised() {
     let policy = MemoryCapabilityPolicy::strict_profile();
     let privacy = MemoryPrivacyPolicy::standard_private_boundary();

@@ -1,5 +1,5 @@
 {
-  "schema": "beetle-memory.platform.capability.v4",
+  "schema": "beetle-memory.platform.capability.v5",
   "profile": "profile-server-linux-memory-gateway",
   "target": "target-server-linux",
   "role": "role-memory-gateway",
@@ -164,5 +164,47 @@
       "visible": false
     },
     "runtime_skill_recall_transport": "unavailable"
+  },
+  "procedural_learning": {
+    "standard_agent_skill_mount": {
+      "profile_allowed": true,
+      "compiled": true,
+      "visible": true
+    },
+    "agent_tool_registry": {
+      "profile_allowed": true,
+      "compiled": true,
+      "visible": true
+    },
+    "agent_tool_experience_read": {
+      "profile_allowed": true,
+      "compiled": true,
+      "visible": true
+    },
+    "agent_tool_hint": {
+      "profile_allowed": true,
+      "compiled": true,
+      "visible": true
+    },
+    "agent_tool_learning": {
+      "profile_allowed": true,
+      "compiled": true,
+      "visible": true
+    },
+    "selection_receipt": {
+      "profile_allowed": true,
+      "compiled": true,
+      "visible": true
+    },
+    "finalize_feedback": {
+      "profile_allowed": true,
+      "compiled": true,
+      "visible": true
+    },
+    "worker": {
+      "profile_allowed": true,
+      "compiled": true,
+      "visible": true
+    }
   }
 }

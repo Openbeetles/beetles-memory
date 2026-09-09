@@ -94,6 +94,7 @@ impl DesktopConsoleState {
                 owner_id: memory_authority.owner_id.clone(),
             },
             scope: EntryScope {
+                conversation_id: None,
                 channel: memory_authority.channel.clone(),
                 chat_id: memory_authority.chat_id.clone(),
             },

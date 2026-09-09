@@ -7,6 +7,9 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::store_internal::agent_tool_experience::{
+    combine_agent_tool_experience_plans, AgentToolExperienceStoreMutationPlanV1,
+};
 use crate::store_internal::recall_index::{
     decode_typed_recall_index, ActiveTaskRunByChatIndex, ArchiveRecallManifest,
     ContinuityCapsuleScopeIndex, ConversationRecallManifest, ConversationTranscriptAuxManifest,
@@ -21,10 +24,12 @@ use crate::store_internal::schema::{
     is_subject_soul_protected_json_namespace, relationship_source_revision_key,
     relationship_source_scope_key, subject_soul_generation_tombstone_key,
     subject_soul_relationship_projection_key, subject_soul_revision_material_key,
-    subject_soul_scope_key, RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE,
-    RELATIONSHIP_SOURCE_SCOPE_MANIFEST_NAMESPACE, SUBJECT_SOUL_GENERATION_TOMBSTONE_NAMESPACE,
-    SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE, SUBJECT_SOUL_RELATIONSHIP_PROJECTION_NAMESPACE,
-    SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE, SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE,
+    subject_soul_scope_key, AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE,
+    AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE, AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE,
+    RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE, RELATIONSHIP_SOURCE_SCOPE_MANIFEST_NAMESPACE,
+    SUBJECT_SOUL_GENERATION_TOMBSTONE_NAMESPACE, SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE,
+    SUBJECT_SOUL_RELATIONSHIP_PROJECTION_NAMESPACE, SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE,
+    SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE,
 };
 use crate::store_internal::subject_soul::{
     RelationshipSourceStoreMutationOutcome, RelationshipSourceStoreMutationPlan,
@@ -56,43 +61,44 @@ use bm_core::memory::{
     build_long_term_memory_facet_index_doc, build_memory_graph_persistence_plan,
     build_procedural_memory_delivery_report, build_temporal_memory_graph_from_evidence,
     build_temporal_memory_graph_from_parts, canonical_recall_evidence_group,
-    coalesce_continuity_snapshot_import_plans, commit_canonical_turn_delta_with_transcript,
-    compile_inhabited_subject_projection, default_agent_subject_id, default_memory_space_id,
-    filter_host_refs_for_transcript_view, finalize_procedural_memory_delivery_report,
-    govern_write_candidates, governed_evidence_source_ref_from_document,
-    governed_long_term_owner_evidence_bindings, governed_memory_recall_candidate_id,
-    inspect_intelligence_replay, inspect_memory_hygiene, inspect_working_recall,
-    load_prompt_memory_context, long_term_version_head_key, long_term_version_material_key,
-    long_term_version_scope_manifest_key, memory_facet_manifest_key, memory_facet_posting_key,
-    memory_graph_backlink_key, memory_graph_integrity_incident_token,
-    memory_graph_recall_index_key, memory_graph_scope_digest, memory_graph_scope_manifest_key,
-    normalize_private_garden_doc_path, plan_continuity_snapshot_import,
-    plan_governed_evidence_document_delete, plan_governed_evidence_document_upsert,
-    plan_governed_shared_memory_in_space, plan_long_term_memory_control_mutation,
-    plan_long_term_memory_governance_policy_mutation, plan_long_term_memory_owner_mutation,
-    plan_long_term_memory_upsert, plan_relationship_source_control, plan_self_runtime,
-    plan_subject_soul_autonomous_cycle_v1, plan_subject_soul_lifecycle_v1,
-    plan_subject_soul_provision_v1, plan_subject_soul_relationship_projection_v1,
-    plan_temporal_memory_graph_write, post_turn_governance_transcript_digest,
-    project_current_long_term_recall_lifecycle_facts,
-    project_historical_long_term_recall_lifecycle_facts, promote_task_experience_to_procedure,
-    relationship_scope, rerank_recall_with_temporal_graph,
-    rerank_recall_with_temporal_graph_and_facets, run_long_term_memory_refresh,
-    run_long_term_memory_refresh_strict, run_memory_retention_compaction,
-    run_post_reply_memory_maintenance, run_private_garden_governance,
-    run_private_garden_governance_strict, scoped_governed_evidence_document_key,
-    scoped_governed_evidence_source_ref_key, scoped_long_term_control_storage_key,
-    scoped_long_term_memory_storage_key, scoped_memory_facet_owner_storage_key,
-    score_recall_delivery_texts, select_long_term_current_recall_query_time,
-    select_long_term_historical_recall_query_time, subject_soul_lifecycle_intent_digest_v1,
-    subject_soul_provision_intent_digest_v1, transcript_cursor_governance_context_digest,
-    validate_governed_evidence_document, validate_governed_evidence_source_ref,
-    validate_memory_facet_manifest, validate_memory_facet_posting,
-    validate_memory_facet_read_chain, validate_memory_graph_read_chain,
-    validate_memory_graph_revision_doc, validate_memory_graph_scope_manifest, AutonomyStrategy,
-    AutonomyStrategyStore, CanonicalTurnDelta, CompactMemoryGraph, ContinuitySnapshotImportContext,
-    ContinuitySnapshotImportPlan, ConversationKey, ConversationTranscriptStore, CoreRevisionLedger,
-    CoreRevisionLedgerStore, DeferredGovernanceQueueReport, DerivedMemoryPlane, DerivedMemoryRef,
+    canonical_turn_learning_digest, coalesce_continuity_snapshot_import_plans,
+    commit_canonical_turn_delta_with_transcript, compile_inhabited_subject_projection,
+    default_agent_subject_id, default_memory_space_id, filter_host_refs_for_transcript_view,
+    finalize_procedural_memory_delivery_report, govern_write_candidates,
+    governed_evidence_source_ref_from_document, governed_long_term_owner_evidence_bindings,
+    governed_memory_recall_candidate_id, inspect_intelligence_replay, inspect_memory_hygiene,
+    inspect_working_recall, load_prompt_memory_context, long_term_version_head_key,
+    long_term_version_material_key, long_term_version_scope_manifest_key,
+    memory_facet_manifest_key, memory_facet_posting_key, memory_graph_backlink_key,
+    memory_graph_integrity_incident_token, memory_graph_recall_index_key,
+    memory_graph_scope_digest, memory_graph_scope_manifest_key, normalize_private_garden_doc_path,
+    plan_continuity_snapshot_import, plan_governed_evidence_document_delete,
+    plan_governed_evidence_document_upsert, plan_governed_shared_memory_in_space,
+    plan_long_term_memory_control_mutation, plan_long_term_memory_governance_policy_mutation,
+    plan_long_term_memory_owner_mutation, plan_long_term_memory_upsert,
+    plan_relationship_source_control, plan_self_runtime, plan_subject_soul_autonomous_cycle_v1,
+    plan_subject_soul_lifecycle_v1, plan_subject_soul_provision_v1,
+    plan_subject_soul_relationship_projection_v1, plan_temporal_memory_graph_write,
+    post_turn_governance_transcript_digest, project_current_long_term_recall_lifecycle_facts,
+    project_historical_long_term_recall_lifecycle_facts, relationship_scope,
+    rerank_recall_with_temporal_graph, rerank_recall_with_temporal_graph_and_facets,
+    run_long_term_memory_refresh, run_long_term_memory_refresh_strict,
+    run_memory_retention_compaction, run_post_reply_memory_maintenance,
+    run_private_garden_governance, run_private_garden_governance_strict,
+    scoped_governed_evidence_document_key, scoped_governed_evidence_source_ref_key,
+    scoped_long_term_control_storage_key, scoped_long_term_memory_storage_key,
+    scoped_memory_facet_owner_storage_key, score_recall_delivery_texts,
+    select_long_term_current_recall_query_time, select_long_term_historical_recall_query_time,
+    subject_soul_lifecycle_intent_digest_v1, subject_soul_provision_intent_digest_v1,
+    transcript_cursor_governance_context_digest, validate_governed_evidence_document,
+    validate_governed_evidence_source_ref, validate_memory_facet_manifest,
+    validate_memory_facet_posting, validate_memory_facet_read_chain,
+    validate_memory_graph_read_chain, validate_memory_graph_revision_doc,
+    validate_memory_graph_scope_manifest, AgentToolUsageFeedbackV2, AutonomyStrategy,
+    AutonomyStrategyStore, CanonicalTurnDelta, CanonicalTurnTranscriptCommitOptions,
+    CompactMemoryGraph, ContinuitySnapshotImportContext, ContinuitySnapshotImportPlan,
+    ConversationKey, ConversationTranscriptStore, CoreRevisionLedger, CoreRevisionLedgerStore,
+    DeferredGovernanceQueueReport, DerivedMemoryPlane, DerivedMemoryRef,
     DroppedProjectionCandidate, DynamicStateResolutionReport, EvidenceBacklink,
     FacetCoverageSelectionReport, FacetRankFusionCandidateReport, FacetRankFusionReport,
     FacetReportAudience, FeltSignificance, FeltSignificanceStore, GovernedEvidenceBinding,
@@ -133,28 +139,28 @@ use bm_core::memory::{
     PostTurnGovernanceBindingSnapshotV1, PostTurnGovernanceDecisionSummaryV1,
     PostTurnGovernanceExecutionBindingV1, PostTurnGovernanceIdentityV2,
     PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV3, PostTurnGovernancePrivacyAuthorityV1,
-    PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport, PremiseTypedSource,
-    PrivateDocStore, PrivateDocWorkspace, PrivateGardenDoc, PrivateGardenDocRecord,
-    PrivateGardenGovernanceContext, PrivateGardenGovernanceInput,
+    PostTurnLearningEvidenceV1, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
+    PremiseTypedSource, PrivateDocStore, PrivateDocWorkspace, PrivateGardenDoc,
+    PrivateGardenDocRecord, PrivateGardenGovernanceContext, PrivateGardenGovernanceInput,
     PrivateGardenGovernanceManifestEntry, PrivateGardenGovernanceOutcome, PrivateGardenStore,
-    ProceduralMemoryDeliveryReport, ProceduralMemoryPromotionPolicy,
-    ProceduralMemoryPromotionReport, ProjectionBudgetDecision, ProjectionFaithfulnessCheck,
-    ProjectionPrivacyDecision, PromptMemoryContextParams, PromptParticipationPlan,
-    PromptProjectionSource, PromptProjectionSurfaceRole, PromptRecallIntent, QueryFacet,
-    QueryFacetInput, QueryFacetParser, RecallCandidate, RecallDeliveryCandidate,
-    RecallDeliveryOrderingPolicy, RecallDeliveryText, RecallSelectionReport,
-    RedactedTranscriptSlice, RelationshipConstitution, RelationshipConstitutionStore,
-    RelationshipPortfolio, RelationshipPortfolioStore, RelationshipSourceConstitutionV1,
-    RelationshipSourceControlAuthorityV1, RelationshipSourceControlErrorKeyV1,
-    RelationshipSourceControlIntentV1, RelationshipSourceControlReportV1,
-    RelationshipSourceExpectedStateV1, RelationshipSourceReadRequestV1,
-    RelationshipSourceReadSelectorV1, RelationshipTopology, RelationshipTopologyStore,
-    SelfAuthoredCore, SelfAuthoredCoreRefreshPlanV1, SelfAuthoredCoreStore, SelfContinuity,
-    SelfContinuityStore, SelfModel, SelfModelStore, SelfRuntimeContext,
-    SelfRuntimeInitialPlanningStateV1, SelfRuntimeJobPayload, SelfRuntimePlannedEffectV1,
-    SelfRuntimeTrigger, SessionMessage, SessionMessageRecord, SessionStore, SessionSummaryStore,
-    SharedFactWriteGovernanceContext, SharedMemoryWriteAction, SharedMemoryWriteOutcome,
-    SharedMemoryWriteReason, SharedMemoryWriteSource, SkillEvolutionReport, SubjectKind,
+    ProceduralExecutionOutcomeV1, ProceduralFeedbackAuthorityV1, ProceduralFeedbackIdentityV1,
+    ProceduralFeedbackJobV1, ProceduralMemoryDeliveryReport, ProjectionBudgetDecision,
+    ProjectionFaithfulnessCheck, ProjectionPrivacyDecision, PromptMemoryContextParams,
+    PromptParticipationPlan, PromptProjectionSource, PromptProjectionSurfaceRole,
+    PromptRecallIntent, QueryFacet, QueryFacetInput, QueryFacetParser, RecallCandidate,
+    RecallDeliveryCandidate, RecallDeliveryOrderingPolicy, RecallDeliveryText,
+    RecallSelectionReport, RedactedTranscriptSlice, RelationshipConstitution,
+    RelationshipConstitutionStore, RelationshipPortfolio, RelationshipPortfolioStore,
+    RelationshipSourceConstitutionV1, RelationshipSourceControlAuthorityV1,
+    RelationshipSourceControlErrorKeyV1, RelationshipSourceControlIntentV1,
+    RelationshipSourceControlReportV1, RelationshipSourceExpectedStateV1,
+    RelationshipSourceReadRequestV1, RelationshipSourceReadSelectorV1, RelationshipTopology,
+    RelationshipTopologyStore, SelfAuthoredCore, SelfAuthoredCoreRefreshPlanV1,
+    SelfAuthoredCoreStore, SelfContinuity, SelfContinuityStore, SelfModel, SelfModelStore,
+    SelfRuntimeContext, SelfRuntimeInitialPlanningStateV1, SelfRuntimeJobPayload,
+    SelfRuntimePlannedEffectV1, SelfRuntimeTrigger, SessionMessage, SessionMessageRecord,
+    SessionStore, SessionSummaryStore, SharedFactWriteGovernanceContext, SharedMemoryWriteAction,
+    SharedMemoryWriteOutcome, SharedMemoryWriteReason, SharedMemoryWriteSource, SubjectKind,
     SubjectLifecycleState, SubjectProjectionBoundaryProtocolReport, SubjectProjectionMountReport,
     SubjectProjectionReport, SubjectProjectionWorkIntegrityReport, SubjectRegistry,
     SubjectRelationshipGraph, SubjectRelationshipKind, SubjectScopedRuntime,
@@ -184,7 +190,8 @@ use bm_core::memory::{
     WorkingRecallInspectionInput, LONG_TERM_CONTROL_AUDIT_NAMESPACE,
     LONG_TERM_CONTROL_REVISION_NAMESPACE, LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
     LONG_TERM_GOVERNANCE_POLICY_NAMESPACE, MAX_LONG_TERM_MEMORY_ITEMS,
-    MEMORY_FACET_INDEX_NAMESPACE, MEMORY_FACET_POSTING_NAMESPACE, PRIVATE_GARDEN_MAX_DOC_BYTES,
+    MEMORY_FACET_INDEX_NAMESPACE, MEMORY_FACET_POSTING_NAMESPACE,
+    POST_TURN_LEARNING_EVIDENCE_SCHEMA_VERSION, PRIVATE_GARDEN_MAX_DOC_BYTES,
     TRANSCRIPT_CURSOR_DISCLOSURE_POLICY_SCHEMA_V1,
 };
 use bm_core::metrics::{
@@ -204,26 +211,32 @@ use bm_core::runtime::{
     RuntimeLifecycleTrigger,
 };
 use bm_core::skills::{
+    agent_tool_experience_head_key, agent_tool_experience_scope_manifest_key,
     build_agent_skill_registry_snapshot, build_agent_tool_registry_report,
     build_projected_agent_skill_hints, build_runtime_skill_projection_material,
-    build_runtime_skill_recall_plan, govern_agent_tool_usage_feedback,
-    govern_runtime_skill_write_shapes, is_runtime_skill_name, list_agent_tool_experience_records,
-    plan_agent_tool_experience_record, retrieve_agent_skill_hits,
-    runtime_skill_projection_candidate_ref, runtime_skill_scope_manifest_key,
-    select_agent_tool_hints, validate_agent_tool_registry_snapshot, AgentSkillDirConfig,
-    AgentSkillProjectionAudit, AgentSkillRegistrySnapshot, AgentToolProjectionAudit,
-    AgentToolRegistryReport, AgentToolRegistrySnapshot, RuntimeSkillApplicability,
-    RuntimeSkillApplicabilityContext, RuntimeSkillAvailability, RuntimeSkillCreationRef,
-    RuntimeSkillDeliveryDropReason, RuntimeSkillEvidenceBinding, RuntimeSkillEvidenceKind,
-    RuntimeSkillFailureMode, RuntimeSkillIntrinsicContract, RuntimeSkillLifecycle,
+    build_runtime_skill_recall_plan, canonical_agent_tool_experience_owner_id,
+    retrieve_agent_skill_hits, runtime_skill_projection_candidate_ref,
+    runtime_skill_scope_manifest_key, select_subject_agent_tool_hints,
+    validate_agent_tool_registry_snapshot, AgentSkillDirConfig, AgentSkillProjectionAudit,
+    AgentSkillRegistrySnapshot, AgentToolExperienceConfidence, AgentToolExperienceHeadBindingV1,
+    AgentToolExperienceOwnerHeadV2, AgentToolExperienceOwningScopeV1,
+    AgentToolExperienceRetainedRevisionDigestV2, AgentToolExperienceRevisionMaterialV2,
+    AgentToolExperienceScopeManifestV1, AgentToolExperienceSelectionInput,
+    AgentToolExperienceStatus, AgentToolOutcome, AgentToolProjectionAudit, AgentToolRegistryReport,
+    AgentToolRegistrySnapshot, AgentToolSelectionReport, RuntimeSkillApplicabilityContext,
+    RuntimeSkillAvailability, RuntimeSkillCreationRef, RuntimeSkillDeliveryDropReason,
     RuntimeSkillLifecycleState, RuntimeSkillOperationAuthorityRef, RuntimeSkillOwnerBinding,
     RuntimeSkillOwnerLocator, RuntimeSkillOwnerRecord, RuntimeSkillOwningScope,
     RuntimeSkillPremise, RuntimeSkillPremiseObservation, RuntimeSkillProceduralContent,
-    RuntimeSkillProjectionMaterial, RuntimeSkillProjectionPolicy,
-    RuntimeSkillProjectionRenderReceipt, RuntimeSkillRecallAuthority,
-    RuntimeSkillRecallBudgetAuthority, RuntimeSkillRecallPlan, RuntimeSkillRecallQuery,
-    RuntimeSkillScopeManifest, RuntimeSkillStorageMutation, RuntimeSkillTrigger,
-    RuntimeSkillTriggerKind, RuntimeSkillWriteAction,
+    RuntimeSkillProjectionMaterial, RuntimeSkillProjectionRenderReceipt,
+    RuntimeSkillRecallAuthority, RuntimeSkillRecallBudgetAuthority, RuntimeSkillRecallPlan,
+    RuntimeSkillRecallQuery, RuntimeSkillScopeManifest,
+};
+#[cfg(feature = "nonproduction-replay-harness")]
+use bm_core::skills::{
+    govern_runtime_skill_write_shapes, RuntimeSkillEvidenceBinding, RuntimeSkillEvidenceKind,
+    RuntimeSkillFailureMode, RuntimeSkillIntrinsicContract, RuntimeSkillLifecycle,
+    RuntimeSkillProjectionPolicy, RuntimeSkillTrigger, RuntimeSkillTriggerKind,
     RUNTIME_SKILL_GOVERNED_CONTRACT_SCHEMA_VERSION,
 };
 use serde::de::DeserializeOwned;
@@ -244,29 +257,37 @@ use crate::store_internal::post_turn_governance::{
     block_claimed_governance_job, block_governance_job, cancel_governance_job,
     claim_governance_job, complete_governance_job_with_memory_plan,
     complete_governance_job_with_subject_soul_plan, dead_letter_governance_job,
-    ensure_binding_snapshot, ensure_governance_intent, governance_completion_transaction_id,
+    ensure_binding_snapshot, governance_completion_transaction_id,
     governance_recovery_operation_was_committed, read_binding_snapshot,
     read_job as read_governance_job, read_scope_index as read_governance_scope_index,
     reconcile_governance_intents, renew_governance_job_lease, resume_governance_job,
     resume_governance_job_for_credential, resume_governance_job_for_provider_permission,
     retry_governance_job, GovernanceIntentEnsureOutcome,
 };
+use crate::store_internal::procedural_feedback::{
+    claim_procedural_feedback_job, complete_procedural_feedback_job,
+    ensure_post_turn_learning_intents as ensure_durable_post_turn_learning_intents,
+    list_due_procedural_feedback_jobs, read_scope_index as read_procedural_feedback_scope_index,
+    reconcile_procedural_feedback_intents, repair_required_procedural_feedback_job,
+    retry_procedural_feedback_job, ProceduralFeedbackCompletionInput,
+    ProceduralFeedbackCompletionOutcome, ProceduralIntentEnsureOutcome,
+};
 use crate::{
-    Error, GovernedRuntimeSkillWriteInput, LlmClient, MemoryArchiveScope, MemoryCapabilityCatalog,
-    MemoryCapabilityPolicy, MemoryCloseReport, MemoryCloseRequest, MemoryConsolidationReport,
-    MemoryConsolidationState, MemoryConversationListReport, MemoryConversationListRequest,
-    MemoryEvalEvidenceApplicability, MemoryEvalQuestionEvaluation, MemoryEvalRecallAtK,
-    MemoryEvalRecallBenchmarkContext, MemoryEvalRecallCandidate,
-    MemoryEvalRecallCandidateRenderLoss, MemoryEvalRecallCandidateSelectionLoss,
-    MemoryEvalRecallEvidenceGroupCoverage, MemoryEvalRecallEvidenceRefIndexEntry,
-    MemoryEvalRecallFacetStageDiagnostics, MemoryEvalRecallGoldRank,
-    MemoryEvalRecallGraphDistanceToGold, MemoryEvalRecallLossEntry, MemoryEvalRecallLossLedger,
-    MemoryEvalRecallMetrics, MemoryEvalRecallPrivacyReport, MemoryEvalRecallReport,
-    MemoryEvalRecallRequest, MemoryEvalRecallStageCandidateMatch, MemoryEvalRecallStageDiagnostics,
-    MemoryEvalRecallStageEvidenceRefs, MemoryEvidenceDocumentMutation,
-    MemoryEvidenceDocumentReadReport, MemoryEvidenceDocumentReadRequest,
-    MemoryEvidenceDocumentView, MemoryEvidenceDocumentWriteSummary, MemoryEvidenceRefView,
-    MemoryEvidenceRefVisibility, MemoryFacetRecallIndexReport, MemoryGovernanceActiveJobsReport,
+    Error, LlmClient, MemoryArchiveScope, MemoryCapabilityCatalog, MemoryCapabilityPolicy,
+    MemoryCloseReport, MemoryCloseRequest, MemoryConsolidationReport, MemoryConsolidationState,
+    MemoryConversationListReport, MemoryConversationListRequest, MemoryEvalEvidenceApplicability,
+    MemoryEvalQuestionEvaluation, MemoryEvalRecallAtK, MemoryEvalRecallBenchmarkContext,
+    MemoryEvalRecallCandidate, MemoryEvalRecallCandidateRenderLoss,
+    MemoryEvalRecallCandidateSelectionLoss, MemoryEvalRecallEvidenceGroupCoverage,
+    MemoryEvalRecallEvidenceRefIndexEntry, MemoryEvalRecallFacetStageDiagnostics,
+    MemoryEvalRecallGoldRank, MemoryEvalRecallGraphDistanceToGold, MemoryEvalRecallLossEntry,
+    MemoryEvalRecallLossLedger, MemoryEvalRecallMetrics, MemoryEvalRecallPrivacyReport,
+    MemoryEvalRecallReport, MemoryEvalRecallRequest, MemoryEvalRecallStageCandidateMatch,
+    MemoryEvalRecallStageDiagnostics, MemoryEvalRecallStageEvidenceRefs,
+    MemoryEvidenceDocumentMutation, MemoryEvidenceDocumentReadReport,
+    MemoryEvidenceDocumentReadRequest, MemoryEvidenceDocumentView,
+    MemoryEvidenceDocumentWriteSummary, MemoryEvidenceRefView, MemoryEvidenceRefVisibility,
+    MemoryFacetRecallIndexReport, MemoryGovernanceActiveJobsReport,
     MemoryGovernanceActiveJobsRequest, MemoryGovernanceAttemptAuthorityReport,
     MemoryGovernanceAttemptAuthorityRequest, MemoryGovernanceBlockKind,
     MemoryGovernanceClaimedJobBlockReport, MemoryGovernanceClaimedJobBlockRequest,
@@ -284,14 +305,14 @@ use crate::{
     MemoryLongTermListReport, MemoryLongTermListRequest, MemoryLongTermMutationReport,
     MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryMaintenanceReport,
     MemoryMaintenanceRequest, MemoryMutationExecution, MemoryOperationVisibility,
-    MemoryPrivacyPolicy, MemoryProfile, MemoryProjectionAuditReport,
-    MemoryProjectionGatewayAuditView, MemoryProjectionOutput, MemoryProjectionPrivateGateAudit,
-    MemoryProjectionReport, MemoryProjectionRequest, MemoryProjectionSafeAuditReport,
-    MemoryProjectionSectionAudit, MemoryProjectionSourceAudit, MemoryRecallDeliveryReport,
-    MemoryRecallDeliverySafeView, MemoryRecallRenderDecision, MemoryRecallRenderDropReason,
-    MemoryRecallReport, MemoryRecallRequest, MemoryRecallSelectionDecision,
-    MemoryRecallSelectionDropReason, MemoryRecoverReport, MemoryRecoverRequest,
-    MemoryRenderedEvidenceCapsule, MemoryReplayReport, MemoryReplayRequest,
+    MemoryPrivacyPolicy, MemoryProceduralLearningIntentReport, MemoryProfile,
+    MemoryProjectionAuditReport, MemoryProjectionGatewayAuditView, MemoryProjectionOutput,
+    MemoryProjectionPrivateGateAudit, MemoryProjectionReport, MemoryProjectionRequest,
+    MemoryProjectionSafeAuditReport, MemoryProjectionSectionAudit, MemoryProjectionSourceAudit,
+    MemoryRecallDeliveryReport, MemoryRecallDeliverySafeView, MemoryRecallRenderDecision,
+    MemoryRecallRenderDropReason, MemoryRecallReport, MemoryRecallRequest,
+    MemoryRecallSelectionDecision, MemoryRecallSelectionDropReason, MemoryRecoverReport,
+    MemoryRecoverRequest, MemoryRenderedEvidenceCapsule, MemoryReplayReport, MemoryReplayRequest,
     MemoryRetentionCompactionReport, MemoryRetentionCompactionRequest, MemoryRuntimeSystemKind,
     MemorySpaceExportReport, MemorySpaceExportRequest, MemorySpaceImportReport,
     MemorySpaceImportRequest, MemoryStoreHandle, MemoryTranscriptActivityReport,
@@ -304,15 +325,18 @@ use crate::{
     MemoryTranscriptTimelineRequest, MemoryTurnFinalizeReport, MemoryTurnFinalizeRequest,
     MemoryWriteReport, MemoryWriteRequest, MemoryWriteTransactionReport, PressureLevel,
     PrivateDisclosureIntegrityReport, PrivateDisclosureSurfaceReport, ProceduralMemoryDeliveryView,
-    ProviderProjectionMaintenanceCarry, ProviderProjectionPayload, Result,
-    RuntimeDisclosureProtocolReport, RuntimeOperatorAction, RuntimeOperatorActionReport,
-    RuntimeSkillDetailReport, RuntimeSkillDetailRequest, RuntimeSkillEditRequest,
-    RuntimeSkillListReport, RuntimeSkillListRequest, RuntimeSkillMutationReport,
-    RuntimeSkillRetireRequest, RuntimeSkillReuseOutcome, RuntimeSkillSetEnabledRequest,
-    RuntimeSkillSummary, RuntimeSkillWrite, RuntimeSkillWriteSource, SoulLifeProjectionReport,
-    TemporalMemoryGraphMutationReport, TemporalMemoryGraphNodeOwnerRef,
-    TemporalMemoryGraphWriteRequest, WorkIntegrityReport,
+    ProviderProjectionPayload, Result, RuntimeDisclosureProtocolReport, RuntimeOperatorAction,
+    RuntimeOperatorActionReport, RuntimeSkillDetailReport, RuntimeSkillDetailRequest,
+    RuntimeSkillEditRequest, RuntimeSkillListReport, RuntimeSkillListRequest,
+    RuntimeSkillMutationReport, RuntimeSkillRetireRequest, RuntimeSkillSetEnabledRequest,
+    RuntimeSkillSummary, SoulLifeProjectionReport, TemporalMemoryGraphMutationReport,
+    TemporalMemoryGraphNodeOwnerRef, TemporalMemoryGraphWriteRequest, WorkIntegrityReport,
     MEMORY_PROJECTION_DELIVERY_DIGEST_SCHEMA_VERSION,
+};
+#[cfg(feature = "nonproduction-replay-harness")]
+use crate::{
+    GovernedRuntimeSkillWriteInput, RuntimeSkillApplicability, RuntimeSkillWrite,
+    RuntimeSkillWriteSource,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1038,13 +1062,44 @@ struct MemoryMutationExecutionContext {
 }
 
 fn canonical_memory_write_operation_request(request: &MemoryWriteRequest) -> MemoryWriteRequest {
-    let mut canonical = request.clone();
-    if let MemoryWriteRequest::Procedural { writes, .. } = &mut canonical {
-        for write in writes {
-            write.write.observed_at = 0;
-        }
+    request.clone()
+}
+
+fn validate_public_memory_write_authority(request: &MemoryWriteRequest) -> Result<()> {
+    if let MemoryWriteRequest::Candidates { candidates } = request {
+        bm_core::memory::validate_write_candidate_identities(candidates)?;
     }
-    canonical
+    let asserts_governance = match request {
+        MemoryWriteRequest::Candidates { candidates } => candidates.iter().any(|candidate| {
+            matches!(
+                candidate.target,
+                bm_core::memory::MemoryCandidateTarget::ProceduralMemory { .. }
+            ) || candidate.governed_target().is_some_and(|target| {
+                matches!(
+                    target,
+                    bm_core::memory::MemoryCandidateTarget::ProceduralMemory { .. }
+                )
+            }) || matches!(
+                candidate.content,
+                bm_core::memory::MemoryCandidateContent::RuntimeSkill { .. }
+            )
+        }),
+        MemoryWriteRequest::LongTermExtraction { extraction } => {
+            !extraction.skill_writes.is_empty()
+        }
+        MemoryWriteRequest::GovernedEvidenceDocuments { .. } => false,
+    };
+    if asserts_governance {
+        return Err(Error::Other {
+            stage: "public_memory_write_authority",
+            source: Box::new(crate::ProceduralLearningSdkError {
+                operation: crate::ProceduralLearningSdkOperation::WriteIntent,
+                key: crate::ProceduralLearningErrorKeyV1::TransitionRequiresGovernance,
+                disposition: crate::ProceduralLearningSdkErrorDisposition::AuthorityRejected,
+            }),
+        });
+    }
+    Ok(())
 }
 
 struct LongTermMutationExecution {
@@ -1062,6 +1117,17 @@ struct MemoryStoreMutationPlan {
     mutations: Vec<StoreMutation>,
     preconditions: Vec<StoreJsonPrecondition>,
     blob_preconditions: Vec<StoreBlobPrecondition>,
+}
+
+struct ProceduralFeedbackApplicationPlan {
+    rejection_cause: Option<crate::ProceduralLearningErrorKeyV1>,
+    mutations: Vec<StoreMutation>,
+    preconditions: Vec<StoreJsonPrecondition>,
+    owner_bindings: Vec<bm_core::memory::ProceduralAppliedOwnerBindingV1>,
+    accepted_count: u32,
+    deferred_count: u32,
+    rejected_count: u32,
+    changed_count: u32,
 }
 
 /// Generic continuity recovery is deliberately outside the Subject Soul lifecycle owner.
@@ -1481,6 +1547,8 @@ pub struct MemoryRuntimeConfig {
     long_term_memory_read_store: Arc<dyn LongTermMemoryReadStore>,
     long_term_memory_control_store: Arc<dyn LongTermMemoryControlReadStore>,
     store_platform: Option<StorePlatform>,
+    procedural_selection_signer:
+        Option<crate::store_internal::procedural_selection::ProceduralSelectionSigner>,
     pub llm: Option<Arc<dyn LlmClient>>,
     pub clock: Arc<dyn MemoryClock>,
     pub capability_policy: MemoryCapabilityPolicy,
@@ -1488,6 +1556,7 @@ pub struct MemoryRuntimeConfig {
     pub audit_sink: Arc<dyn MemoryAuditSink>,
     runtime_budget_authority: Arc<RuntimeBudgetAuthority>,
     pub agent_skill_registry: AgentSkillRegistrySnapshot,
+    procedural_applicability_context: bm_core::memory::ProceduralApplicabilityContextV1,
     runtime_skill_applicability_context: RuntimeSkillApplicabilityContext,
     runtime_skill_premise_observations: Vec<RuntimeSkillPremiseObservation>,
 }
@@ -1590,6 +1659,8 @@ struct MaterializedRuntimeSkillProjection {
 
 struct MaterializedProductionRecall {
     report: MemoryRecallReport,
+    agent_tool_selection_bindings: Vec<bm_core::memory::AgentToolExperienceSelectionV1>,
+    agent_tool_audit: AgentToolProjectionAudit,
     long_term: MaterializedLongTermRecallClosure,
     procedural: Vec<MaterializedRuntimeSkillProjection>,
     runtime_skill_materializer: Option<RuntimeSkillMaterializerObservation>,
@@ -1705,6 +1776,8 @@ impl RecallImmutableSessionBinding {
 
 struct ProductionRecallClosure {
     report: MemoryRecallReport,
+    agent_tool_selection_bindings: Vec<bm_core::memory::AgentToolExperienceSelectionV1>,
+    agent_tool_audit: AgentToolProjectionAudit,
     long_term: MaterializedLongTermRecallClosure,
     procedural: Vec<MaterializedRuntimeSkillProjection>,
     authority: RecallOperationAuthoritySnapshot,
@@ -7637,13 +7710,153 @@ impl MemoryRuntime {
     }
 
     pub fn agent_tool_registry_report(&self) -> Result<AgentToolRegistryReport> {
+        if RuntimeBudgetLease::active_report(&self.config.runtime_budget_authority).is_none() {
+            let lease = self.acquire_runtime_budget_lease()?;
+            return self
+                .execute_with_runtime_budget_lease(&lease, || self.agent_tool_registry_report());
+        }
         let registries = self.agent_tool_registries();
-        let skill_storage = self.config.platform.skill_storage();
-        Ok(build_agent_tool_registry_report(
-            self.config.profile,
-            &registries,
-            &list_agent_tool_experience_records(skill_storage.as_ref()),
-        ))
+        let mut report = build_agent_tool_registry_report(self.config.profile, &registries, &[]);
+        if report.forbidden_by_profile || !self.procedural_subject_active() {
+            return Ok(report);
+        }
+        let store = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "agent_tool_registry_report",
+                "typed experience inspection requires StorePlatform",
+            )
+        })?;
+        let budget = self.runtime_budget();
+        let scope = AgentToolExperienceOwningScopeV1::Subject {
+            mounted_subject_id: self.config.scoped_runtime.mounted_subject_id.clone(),
+        };
+        let outcome = store.with_recall_immutable_read_session(&budget, |context| {
+            context.materialize_agent_tool_experience_scope(
+                &self.config.memory_space_id,
+                &scope,
+                budget
+                    .governed_state_budget
+                    .max_agent_tool_experience_owners_per_subject,
+                budget
+                    .governed_state_budget
+                    .max_agent_tool_experience_revisions_per_owner,
+            )?;
+            let view = context.take_materialized_view();
+            let closure = view
+                .agent_tool_experience_scope(&self.config.memory_space_id, &scope)
+                .ok_or_else(|| {
+                    Error::config(
+                        "agent_tool_registry_report",
+                        "exact scope was not materialized",
+                    )
+                })?;
+            for head in closure.heads().iter().filter(|head| {
+                head.state == bm_core::skills::AgentToolExperienceHeadStateV2::Active
+            }) {
+                let material = closure
+                    .materials()
+                    .iter()
+                    .find(|material| {
+                        material.owner_ref == head.owner_ref
+                            && material.owner_revision == head.current_revision
+                    })
+                    .ok_or_else(|| {
+                        Error::config("agent_tool_registry_report", "current material is missing")
+                    })?;
+                report.governed_experiences += 1;
+                if !registries.iter().any(|registry| {
+                    registry.registry_id == material.registry_id
+                        && registry.scope == material.registry_scope
+                        && registry.tools.iter().any(|tool| {
+                            tool.tool_id == material.tool_id
+                                && tool.schema_fingerprint == material.schema_fingerprint
+                        })
+                }) {
+                    report.stale_experiences += 1;
+                }
+            }
+            Ok(report)
+        })?;
+        Ok(outcome.output)
+    }
+
+    fn procedural_subject_active(&self) -> bool {
+        self.config.subject_registry.memory_space_id == self.config.memory_space_id
+            && self
+                .config
+                .subject_registry
+                .subject(&self.config.scoped_runtime.mounted_subject_id)
+                .is_some_and(|subject| {
+                    subject.lifecycle_state == bm_core::memory::SubjectLifecycleState::Active
+                })
+    }
+
+    fn procedural_applicability_for_conversation(
+        &self,
+        conversation_id: &str,
+    ) -> Result<bm_core::memory::ProceduralApplicabilityContextV1> {
+        let context = &self.config.procedural_applicability_context;
+        if !context.validate_contract()
+            || context
+                .conversation_id
+                .as_deref()
+                .is_some_and(|id| id != conversation_id)
+        {
+            return Err(Error::config(
+                "procedural_applicability_context",
+                "runtime and conversation applicability differ",
+            ));
+        }
+        bm_core::memory::ProceduralApplicabilityContextV1::try_new(
+            context.project_id.clone(),
+            context.workspace_id.clone(),
+            Some(conversation_id.to_string()),
+        )
+    }
+
+    fn select_materialized_agent_tool_hints(
+        &self,
+        view: &RecallReadView,
+        temporal_operation: crate::MemoryRecallTemporalOperation,
+        registry_refs: &[bm_core::skills::AgentToolRegistryRef],
+        query: &str,
+        max_hints: usize,
+    ) -> Result<AgentToolSelectionReport> {
+        if !self.procedural_subject_active() {
+            return Ok(AgentToolSelectionReport::empty(registry_refs.len(), 0));
+        }
+        let owning_scope = AgentToolExperienceOwningScopeV1::Subject {
+            mounted_subject_id: self.config.scoped_runtime.mounted_subject_id.clone(),
+        };
+        let Some(closure) =
+            view.agent_tool_experience_scope(&self.config.memory_space_id, &owning_scope)
+        else {
+            return Ok(AgentToolSelectionReport::empty(registry_refs.len(), 0));
+        };
+        let applicability = self.procedural_applicability_for_conversation(
+            self.config
+                .scope
+                .conversation_id
+                .as_deref()
+                .unwrap_or(&self.config.scope.chat_id),
+        )?;
+        select_subject_agent_tool_hints(AgentToolExperienceSelectionInput {
+            query,
+            memory_space_id: &self.config.memory_space_id,
+            owning_scope: &owning_scope,
+            heads: closure.heads(),
+            materials: closure.materials(),
+            registries: &self.agent_tool_registries(),
+            registry_refs,
+            applicability: &applicability,
+            as_of_time: match temporal_operation {
+                crate::MemoryRecallTemporalOperation::Current => None,
+                crate::MemoryRecallTemporalOperation::HistoricalAsOf { as_of_time } => {
+                    Some(as_of_time)
+                }
+            },
+            max_hints,
+        })
     }
 
     pub fn runtime_metrics_report(&self) -> Result<RuntimeMetricsReport> {
@@ -7827,6 +8040,7 @@ impl MemoryRuntime {
     }
 
     pub fn write(&self, request: MemoryWriteRequest) -> Result<MemoryWriteReport> {
+        validate_public_memory_write_authority(&request)?;
         if RuntimeBudgetLease::active_report(&self.config.runtime_budget_authority).is_none() {
             let lease = self.acquire_runtime_budget_lease()?;
             return self.execute_with_runtime_budget_lease(&lease, || self.write(request));
@@ -7834,11 +8048,94 @@ impl MemoryRuntime {
         self.write_internal(request, None)
     }
 
+    /// Synthetic fixture admission. This capability is absent from production builds.
+    #[cfg(feature = "nonproduction-replay-harness")]
+    #[doc(hidden)]
+    pub fn seed_runtime_skills_for_replay(
+        &self,
+        writes: Vec<GovernedRuntimeSkillWriteInput>,
+        owning_scope: RuntimeSkillOwningScope,
+    ) -> Result<MemoryWriteReport> {
+        if RuntimeBudgetLease::active_report(&self.config.runtime_budget_authority).is_none() {
+            let lease = self.acquire_runtime_budget_lease()?;
+            return self.execute_with_runtime_budget_lease(&lease, || {
+                self.seed_runtime_skills_for_replay(writes, owning_scope)
+            });
+        }
+        self.ensure_visible("replay.seed_runtime_skills", self.capabilities.write)?;
+        if !self.config.capability_policy.replay_harness_enabled {
+            return Err(Error::config(
+                "replay.seed_runtime_skills",
+                "synthetic replay harness is disabled",
+            ));
+        }
+        self.runtime_skill_transaction_scope(&owning_scope)?;
+        let now = self.config.clock.now_secs();
+        let records = writes
+            .into_iter()
+            .map(|mut input| {
+                input.write.observed_at = now;
+                let shape = govern_runtime_skill_write_shapes(
+                    std::slice::from_ref(&input.write),
+                    RuntimeSkillWriteSource::ReplayHarness,
+                );
+                if shape.accepted != 1 {
+                    return Err(Error::config(
+                        "replay.seed_runtime_skills",
+                        "synthetic skill failed canonical shape governance",
+                    ));
+                }
+                runtime_skill_owner_record_from_governed_write(
+                    &input.write,
+                    &self.config.memory_space_id,
+                    owning_scope.clone(),
+                    input.creation_ref,
+                    input.privacy_class,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let plan = self.plan_runtime_skill_owner_records(&owning_scope, records)?;
+        let changed = runtime_skill_owner_mutation_count(&plan);
+        let lifecycle = self.start_lifecycle(
+            RuntimeLifecycleOperation::Maintain,
+            RuntimeLifecycleTrigger::SdkCall,
+            RuntimeLifecycleModeInput::default(),
+        );
+        let (lifecycle_report, transaction) = self
+            .commit_memory_write_transaction_in_runtime_skill_scope_with_operation(
+                MemoryWriteTransactionCommit {
+                    lifecycle,
+                    operation: "replay.seed_runtime_skills",
+                    lifecycle_kind: RuntimeLifecycleEventKind::RuntimeLifecycle,
+                    lifecycle_effect: RuntimeLifecycleEffect::RunMaintenance,
+                    changed: changed > 0,
+                    summary: "synthetic_runtime_skill_fixture".to_string(),
+                    extra_payload: &[],
+                    plan,
+                    changed_count: changed,
+                },
+                &owning_scope,
+                None,
+            )?;
+        Ok(MemoryWriteReport {
+            accepted: true,
+            changed,
+            operation: "replay.seed_runtime_skills",
+            reason: "synthetic_runtime_skill_fixture".to_string(),
+            lifecycle_report,
+            transaction: Some(transaction),
+            semantic_governance: None,
+            shared_fact_governance: None,
+            evidence_documents: None,
+        })
+    }
+
     pub fn write_operation(
         &self,
         operation_id: impl Into<String>,
         request: MemoryWriteRequest,
     ) -> Result<MemoryMutationExecution<MemoryWriteReport>> {
+        validate_public_memory_write_authority(&request)?;
         if RuntimeBudgetLease::active_report(&self.config.runtime_budget_authority).is_none() {
             let lease = self.acquire_runtime_budget_lease()?;
             return self.execute_with_runtime_budget_lease(&lease, || {
@@ -7890,306 +8187,7 @@ impl MemoryRuntime {
             RuntimeLifecycleModeInput::default(),
         );
         let report = match request {
-            MemoryWriteRequest::Procedural {
-                writes,
-                owning_scope,
-                source,
-            } => {
-                if runtime_skill_write_source_requires_promotion(source) {
-                    let rejected = writes
-                        .iter()
-                        .map(|input| {
-                            let write = &input.write;
-                            if write.name.trim().is_empty() {
-                                sdk_runtime_skill_name(&write.topic)
-                            } else {
-                                write.name.trim().to_string()
-                            }
-                        })
-                        .collect::<Vec<_>>();
-                    let procedural_evolution = Some(SkillEvolutionReport {
-                        rejected,
-                        reasons: vec![
-                            "runtime_learned_procedural_write_requires_promotion".to_string()
-                        ],
-                        ..SkillEvolutionReport::default()
-                    });
-                    let lifecycle_report = self.finish_lifecycle_success(
-                        lifecycle,
-                        RuntimeLifecycleEventKind::RuntimeLifecycle,
-                        RuntimeLifecycleEffect::Noop,
-                        false,
-                        "runtime_learned_procedural_write_requires_promotion",
-                    )?;
-                    MemoryWriteReport {
-                        accepted: false,
-                        changed: 0,
-                        operation: "write.procedural",
-                        reason: "runtime_learned_procedural_write_requires_promotion".to_string(),
-                        lifecycle_report,
-                        transaction: None,
-                        semantic_governance: None,
-                        shared_fact_governance: None,
-                        procedural_evolution,
-                        procedural_promotions: Vec::new(),
-                        agent_tool_experience: None,
-                        evidence_documents: None,
-                    }
-                } else {
-                    let normalized_writes = normalize_runtime_skill_write_names(
-                        writes.iter().map(|input| input.write.clone()).collect(),
-                    );
-                    let normalized_inputs = writes
-                        .into_iter()
-                        .zip(normalized_writes.iter().cloned())
-                        .map(|(mut input, write)| {
-                            input.write = write;
-                            input
-                        })
-                        .collect::<Vec<_>>();
-                    let mut outcome = govern_runtime_skill_write_shapes(&normalized_writes, source);
-                    let accepted_inputs = normalized_inputs
-                        .iter()
-                        .zip(outcome.reports.iter())
-                        .filter(|(_input, report)| {
-                            matches!(report.action, RuntimeSkillWriteAction::Accepted)
-                        })
-                        .map(|(input, _report)| input)
-                        .collect::<Vec<_>>();
-                    let owner_records = accepted_inputs
-                        .iter()
-                        .map(|input| {
-                            runtime_skill_owner_record_from_governed_write(
-                                &input.write,
-                                &self.config.memory_space_id,
-                                owning_scope.clone(),
-                                input.creation_ref.clone(),
-                                input.privacy_class,
-                            )
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    let plan = plan_runtime_skill_owner_upserts(
-                        self.config.store_platform.as_ref().ok_or_else(|| {
-                            Error::config("runtime_skill_owner_plan", "store platform is required")
-                        })?,
-                        &self.config.memory_space_id,
-                        &owning_scope,
-                        owner_records,
-                        self.runtime_budget()
-                            .governed_state_budget
-                            .max_retained_runtime_skill_owners_per_scope,
-                        self.runtime_budget()
-                            .governed_state_budget
-                            .max_runtime_skill_lineage_depth,
-                    )?;
-                    outcome.changed = runtime_skill_owner_mutation_count(&plan);
-                    let procedural_evolution =
-                        Some(build_skill_evolution_report_from_write_outcome(
-                            &normalized_writes,
-                            &outcome,
-                        ));
-                    let changed = outcome.changed;
-                    let (lifecycle_report, transaction) = self
-                        .commit_memory_write_transaction_in_runtime_skill_scope_with_operation(
-                            MemoryWriteTransactionCommit {
-                                lifecycle,
-                                operation: "write.procedural",
-                                lifecycle_kind: RuntimeLifecycleEventKind::RuntimeLifecycle,
-                                lifecycle_effect: RuntimeLifecycleEffect::RunMaintenance,
-                                changed: changed > 0,
-                                summary: "write.procedural".to_string(),
-                                extra_payload: &[("changed_count", changed.to_string())],
-                                plan,
-                                changed_count: changed,
-                            },
-                            &owning_scope,
-                            mutation_operation.clone(),
-                        )?;
-                    MemoryWriteReport {
-                        accepted: outcome.accepted > 0 || outcome.rejected == 0,
-                        changed,
-                        operation: "write.procedural",
-                        reason: format!(
-                            "submitted={}, accepted={}, rejected={}",
-                            outcome.submitted, outcome.accepted, outcome.rejected
-                        ),
-                        lifecycle_report,
-                        transaction: Some(transaction),
-                        semantic_governance: None,
-                        shared_fact_governance: None,
-                        procedural_evolution,
-                        procedural_promotions: Vec::new(),
-                        agent_tool_experience: None,
-                        evidence_documents: None,
-                    }
-                }
-            }
-            MemoryWriteRequest::ProceduralPromotions {
-                promotions,
-                owning_scope,
-                source,
-            } => {
-                if source != RuntimeSkillWriteSource::TaskLearning {
-                    return Err(Error::config(
-                        "runtime_skill_owner_plan",
-                        "task-learning promotions require the TaskLearning write source",
-                    ));
-                }
-                let promotion_reports = promotions
-                    .iter()
-                    .cloned()
-                    .map(|input| {
-                        promote_task_experience_to_procedure(
-                            input,
-                            ProceduralMemoryPromotionPolicy::default(),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let promoted_inputs_and_writes = promotions
-                    .iter()
-                    .zip(promotion_reports.iter())
-                    .filter_map(|(input, report)| {
-                        runtime_skill_write_from_promotion_report(
-                            report,
-                            Some(&self.config.scope.chat_id),
-                            now_secs,
-                        )
-                        .map(|write| (input, write))
-                    })
-                    .collect::<Vec<_>>();
-                let writes = normalize_runtime_skill_write_names(
-                    promoted_inputs_and_writes
-                        .iter()
-                        .map(|(_input, write)| write.clone())
-                        .collect(),
-                );
-                let transaction_plan = if writes.is_empty() {
-                    None
-                } else {
-                    let mut outcome = govern_runtime_skill_write_shapes(&writes, source);
-                    let owner_records = promoted_inputs_and_writes
-                        .iter()
-                        .zip(writes.iter())
-                        .zip(outcome.reports.iter())
-                        .filter(|((_pair, _write), report)| {
-                            matches!(report.action, RuntimeSkillWriteAction::Accepted)
-                        })
-                        .map(|(((input, _raw_write), write), _report)| {
-                            runtime_skill_owner_record_from_governed_write(
-                                write,
-                                &self.config.memory_space_id,
-                                owning_scope.clone(),
-                                RuntimeSkillCreationRef::TaskLearningPromotion {
-                                    learning_id: input.learning_id.clone(),
-                                    learning_digest: input.learning_digest.clone(),
-                                },
-                                input.privacy_class,
-                            )
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    let plan = plan_runtime_skill_owner_upserts(
-                        self.config.store_platform.as_ref().ok_or_else(|| {
-                            Error::config("runtime_skill_owner_plan", "store platform is required")
-                        })?,
-                        &self.config.memory_space_id,
-                        &owning_scope,
-                        owner_records,
-                        self.runtime_budget()
-                            .governed_state_budget
-                            .max_retained_runtime_skill_owners_per_scope,
-                        self.runtime_budget()
-                            .governed_state_budget
-                            .max_runtime_skill_lineage_depth,
-                    )?;
-                    outcome.changed = runtime_skill_owner_mutation_count(&plan);
-                    Some((outcome, plan))
-                };
-                let outcome = transaction_plan
-                    .as_ref()
-                    .map(|(outcome, _plan)| outcome.clone())
-                    .unwrap_or_else(|| crate::RuntimeSkillWriteOutcome {
-                        source,
-                        submitted: promotion_reports.len(),
-                        rejected: promotion_reports
-                            .iter()
-                            .filter(|report| !report.promoted)
-                            .count(),
-                        ..crate::RuntimeSkillWriteOutcome::default()
-                    });
-                let procedural_evolution = Some(merge_promotion_and_write_evolution(
-                    &promotion_reports,
-                    &writes,
-                    &outcome,
-                ));
-                let blocked_reasons = promotion_reports
-                    .iter()
-                    .flat_map(|report| report.blocked_reasons.iter().cloned())
-                    .collect::<Vec<_>>();
-                let changed = outcome.changed;
-                let (lifecycle_report, transaction) =
-                    if let Some((_outcome, plan)) = transaction_plan {
-                        let (lifecycle_report, transaction) = self
-                            .commit_memory_write_transaction_in_runtime_skill_scope_with_operation(
-                                MemoryWriteTransactionCommit {
-                                    lifecycle,
-                                    operation: "write.procedural_promotions",
-                                    lifecycle_kind: RuntimeLifecycleEventKind::RuntimeLifecycle,
-                                    lifecycle_effect: RuntimeLifecycleEffect::RunMaintenance,
-                                    changed: changed > 0,
-                                    summary: "write.procedural_promotions".to_string(),
-                                    extra_payload: &[("changed_count", changed.to_string())],
-                                    plan,
-                                    changed_count: changed,
-                                },
-                                &owning_scope,
-                                mutation_operation.clone(),
-                            )?;
-                        (lifecycle_report, Some(transaction))
-                    } else {
-                        (
-                            self.finish_lifecycle_success_with_payload(
-                                lifecycle,
-                                RuntimeLifecycleEventKind::RuntimeLifecycle,
-                                RuntimeLifecycleEffect::RunMaintenance,
-                                changed > 0,
-                                "write.procedural_promotions",
-                                &[("changed_count", changed.to_string())],
-                            )?,
-                            None,
-                        )
-                    };
-                MemoryWriteReport {
-                    accepted: !writes.is_empty()
-                        && blocked_reasons.is_empty()
-                        && outcome.accepted == writes.len(),
-                    changed,
-                    operation: "write.procedural_promotions",
-                    reason: format!(
-                        "submitted={}, promoted={}, accepted={}, rejected={}, blocked={}",
-                        promotion_reports.len(),
-                        promotion_reports
-                            .iter()
-                            .filter(|report| report.promoted)
-                            .count(),
-                        outcome.accepted,
-                        outcome.rejected,
-                        blocked_reasons.join("|")
-                    ),
-                    lifecycle_report,
-                    transaction,
-                    semantic_governance: None,
-                    shared_fact_governance: None,
-                    procedural_evolution,
-                    procedural_promotions: promotion_reports,
-                    agent_tool_experience: None,
-                    evidence_documents: None,
-                }
-            }
-            MemoryWriteRequest::LongTermExtraction {
-                extraction,
-                governed_skill_writes,
-                runtime_skill_owning_scope,
-            } => {
+            MemoryWriteRequest::LongTermExtraction { extraction } => {
                 self.validate_long_term_draft_subject_visibility_registry_membership(
                     &extraction.upserts,
                 )?;
@@ -8200,15 +8198,10 @@ impl MemoryRuntime {
                     deletes: extraction.deletes,
                     skill_writes: extraction.skill_writes,
                 };
-                let extraction_plan = self.plan_long_term_extraction_transaction(
-                    &extraction,
-                    &governed_skill_writes,
-                    runtime_skill_owning_scope.as_ref(),
-                    now_secs,
-                )?;
+                let extraction_plan =
+                    self.plan_long_term_extraction_transaction(&extraction, now_secs)?;
                 let changed = extraction_plan.changed;
                 let shared_fact_governance = extraction_plan.shared_fact_governance.clone();
-                let procedural_evolution = extraction_plan.procedural_evolution.clone();
                 let commit = MemoryWriteTransactionCommit {
                     lifecycle,
                     operation: "write.long_term_extraction",
@@ -8224,19 +8217,11 @@ impl MemoryRuntime {
                     },
                     changed_count: changed,
                 };
-                let (lifecycle_report, transaction) =
-                    if let Some(owning_scope) = runtime_skill_owning_scope.as_ref() {
-                        self.commit_memory_write_transaction_in_runtime_skill_scope_with_operation(
-                            commit,
-                            owning_scope,
-                            mutation_operation.clone(),
-                        )?
-                    } else {
-                        self.commit_memory_write_transaction_with_operation(
-                            commit,
-                            mutation_operation.clone(),
-                        )?
-                    };
+                let (lifecycle_report, transaction) = self
+                    .commit_memory_write_transaction_with_operation(
+                        commit,
+                        mutation_operation.clone(),
+                    )?;
                 let policy_reason = if suppressed_draft_count > 0 {
                     format!(
                         "; suppressed_by_long_term_policy={}, policy_ids={}",
@@ -8255,18 +8240,11 @@ impl MemoryRuntime {
                     transaction: Some(transaction),
                     semantic_governance: None,
                     shared_fact_governance,
-                    procedural_evolution,
-                    procedural_promotions: Vec::new(),
-                    agent_tool_experience: None,
                     evidence_documents: None,
                 }
             }
-            MemoryWriteRequest::Candidates {
+            MemoryWriteRequest::Candidates { candidates } => self.write_candidates_transactional(
                 candidates,
-                runtime_skill_owning_scope,
-            } => self.write_candidates_transactional(
-                candidates,
-                runtime_skill_owning_scope,
                 lifecycle,
                 now_secs,
                 mutation_operation.clone(),
@@ -8278,80 +8256,6 @@ impl MemoryRuntime {
                     now_secs,
                     mutation_operation.clone(),
                 )?,
-            MemoryWriteRequest::AgentToolUsageFeedback { feedback } => {
-                let storage = self.config.platform.skill_storage();
-                let agent_tool_registries = self.agent_tool_registries();
-                let governance =
-                    govern_agent_tool_usage_feedback(&agent_tool_registries, &feedback, now_secs);
-                let (changed, lifecycle_report, transaction) =
-                    if let Some(experience) = governance.experience.as_ref() {
-                        let mutations = if let Some(mutation) =
-                            plan_agent_tool_experience_record(storage.as_ref(), experience)?
-                        {
-                            runtime_skill_storage_mutations_to_store_mutations(&[mutation])
-                        } else {
-                            Vec::new()
-                        };
-                        let changed = usize::from(!mutations.is_empty());
-                        let (lifecycle_report, transaction) = self
-                            .commit_memory_write_transaction_with_operation(
-                                MemoryWriteTransactionCommit {
-                                    lifecycle,
-                                    operation: "write.agent_tool_usage_feedback",
-                                    lifecycle_kind: RuntimeLifecycleEventKind::RuntimeLifecycle,
-                                    lifecycle_effect: RuntimeLifecycleEffect::RunMaintenance,
-                                    changed: changed > 0,
-                                    summary: "write.agent_tool_usage_feedback".to_string(),
-                                    extra_payload: &[("changed_count", changed.to_string())],
-                                    plan: MemoryStoreMutationPlan::from_mutations(mutations),
-                                    changed_count: changed,
-                                },
-                                mutation_operation.clone(),
-                            )?;
-                        (changed, lifecycle_report, Some(transaction))
-                    } else if governance.accepted && mutation_operation.is_some() {
-                        let (lifecycle_report, transaction) = self
-                            .commit_memory_write_transaction_with_operation(
-                                MemoryWriteTransactionCommit {
-                                    lifecycle,
-                                    operation: "write.agent_tool_usage_feedback",
-                                    lifecycle_kind: RuntimeLifecycleEventKind::RuntimeLifecycle,
-                                    lifecycle_effect: RuntimeLifecycleEffect::RunMaintenance,
-                                    changed: false,
-                                    summary: "write.agent_tool_usage_feedback".to_string(),
-                                    extra_payload: &[("changed_count", "0".to_string())],
-                                    plan: MemoryStoreMutationPlan::default(),
-                                    changed_count: 0,
-                                },
-                                mutation_operation.clone(),
-                            )?;
-                        (0, lifecycle_report, Some(transaction))
-                    } else {
-                        let lifecycle_report = self.finish_lifecycle_success_with_payload(
-                            lifecycle,
-                            RuntimeLifecycleEventKind::RuntimeLifecycle,
-                            RuntimeLifecycleEffect::RunMaintenance,
-                            false,
-                            "write.agent_tool_usage_feedback",
-                            &[("changed_count", "0".to_string())],
-                        )?;
-                        (0, lifecycle_report, None)
-                    };
-                MemoryWriteReport {
-                    accepted: governance.accepted,
-                    changed,
-                    operation: "write.agent_tool_usage_feedback",
-                    reason: governance.reason.clone(),
-                    lifecycle_report,
-                    transaction,
-                    semantic_governance: None,
-                    shared_fact_governance: None,
-                    procedural_evolution: None,
-                    procedural_promotions: Vec::new(),
-                    agent_tool_experience: Some(governance),
-                    evidence_documents: None,
-                }
-            }
         };
         self.audit("write", true, &report.reason);
         Ok(report)
@@ -8932,9 +8836,6 @@ impl MemoryRuntime {
                     transaction: Some(transaction),
                     semantic_governance: None,
                     shared_fact_governance: None,
-                    procedural_evolution: None,
-                    procedural_promotions: Vec::new(),
-                    agent_tool_experience: None,
                     evidence_documents: Some(summary),
                 });
             }
@@ -8955,9 +8856,6 @@ impl MemoryRuntime {
                 transaction: None,
                 semantic_governance: None,
                 shared_fact_governance: None,
-                procedural_evolution: None,
-                procedural_promotions: Vec::new(),
-                agent_tool_experience: None,
                 evidence_documents: Some(summary),
             });
         }
@@ -9023,9 +8921,6 @@ impl MemoryRuntime {
             transaction: Some(transaction),
             semantic_governance: None,
             shared_fact_governance: None,
-            procedural_evolution: None,
-            procedural_promotions: Vec::new(),
-            agent_tool_experience: None,
             evidence_documents: Some(summary),
         })
     }
@@ -9033,43 +8928,21 @@ impl MemoryRuntime {
     fn write_candidates_transactional(
         &self,
         candidates: Vec<MemoryWriteCandidate>,
-        runtime_skill_owning_scope: Option<RuntimeSkillOwningScope>,
         lifecycle: RuntimeLifecycleReport,
         now_secs: u64,
         mutation_operation: Option<MemoryMutationExecutionContext>,
     ) -> Result<MemoryWriteReport> {
-        let has_procedural_candidate = candidates.iter().any(|candidate| {
-            matches!(
-                candidate.governed_target().unwrap_or(&candidate.target),
-                MemoryCandidateTarget::ProceduralMemory { .. }
-            )
-        });
-        if has_procedural_candidate != runtime_skill_owning_scope.is_some() {
-            return Err(Error::config(
-                "runtime_skill_owner_plan",
-                "candidate requests require an explicit owning scope exactly when procedural candidates are present",
-            ));
-        }
-        let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
-            Error::config(
-                "memory_write_transaction_unavailable",
-                "transactional memory writes require StorePlatform-backed runtime",
-            )
-        })?;
         let operation = "write.candidates";
         let semantic_governance = govern_write_candidates(&candidates);
         let semantically_accepted_candidate_ids = semantic_governance
-            .plane_reports
+            .accepted_candidate_ids
             .iter()
-            .filter(|report| report.decision == GovernedWriteDecision::Accepted)
-            .flat_map(|report| report.evidence_refs.iter().map(String::as_str))
+            .map(String::as_str)
             .collect::<BTreeSet<_>>();
         let accepted_candidates = candidates
             .iter()
             .filter(|candidate| {
-                let candidate_id = candidate.candidate_id.trim();
-                !candidate_id.is_empty()
-                    && semantically_accepted_candidate_ids.contains(candidate_id)
+                semantically_accepted_candidate_ids.contains(candidate.candidate_id.as_str())
             })
             .collect::<Vec<_>>();
         let accepted_draft_pairs = accepted_candidates
@@ -9093,26 +8966,6 @@ impl MemoryRuntime {
             .iter()
             .map(|(_, draft)| draft.clone())
             .collect::<Vec<_>>();
-        let accepted_skill_pairs = accepted_candidates
-            .iter()
-            .filter_map(|candidate| {
-                let target = candidate.governed_target().unwrap_or(&candidate.target);
-                candidate
-                    .to_runtime_skill_write_for_target(target, &self.config.scope.chat_id, now_secs)
-                    .map(|write| (*candidate, write))
-            })
-            .collect::<Vec<_>>();
-        let accepted_skill_writes = accepted_skill_pairs
-            .iter()
-            .map(|(_, write)| write.clone())
-            .collect::<Vec<_>>();
-        let accepted_skill_writes = normalize_runtime_skill_write_names(accepted_skill_writes);
-        let accepted_normalized_skill_pairs = accepted_skill_pairs
-            .iter()
-            .zip(accepted_skill_writes.iter())
-            .map(|((candidate, _), write)| (*candidate, write.clone()))
-            .collect::<Vec<_>>();
-
         let mut mutations = Vec::new();
         let mut preconditions = Vec::new();
         let shared_fact_governance = if accepted_drafts.is_empty() {
@@ -9179,74 +9032,6 @@ impl MemoryRuntime {
             })
             .unwrap_or_default();
 
-        let (skill_changed, skill_accepted, skill_rejected, procedural_evolution) =
-            if accepted_skill_writes.is_empty() {
-                (0, 0, 0, None)
-            } else {
-                let mut outcome = govern_runtime_skill_write_shapes(
-                    &accepted_skill_writes,
-                    RuntimeSkillWriteSource::Manual,
-                );
-                let governed_skill_pairs = accepted_normalized_skill_pairs
-                    .iter()
-                    .zip(outcome.reports.iter())
-                    .filter(|&((_candidate, _write), report)| {
-                        matches!(report.action, RuntimeSkillWriteAction::Accepted)
-                    })
-                    .map(|((candidate, write), _report)| (*candidate, write.clone()))
-                    .collect::<Vec<_>>();
-                let owning_scope = runtime_skill_owning_scope.clone().ok_or_else(|| {
-                    Error::config(
-                        "runtime_skill_owner_plan",
-                        "accepted procedural candidates require an explicit owning scope",
-                    )
-                })?;
-                if matches!(owning_scope, RuntimeSkillOwningScope::SharedProgram)
-                    && !accepted_drafts.is_empty()
-                {
-                    return Err(Error::config(
-                    "runtime_skill_owner_plan",
-                    "one candidate transaction cannot mix SharedProgram RuntimeSkill owners with subject long-term owners",
-                ));
-                }
-                let owner_records = governed_skill_pairs
-                    .iter()
-                    .map(|(candidate, write)| {
-                        runtime_skill_owner_record_from_candidate(
-                            candidate,
-                            write,
-                            &self.config.memory_space_id,
-                            owning_scope.clone(),
-                        )
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                let runtime_skill_plan = plan_runtime_skill_owner_upserts(
-                    store_platform,
-                    &self.config.memory_space_id,
-                    &owning_scope,
-                    owner_records,
-                    self.runtime_budget()
-                        .governed_state_budget
-                        .max_retained_runtime_skill_owners_per_scope,
-                    self.runtime_budget()
-                        .governed_state_budget
-                        .max_runtime_skill_lineage_depth,
-                )?;
-                outcome.changed = runtime_skill_owner_mutation_count(&runtime_skill_plan);
-                mutations.extend(runtime_skill_plan.mutations);
-                merge_json_preconditions(&mut preconditions, runtime_skill_plan.preconditions)?;
-                let procedural_evolution = build_skill_evolution_report_from_write_outcome(
-                    &accepted_skill_writes,
-                    &outcome,
-                );
-                (
-                    outcome.changed,
-                    outcome.accepted,
-                    outcome.rejected,
-                    Some(procedural_evolution),
-                )
-            };
-
         mutations.extend(plan_candidate_derived_memory_ref_mutations(
             &self.config.subject_id,
             &governed_draft_pairs,
@@ -9258,7 +9043,7 @@ impl MemoryRuntime {
             now_secs,
         )?);
 
-        let changed = long_term_changed + skill_changed;
+        let changed = long_term_changed;
         let changed_count = changed.to_string();
         let commit = MemoryWriteTransactionCommit {
             lifecycle,
@@ -9276,15 +9061,7 @@ impl MemoryRuntime {
             changed_count: changed,
         };
         let (lifecycle_report, transaction) =
-            if let Some(owning_scope) = runtime_skill_owning_scope.as_ref() {
-                self.commit_memory_write_transaction_in_runtime_skill_scope_with_operation(
-                    commit,
-                    owning_scope,
-                    mutation_operation,
-                )?
-            } else {
-                self.commit_memory_write_transaction_with_operation(commit, mutation_operation)?
-            };
+            self.commit_memory_write_transaction_with_operation(commit, mutation_operation)?;
         let shared_fact_accepted = shared_fact_governance
             .as_ref()
             .map(|outcome| outcome.accepted)
@@ -9293,7 +9070,7 @@ impl MemoryRuntime {
             .as_ref()
             .map(|outcome| outcome.rejected)
             .unwrap_or(0);
-        let final_accepted_count = shared_fact_accepted.saturating_add(skill_accepted);
+        let final_accepted_count = shared_fact_accepted;
         let policy_reason = if suppressed_draft_count > 0 {
             format!(
                 ", suppressed_by_long_term_policy={}, policy_ids={}",
@@ -9309,13 +9086,12 @@ impl MemoryRuntime {
                 && semantic_governance.rejected_count == 0
                 && semantic_governance.deferred_count == 0
                 && shared_fact_rejected == 0
-                && skill_rejected == 0
                 && suppressed_draft_count == 0
                 && final_accepted_count == semantic_governance.proposal_count,
             changed,
             operation,
             reason: format!(
-                "submitted={}, semantic_accepted={}, semantic_rejected={}, semantic_deferred={}, final_accepted={}, shared_fact_accepted={}, shared_fact_rejected={}, skill_accepted={}, skill_rejected={}{}",
+                "submitted={}, semantic_accepted={}, semantic_rejected={}, semantic_deferred={}, final_accepted={}, shared_fact_accepted={}, shared_fact_rejected={}{}",
                 semantic_governance.proposal_count,
                 semantic_governance.accepted_count,
                 semantic_governance.rejected_count,
@@ -9323,17 +9099,12 @@ impl MemoryRuntime {
                 final_accepted_count,
                 shared_fact_accepted,
                 shared_fact_rejected,
-                skill_accepted,
-                skill_rejected,
                 policy_reason
             ),
             lifecycle_report,
             transaction: Some(transaction),
             semantic_governance: Some(semantic_governance),
             shared_fact_governance,
-            procedural_evolution,
-            procedural_promotions: Vec::new(),
-            agent_tool_experience: None,
             evidence_documents: None,
         })
     }
@@ -11174,7 +10945,8 @@ impl MemoryRuntime {
                     ),
                 GovernedMemoryOwnerPlane::ConversationTranscript
                 | GovernedMemoryOwnerPlane::MemoryGraph
-                | GovernedMemoryOwnerPlane::RuntimeSkill => Ok(None),
+                | GovernedMemoryOwnerPlane::RuntimeSkill
+                | GovernedMemoryOwnerPlane::AgentToolExperience => Ok(None),
             };
             match owner {
                 Ok(Some(material)) => {
@@ -11365,7 +11137,8 @@ impl MemoryRuntime {
                             GovernedMemoryOwnerPlane::EvidenceDocument => true,
                             GovernedMemoryOwnerPlane::ConversationTranscript
                             | GovernedMemoryOwnerPlane::MemoryGraph
-                            | GovernedMemoryOwnerPlane::RuntimeSkill => false,
+                            | GovernedMemoryOwnerPlane::RuntimeSkill
+                            | GovernedMemoryOwnerPlane::AgentToolExperience => false,
                         };
                     if !lexical_eligible {
                         return None;
@@ -11808,7 +11581,8 @@ impl MemoryRuntime {
                     ),
                 GovernedMemoryOwnerPlane::ConversationTranscript
                 | GovernedMemoryOwnerPlane::MemoryGraph
-                | GovernedMemoryOwnerPlane::RuntimeSkill => Ok(None),
+                | GovernedMemoryOwnerPlane::RuntimeSkill
+                | GovernedMemoryOwnerPlane::AgentToolExperience => Ok(None),
             };
             match owner {
                 Ok(Some(owner)) => {
@@ -11823,7 +11597,8 @@ impl MemoryRuntime {
                         }
                         GovernedMemoryOwnerPlane::ConversationTranscript
                         | GovernedMemoryOwnerPlane::MemoryGraph
-                        | GovernedMemoryOwnerPlane::RuntimeSkill => {
+                        | GovernedMemoryOwnerPlane::RuntimeSkill
+                        | GovernedMemoryOwnerPlane::AgentToolExperience => {
                             failures.push(
                                 "recall_privacy_unsupported_governed_owner_plane".to_string(),
                             );
@@ -11882,6 +11657,7 @@ impl MemoryRuntime {
         )
     }
 
+    #[cfg(feature = "nonproduction-replay-harness")]
     fn commit_memory_write_transaction_in_runtime_skill_scope_with_operation(
         &self,
         commit: MemoryWriteTransactionCommit<'_>,
@@ -11933,6 +11709,7 @@ impl MemoryRuntime {
                 "transactional memory writes require StorePlatform-backed runtime",
             )
         })?;
+        let transaction_timestamp = self.config.clock.now_secs();
         let mutation_operation_plan = mutation_operation
             .map(|context| {
                 StoreMutationOperationPlan::new(
@@ -11945,7 +11722,7 @@ impl MemoryRuntime {
                     },
                     changed_count,
                     self.config.scoped_runtime.actor_subject_id.clone(),
-                    self.config.clock.now_secs(),
+                    transaction_timestamp,
                 )
             })
             .transpose()?;
@@ -11954,8 +11731,7 @@ impl MemoryRuntime {
             .map(|operation| operation.transaction_id().to_string())
             .unwrap_or_else(|| format!("memory_write_txn_{}", lifecycle.event_id));
         bind_control_audit_transaction_id(&mut plan.mutations, &transaction_id)?;
-        let lifecycle_report =
-            lifecycle.finish_success(self.config.clock.now_secs(), changed, summary);
+        let lifecycle_report = lifecycle.finish_success(transaction_timestamp, changed, summary);
         self.append_graph_owner_cascade_mutations(&mut plan.mutations, &mut plan.preconditions)?;
         self.append_graph_owner_closure_preconditions(&plan.mutations, &mut plan.preconditions)?;
         plan.mutations.push(StoreMutation::AppendEvent {
@@ -12517,7 +12293,6 @@ impl MemoryRuntime {
                 mutations.extend(plan_long_term_extraction_derived_memory_ref_mutations(
                     &self.config.subject_id,
                     &apply_report.accepted_upserts,
-                    &[],
                     self.config.clock.now_secs(),
                 )?);
                 if let Some(mutation) = long_term_extraction_state_mutation(
@@ -12542,10 +12317,11 @@ impl MemoryRuntime {
     fn plan_long_term_extraction_transaction(
         &self,
         extraction: &ParsedLongTermMemoryExtraction,
-        governed_skill_writes: &[GovernedRuntimeSkillWriteInput],
-        runtime_skill_owning_scope: Option<&RuntimeSkillOwningScope>,
         now_secs: u64,
     ) -> Result<MemoryLongTermExtractionTransactionPlan> {
+        validate_public_memory_write_authority(&MemoryWriteRequest::LongTermExtraction {
+            extraction: extraction.clone(),
+        })?;
         self.validate_long_term_draft_subject_visibility_registry_membership(&extraction.upserts)?;
         let store = self.config.long_term_memory_read_store.clone();
         let planning_store = PlanningLongTermMemoryStore::new(
@@ -12553,44 +12329,6 @@ impl MemoryRuntime {
             &self.config.scoped_runtime.actor_subject_id,
         )?;
         let mut changed = 0usize;
-        if extraction.skill_writes.is_empty() {
-            if !governed_skill_writes.is_empty() || runtime_skill_owning_scope.is_some() {
-                return Err(Error::config(
-                    "runtime_skill_owner_plan",
-                    "long-term extraction without procedural writes must not carry RuntimeSkill authority",
-                ));
-            }
-        } else {
-            let owning_scope = runtime_skill_owning_scope.ok_or_else(|| {
-                Error::config(
-                    "runtime_skill_owner_plan",
-                    "procedural extraction requires an explicit RuntimeSkill owning scope",
-                )
-            })?;
-            if matches!(owning_scope, RuntimeSkillOwningScope::SharedProgram)
-                && (!extraction.upserts.is_empty() || !extraction.deletes.is_empty())
-            {
-                return Err(Error::config(
-                    "runtime_skill_owner_plan",
-                    "one extraction transaction cannot mix SharedProgram RuntimeSkill owners with subject long-term owners",
-                ));
-            }
-            let normalized_extracted =
-                normalize_runtime_skill_write_names(extraction.skill_writes.clone());
-            let normalized_governed = normalize_runtime_skill_write_names(
-                governed_skill_writes
-                    .iter()
-                    .map(|input| input.write.clone())
-                    .collect(),
-            );
-            if normalized_extracted != normalized_governed {
-                return Err(Error::config(
-                    "runtime_skill_owner_plan",
-                    "governed RuntimeSkill writes must exactly bind every extracted procedural write",
-                ));
-            }
-        }
-
         for slot in &extraction.deletes {
             let Some(id) = slot.stable_id() else {
                 continue;
@@ -12644,75 +12382,19 @@ impl MemoryRuntime {
         mutation_plan.merge(facet_plan)?;
         let MemoryStoreMutationPlan {
             mut mutations,
-            mut preconditions,
+            preconditions,
             blob_preconditions: _,
         } = mutation_plan;
-
-        let procedural_evolution = if extraction.skill_writes.is_empty() {
-            None
-        } else {
-            let owning_scope = runtime_skill_owning_scope.expect("validated owning scope");
-            let normalized_writes =
-                normalize_runtime_skill_write_names(extraction.skill_writes.clone());
-            let mut outcome = govern_runtime_skill_write_shapes(
-                &normalized_writes,
-                RuntimeSkillWriteSource::Extraction,
-            );
-            let accepted_inputs = governed_skill_writes
-                .iter()
-                .zip(normalized_writes.iter())
-                .zip(outcome.reports.iter())
-                .filter(|((_input, _write), report)| {
-                    matches!(report.action, RuntimeSkillWriteAction::Accepted)
-                })
-                .collect::<Vec<_>>();
-            let owner_records = accepted_inputs
-                .iter()
-                .map(|((input, write), _report)| {
-                    runtime_skill_owner_record_from_governed_write(
-                        write,
-                        &self.config.memory_space_id,
-                        owning_scope.clone(),
-                        input.creation_ref.clone(),
-                        input.privacy_class,
-                    )
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let skill_plan = plan_runtime_skill_owner_upserts(
-                self.config.store_platform.as_ref().ok_or_else(|| {
-                    Error::config("runtime_skill_owner_plan", "store platform is required")
-                })?,
-                &self.config.memory_space_id,
-                owning_scope,
-                owner_records,
-                self.runtime_budget()
-                    .governed_state_budget
-                    .max_retained_runtime_skill_owners_per_scope,
-                self.runtime_budget()
-                    .governed_state_budget
-                    .max_runtime_skill_lineage_depth,
-            )?;
-            outcome.changed = runtime_skill_owner_mutation_count(&skill_plan);
-            mutations.extend(skill_plan.mutations);
-            merge_json_preconditions(&mut preconditions, skill_plan.preconditions)?;
-            changed = changed.saturating_add(outcome.changed);
-            Some(build_skill_evolution_report_from_write_outcome(
-                &normalized_writes,
-                &outcome,
-            ))
-        };
 
         mutations.extend(plan_long_term_extraction_derived_memory_ref_mutations(
             &self.config.subject_id,
             &accepted_upserts,
-            &[],
             now_secs,
         )?);
 
         Ok(MemoryLongTermExtractionTransactionPlan {
             changed,
             shared_fact_governance,
-            procedural_evolution,
             mutations,
             preconditions,
         })
@@ -13402,6 +13084,16 @@ impl MemoryRuntime {
         let channel_id = self.config.scope.channel.as_str();
         let chat_id = self.config.scope.chat_id.as_str();
         let governed_state_budget = authority.runtime_budget.governed_state_budget;
+        if authority.profile_entry.procedural_recall_allowed && self.procedural_subject_active() {
+            context.materialize_agent_tool_experience_scope(
+                memory_space_id,
+                &AgentToolExperienceOwningScopeV1::Subject {
+                    mounted_subject_id: mounted_subject_id.to_string(),
+                },
+                governed_state_budget.max_agent_tool_experience_owners_per_subject,
+                governed_state_budget.max_agent_tool_experience_revisions_per_owner,
+            )?;
+        }
         let runtime_skill_materializer = self
             .runtime_skill_materializer_resolver
             .materialize_for_operation(
@@ -13829,6 +13521,27 @@ impl MemoryRuntime {
             Ok(query) => query,
             Err(_) => return Ok(Vec::new()),
         };
+        let procedural_context = self.procedural_applicability_for_conversation(
+            self.config.scope.conversation_id_or_chat_id(),
+        )?;
+        let mut targets = self
+            .config
+            .runtime_skill_applicability_context
+            .targets
+            .clone();
+        if let Some(project_id) = procedural_context.project_id {
+            targets.push(bm_core::skills::RuntimeSkillApplicabilityTarget::Project { project_id });
+        }
+        if let Some(workspace_id) = procedural_context.workspace_id {
+            targets
+                .push(bm_core::skills::RuntimeSkillApplicabilityTarget::Workspace { workspace_id });
+        }
+        if let Some(conversation_id) = procedural_context.conversation_id {
+            targets.push(
+                bm_core::skills::RuntimeSkillApplicabilityTarget::Conversation { conversation_id },
+            );
+        }
+        let applicability = RuntimeSkillApplicabilityContext::try_new(targets)?;
         let memory_space_id = self.config.memory_space_id.as_str();
         let mounted_subject_id = self.config.scoped_runtime.mounted_subject_id.trim();
         let scopes = [
@@ -13927,7 +13640,7 @@ impl MemoryRuntime {
                     operation_authority_ref.clone(),
                     authority_snapshot.operation_time,
                     query.clone(),
-                    self.config.runtime_skill_applicability_context.clone(),
+                    applicability.clone(),
                     premise_observations,
                     authority.clone(),
                     budget,
@@ -14568,19 +14281,32 @@ impl MemoryRuntime {
                 };
                 let procedural_delivery_reports =
                     public_safe_runtime_skill_delivery_views(&procedural_projection_items)?;
-                let agent_skill_hits = retrieve_agent_skill_hits(
-                    &self.config.agent_skill_registry,
+                let agent_skill_hits = if request.temporal_operation
+                    == crate::MemoryRecallTemporalOperation::Current
+                {
+                    let applicability = self.procedural_applicability_for_conversation(
+                        self.config
+                            .scope
+                            .conversation_id
+                            .as_deref()
+                            .unwrap_or(&self.config.scope.chat_id),
+                    )?;
+                    let mut registry = self.config.agent_skill_registry.clone();
+                    registry.packages.retain(|package| {
+                        self.procedural_subject_active()
+                            && applicability.permits_agent_skill_scope(&package.scope)
+                    });
+                    retrieve_agent_skill_hits(&registry, &request.query, request.limit.max(1))
+                } else {
+                    Vec::new()
+                };
+                let agent_tool_selection = self.select_materialized_agent_tool_hints(
+                    read_view.as_ref(),
+                    request.temporal_operation,
+                    &request.tool_registry_refs,
                     &request.query,
                     request.limit.max(1),
-                );
-                let agent_tool_experiences = list_agent_tool_experience_records(read_view.as_ref());
-                let agent_tool_registries = self.agent_tool_registries();
-                let agent_tool_selection = select_agent_tool_hints(
-                    &agent_tool_registries,
-                    &agent_tool_experiences,
-                    &request.tool_registry_refs,
-                    request.limit.max(1),
-                );
+                )?;
                 let source_max_chars = runtime_budget
                     .projection_source_budget
                     .context_assembly_max_chars;
@@ -14733,6 +14459,8 @@ impl MemoryRuntime {
                     None
                 };
                 Ok(MaterializedProductionRecall {
+                    agent_tool_selection_bindings: agent_tool_selection.selection_bindings,
+                    agent_tool_audit: agent_tool_selection.audit,
                     report: MemoryRecallReport {
                         query: request.query.clone(),
                         temporal_operation: request.temporal_operation,
@@ -14786,7 +14514,9 @@ impl MemoryRuntime {
             &materialized_recall.manifest_closure,
         )?;
         let MaterializedProductionRecall {
+            agent_tool_selection_bindings,
             report,
+            agent_tool_audit,
             long_term,
             procedural,
             runtime_skill_materializer: _,
@@ -14802,7 +14532,9 @@ impl MemoryRuntime {
                 immutable_session.exact_closure.receipt_count,
             )?;
         let mut recall_closure = ProductionRecallClosure {
+            agent_tool_selection_bindings,
             report,
+            agent_tool_audit,
             long_term,
             procedural,
             authority,
@@ -15547,7 +15279,8 @@ impl MemoryRuntime {
                         GovernedMemoryOwnerPlane::EvidenceDocument => true,
                         GovernedMemoryOwnerPlane::ConversationTranscript
                         | GovernedMemoryOwnerPlane::MemoryGraph
-                        | GovernedMemoryOwnerPlane::RuntimeSkill => false,
+                        | GovernedMemoryOwnerPlane::RuntimeSkill
+                        | GovernedMemoryOwnerPlane::AgentToolExperience => false,
                     }
             })
             .map(|binding| governed_memory_recall_candidate_id(&binding.owner_ref))
@@ -16906,6 +16639,33 @@ impl MemoryRuntime {
             });
         }
         self.ensure_visible("project", self.capabilities.projection)?;
+        if let bm_core::memory::ProceduralProjectionBindingV1::Turn { turn_id } = &request.binding {
+            if !self
+                .capabilities
+                .procedural_learning
+                .selection_receipt
+                .visible
+            {
+                return Err(Error::Other {
+                    stage: "procedural_projection_binding",
+                    source: Box::new(crate::ProceduralLearningSdkError {
+                        operation: crate::ProceduralLearningSdkOperation::Project,
+                        key: crate::ProceduralLearningErrorKeyV1::CapabilityUnavailable,
+                        disposition:
+                            crate::ProceduralLearningSdkErrorDisposition::AuthorityRejected,
+                    }),
+                });
+            }
+            if turn_id.is_empty()
+                || turn_id.trim() != turn_id
+                || request.temporal_operation != crate::MemoryRecallTemporalOperation::Current
+            {
+                return Err(Error::config(
+                    "procedural_projection_binding",
+                    "execution projections require a canonical turn id and current read",
+                ));
+            }
+        }
         let lifecycle = self.start_lifecycle(
             RuntimeLifecycleOperation::Project,
             RuntimeLifecycleTrigger::SdkCall,
@@ -16940,7 +16700,9 @@ impl MemoryRuntime {
             effective_soul_selector.clone(),
         )?;
         let ProductionRecallClosure {
+            agent_tool_selection_bindings,
             report: recall_report,
+            agent_tool_audit,
             long_term: long_term_recall_closure,
             procedural: mut procedural_projection_items,
             authority,
@@ -17019,23 +16781,19 @@ impl MemoryRuntime {
                 foreground_disclosure_allowed: false,
                 user_query: request.user_query.as_str(),
             });
-        let agent_skill_hits =
-            retrieve_agent_skill_hits(&self.config.agent_skill_registry, &request.user_query, 4);
+        let agent_skill_hits = recall_report.agent_skill_hits;
         let agent_skill_projection_budget = render_max_chars.saturating_div(6).clamp(320, 1600);
-        let (agent_skill_hints, agent_skill_audit) = build_projected_agent_skill_hints(
+        let (agent_skill_hints, mut agent_skill_audit) = build_projected_agent_skill_hints(
             &self.config.agent_skill_registry,
             &agent_skill_hits,
             agent_skill_projection_budget,
         );
-        let skill_storage = self.config.platform.skill_storage();
-        let agent_tool_experiences = list_agent_tool_experience_records(skill_storage.as_ref());
-        let agent_tool_registries = self.agent_tool_registries();
-        let agent_tool_selection = select_agent_tool_hints(
-            &agent_tool_registries,
-            &agent_tool_experiences,
-            &request.tool_registry_refs,
-            5,
-        );
+        let mut agent_tool_selection = AgentToolSelectionReport {
+            selection_bindings: agent_tool_selection_bindings,
+            tool_hints: recall_report.agent_tool_hints,
+            tool_experience_status: recall_report.tool_experience_status,
+            audit: agent_tool_audit,
+        };
         let mut runtime_projection = build_llm_runtime_projection_envelope(
             projection_id(self, &request),
             &context,
@@ -17070,11 +16828,13 @@ impl MemoryRuntime {
         attach_agent_skill_hints_to_runtime_projection(
             &mut runtime_projection,
             agent_skill_hints,
+            &mut agent_skill_audit,
             render_max_chars,
         );
         attach_agent_tool_hints_to_runtime_projection(
             &mut runtime_projection,
             agent_tool_selection.tool_hints.clone(),
+            &mut agent_tool_selection.audit,
             render_max_chars,
         );
         let procedural_delivery_reports =
@@ -17083,8 +16843,8 @@ impl MemoryRuntime {
         let hit_count = prompt_context_hit_count(&context)
             .saturating_add(recall_delivery_report.rendered_capsules.len())
             .saturating_add(recall_procedural_hit_count)
-            .saturating_add(agent_skill_hits.len())
-            .saturating_add(agent_tool_selection.tool_hints.len());
+            .saturating_add(runtime_projection.agent_skill_hints.len())
+            .saturating_add(runtime_projection.agent_tool_hints.len());
         let system_memory_chars = system_memory_block.chars().count();
         let projection_audit = build_projection_audit(ProjectionAuditInput {
             runtime: self,
@@ -17125,6 +16885,103 @@ impl MemoryRuntime {
                 "provider projection failed its canonical delivery digest contract",
             ));
         }
+        let selection_receipt = match &request.binding {
+            bm_core::memory::ProceduralProjectionBindingV1::Preview => None,
+            bm_core::memory::ProceduralProjectionBindingV1::Turn { turn_id } => {
+                use bm_core::memory::{
+                    ProceduralProjectionIdentityV1, ProceduralSelectionReceiptV1,
+                    RuntimeSkillSelectionV1, StandardAgentSkillSelectionV1,
+                };
+                let mut receipt = ProceduralSelectionReceiptV1 {
+                    schema_version: bm_core::memory::PROCEDURAL_SELECTION_RECEIPT_SCHEMA_VERSION,
+                    receipt_ref: String::new(),
+                    signing_key_id: String::new(),
+                    issued_at: authority.operation_time,
+                    expires_at: authority
+                        .operation_time
+                        .checked_add(24 * 60 * 60)
+                        .ok_or_else(|| {
+                            Error::config(
+                                "procedural_projection_binding",
+                                "receipt expiry overflow",
+                            )
+                        })?,
+                    identity: ProceduralProjectionIdentityV1 {
+                        projection_id: runtime_projection.projection_id.clone(),
+                        memory_space_id: self.config.memory_space_id.clone(),
+                        mounted_subject_id: self.config.scoped_runtime.mounted_subject_id.clone(),
+                        channel: self.config.scope.channel.clone(),
+                        chat_id: self.config.scope.chat_id.clone(),
+                        conversation_id: self.config.scope.conversation_id_or_chat_id().to_string(),
+                        turn_id: turn_id.clone(),
+                    },
+                    applicability: self.procedural_applicability_for_conversation(
+                        self.config.scope.conversation_id_or_chat_id(),
+                    )?,
+                    standard_agent_skills: runtime_projection
+                        .agent_skill_hints
+                        .iter()
+                        .map(|hint| StandardAgentSkillSelectionV1 {
+                            package_id: hint.package_id.clone(),
+                            package_fingerprint: hint.fingerprint.clone(),
+                            package_binding: hint.package_binding().to_string(),
+                            scope: hint.scope.clone(),
+                            trust: hint.trust,
+                        })
+                        .collect(),
+                    runtime_skills: procedural_projection_items
+                        .iter()
+                        .filter(|item| {
+                            item.report.rendered
+                                && item
+                                    .plan
+                                    .owner_binding()
+                                    .privacy_class
+                                    .projection_content_allowed()
+                        })
+                        .map(|item| RuntimeSkillSelectionV1 {
+                            locator: item.plan.locator(),
+                            content_digest: item.plan.owner_binding().content_digest.clone(),
+                        })
+                        .collect(),
+                    task_learnings: delivered_task_learning_selections(
+                        context.task_recall_text.as_deref().unwrap_or_default(),
+                        &context.task_recall_bindings,
+                        &runtime_projection,
+                        &system_memory_block,
+                    ),
+                    agent_tool_experiences: agent_tool_selection
+                        .selection_bindings
+                        .iter()
+                        .filter(|binding| {
+                            runtime_projection
+                                .agent_tool_hints
+                                .iter()
+                                .any(|hint| hint.experience_id == binding.experience_owner_id)
+                        })
+                        .cloned()
+                        .collect(),
+                    selection_digest: String::new(),
+                    delivery_digest: format!(
+                        "sha256:{}",
+                        delivery_digest_manifest.system_memory_block_sha256
+                    ),
+                    authority_tag: String::new(),
+                };
+                canonicalize_procedural_selections(&mut receipt)?;
+                self.config
+                    .procedural_selection_signer
+                    .as_ref()
+                    .ok_or_else(|| {
+                        Error::config(
+                            "procedural_selection_authority",
+                            "runtime has no selection signing authority",
+                        )
+                    })?
+                    .sign(&mut receipt)?;
+                Some(receipt)
+            }
+        };
         let projection_surfaces = build_projection_surface_set(&runtime_projection);
         let private_disclosure_integrity = build_private_disclosure_integrity_report(
             &projection_audit,
@@ -17218,10 +17075,6 @@ impl MemoryRuntime {
             system_memory_block,
             recent_messages: prompt_carry.recent_messages,
             agent_tool_hints: runtime_projection.agent_tool_hints.clone(),
-            maintenance_carry: ProviderProjectionMaintenanceCarry {
-                runtime_skill_selected_ids: prompt_carry.runtime_skill_selected_ids,
-                task_learning_selected_ids: prompt_carry.task_recall_selected_ids,
-            },
         };
         let (governed_public_report, governed_operator_report) = build_governed_safe_reports(
             &authority,
@@ -17231,6 +17084,7 @@ impl MemoryRuntime {
             &recall_delivery_report,
         )?;
         let report = MemoryProjectionReport {
+            selection_receipt,
             temporal_operation: request.temporal_operation,
             ui_api_chars: projection_surfaces.ui_api.chars().count(),
             ui_api_projection: projection_surfaces.ui_api,
@@ -17483,11 +17337,6 @@ impl MemoryRuntime {
             maintenance_budget.reply_input_max_chars,
             maintenance_budget.reply_input_max_bytes,
         );
-        let reuse_outcome_note = bound_text_for_budget(
-            &request.reuse_outcome_note,
-            maintenance_budget.reply_input_max_chars.min(1024),
-            maintenance_budget.reply_input_max_bytes.min(2048),
-        );
         let ctx = PostReplyMemoryMaintenanceContext {
             session_store: session_store.as_ref(),
             memory_store: memory_store.as_ref(),
@@ -17515,10 +17364,6 @@ impl MemoryRuntime {
             tool_calls: request.tool_calls,
             external_content_used: request.external_content_used,
             prompt_recall_intent: PromptRecallIntent::Factual,
-            runtime_skill_selected_ids: request.runtime_skill_selected_ids,
-            task_learning_selected_ids: request.task_learning_selected_ids,
-            reuse_outcome: request.reuse_outcome,
-            reuse_outcome_note: &reuse_outcome_note,
             now_secs: self.config.clock.now_secs(),
         };
         let mut long_term_refresh_enqueued = false;
@@ -17644,19 +17489,27 @@ impl MemoryRuntime {
         request: MemoryTurnFinalizeRequest,
     ) -> Result<MemoryTurnFinalizeReport> {
         self.ensure_visible("write.turn", self.capabilities.write)?;
-        validate_turn_scope(&self.config.scope, &self.config.subject_id, &request.turn)?;
+        validate_turn_scope(
+            &self.config.scope,
+            &self.config.scoped_runtime,
+            &request.turn,
+        )?;
         let conversation_alias = self.conversation_alias_from_delta(&request.turn)?;
         let platform = self.config.platform.as_ref();
         let session_store = platform.session_store();
         let transcript_store = platform.conversation_transcript_store();
+        let learning_evidence = self.build_post_turn_learning_evidence(&request)?;
         let core_report = commit_canonical_turn_delta_with_transcript(
             session_store.as_ref(),
             transcript_store.as_ref(),
             &self.config.memory_space_id,
             &request.turn,
-            Vec::new(),
-            conversation_alias.clone(),
-            self.config.clock.now_secs(),
+            CanonicalTurnTranscriptCommitOptions {
+                host_refs: Vec::new(),
+                learning_evidence: Some(learning_evidence),
+                conversation_alias: conversation_alias.clone(),
+                now_secs: self.config.clock.now_secs(),
+            },
         )?;
         let transcript_commit = core_report.transcript_commit;
         let transcript_committed = transcript_commit
@@ -17670,8 +17523,8 @@ impl MemoryRuntime {
         }
 
         if !session_commit.committed && !transcript_committed {
-            let memory_consolidation = if transcript_commit.is_some() {
-                self.ensure_post_turn_governance_intent(
+            let (memory_consolidation, procedural_learning) = if transcript_commit.is_some() {
+                self.ensure_post_turn_learning_intents(
                     &request,
                     transcript_commit.as_ref(),
                     session_commit
@@ -17680,27 +17533,32 @@ impl MemoryRuntime {
                         .unwrap_or("turn_not_committed"),
                 )?
             } else {
-                MemoryConsolidationReport {
-                    state: MemoryConsolidationState::NotScheduled,
-                    job_id: None,
-                    reason: "turn_not_committed".to_string(),
-                }
+                (
+                    MemoryConsolidationReport {
+                        state: MemoryConsolidationState::NotScheduled,
+                        job_id: None,
+                        reason: "turn_not_committed".to_string(),
+                    },
+                    MemoryProceduralLearningIntentReport {
+                        state: MemoryConsolidationState::NotScheduled,
+                        job_id: None,
+                        reason: "turn_not_committed".to_string(),
+                    },
+                )
             };
             let lifecycle = self.start_lifecycle(
                 RuntimeLifecycleOperation::Maintain,
                 RuntimeLifecycleTrigger::PostReply,
                 self.mode_input_for_request(request.mode_input, request.pressure),
             );
-            let lifecycle_report = self.finish_lifecycle_success(
-                lifecycle,
-                RuntimeLifecycleEventKind::RuntimeLifecycle,
-                RuntimeLifecycleEffect::Noop,
+            let lifecycle_report = lifecycle.finish_success(
+                self.config.clock.now_secs(),
                 false,
                 session_commit
                     .skipped_reason
                     .as_deref()
                     .unwrap_or("turn_not_committed"),
-            )?;
+            );
             return Ok(MemoryTurnFinalizeReport {
                 session_commit,
                 transcript_commit,
@@ -17712,6 +17570,7 @@ impl MemoryRuntime {
                     "turn_not_committed",
                 ),
                 memory_consolidation,
+                procedural_learning,
                 lifecycle_report,
             });
         }
@@ -17759,6 +17618,11 @@ impl MemoryRuntime {
                 state: MemoryConsolidationState::Succeeded,
                 job_id: None,
                 reason: "synchronous_governance_completed".to_string(),
+            },
+            procedural_learning: MemoryProceduralLearningIntentReport {
+                state: MemoryConsolidationState::NotScheduled,
+                job_id: None,
+                reason: "nonproduction_synchronous_governance".to_string(),
             },
             lifecycle_report,
         })
@@ -17873,7 +17737,7 @@ impl MemoryRuntime {
             user_content: &user_content,
             reply_content: &reply_content,
             pressure: request.pressure,
-            tool_calls: request.tool_calls,
+            tool_calls: request.learning.tool_call_count,
             now_secs: self.config.clock.now_secs(),
         };
         let outcome = if strict_model_contract {
@@ -17981,7 +17845,7 @@ impl MemoryRuntime {
             source_channel: request.turn.source.channel.clone(),
             user_content: latest_user_content(&request.turn),
             reply_content: assistant_content(&request.turn).unwrap_or_default(),
-            tool_calls: request.tool_calls,
+            tool_calls: request.learning.tool_call_count,
             external_content_used: request.turn.external_content_used
                 || request
                     .turn
@@ -18180,12 +18044,8 @@ impl MemoryRuntime {
                 ingress: request.turn.source.ingress,
                 user_content: finalize_user_content.clone(),
                 reply_content: finalize_assistant_content.clone().unwrap_or_default(),
-                tool_calls: request.tool_calls,
+                tool_calls: request.learning.tool_call_count,
                 external_content_used,
-                runtime_skill_selected_ids: request.runtime_skill_selected_ids.clone(),
-                task_learning_selected_ids: request.task_learning_selected_ids.clone(),
-                reuse_outcome: RuntimeSkillReuseOutcome::Neutral,
-                reuse_outcome_note: request.reuse_outcome_note.clone(),
                 pressure: request.pressure,
                 mode_input: request.mode_input,
             },
@@ -18322,8 +18182,8 @@ impl MemoryRuntime {
         request: &MemoryTurnFinalizeRequest,
         reason: &'static str,
     ) -> Result<MemoryTurnFinalizeReport> {
-        let memory_consolidation =
-            self.ensure_post_turn_governance_intent(request, transcript_commit.as_ref(), reason)?;
+        let (memory_consolidation, procedural_learning) =
+            self.ensure_post_turn_learning_intents(request, transcript_commit.as_ref(), reason)?;
         let lifecycle = self.start_lifecycle(
             RuntimeLifecycleOperation::Maintain,
             RuntimeLifecycleTrigger::PostReply,
@@ -18364,16 +18224,20 @@ impl MemoryRuntime {
                 "post_turn_governance",
             ),
             memory_consolidation,
+            procedural_learning,
             lifecycle_report,
         })
     }
 
-    fn ensure_post_turn_governance_intent(
+    fn ensure_post_turn_learning_intents(
         &self,
         request: &MemoryTurnFinalizeRequest,
         transcript_commit: Option<&bm_core::memory::TranscriptCommitReport>,
         blocking_reason: &str,
-    ) -> Result<MemoryConsolidationReport> {
+    ) -> Result<(
+        MemoryConsolidationReport,
+        MemoryProceduralLearningIntentReport,
+    )> {
         reject_legacy_governance_queue(self.config.platform.as_ref())?;
         let transcript_commit = transcript_commit.ok_or_else(|| {
             Error::config(
@@ -18406,11 +18270,16 @@ impl MemoryRuntime {
                 "transcript sequence differs from commit authority",
             ));
         }
-        let job = self.build_governance_job_from_transcript(
+        let semantic_job = self.build_governance_job_from_transcript(
             &record,
             &request.turn.conversation.chat_id,
-            request.tool_calls,
+            request.learning.tool_call_count,
             blocking_reason,
+            now_secs,
+        )?;
+        let procedural_job = self.build_procedural_job_from_transcript(
+            &record,
+            &request.turn.conversation.chat_id,
             now_secs,
         )?;
         let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
@@ -18422,25 +18291,216 @@ impl MemoryRuntime {
         let scope = self
             .memory_write_transaction_scope()
             .with_conversation(key.conversation_id.clone());
-        let outcome = ensure_governance_intent(
+        let (semantic_outcome, procedural_outcome) = ensure_durable_post_turn_learning_intents(
             store_platform,
             scope,
             &self.runtime_budget(),
-            &job,
+            &semantic_job,
+            procedural_job.as_ref(),
             now_secs,
         )?;
         self.notify_learning_wake_sinks();
-        Ok(MemoryConsolidationReport {
+        let semantic_report = MemoryConsolidationReport {
             state: MemoryConsolidationState::Queued,
-            job_id: Some(job.job_id),
-            reason: match outcome {
+            job_id: Some(semantic_job.job_id),
+            reason: match semantic_outcome {
                 GovernanceIntentEnsureOutcome::Created => "governance_intent_created",
                 GovernanceIntentEnsureOutcome::AlreadyPresent => {
                     "governance_intent_already_present"
                 }
             }
             .to_string(),
-        })
+        };
+        let procedural_report = match (procedural_job, procedural_outcome) {
+            (Some(job), Some(outcome)) => MemoryProceduralLearningIntentReport {
+                state: MemoryConsolidationState::Queued,
+                job_id: Some(job.job_id),
+                reason: match outcome {
+                    ProceduralIntentEnsureOutcome::Created => "procedural_intent_created",
+                    ProceduralIntentEnsureOutcome::AlreadyPresent => {
+                        "procedural_intent_already_present"
+                    }
+                }
+                .to_string(),
+            },
+            _ => MemoryProceduralLearningIntentReport {
+                state: MemoryConsolidationState::NotScheduled,
+                job_id: None,
+                reason: "no_actionable_procedural_feedback".to_string(),
+            },
+        };
+        Ok((semantic_report, procedural_report))
+    }
+
+    fn build_procedural_job_from_transcript(
+        &self,
+        record: &TranscriptTurnRecord,
+        chat_id: &str,
+        now_secs: u64,
+    ) -> Result<Option<ProceduralFeedbackJobV1>> {
+        if !record.permits_post_turn_learning() || !self.procedural_subject_active() {
+            return Ok(None);
+        }
+        let Some(evidence) = record.learning_evidence.as_ref() else {
+            return Ok(None);
+        };
+        let submitted_count = u32::try_from(
+            evidence
+                .runtime_skill_feedback
+                .len()
+                .saturating_add(evidence.agent_skill_feedback.len())
+                .saturating_add(evidence.task_learning_feedback.len())
+                .saturating_add(evidence.agent_tool_feedback.len()),
+        )
+        .map_err(|_| {
+            Error::config(
+                "procedural_feedback_intent",
+                "procedural feedback group count exceeds durable contract",
+            )
+        })?;
+        if submitted_count == 0 {
+            return Ok(None);
+        }
+        let identity = ProceduralFeedbackIdentityV1::new(
+            &record.key.memory_space_id,
+            &record.subject,
+            &record.key.channel_id,
+            chat_id,
+            &record.key.conversation_id,
+            &record.turn_id,
+        )?;
+        let job = ProceduralFeedbackJobV1::pending(
+            identity,
+            record.sequence,
+            post_turn_governance_transcript_digest(record)?,
+            evidence.learning_evidence_digest.clone(),
+            submitted_count,
+            5,
+            now_secs,
+        )?;
+        Ok(Some(job))
+    }
+
+    pub(crate) fn due_procedural_feedback_jobs(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ProceduralFeedbackJobV1>> {
+        if !self.procedural_subject_active() {
+            return Ok(Vec::new());
+        }
+        let conversation_id = self
+            .config
+            .scope
+            .conversation_id
+            .as_deref()
+            .unwrap_or(self.config.scope.chat_id.as_str());
+        let identity = ProceduralFeedbackIdentityV1::new(
+            &self.config.memory_space_id,
+            &self.config.subject_id,
+            &self.config.scope.channel,
+            &self.config.scope.chat_id,
+            conversation_id,
+            "scope-discovery",
+        )?;
+        let store = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "procedural_feedback_discover",
+                "durable procedural discovery requires StorePlatform",
+            )
+        })?;
+        list_due_procedural_feedback_jobs(
+            store,
+            &identity.scope_id(),
+            self.config.clock.now_secs(),
+            limit,
+        )
+    }
+
+    pub(crate) fn claim_due_procedural_feedback_job(
+        &self,
+        job_id: &str,
+        lease_owner: &str,
+        lease_until: u64,
+    ) -> Result<ProceduralFeedbackJobV1> {
+        if !self.capabilities.procedural_learning.worker.visible {
+            return Err(Error::Other {
+                stage: "procedural_feedback_claim",
+                source: Box::new(crate::ProceduralLearningSdkError {
+                    operation: crate::ProceduralLearningSdkOperation::Wake,
+                    key: crate::ProceduralLearningErrorKeyV1::CapabilityUnavailable,
+                    disposition: crate::ProceduralLearningSdkErrorDisposition::AuthorityRejected,
+                }),
+            });
+        }
+        if !self.procedural_subject_active() {
+            return Err(Error::conflict(
+                "procedural_feedback_claim",
+                "mounted subject no longer permits learning",
+            ));
+        }
+        let store = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "procedural_feedback_claim",
+                "durable procedural claim requires StorePlatform",
+            )
+        })?;
+        claim_procedural_feedback_job(
+            store,
+            self.memory_write_transaction_scope(),
+            &self.runtime_budget(),
+            job_id,
+            lease_owner,
+            lease_until,
+            self.config.clock.now_secs(),
+        )
+    }
+
+    pub(crate) fn retry_claimed_procedural_feedback_job(
+        &self,
+        job: &ProceduralFeedbackJobV1,
+        lease_owner: &str,
+        error_class: bm_core::memory::ProceduralFeedbackErrorClassV1,
+    ) -> Result<ProceduralFeedbackJobV1> {
+        let store = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "procedural_feedback_retry",
+                "durable procedural retry requires StorePlatform",
+            )
+        })?;
+        retry_procedural_feedback_job(
+            store,
+            self.memory_write_transaction_scope(),
+            &self.runtime_budget(),
+            &job.job_id,
+            lease_owner,
+            job.lease_epoch,
+            error_class,
+            self.config.clock.now_secs(),
+        )
+    }
+
+    pub(crate) fn mark_claimed_procedural_feedback_repair_required(
+        &self,
+        job: &ProceduralFeedbackJobV1,
+        lease_owner: &str,
+        error_class: bm_core::memory::ProceduralFeedbackErrorClassV1,
+    ) -> Result<ProceduralFeedbackJobV1> {
+        let store = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "procedural_feedback_repair_required",
+                "durable procedural terminal transition requires StorePlatform",
+            )
+        })?;
+        repair_required_procedural_feedback_job(
+            store,
+            self.memory_write_transaction_scope(),
+            &self.runtime_budget(),
+            &job.job_id,
+            lease_owner,
+            job.lease_epoch,
+            error_class,
+            self.config.clock.now_secs(),
+        )
     }
 
     fn build_governance_job_from_transcript(
@@ -19284,7 +19344,7 @@ impl MemoryRuntime {
             &self.config.scope.channel,
             &conversation_id,
         )?;
-        let scope_identity = PostTurnGovernanceIdentityV2::new(
+        let semantic_scope_identity = PostTurnGovernanceIdentityV2::new(
             &self.config.memory_space_id,
             &self.config.subject_id,
             &self.config.scope.channel,
@@ -19292,11 +19352,20 @@ impl MemoryRuntime {
             &conversation_id,
             "reconciliation-scope",
         )?;
-        let before_index = read_governance_scope_index(store_platform, &scope_identity.scope_id())?;
-        let existing_cursor = before_index
+        let procedural_scope_identity = ProceduralFeedbackIdentityV1::new(
+            &self.config.memory_space_id,
+            &self.config.subject_id,
+            &self.config.scope.channel,
+            &self.config.scope.chat_id,
+            &conversation_id,
+            "reconciliation-scope",
+        )?;
+        let before_semantic_index =
+            read_governance_scope_index(store_platform, &semantic_scope_identity.scope_id())?;
+        let semantic_existing_cursor = before_semantic_index
             .as_ref()
             .and_then(|index| index.reconciliation_cursor(&conversation_id));
-        let cursor = if let Some(existing_cursor) = existing_cursor {
+        let semantic_cursor = if let Some(existing_cursor) = semantic_existing_cursor {
             let turn = self
                 .config
                 .platform
@@ -19318,31 +19387,77 @@ impl MemoryRuntime {
         } else {
             None
         };
-        let page = self
+        let semantic_page = self
             .config
             .platform
             .conversation_transcript_store()
             .list_turns_page(
                 &key,
                 &self.config.subject_id,
-                cursor.as_deref(),
+                semantic_cursor.as_deref(),
                 request.limit,
             )?;
-        if page.turns.is_empty() {
+        let before_procedural_index = read_procedural_feedback_scope_index(
+            store_platform,
+            &procedural_scope_identity.scope_id(),
+        )?;
+        let procedural_existing_cursor = before_procedural_index
+            .as_ref()
+            .and_then(|index| index.reconciliation_cursor(&conversation_id));
+        let procedural_cursor = if let Some(existing_cursor) = procedural_existing_cursor {
+            let turn = self
+                .config
+                .platform
+                .conversation_transcript_store()
+                .get_turn(&key, &self.config.subject_id, &existing_cursor.turn_id)?
+                .ok_or_else(|| {
+                    Error::conflict(
+                        "procedural_feedback_reconcile",
+                        "reconciliation cursor turn is missing",
+                    )
+                })?;
+            if turn.sequence != existing_cursor.sequence {
+                return Err(Error::conflict(
+                    "procedural_feedback_reconcile",
+                    "reconciliation cursor sequence differs from transcript authority",
+                ));
+            }
+            Some(TranscriptTurnCursor::for_record(&turn).encode()?)
+        } else {
+            None
+        };
+        let procedural_page = self
+            .config
+            .platform
+            .conversation_transcript_store()
+            .list_turns_page(
+                &key,
+                &self.config.subject_id,
+                procedural_cursor.as_deref(),
+                request.limit,
+            )?;
+        if semantic_page.turns.is_empty() && procedural_page.turns.is_empty() {
             return Ok(MemoryGovernanceReconcileReport {
                 inspected: 0,
                 created: 0,
-                cursor_sequence: before_index
+                cursor_sequence: before_semantic_index
                     .as_ref()
                     .and_then(|index| index.reconciliation_cursor(&conversation_id))
                     .map_or(0, |cursor| cursor.sequence),
                 has_more: false,
+                procedural_created: 0,
+                procedural_cursor_sequence: before_procedural_index
+                    .as_ref()
+                    .and_then(|index| index.reconciliation_cursor(&conversation_id))
+                    .map_or(0, |cursor| cursor.sequence),
+                procedural_has_more: false,
             });
         }
         let now_secs = self.config.clock.now_secs();
-        let jobs = page
+        let semantic_jobs = semantic_page
             .turns
             .iter()
+            .filter(|turn| turn.permits_post_turn_learning() && self.procedural_subject_active())
             .map(|turn| {
                 self.build_governance_job_from_transcript(
                     turn,
@@ -19353,20 +19468,68 @@ impl MemoryRuntime {
                 )
             })
             .collect::<Result<Vec<_>>>()?;
-        let last = page.turns.last().expect("non-empty page");
-        let created = reconcile_governance_intents(
-            store_platform,
-            self.memory_write_transaction_scope()
-                .with_conversation(conversation_id),
-            &self.runtime_budget(),
-            &jobs,
-            now_secs,
-        )?;
+        let semantic_created = if let Some(cursor_source) = semantic_page.turns.last() {
+            reconcile_governance_intents(
+                store_platform,
+                self.memory_write_transaction_scope()
+                    .with_conversation(conversation_id.clone()),
+                &self.runtime_budget(),
+                &semantic_jobs,
+                cursor_source,
+                now_secs,
+            )?
+        } else {
+            0
+        };
+        let mut procedural_jobs = Vec::new();
+        for turn in &procedural_page.turns {
+            if let Some(job) = self.build_procedural_job_from_transcript(
+                turn,
+                &self.config.scope.chat_id,
+                now_secs,
+            )? {
+                procedural_jobs.push(job);
+            }
+        }
+        let procedural_created = if let Some(last) = procedural_page.turns.last() {
+            reconcile_procedural_feedback_intents(
+                store_platform,
+                self.memory_write_transaction_scope()
+                    .with_conversation(conversation_id.clone()),
+                &self.runtime_budget(),
+                &procedural_scope_identity,
+                &procedural_jobs,
+                last.sequence,
+                &last.turn_id,
+                now_secs,
+            )?
+        } else {
+            0
+        };
         Ok(MemoryGovernanceReconcileReport {
-            inspected: jobs.len(),
-            created,
-            cursor_sequence: last.sequence,
-            has_more: page.has_more,
+            inspected: semantic_page.turns.len(),
+            created: semantic_created,
+            cursor_sequence: semantic_page.turns.last().map_or_else(
+                || {
+                    before_semantic_index
+                        .as_ref()
+                        .and_then(|index| index.reconciliation_cursor(&conversation_id))
+                        .map_or(0, |cursor| cursor.sequence)
+                },
+                |turn| turn.sequence,
+            ),
+            has_more: semantic_page.has_more,
+            procedural_created,
+            procedural_cursor_sequence: procedural_page.turns.last().map_or_else(
+                || {
+                    before_procedural_index
+                        .as_ref()
+                        .and_then(|index| index.reconciliation_cursor(&conversation_id))
+                        .map_or(0, |cursor| cursor.sequence)
+                },
+                |turn| turn.sequence,
+            ),
+            procedural_has_more: procedural_page.has_more,
         })
     }
 
@@ -19546,11 +19709,9 @@ impl MemoryRuntime {
         let turn = canonical_turn_delta_from_transcript(&leased, &transcript)?;
         let finalize_request = MemoryTurnFinalizeRequest {
             turn,
-            tool_calls: leased.tool_call_count,
-            runtime_skill_selected_ids: Vec::new(),
-            task_learning_selected_ids: Vec::new(),
-            reuse_outcome_note: String::new(),
-            tool_usage_feedback: None,
+            learning: bm_core::memory::PostTurnLearningInputV1::with_tool_call_count(
+                leased.tool_call_count,
+            ),
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
         };
@@ -20006,57 +20167,6 @@ impl MemoryRuntime {
         Ok(())
     }
 
-    fn cancel_governance_for_transcript_lifecycle(
-        &self,
-        key: &ConversationKey,
-        turn_id: Option<&str>,
-        transition: TranscriptLifecycleTransition,
-    ) -> Result<()> {
-        let reason = match transition {
-            TranscriptLifecycleTransition::Mask => "transcript_masked",
-            TranscriptLifecycleTransition::DeleteRaw => "transcript_raw_deleted",
-            TranscriptLifecycleTransition::Archive | TranscriptLifecycleTransition::Restore => {
-                return Ok(())
-            }
-        };
-        let Some(store_platform) = self.config.store_platform.as_ref() else {
-            return Ok(());
-        };
-        let identity = PostTurnGovernanceIdentityV2::new(
-            &self.config.memory_space_id,
-            &self.config.subject_id,
-            &key.channel_id,
-            &self.config.scope.chat_id,
-            &key.conversation_id,
-            turn_id.unwrap_or("scope-cancellation"),
-        )?;
-        let Some(index) = read_governance_scope_index(store_platform, &identity.scope_id())? else {
-            return Ok(());
-        };
-        for reference in index.active_jobs {
-            let job = read_governance_job(store_platform, &reference.job_id)?.ok_or_else(|| {
-                Error::config(
-                    "post_turn_governance_cancel",
-                    "scope index references a missing governance job",
-                )
-            })?;
-            if turn_id.is_some_and(|turn_id| job.identity.turn_id != turn_id) {
-                continue;
-            }
-            self.validate_governance_job_runtime_scope(&job)?;
-            cancel_governance_job(
-                store_platform,
-                self.memory_write_transaction_scope()
-                    .with_conversation(job.identity.conversation_id.clone()),
-                &self.runtime_budget(),
-                &job.job_id,
-                reason,
-                self.config.clock.now_secs(),
-            )?;
-        }
-        Ok(())
-    }
-
     pub fn run_retention_compaction(
         &self,
         request: MemoryRetentionCompactionRequest,
@@ -20337,7 +20447,11 @@ impl MemoryRuntime {
         request: MemoryTranscriptCommitRequest,
     ) -> Result<MemoryTranscriptCommitReport> {
         self.ensure_visible("write.transcript", self.capabilities.write)?;
-        validate_turn_scope(&self.config.scope, &self.config.subject_id, &request.turn)?;
+        validate_turn_scope(
+            &self.config.scope,
+            &self.config.scoped_runtime,
+            &request.turn,
+        )?;
         let conversation_alias = self.conversation_alias_from_delta(&request.turn)?;
         let lifecycle = self.start_lifecycle(
             RuntimeLifecycleOperation::Maintain,
@@ -20353,9 +20467,12 @@ impl MemoryRuntime {
             transcript_store.as_ref(),
             &self.config.memory_space_id,
             &request.turn,
-            request.host_refs,
-            conversation_alias.clone(),
-            self.config.clock.now_secs(),
+            CanonicalTurnTranscriptCommitOptions {
+                host_refs: request.host_refs,
+                learning_evidence: None,
+                conversation_alias: conversation_alias.clone(),
+                now_secs: self.config.clock.now_secs(),
+            },
         )?;
         let changed = core_report.session_commit.committed
             || core_report
@@ -21062,6 +21179,17 @@ impl MemoryRuntime {
     ) -> Result<MemoryTranscriptLifecycleReport> {
         self.ensure_visible("transcript.lifecycle", self.capabilities.write)?;
         self.ensure_runtime_memory_space("transcript.lifecycle", &request.memory_space_id)?;
+        if !self
+            .config
+            .subject_registry
+            .subject(&self.config.scoped_runtime.actor_subject_id)
+            .is_some_and(|actor| actor.lifecycle_state == SubjectLifecycleState::Active)
+        {
+            return Err(Error::config(
+                "transcript.lifecycle",
+                "lifecycle requires an active registered actor",
+            ));
+        }
         let lifecycle = self.start_lifecycle(
             RuntimeLifecycleOperation::Maintain,
             RuntimeLifecycleTrigger::OperatorRequested,
@@ -21072,8 +21200,6 @@ impl MemoryRuntime {
             request.channel_id,
             request.conversation_id,
         )?;
-        let governed_turn_id = request.turn_id.clone();
-        let governance_transition = request.transition;
         self.ensure_transcript_lifecycle_has_facet_impact_or_fails_closed(
             &key,
             request.turn_id.as_deref(),
@@ -21087,14 +21213,9 @@ impl MemoryRuntime {
                 turn_id: request.turn_id,
                 transition: request.transition,
                 reason: request.reason,
-                requested_by: self.config.identity.owner_id.clone(),
+                requested_by: self.config.scoped_runtime.actor_subject_id.clone(),
                 requested_at: self.config.clock.now_secs(),
             },
-        )?;
-        self.cancel_governance_for_transcript_lifecycle(
-            &key,
-            governed_turn_id.as_deref(),
-            governance_transition,
         )?;
         sanitize_transcript_lifecycle_report_for_view(
             &mut transcript,
@@ -21541,7 +21662,13 @@ impl MemoryRuntime {
         report: &RuntimeLifecycleReport,
         extra_payload: &[(&str, String)],
     ) -> Result<MemoryStoreEvent> {
-        let event = self.build_lifecycle_event(kind, effect, report, extra_payload);
+        let event = self.build_lifecycle_event(
+            kind,
+            effect,
+            report,
+            extra_payload,
+            report.finished_at_unix_secs,
+        );
         materialize_runtime_lifecycle_store_event(
             &event,
             RuntimeLifecycleStoreBinding::Transaction {
@@ -21557,10 +21684,11 @@ impl MemoryRuntime {
         effect: RuntimeLifecycleEffect,
         report: &RuntimeLifecycleReport,
         extra_payload: &[(&str, String)],
+        timestamp_unix_secs: u64,
     ) -> RuntimeLifecycleEvent {
         let runtime_budget = self.runtime_budget();
         let mut event =
-            RuntimeLifecycleEvent::from_report(kind, effect, report, self.config.clock.now_secs())
+            RuntimeLifecycleEvent::from_report(kind, effect, report, timestamp_unix_secs)
                 .with_payload("changed", report.changed.to_string())
                 .with_payload(
                     "retry_after_ms",
@@ -21638,7 +21766,13 @@ impl MemoryRuntime {
         report: &RuntimeLifecycleReport,
         extra_payload: &[(&str, String)],
     ) -> Result<()> {
-        let event = self.build_lifecycle_event(kind, effect, report, extra_payload);
+        let event = self.build_lifecycle_event(
+            kind,
+            effect,
+            report,
+            extra_payload,
+            self.config.clock.now_secs(),
+        );
         self.config
             .platform
             .runtime_lifecycle_event_sink()
@@ -22068,6 +22202,7 @@ fn semantic_report_from_atomic_refresh(
         skipped_reason: None,
         proposal_count,
         accepted_count,
+        accepted_candidate_ids: Vec::new(),
         rejected_count: usize::from(decision == GovernedWriteDecision::Rejected),
         deferred_count: usize::from(decision == GovernedWriteDecision::Deferred),
         plane_reports: vec![MemoryPlaneGovernanceReport {
@@ -22636,6 +22771,7 @@ fn upsert_recall_capsule_projection_block(
 fn attach_agent_skill_hints_to_runtime_projection(
     envelope: &mut LLMRuntimeProjectionEnvelope,
     hints: Vec<bm_core::skills::ProjectedAgentSkillHint>,
+    audit: &mut AgentSkillProjectionAudit,
     max_len: usize,
 ) {
     envelope.agent_skill_hints.clear();
@@ -22646,7 +22782,17 @@ fn attach_agent_skill_hints_to_runtime_projection(
             .count()
             > max_len
         {
-            envelope.agent_skill_hints.pop();
+            if let Some(dropped) = envelope.agent_skill_hints.pop() {
+                audit.budget_limited = true;
+                audit
+                    .rejected
+                    .push(bm_core::skills::AgentSkillProjectionRejection {
+                        package_id: dropped.package_id.clone(),
+                        namespace: dropped.namespace.clone(),
+                        name: dropped.name.clone(),
+                        reason: "projection_render_budget_exceeded".to_string(),
+                    });
+            }
         }
     }
     envelope
@@ -22657,12 +22803,19 @@ fn attach_agent_skill_hints_to_runtime_projection(
         envelope.section_names.sort();
         envelope.section_names.dedup();
     }
+    audit.selected.retain(|selected| {
+        envelope
+            .agent_skill_hints
+            .iter()
+            .any(|hint| hint.package_binding() == selected.package_binding())
+    });
     envelope.rendered_block = render_bounded_llm_runtime_projection_envelope(envelope, max_len);
 }
 
 fn attach_agent_tool_hints_to_runtime_projection(
     envelope: &mut LLMRuntimeProjectionEnvelope,
     hints: Vec<bm_core::skills::AgentToolHint>,
+    audit: &mut AgentToolProjectionAudit,
     max_len: usize,
 ) {
     envelope.agent_tool_hints.clear();
@@ -22673,7 +22826,17 @@ fn attach_agent_tool_hints_to_runtime_projection(
             .count()
             > max_len
         {
-            envelope.agent_tool_hints.pop();
+            if let Some(dropped) = envelope.agent_tool_hints.pop() {
+                audit.budget_limited = true;
+                audit
+                    .rejected
+                    .push(bm_core::skills::AgentToolProjectionRejection {
+                        registry_id: dropped.registry_id,
+                        tool_id: dropped.tool_id,
+                        experience_id: Some(dropped.experience_id),
+                        reason: "projection_render_budget_exceeded".to_string(),
+                    });
+            }
         }
     }
     envelope
@@ -22684,6 +22847,7 @@ fn attach_agent_tool_hints_to_runtime_projection(
         envelope.section_names.sort();
         envelope.section_names.dedup();
     }
+    audit.selected = envelope.agent_tool_hints.clone();
     envelope.rendered_block = render_bounded_llm_runtime_projection_envelope(envelope, max_len);
 }
 
@@ -22755,7 +22919,13 @@ fn build_projection_audit(input: ProjectionAuditInput<'_>) -> MemoryProjectionAu
         memory_space_id: runtime.config.memory_space_id.clone(),
         subject_id: runtime.config.subject_id.clone(),
         scoped_runtime: runtime.config.scoped_runtime.clone(),
-        conversation_id: Some(runtime.config.scope.chat_id.clone()),
+        conversation_id: Some(
+            runtime
+                .config
+                .scope
+                .conversation_id_or_chat_id()
+                .to_string(),
+        ),
         source_budget_chars,
         render_budget_chars,
         system_memory_chars,
@@ -27184,130 +27354,125 @@ fn first_non_empty<'a>(values: &[&'a str]) -> &'a str {
         .unwrap_or("")
 }
 
-fn build_skill_evolution_report_from_write_outcome(
-    writes: &[RuntimeSkillWrite],
-    outcome: &crate::RuntimeSkillWriteOutcome,
-) -> SkillEvolutionReport {
-    let mut report = SkillEvolutionReport::default();
-    for (idx, item) in outcome.reports.iter().enumerate() {
-        let write_name = writes
-            .get(idx)
-            .map(|write| write.name.clone())
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| item.topic.clone());
-        match item.action {
-            RuntimeSkillWriteAction::Accepted => report.added.push(write_name),
-            RuntimeSkillWriteAction::Rejected => report.rejected.push(write_name),
+fn delivered_task_learning_selections(
+    source: &str,
+    bindings: &[bm_core::task_execution::TaskRecallEntryBinding],
+    envelope: &LLMRuntimeProjectionEnvelope,
+    rendered: &str,
+) -> Vec<bm_core::memory::TaskLearningSelectionV1> {
+    let mut blocks = envelope
+        .governed_memory_evidence
+        .iter()
+        .chain(envelope.procedural_evidence.iter())
+        .filter(|block| block.source_id == "task_recall");
+    let Some(block) = blocks.next() else {
+        return Vec::new();
+    };
+    if blocks.next().is_some()
+        || block.protected
+        || runtime_projection_source_block_prompt_cardinality(rendered, block) != 1
+    {
+        return Vec::new();
+    }
+    let canonical = compact_runtime_projection_content(source, usize::MAX);
+    if !canonical.starts_with(&block.content) {
+        return Vec::new();
+    }
+    let mut cursor = 0;
+    let mut selected = Vec::new();
+    for entry in bindings {
+        let Some(offset) = canonical[cursor..].find(&entry.rendered_text) else {
+            return Vec::new();
+        };
+        let end = cursor + offset + entry.rendered_text.len();
+        cursor = end;
+        if end <= block.content.len() {
+            selected.push(bm_core::memory::TaskLearningSelectionV1 {
+                learning_id: entry.learning_id.clone(),
+                learning_digest: entry.learning_digest.clone(),
+            });
         }
-        report.reasons.push(format!(
-            "{}:{}:{}",
-            item.source.label(),
-            item.reason.label(),
-            item.detail
-        ));
     }
-    if outcome.accepted > 0 && outcome.changed == 0 {
-        report
-            .reasons
-            .push("accepted_without_store_delta_existing_record".to_string());
-    }
-    report.added.sort();
-    report.added.dedup();
-    report.rejected.sort();
-    report.rejected.dedup();
-    report.reasons.sort();
-    report.reasons.dedup();
-    report
+    selected
 }
 
-fn runtime_skill_write_from_promotion_report(
-    report: &ProceduralMemoryPromotionReport,
-    source_chat_id: Option<&str>,
-    now_secs: u64,
-) -> Option<RuntimeSkillWrite> {
-    let record = report.record.as_ref()?;
-    Some(RuntimeSkillWrite {
-        name: sdk_runtime_skill_name(&record.trigger),
-        topic: record.trigger.clone(),
-        title: record.trigger.clone(),
-        summary: record.procedure.clone(),
-        content: render_promoted_procedure(record),
-        citations: record.evidence_refs.clone(),
-        source_chat_id: source_chat_id.map(str::to_string),
-        observed_at: now_secs,
-    })
+#[cfg(test)]
+mod procedural_final_delivery_tests {
+    use super::*;
+
+    #[test]
+    fn identical_task_lines_do_not_sign_the_budget_dropped_owner() {
+        let line = "- [procedure / repair / run] Inspect outputs (why: exact; route=runtime_skill)";
+        let bindings = ["learning-first", "learning-dropped"].map(|id| {
+            bm_core::task_execution::TaskRecallEntryBinding {
+                learning_id: id.to_string(),
+                learning_digest: sha256_field_digest(&[id.as_bytes()]),
+                rendered_text: line.to_string(),
+            }
+        });
+        let source = format!("{line}\n{line}");
+        let mut envelope = LLMRuntimeProjectionEnvelope::default();
+        let block = RuntimeProjectionSourceBlock {
+            owner_ref: None,
+            source_id: "task_recall".into(),
+            role: "program_evidence".into(),
+            content: line.into(),
+            evidence_refs: vec![],
+            protected: false,
+            shared_fact_surface_allowed: false,
+        };
+        let rendered = render_runtime_source_block(&block);
+        envelope.governed_memory_evidence.push(block);
+        let selected = delivered_task_learning_selections(&source, &bindings, &envelope, &rendered);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|item| item.learning_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["learning-first"]
+        );
+    }
 }
 
-fn render_promoted_procedure(record: &bm_core::memory::ProceduralMemoryRecordV2) -> String {
-    let mut lines = Vec::new();
-    lines.push(record.procedure.clone());
-    if !record.constraints.is_empty() {
-        lines.push(format!("Constraints: {}", record.constraints.join("; ")));
+fn canonicalize_procedural_selections(
+    receipt: &mut bm_core::memory::ProceduralSelectionReceiptV1,
+) -> Result<()> {
+    fn sort<T: Serialize + Clone>(values: &mut Vec<T>) -> Result<()> {
+        let mut encoded = values
+            .iter()
+            .map(|value| {
+                serde_json::to_vec(value)
+                    .map(|bytes| (bytes, value.clone()))
+                    .map_err(|error| {
+                        Error::config("procedural_selection_canonical", error.to_string())
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        encoded.sort_by(|left, right| left.0.cmp(&right.0));
+        if encoded.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(Error::config(
+                "procedural_selection_canonical",
+                "duplicate delivered owner binding",
+            ));
+        }
+        *values = encoded.into_iter().map(|(_, value)| value).collect();
+        Ok(())
     }
-    if !record.failure_modes.is_empty() {
-        lines.push(format!(
-            "Failure modes: {}",
-            record.failure_modes.join("; ")
-        ));
-    }
-    if !record.counterfactual_fix.trim().is_empty() {
-        lines.push(format!("Counterfactual fix: {}", record.counterfactual_fix));
-    }
-    lines.join("\n")
-}
-
-fn merge_promotion_and_write_evolution(
-    promotions: &[ProceduralMemoryPromotionReport],
-    writes: &[RuntimeSkillWrite],
-    outcome: &crate::RuntimeSkillWriteOutcome,
-) -> SkillEvolutionReport {
-    let mut report = build_skill_evolution_report_from_write_outcome(writes, outcome);
-    for promotion in promotions {
-        report
-            .reasons
-            .extend(promotion.evolution.reasons.iter().cloned());
-        report
-            .added
-            .extend(promotion.evolution.added.iter().cloned());
-        report
-            .rejected
-            .extend(promotion.evolution.rejected.iter().cloned());
-        report
-            .merged
-            .extend(promotion.evolution.merged.iter().cloned());
-        report
-            .retired
-            .extend(promotion.evolution.retired.iter().cloned());
-        report
-            .demoted
-            .extend(promotion.evolution.demoted.iter().cloned());
-    }
-    report.added.sort();
-    report.added.dedup();
-    report.rejected.sort();
-    report.rejected.dedup();
-    report.merged.sort();
-    report.merged.dedup();
-    report.retired.sort();
-    report.retired.dedup();
-    report.demoted.sort();
-    report.demoted.dedup();
-    report.reasons.sort();
-    report.reasons.dedup();
-    report
-}
-
-fn runtime_skill_write_source_requires_promotion(source: RuntimeSkillWriteSource) -> bool {
-    matches!(source, RuntimeSkillWriteSource::TaskLearning)
+    sort(&mut receipt.standard_agent_skills)?;
+    sort(&mut receipt.runtime_skills)?;
+    sort(&mut receipt.task_learnings)?;
+    sort(&mut receipt.agent_tool_experiences)
 }
 
 fn projection_id(runtime: &MemoryRuntime, request: &MemoryProjectionRequest) -> String {
     let seed = format!(
-        "{}:{}:{}:{}",
+        "{}:{}:{}:{}:{:?}:{}",
         runtime.config.memory_space_id,
         runtime.config.scope.channel,
         runtime.config.scope.chat_id,
-        request.user_query
+        request.user_query,
+        request.binding,
+        runtime.config.scoped_runtime.mounted_subject_id,
     );
     format!("projection-{:016x}", fnv1a64(seed.as_bytes()))
 }
@@ -27625,9 +27790,10 @@ fn truncate_to_byte_boundary(value: &str, max_bytes: usize) -> String {
 
 fn validate_turn_scope(
     scope: &MemoryScope,
-    subject_id: &str,
+    scoped_runtime: &SubjectScopedRuntime,
     turn: &CanonicalTurnDelta,
 ) -> Result<()> {
+    let subject_id = scoped_runtime.mounted_subject_id.as_str();
     if turn.turn_id.trim().is_empty() {
         return Err(Error::config(
             "canonical_turn_delta",
@@ -27671,6 +27837,26 @@ fn validate_turn_scope(
             "canonical_turn_delta",
             "turn subject must match runtime subject",
         ));
+    }
+    if let Some(actor) = &turn.actor {
+        if actor
+            .subject_id
+            .as_deref()
+            .is_some_and(|value| value != subject_id)
+            || actor
+                .mounted_subject_id
+                .as_deref()
+                .is_some_and(|value| value != subject_id)
+            || actor
+                .actor_subject_id
+                .as_deref()
+                .is_some_and(|value| value != scoped_runtime.actor_subject_id)
+        {
+            return Err(Error::invalid_input(
+                "canonical_turn_actor",
+                "explicit attribution must match the mounted subject and scoped actor",
+            ));
+        }
     }
     Ok(())
 }
@@ -27803,6 +27989,7 @@ fn semantic_report_from_maintenance(
             skipped_reason: None,
             proposal_count,
             accepted_count,
+            accepted_candidate_ids: Vec::new(),
             rejected_count,
             deferred_count,
             plane_reports,
@@ -27816,6 +28003,7 @@ fn semantic_report_from_maintenance(
         skipped_reason: None,
         proposal_count: 0,
         accepted_count: 0,
+        accepted_candidate_ids: Vec::new(),
         rejected_count: 0,
         deferred_count: 0,
         plane_reports,
@@ -28669,7 +28857,6 @@ fn plan_private_garden_derived_memory_ref_mutations(
 fn plan_long_term_extraction_derived_memory_ref_mutations(
     subject_id: &str,
     accepted_upserts: &[LongTermMemoryDraft],
-    accepted_skill_writes: &[RuntimeSkillWrite],
     now_secs: u64,
 ) -> Result<Vec<StoreMutation>> {
     let mut mutations = Vec::new();
@@ -28689,24 +28876,6 @@ fn plan_long_term_extraction_derived_memory_ref_mutations(
         ) {
             mutations.push(candidate_derived_memory_ref_mutation(
                 plane, &store_key, subject_id, source, now_secs,
-            )?);
-        }
-    }
-    for write in accepted_skill_writes {
-        let name = write.name.trim();
-        if name.is_empty() {
-            continue;
-        }
-        let store_key = format!("runtime_skill:{name}");
-        for source in
-            transcript_evidence_refs_from_display_citations(&write.citations, subject_id, None)
-        {
-            mutations.push(candidate_derived_memory_ref_mutation(
-                DerivedMemoryPlane::ProceduralSkill,
-                &store_key,
-                subject_id,
-                source,
-                now_secs,
             )?);
         }
     }
@@ -28870,7 +29039,6 @@ fn memory_write_transaction_report(
 struct MemoryLongTermExtractionTransactionPlan {
     changed: usize,
     shared_fact_governance: Option<SharedMemoryWriteOutcome>,
-    procedural_evolution: Option<SkillEvolutionReport>,
     mutations: Vec<StoreMutation>,
     preconditions: Vec<StoreJsonPrecondition>,
 }
@@ -30956,6 +31124,7 @@ fn plan_runtime_skill_owner_upserts(
     Ok(plan)
 }
 
+#[cfg(feature = "nonproduction-replay-harness")]
 fn runtime_skill_owner_mutation_count(plan: &MemoryStoreMutationPlan) -> usize {
     plan.mutations
         .iter()
@@ -30969,34 +31138,7 @@ fn runtime_skill_owner_mutation_count(plan: &MemoryStoreMutationPlan) -> usize {
         .count()
 }
 
-fn runtime_skill_owner_record_from_candidate(
-    candidate: &MemoryWriteCandidate,
-    write: &RuntimeSkillWrite,
-    memory_space_id: &str,
-    owning_scope: RuntimeSkillOwningScope,
-) -> Result<RuntimeSkillOwnerRecord> {
-    let candidate_id = candidate.candidate_id.trim();
-    if candidate_id.is_empty() {
-        return Err(Error::config(
-            "runtime_skill_owner_plan",
-            "governed candidate id is required for runtime skill identity",
-        ));
-    }
-    let candidate_bytes = serde_json::to_vec(candidate)
-        .map_err(|error| Error::config("runtime_skill_owner_plan", error.to_string()))?;
-    let candidate_digest = format!("sha256:{:x}", Sha256::digest(candidate_bytes));
-    runtime_skill_owner_record_from_governed_write(
-        write,
-        memory_space_id,
-        owning_scope,
-        RuntimeSkillCreationRef::GovernedCandidate {
-            candidate_id: candidate_id.to_string(),
-            candidate_digest,
-        },
-        candidate.privacy,
-    )
-}
-
+#[cfg(feature = "nonproduction-replay-harness")]
 fn runtime_skill_owner_record_from_governed_write(
     write: &RuntimeSkillWrite,
     memory_space_id: &str,
@@ -31005,6 +31147,12 @@ fn runtime_skill_owner_record_from_governed_write(
     privacy_class: MemoryPrivacyClass,
 ) -> Result<RuntimeSkillOwnerRecord> {
     let (evidence_kind, evidence_safe_ref, evidence_digest) = match &creation_ref {
+        RuntimeSkillCreationRef::AgentToolExperiencePromotion { .. } => {
+            return Err(Error::config(
+                "runtime_skill_owner_plan",
+                "AgentTool promotion must be planned from exact durable procedural sources",
+            ));
+        }
         RuntimeSkillCreationRef::GovernedCandidate {
             candidate_id,
             candidate_digest,
@@ -31281,31 +31429,6 @@ fn long_term_extraction_state_mutation(
     }))
 }
 
-fn runtime_skill_storage_mutations_to_store_mutations(
-    mutations: &[RuntimeSkillStorageMutation],
-) -> Vec<StoreMutation> {
-    mutations
-        .iter()
-        .map(|mutation| match mutation {
-            RuntimeSkillStorageMutation::Upsert { name, content } => StoreMutation::PutBlob {
-                namespace: "skills".to_string(),
-                key: name.clone(),
-                value: content.clone(),
-                event_kind: MemoryStoreEventKind::MemoryWrite,
-                plane: "skills".to_string(),
-                record_key: name.clone(),
-            },
-            RuntimeSkillStorageMutation::Delete { name } => StoreMutation::DeleteBlob {
-                namespace: "skills".to_string(),
-                key: name.clone(),
-                event_kind: MemoryStoreEventKind::MemoryDelete,
-                plane: "skills".to_string(),
-                record_key: name.clone(),
-            },
-        })
-        .collect()
-}
-
 fn stable_hash_hex<T: Hash>(value: &T) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     value.hash(&mut hasher);
@@ -31431,47 +31554,6 @@ fn skill_matches_query(
     haystack.to_ascii_lowercase().contains(query)
 }
 
-fn normalize_runtime_skill_write_names(
-    writes: Vec<crate::RuntimeSkillWrite>,
-) -> Vec<crate::RuntimeSkillWrite> {
-    writes
-        .into_iter()
-        .map(|mut write| {
-            let name = write.name.trim();
-            if name.is_empty() || !is_runtime_skill_name(name) {
-                write.name =
-                    sdk_runtime_skill_name(if name.is_empty() { &write.topic } else { name });
-            } else if name != write.name {
-                write.name = name.to_string();
-            }
-            write
-        })
-        .collect()
-}
-
-fn sdk_runtime_skill_name(seed: &str) -> String {
-    let mut slug = seed
-        .trim()
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
-                ch.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    while slug.contains("__") {
-        slug = slug.replace("__", "_");
-    }
-    let slug = slug.trim_matches('_');
-    let suffix = if slug.is_empty() { "skill" } else { slug };
-    format!(
-        "runtime_skill__{}",
-        suffix.chars().take(40).collect::<String>()
-    )
-}
-
 pub struct MemoryRuntimeBuilder {
     identity: Option<MemoryIdentity>,
     subject_id: Option<String>,
@@ -31489,6 +31571,7 @@ pub struct MemoryRuntimeBuilder {
     agent_skill_dirs: Vec<AgentSkillDirConfig>,
     agent_tool_registries: Vec<AgentToolRegistrySnapshot>,
     runtime_skill_applicability_context: RuntimeSkillApplicabilityContext,
+    procedural_applicability_context: bm_core::memory::ProceduralApplicabilityContextV1,
     runtime_skill_premise_observations: Vec<RuntimeSkillPremiseObservation>,
 }
 
@@ -31515,6 +31598,9 @@ impl Default for MemoryRuntimeBuilder {
             )
             .expect("empty RuntimeSkill applicability context is canonical"),
             runtime_skill_premise_observations: Vec::new(),
+            procedural_applicability_context:
+                bm_core::memory::ProceduralApplicabilityContextV1::try_new(None, None, None)
+                    .expect("empty procedural applicability is canonical"),
         }
     }
 }
@@ -31602,11 +31688,22 @@ impl MemoryRuntimeBuilder {
         self
     }
 
+    /// Additional User/Organization/Device context. Project/Workspace/Conversation
+    /// belong exclusively to `procedural_applicability_context`.
     pub fn runtime_skill_applicability_context(
         mut self,
         context: RuntimeSkillApplicabilityContext,
     ) -> Self {
         self.runtime_skill_applicability_context = context;
+        self
+    }
+
+    /// Trusted host context restricts scoped tool experience; it never changes ownership.
+    pub fn procedural_applicability_context(
+        mut self,
+        context: bm_core::memory::ProceduralApplicabilityContextV1,
+    ) -> Self {
+        self.procedural_applicability_context = context;
         self
     }
 
@@ -31619,6 +31716,39 @@ impl MemoryRuntimeBuilder {
     }
 
     pub fn build(self) -> Result<MemoryRuntime> {
+        if !self.procedural_applicability_context.validate_contract() {
+            return Err(Error::config(
+                "memory_runtime_config",
+                "procedural applicability must be canonical",
+            ));
+        }
+        if self
+            .runtime_skill_applicability_context
+            .targets
+            .iter()
+            .any(|target| {
+                matches!(
+                    target,
+                    bm_core::skills::RuntimeSkillApplicabilityTarget::Project { .. }
+                        | bm_core::skills::RuntimeSkillApplicabilityTarget::Workspace { .. }
+                        | bm_core::skills::RuntimeSkillApplicabilityTarget::Conversation { .. }
+                )
+            })
+        {
+            return Err(Error::config(
+                "procedural_applicability_context",
+                "project, workspace and conversation context require the procedural applicability owner",
+            ));
+        }
+        if RuntimeSkillApplicabilityContext::try_new(
+            self.runtime_skill_applicability_context.targets.clone(),
+        )? != self.runtime_skill_applicability_context
+        {
+            return Err(Error::config(
+                "runtime_skill_applicability_context",
+                "applicability context must be canonical",
+            ));
+        }
         let identity = self
             .identity
             .ok_or_else(|| Error::config("memory_runtime_config", "identity must be configured"))?;
@@ -31786,6 +31916,17 @@ impl MemoryRuntimeBuilder {
         let long_term_memory_control_store = store_platform
             .memory_space_long_term_memory_control_read_store(&memory_space_id)
             .map_err(|error| Error::config(error.stage(), error.to_string()))?;
+        let procedural_selection_signer =
+            if capabilities.procedural_learning.selection_receipt.visible {
+                store_platform.prepare_procedural_selection_authority(
+                    &memory_space_id,
+                    clock.now_secs(),
+                    &runtime_budget,
+                )?;
+                Some(store_platform.prepared_procedural_selection_signer(&memory_space_id)?)
+            } else {
+                None
+            };
         let config = MemoryRuntimeConfig {
             identity,
             memory_space_id,
@@ -31799,6 +31940,7 @@ impl MemoryRuntimeBuilder {
             long_term_memory_read_store,
             long_term_memory_control_store,
             store_platform: Some(store_platform),
+            procedural_selection_signer,
             llm: self.llm,
             clock,
             capability_policy: self.capability_policy,
@@ -31807,6 +31949,7 @@ impl MemoryRuntimeBuilder {
             runtime_budget_authority,
             agent_skill_registry,
             runtime_skill_applicability_context: self.runtime_skill_applicability_context,
+            procedural_applicability_context: self.procedural_applicability_context,
             runtime_skill_premise_observations: self.runtime_skill_premise_observations,
         };
         let runtime = MemoryRuntime {
@@ -32329,8 +32472,6 @@ mod recall_immutable_session_observer_tests {
         let runtime = runtime(platform);
         runtime
             .write(MemoryWriteRequest::LongTermExtraction {
-                governed_skill_writes: Vec::new(),
-                runtime_skill_owning_scope: None,
                 extraction: ParsedLongTermMemoryExtraction {
                     upserts: vec![LongTermMemoryDraft {
                         kind: LongTermMemoryKind::Project,
@@ -32910,8 +33051,6 @@ mod recall_immutable_session_observer_tests {
         let seed_runtime = runtime(platform.clone());
         seed_runtime
             .write(MemoryWriteRequest::LongTermExtraction {
-                governed_skill_writes: Vec::new(),
-                runtime_skill_owning_scope: None,
                 extraction: ParsedLongTermMemoryExtraction {
                     upserts: vec![LongTermMemoryDraft {
                         kind: LongTermMemoryKind::Project,
@@ -32942,8 +33081,8 @@ mod recall_immutable_session_observer_tests {
             })
             .expect("seed governed owner");
         let procedural_write = seed_runtime
-            .write(MemoryWriteRequest::Procedural {
-                writes: vec![GovernedRuntimeSkillWriteInput {
+            .seed_runtime_skills_for_replay(
+                vec![GovernedRuntimeSkillWriteInput {
                     write: RuntimeSkillWrite {
                         name: "immutable_receipt_guard".to_string(),
                         topic: "immutable receipt owner".to_string(),
@@ -32961,18 +33100,17 @@ mod recall_immutable_session_observer_tests {
                     },
                     privacy_class: MemoryPrivacyClass::SharedWithSubject,
                 }],
-                owning_scope: RuntimeSkillOwningScope::Subject {
+                RuntimeSkillOwningScope::Subject {
                     mounted_subject_id: "agent:agent-main".to_string(),
                 },
-                source: RuntimeSkillWriteSource::Manual,
-            })
+            )
             .expect("seed typed RuntimeSkill owner");
         assert!(procedural_write.accepted);
         assert_eq!(procedural_write.changed, 1);
         let cross_space_runtime = runtime_for_owner(platform.clone(), "other-owner");
         let cross_space_write = cross_space_runtime
-            .write(MemoryWriteRequest::Procedural {
-                writes: vec![GovernedRuntimeSkillWriteInput {
+            .seed_runtime_skills_for_replay(
+                vec![GovernedRuntimeSkillWriteInput {
                     write: RuntimeSkillWrite {
                         name: "cross_space_only_guard".to_string(),
                         topic: "cross space only sentinel".to_string(),
@@ -32990,11 +33128,10 @@ mod recall_immutable_session_observer_tests {
                     },
                     privacy_class: MemoryPrivacyClass::SharedWithSubject,
                 }],
-                owning_scope: RuntimeSkillOwningScope::Subject {
+                RuntimeSkillOwningScope::Subject {
                     mounted_subject_id: "agent:agent-main".to_string(),
                 },
-                source: RuntimeSkillWriteSource::Manual,
-            })
+            )
             .expect("seed cross-space RuntimeSkill owner");
         assert!(cross_space_write.accepted);
         assert_eq!(cross_space_write.changed, 1);
@@ -33027,6 +33164,16 @@ mod recall_immutable_session_observer_tests {
             },
         );
         let mut expected_runtime_skill_addresses = BTreeSet::new();
+        expected_addresses.json.insert((
+            AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE.to_string(),
+            agent_tool_experience_scope_manifest_key(
+                "space:owner-default",
+                &AgentToolExperienceOwningScopeV1::Subject {
+                    mounted_subject_id: "agent:agent-main".to_string(),
+                },
+            )
+            .expect("exact subject experience root"),
+        ));
         for owning_scope in [
             RuntimeSkillOwningScope::Subject {
                 mounted_subject_id: "agent:agent-main".to_string(),
@@ -33262,6 +33409,7 @@ mod recall_immutable_session_observer_tests {
         observer.arm();
         let projection = observed_runtime
             .project(MemoryProjectionRequest {
+                binding: bm_core::memory::ProceduralProjectionBindingV1::Preview,
                 temporal_operation: crate::MemoryRecallTemporalOperation::Current,
                 user_query: "immutable receipt owner".to_string(),
                 system_max_len: 4096,
@@ -33421,6 +33569,7 @@ mod recall_immutable_session_observer_tests {
         let observed_platform = platform.with_engine_for_test(observer.clone());
         let runtime = runtime(observed_platform);
         let request = || MemoryProjectionRequest {
+            binding: bm_core::memory::ProceduralProjectionBindingV1::Preview,
             temporal_operation: crate::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "soul read delta procedural guard".to_string(),
@@ -33437,8 +33586,8 @@ mod recall_immutable_session_observer_tests {
         let baseline_observation = observer.observation();
 
         let write = runtime
-            .write(MemoryWriteRequest::Procedural {
-                writes: vec![GovernedRuntimeSkillWriteInput {
+            .seed_runtime_skills_for_replay(
+                vec![GovernedRuntimeSkillWriteInput {
                     write: RuntimeSkillWrite {
                         name: "soul_read_delta_guard".to_string(),
                         topic: "soul read delta procedural guard".to_string(),
@@ -33456,11 +33605,10 @@ mod recall_immutable_session_observer_tests {
                     },
                     privacy_class: MemoryPrivacyClass::SharedWithSubject,
                 }],
-                owning_scope: RuntimeSkillOwningScope::Subject {
+                RuntimeSkillOwningScope::Subject {
                     mounted_subject_id: "agent:agent-main".to_string(),
                 },
-                source: RuntimeSkillWriteSource::Manual,
-            })
+            )
             .expect("seed Soul read delta procedure");
         assert!(write.accepted, "{write:#?}");
 
@@ -33746,8 +33894,6 @@ mod recall_immutable_session_observer_tests {
         let seed_runtime = runtime(platform.clone());
         seed_runtime
             .write(MemoryWriteRequest::LongTermExtraction {
-                governed_skill_writes: Vec::new(),
-                runtime_skill_owning_scope: None,
                 extraction: ParsedLongTermMemoryExtraction {
                     upserts: vec![LongTermMemoryDraft {
                         kind: LongTermMemoryKind::Project,
@@ -33850,11 +33996,21 @@ mod recall_immutable_session_observer_tests {
                     .expect("historical fixture namespace"),
             );
         }
-        let expected_json_addresses = expected_historical_long_term_addresses(
+        let mut expected_json_addresses = expected_historical_long_term_addresses(
             &historical_docs,
             "space:owner-default",
             "space:owner-default",
         );
+        expected_json_addresses.insert((
+            AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE.to_string(),
+            agent_tool_experience_scope_manifest_key(
+                "space:owner-default",
+                &AgentToolExperienceOwningScopeV1::Subject {
+                    mounted_subject_id: "agent:agent-main".to_string(),
+                },
+            )
+            .expect("exact historical subject experience root"),
+        ));
 
         let observer = Arc::new(ObservedStoreEngine::new(platform.engine_for_test()));
         let observed_platform = platform.with_engine_for_test(observer.clone());
@@ -33935,6 +34091,71 @@ mod projection_budget_truncation_tests {
     }
 
     #[test]
+    fn projection_audit_uses_explicit_conversation_not_host_chat() {
+        let profile = test_host_profile();
+        let platform = open_test_store_platform(
+            crate::store_internal::StoreBackendConfig::in_memory(profile).unwrap(),
+        )
+        .unwrap();
+        let runtime = MemoryRuntime::builder()
+            .identity(MemoryIdentity::new("agent-main", "owner-default").unwrap())
+            .scope(
+                MemoryScope::new("local", "host-chat")
+                    .unwrap()
+                    .with_conversation_id("stable-conversation")
+                    .unwrap(),
+            )
+            .store(MemoryStoreHandle::from_platform(platform))
+            .clock(Arc::new(FixedClock))
+            .build()
+            .unwrap();
+        let request = MemoryProjectionRequest {
+            binding: bm_core::memory::ProceduralProjectionBindingV1::Preview,
+            temporal_operation: crate::MemoryRecallTemporalOperation::Current,
+            user_query: "scope identity".into(),
+            system_max_len: 2048,
+            recent_messages_limit: 4,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+            structured_query_facets: vec![],
+            tool_registry_refs: vec![],
+        };
+        let lifecycle = runtime.start_lifecycle(
+            RuntimeLifecycleOperation::Project,
+            RuntimeLifecycleTrigger::SdkCall,
+            RuntimeLifecycleModeInput::default(),
+        );
+        let budget = runtime.runtime_budget();
+        let context = runtime
+            .load_projection_context(
+                &request,
+                &lifecycle,
+                &budget,
+                runtime.config.clock.now_secs(),
+                None,
+                None,
+            )
+            .unwrap();
+        let audit = build_projection_audit(ProjectionAuditInput {
+            runtime: &runtime,
+            context: &context,
+            lifecycle: &lifecycle,
+            render_budget_chars: 2048,
+            system_memory_chars: 0,
+            injected: false,
+            runtime_projection: &LLMRuntimeProjectionEnvelope::default(),
+            recall_delivery_report: &MemoryRecallDeliveryReport::default(),
+            agent_skill_audit: AgentSkillProjectionAudit::empty(),
+            agent_tool_audit: AgentToolProjectionAudit::default(),
+        });
+        assert_eq!(audit.scope.chat_id, "host-chat");
+        assert_eq!(
+            audit.conversation_id.as_deref(),
+            Some("stable-conversation")
+        );
+    }
+
+    #[test]
     fn governed_long_term_reads_filter_the_full_source_before_limits() {
         let profile = test_host_profile();
         let platform = open_test_store_platform(
@@ -33954,8 +34175,6 @@ mod projection_budget_truncation_tests {
         let visible_topic = "governed_scan_visible_after_96";
         runtime
             .write(MemoryWriteRequest::LongTermExtraction {
-                governed_skill_writes: Vec::new(),
-                runtime_skill_owning_scope: None,
                 extraction: ParsedLongTermMemoryExtraction {
                     upserts: vec![LongTermMemoryDraft {
                         kind: LongTermMemoryKind::Project,
@@ -34013,8 +34232,6 @@ mod projection_budget_truncation_tests {
             .collect::<Vec<_>>();
         runtime
             .write(MemoryWriteRequest::LongTermExtraction {
-                governed_skill_writes: Vec::new(),
-                runtime_skill_owning_scope: None,
                 extraction: ParsedLongTermMemoryExtraction {
                     upserts: hidden,
                     deletes: Vec::new(),
@@ -34281,8 +34498,6 @@ mod projection_budget_truncation_tests {
             .expect("runtime");
         runtime
             .write(MemoryWriteRequest::LongTermExtraction {
-                governed_skill_writes: Vec::new(),
-                runtime_skill_owning_scope: None,
                 extraction: ParsedLongTermMemoryExtraction {
                     upserts: vec![LongTermMemoryDraft {
                         kind: LongTermMemoryKind::Project,
@@ -34428,8 +34643,6 @@ mod concurrent_memory_plan_tests {
         let second = runtime(platform.clone());
         first
             .write(MemoryWriteRequest::LongTermExtraction {
-                governed_skill_writes: Vec::new(),
-                runtime_skill_owning_scope: None,
                 extraction: ParsedLongTermMemoryExtraction {
                     upserts: vec![draft("initial owner")],
                     deletes: Vec::new(),
@@ -34508,12 +34721,7 @@ mod concurrent_memory_plan_tests {
         };
         let plan = |runtime: &MemoryRuntime, topic: &str, content: &str| {
             let plan = runtime
-                .plan_long_term_extraction_transaction(
-                    &extraction(topic, content),
-                    &[],
-                    None,
-                    1_900_000_000,
-                )
+                .plan_long_term_extraction_transaction(&extraction(topic, content), 1_900_000_000)
                 .expect("extraction plan");
             MemoryStoreMutationPlan {
                 mutations: plan.mutations,
@@ -34635,3 +34843,4 @@ mod concurrent_memory_plan_tests {
         assert_eq!(policies[0].reason, "first policy");
     }
 }
+mod procedural;

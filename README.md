@@ -20,12 +20,12 @@ The project is not a vector database, a generic RAG framework, a chat-history du
 | Model gateway and transparent local-model control | `bm-llm-gateway`, `bm-ollama-transparent` |
 | Adapters | `bm-cli`, `bm-http`, `bm-wss`, `bm-mcp`, `bm-a2a` |
 
-The Cargo workspace is prepared as a local `0.6.0` source candidate. See the [0.6.0 source candidate notes](docs/en/release-notes-0.6.0.md) before opening a persistent store. This is a clean-break Store v12 release with no v11 migration or compatibility reader. The repository includes five smoke-test examples under `examples/` and platform capability fixtures under `fixtures/platform/capabilities/`.
+The Cargo workspace is on an unreleased source-candidate line after `v0.6.0`. The [0.6.0 release notes](docs/en/release-notes-0.6.0.md) describe that historical release, not the current worktree contract. The current line is a clean-break Store v13 development generation with no compatibility reader or automatic migration. The repository includes smoke-test examples under `examples/` and platform capability fixtures under `fixtures/platform/capabilities/`.
 
 ## Capabilities
 
 - Build a `MemoryRuntime` from an identity, scope, profile, and store backend.
-- Write policy-checked procedural memory and long-term extraction results.
+- Submit policy-checked factual candidates, long-term extraction results, and governed evidence; procedural owners are created only by governed post-turn learning.
 - Recall memory across working, procedural, long-term, and continuity surfaces.
 - Project a bounded memory block for model context assembly.
 - Inspect runtime state, lifecycle reports, and operator-safe recovery actions.
@@ -59,8 +59,8 @@ After publishing, use the crate version instead of a path dependency.
 use bm_sdk::{
     AgentSkillDirConfig, MemoryIdentity, MemoryProjectionRequest, MemoryRecallRequest,
     MemoryRecallTemporalOperation, MemoryRuntime, MemoryScope, MemoryStoreHandle,
-    MemoryWriteRequest, PressureLevel, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite,
-    RuntimeSkillWriteSource, StoreBackendConfig,
+    PressureLevel, ProceduralProjectionBindingV1, ProfileId, RuntimeLifecycleModeInput,
+    StoreBackendConfig,
 };
 
 fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
@@ -79,20 +79,6 @@ fn build_runtime() -> bm_sdk::Result<MemoryRuntime> {
 }
 
 fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
-    runtime.write(MemoryWriteRequest::Procedural {
-        writes: vec![RuntimeSkillWrite {
-            name: "release_guard".to_string(),
-            topic: "release".to_string(),
-            title: "Release guard".to_string(),
-            summary: "Verify release artifacts before publishing.".to_string(),
-            content: "Run examples, platform gates, and publish dry-run.".to_string(),
-            citations: vec!["quickstart".to_string()],
-            source_chat_id: Some("chat-1".to_string()),
-            observed_at: 1_800_000_000,
-        }],
-        source: RuntimeSkillWriteSource::Manual,
-    })?;
-
     let recall = runtime.recall(MemoryRecallRequest {
         temporal_operation: MemoryRecallTemporalOperation::Current,
         query: "release artifacts".to_string(),
@@ -100,12 +86,10 @@ fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
         structured_query_facets: Vec::new(),
         tool_registry_refs: Vec::new(),
     })?;
-    assert!(recall
-        .procedural_delivery_reports
-        .iter()
-        .any(|delivery| delivery.selected));
+    assert_eq!(recall.query, "release artifacts");
 
     let projection = runtime.project(MemoryProjectionRequest {
+        binding: ProceduralProjectionBindingV1::Preview,
         temporal_operation: MemoryRecallTemporalOperation::Current,
         user_query: "How should this host release?".to_string(),
         system_max_len: 4096,
@@ -115,10 +99,15 @@ fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
         structured_query_facets: Vec::new(),
         tool_registry_refs: Vec::new(),
     })?;
-    assert!(projection.system_memory_block.len() <= 4096);
+    assert!(projection.provider_payload().system_memory_block().len() <= 4096);
     Ok(())
 }
 ```
+
+`Preview` is for read-only inspection. A host executing a real turn must choose one
+stable turn id at ingress, project with `ProceduralProjectionBindingV1::Turn`, and
+pass the complete signed selection receipt unchanged to `finalize_turn` for that
+same canonical turn. Retries of one turn reuse its id; separate turns never share it.
 
 ## Documentation
 

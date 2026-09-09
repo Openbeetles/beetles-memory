@@ -8,12 +8,12 @@ use bm_sdk::{
     plan_memory_autopilot_for_profile, promote_task_experience_to_procedure,
     rerank_recall_with_temporal_graph, ActorAttribution, AgentSkillDirConfig,
     AgentSkillDirectoryReport, AgentSkillProjectionAudit, AgentToolDescriptor,
-    AgentToolExperienceGovernanceReport, AgentToolHint, AgentToolObservationDigest,
-    AgentToolProjectionAudit, AgentToolRegistryRef, AgentToolRegistryReport,
-    AgentToolRegistrySnapshot, AgentToolUsageFeedback, ConversationKey, DerivedMemoryPlane,
-    DerivedMemoryRef, GovernedStateMemoryCapability, GraphRecallExpansionBudget,
-    GraphRecallExpansionBudgetReport, HostOpaqueRef, HostRefRelation, HostRefVisibility,
-    MemoryAutopilotInput, MemoryCapabilityCatalog, MemoryCapabilityPolicy,
+    AgentToolExperienceOwnerLocatorV2, AgentToolExperienceOwningScopeV1, AgentToolHint,
+    AgentToolObservationDigest, AgentToolProjectionAudit, AgentToolRegistryRef,
+    AgentToolRegistryReport, AgentToolRegistrySnapshot, AgentToolUsageFeedbackV2, ConversationKey,
+    DerivedMemoryPlane, DerivedMemoryRef, GovernedStateMemoryCapability,
+    GraphRecallExpansionBudget, GraphRecallExpansionBudgetReport, HostOpaqueRef, HostRefRelation,
+    HostRefVisibility, MemoryAutopilotInput, MemoryCapabilityCatalog, MemoryCapabilityPolicy,
     MemoryConversationListRequest, MemoryGovernancePolicyMutation,
     MemoryGovernancePolicyMutationReport, MemoryGovernanceSelector,
     MemoryGovernanceSuppressionDuration, MemoryGraphEvidence, MemoryGraphNodeKind, MemoryIdentity,
@@ -22,13 +22,20 @@ use bm_sdk::{
     MemoryLongTermGovernancePolicy, MemoryLongTermListReport, MemoryLongTermListRequest,
     MemoryLongTermMutation, MemoryLongTermMutationReport, MemoryLongTermMutationRequest,
     MemoryLongTermPolicyRequest, MemoryLongTermSelector, MemoryLongTermTarget, MemoryPrivacyClass,
-    MemoryProfile, MemoryProjectionOutput, MemoryProjectionReport, MemoryProjectionSafeAuditReport,
-    MemoryRuntime, MemoryRuntimeSystemKind, MemoryScope, MemorySubjectVisibilityPolicy,
+    MemoryProceduralLearningIntentReport, MemoryProceduralLearningRunReport,
+    MemoryProceduralLearningStateReport, MemoryProfile, MemoryProjectionOutput,
+    MemoryProjectionReport, MemoryProjectionSafeAuditReport, MemoryRuntime,
+    MemoryRuntimeSystemKind, MemoryScope, MemorySubjectVisibilityPolicy,
     MemoryTranscriptActivityRequest, MemoryTranscriptCommitRequest, MemoryTranscriptExportRequest,
     MemoryTranscriptLifecycleRequest, MemoryTranscriptRepairRequest, MemoryTranscriptReplayRequest,
     MemoryTranscriptSearchRequest, MemoryTranscriptSearchScope, MemoryTranscriptTimelineRequest,
-    MemoryWriteRequest, PostReplyMemoryMaintenanceContext, PrivateMaterialRedactionReport,
-    ProceduralMemoryPromotionInput, ProceduralMemoryPromotionPolicy, ProfileId,
+    MemoryWriteRequest, PostReplyMemoryMaintenanceContext, PostTurnLearningEvidenceV1,
+    PostTurnLearningInputV1, PrivateMaterialRedactionReport, ProceduralApplicabilityContextV1,
+    ProceduralFeedbackAuthorityInputV1, ProceduralFeedbackAuthorityV1,
+    ProceduralLearningErrorKeyV1, ProceduralLearningSdkError,
+    ProceduralLearningSdkErrorDisposition, ProceduralLearningSdkOperation,
+    ProceduralLearningSdkResult, ProceduralMemoryPromotionInput, ProceduralMemoryPromotionPolicy,
+    ProceduralProjectionBindingV1, ProceduralSelectionReceiptV1, ProfileId,
     ProjectedAgentSkillHint, PromptMemoryContextParams, PromptParticipationPlan,
     ProviderProjectionPayload, RedactedTranscriptSlice, RuntimeSkillRecallTransport,
     StoreBackendConfig, SubjectKind, SubjectRegistry, SubjectRelationshipGraph,
@@ -70,8 +77,7 @@ fn sdk_agent_tool_contract_types_are_importable(
     _hint: Option<AgentToolHint>,
     _projection: Option<AgentToolProjectionAudit>,
     _observation: Option<AgentToolObservationDigest>,
-    _feedback: Option<AgentToolUsageFeedback>,
-    _governance: Option<AgentToolExperienceGovernanceReport>,
+    _feedback: Option<AgentToolUsageFeedbackV2>,
 ) {
     assert_eq!(
         AGENT_TOOL_NO_EXPERIENCE_REASON,
@@ -87,6 +93,26 @@ fn sdk_agent_tool_contract_types_are_importable(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
+fn pfi1_procedural_learning_contract_types_are_importable(
+    _scope: Option<AgentToolExperienceOwningScopeV1>,
+    _locator: Option<AgentToolExperienceOwnerLocatorV2>,
+    _applicability: Option<ProceduralApplicabilityContextV1>,
+    _receipt: Option<ProceduralSelectionReceiptV1>,
+    _binding: Option<ProceduralProjectionBindingV1>,
+    _input: Option<PostTurnLearningInputV1>,
+    _input_authority: Option<ProceduralFeedbackAuthorityInputV1>,
+    _intent_report: Option<MemoryProceduralLearningIntentReport>,
+    _evidence: Option<PostTurnLearningEvidenceV1>,
+    _authority: Option<ProceduralFeedbackAuthorityV1>,
+    _operation: Option<ProceduralLearningSdkOperation>,
+    _key: Option<ProceduralLearningErrorKeyV1>,
+    _disposition: Option<ProceduralLearningSdkErrorDisposition>,
+    _error: Option<ProceduralLearningSdkError>,
+    _result: Option<ProceduralLearningSdkResult<()>>,
+) {
+}
+
 fn post_reply_context_contract_is_sdk_importable<'a>(
     ctx: PostReplyMemoryMaintenanceContext<'a>,
 ) -> PostReplyMemoryMaintenanceContext<'a> {
@@ -97,6 +123,8 @@ fn memory_learning_engine_contract_is_sdk_importable(
     _engine: Option<MemoryLearningEngine>,
     _request: Option<MemoryLearningCycleRequest>,
     _outcome: Option<MemoryLearningCycleOutcome>,
+    _procedural_state: Option<MemoryProceduralLearningStateReport>,
+    _procedural_run: Option<MemoryProceduralLearningRunReport>,
 ) {
 }
 

@@ -1,13 +1,10 @@
 use bm_entry::EntryRuntimeBaseConfig;
 use bm_llm_gateway::{
     handle_openai_request, probe_openai_provider_capabilities, GatewayConfig, GatewayErrorKey,
-    GatewayProjectionAuditStatus, GatewayRuntime, GatewayScopeRequest, GatewayScopeResolver,
-    OpenAiCompatibleUpstream, OpenAiGatewayBody, OpenAiGatewayRequest, OpenAiUpstreamRequest,
-    OpenAiUpstreamResponse,
+    GatewayProjectionAuditStatus, GatewayRuntime, GatewayScopeRequest, OpenAiCompatibleUpstream,
+    OpenAiGatewayBody, OpenAiGatewayRequest, OpenAiUpstreamRequest, OpenAiUpstreamResponse,
 };
-use bm_sdk::{
-    MemoryCapabilityPolicy, MemoryWriteRequest, RuntimeSkillWrite, RuntimeSkillWriteSource,
-};
+use bm_sdk::MemoryCapabilityPolicy;
 use serde_json::{json, Value};
 
 mod support;
@@ -30,38 +27,6 @@ fn scope_request() -> GatewayScopeRequest {
         model_alias: Some("local".to_string()),
         ..GatewayScopeRequest::new(support::gateway_bearer_auth("owner-token"))
     }
-}
-
-fn seed_runtime_skill(
-    gateway: &GatewayRuntime,
-    config: &GatewayConfig,
-    scope: &GatewayScopeRequest,
-) {
-    let resolved = GatewayScopeResolver::new(config.scope.clone())
-        .resolve(scope)
-        .expect("scope");
-    let agent_id = resolved.entry_scope.identity.agent_id.clone();
-    let runtime = gateway
-        .runtime_for_scope(resolved.entry_scope)
-        .expect("runtime");
-    runtime
-        .runtime()
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
-                name: "responses_gateway_style".to_string(),
-                topic: "llm_gateway_responses".to_string(),
-                title: "Responses gateway style".to_string(),
-                summary: "Always mention the responses boundary.".to_string(),
-                content: "When answering through Responses, keep the memory boundary explicit."
-                    .to_string(),
-                citations: Vec::new(),
-                source_chat_id: Some("thread-7".to_string()),
-                observed_at: 1,
-            })],
-            owning_scope: support::runtime_skill_subject_scope(&agent_id),
-            source: RuntimeSkillWriteSource::Manual,
-        })
-        .expect("seed skill");
 }
 
 #[derive(Default)]
@@ -129,7 +94,6 @@ fn responses_stateless_injects_memory_into_instructions_and_preserves_payload() 
     let config = gateway_config();
     let gateway = GatewayRuntime::open(config.clone()).expect("gateway");
     let scope = scope_request();
-    seed_runtime_skill(&gateway, &config, &scope);
     let mut upstream = MockOpenAiUpstream::default();
 
     let response = handle_openai_request(

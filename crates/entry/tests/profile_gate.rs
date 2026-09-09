@@ -27,6 +27,16 @@ fn esp_standalone_has_compact_entry_but_no_server_listener() {
     assert!(!view.mcp_server.visible);
     assert!(!view.a2a_bridge.visible);
     assert!(!view.llm_gateway_server.visible);
+    assert!(
+        !view
+            .procedural_learning
+            .standard_agent_skill_mount
+            .profile_allowed
+    );
+    assert!(!view.procedural_learning.agent_tool_registry.profile_allowed);
+    assert!(!view.procedural_learning.selection_receipt.profile_allowed);
+    assert!(!view.procedural_learning.finalize_feedback.profile_allowed);
+    assert!(!view.procedural_learning.worker.profile_allowed);
 }
 
 #[test]
@@ -63,6 +73,15 @@ fn linux_server_gateway_exposes_full_server_entry_set() {
     assert!(view.mcp_server.visible);
     assert!(view.a2a_bridge.visible);
     assert!(view.llm_gateway_server.visible);
+    assert!(
+        view.procedural_learning
+            .standard_agent_skill_mount
+            .profile_allowed
+    );
+    assert!(view.procedural_learning.agent_tool_registry.profile_allowed);
+    assert!(view.procedural_learning.selection_receipt.profile_allowed);
+    assert!(view.procedural_learning.finalize_feedback.profile_allowed);
+    assert!(view.procedural_learning.worker.profile_allowed);
 }
 
 #[test]

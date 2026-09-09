@@ -1,9 +1,14 @@
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use bm_core::llm::{LlmClient, LlmHttpClient};
-use bm_core::memory::{PostTurnGovernanceErrorClassV2, PostTurnGovernanceJobStatusV2};
+use bm_core::memory::{
+    PostTurnGovernanceErrorClassV2, PostTurnGovernanceJobStatusV2, ProceduralFeedbackErrorClassV1,
+    ProceduralFeedbackJobStatusV1, ProceduralFeedbackJobV1, ProceduralFeedbackReceiptV1,
+};
 use bm_core::{Error, Result};
 
+use crate::store_internal::procedural_feedback::ProceduralFeedbackCompletionOutcome;
 use crate::{
     MemoryGovernanceActiveJobsRequest, MemoryGovernanceAttemptAuthorityRequest,
     MemoryGovernanceBlockKind, MemoryGovernanceClaimedJobBlockRequest,
@@ -346,6 +351,19 @@ pub struct MemoryLearningStateReport {
     pub reason: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryProceduralLearningStateReport {
+    pub job: ProceduralFeedbackJobV1,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryProceduralLearningRunReport {
+    pub job: ProceduralFeedbackJobV1,
+    pub receipt: ProceduralFeedbackReceiptV1,
+    pub replayed: bool,
+}
+
 #[derive(Debug)]
 pub enum MemoryLearningCycleOutcome {
     Idle { reason: String },
@@ -354,17 +372,25 @@ pub enum MemoryLearningCycleOutcome {
     Blocked(MemoryLearningStateReport),
     Cancelled(MemoryLearningStateReport),
     Failed(MemoryLearningStateReport),
+    ProceduralCompleted(MemoryProceduralLearningRunReport),
+    ProceduralRetrying(MemoryProceduralLearningStateReport),
+    ProceduralFailed(MemoryProceduralLearningStateReport),
 }
 
 #[derive(Clone)]
 pub struct MemoryLearningEngine {
     runtime: Arc<MemoryRuntime>,
+    next_lane: Arc<AtomicU8>,
 }
 
 impl MemoryLearningEngine {
     pub fn attach(runtime: Arc<MemoryRuntime>) -> Result<Self> {
         runtime.active_governance_jobs(MemoryGovernanceActiveJobsRequest { limit: 1 })?;
-        Ok(Self { runtime })
+        runtime.due_procedural_feedback_jobs(1)?;
+        Ok(Self {
+            runtime,
+            next_lane: Arc::new(AtomicU8::new(0)),
+        })
     }
 
     pub fn runtime(&self) -> &Arc<MemoryRuntime> {
@@ -388,9 +414,24 @@ impl MemoryLearningEngine {
                 limit: MAX_LEARNING_CYCLE_JOBS,
             })?
             .jobs;
-        let Some(mut job) = jobs.into_iter().find(|job| is_due(job, now_secs)) else {
+        let semantic_job = jobs.into_iter().find(|job| is_due(job, now_secs));
+        let procedural_job = self
+            .runtime
+            .due_procedural_feedback_jobs(MAX_LEARNING_CYCLE_JOBS)?
+            .into_iter()
+            .next();
+        let prefer_procedural = self.next_lane.fetch_xor(1, Ordering::AcqRel) == 0;
+        if let Some(job) = procedural_job.as_ref() {
+            if prefer_procedural || semantic_job.is_none() {
+                return self.run_procedural_cycle(job.clone(), &request, now_secs);
+            }
+        }
+        let Some(mut job) = semantic_job else {
+            if let Some(job) = procedural_job {
+                return self.run_procedural_cycle(job, &request, now_secs);
+            }
             return Ok(MemoryLearningCycleOutcome::Idle {
-                reason: "no_due_governance_job".to_string(),
+                reason: "no_due_learning_job".to_string(),
             });
         };
 
@@ -567,6 +608,91 @@ impl MemoryLearningEngine {
                 PostTurnGovernanceErrorClassV2::SchemaViolation,
             ),
             Err(failure) => self.transition_execution_failure(claimed, &request, &egress, failure),
+        }
+    }
+
+    fn run_procedural_cycle(
+        &self,
+        job: ProceduralFeedbackJobV1,
+        request: &MemoryLearningCycleRequest,
+        now_secs: u64,
+    ) -> Result<MemoryLearningCycleOutcome> {
+        let lease_until = now_secs
+            .checked_add(request.lease_duration_secs)
+            .ok_or_else(|| Error::config("memory_learning_cycle", "lease deadline overflow"))?;
+        let claimed = match self.runtime.claim_due_procedural_feedback_job(
+            &job.job_id,
+            &request.lease_owner,
+            lease_until,
+        ) {
+            Ok(job) => job,
+            Err(Error::Conflict { .. }) => {
+                return Ok(MemoryLearningCycleOutcome::Idle {
+                    reason: "procedural_claim_lost".to_string(),
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        match self
+            .runtime
+            .run_claimed_procedural_feedback_job(&claimed, &request.lease_owner)
+        {
+            Ok(ProceduralFeedbackCompletionOutcome::Committed { job, receipt }) => {
+                Ok(MemoryLearningCycleOutcome::ProceduralCompleted(
+                    MemoryProceduralLearningRunReport {
+                        job,
+                        receipt,
+                        replayed: false,
+                    },
+                ))
+            }
+            Ok(ProceduralFeedbackCompletionOutcome::Replayed { job, receipt }) => {
+                Ok(MemoryLearningCycleOutcome::ProceduralCompleted(
+                    MemoryProceduralLearningRunReport {
+                        job,
+                        receipt,
+                        replayed: true,
+                    },
+                ))
+            }
+            Err(error) => {
+                let (error_class, repair_required) = classify_procedural_error(&error);
+                if repair_required {
+                    let failed = self
+                        .runtime
+                        .mark_claimed_procedural_feedback_repair_required(
+                            &claimed,
+                            &request.lease_owner,
+                            error_class,
+                        )?;
+                    return Ok(MemoryLearningCycleOutcome::ProceduralFailed(
+                        MemoryProceduralLearningStateReport {
+                            job: failed,
+                            reason: "procedural_feedback_repair_required".to_string(),
+                        },
+                    ));
+                }
+                let retrying = self.runtime.retry_claimed_procedural_feedback_job(
+                    &claimed,
+                    &request.lease_owner,
+                    error_class,
+                )?;
+                if retrying.status == ProceduralFeedbackJobStatusV1::DeadLetter {
+                    Ok(MemoryLearningCycleOutcome::ProceduralFailed(
+                        MemoryProceduralLearningStateReport {
+                            job: retrying,
+                            reason: "procedural_retry_attempts_exhausted".to_string(),
+                        },
+                    ))
+                } else {
+                    Ok(MemoryLearningCycleOutcome::ProceduralRetrying(
+                        MemoryProceduralLearningStateReport {
+                            job: retrying,
+                            reason: format!("procedural_{error_class:?}"),
+                        },
+                    ))
+                }
+            }
         }
     }
 
@@ -876,5 +1002,45 @@ fn classify_execution_error(error: &Error) -> PostTurnGovernanceErrorClassV2 {
         Error::InvalidInput { .. } | Error::Config { .. } => {
             PostTurnGovernanceErrorClassV2::SchemaViolation
         }
+    }
+}
+
+fn classify_procedural_error(error: &Error) -> (ProceduralFeedbackErrorClassV1, bool) {
+    match error {
+        Error::Conflict { stage, .. }
+            if matches!(
+                *stage,
+                "procedural_feedback_evidence"
+                    | "procedural_feedback_completion"
+                    | "procedural_feedback_store_closure"
+                    | "agent_tool_experience_store_closure"
+            ) =>
+        {
+            (ProceduralFeedbackErrorClassV1::ClosureRejected, true)
+        }
+        Error::Conflict { .. } => (ProceduralFeedbackErrorClassV1::CasConflict, false),
+        Error::Config { stage, .. } if *stage == "procedural_feedback_registry_unavailable" => {
+            (ProceduralFeedbackErrorClassV1::RegistryUnavailable, false)
+        }
+        Error::Config { stage, .. }
+            if matches!(
+                *stage,
+                "memory_write_transaction_budget"
+                    | "agent_tool_experience_store_budget"
+                    | "procedural_feedback_store_budget"
+            ) =>
+        {
+            (ProceduralFeedbackErrorClassV1::BudgetExceeded, false)
+        }
+        Error::InvalidInput { .. } | Error::NotFound { .. } => {
+            (ProceduralFeedbackErrorClassV1::ClosureRejected, true)
+        }
+        Error::Io { .. }
+        | Error::Other { .. }
+        | Error::Nvs { .. }
+        | Error::Storage { .. }
+        | Error::Esp { .. }
+        | Error::Http { .. }
+        | Error::Config { .. } => (ProceduralFeedbackErrorClassV1::StoreUnavailable, false),
     }
 }

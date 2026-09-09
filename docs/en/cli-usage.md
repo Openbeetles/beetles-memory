@@ -42,7 +42,8 @@ Commands:
 | Command | Purpose |
 | --- | --- |
 | `capabilities` | Print runtime capability catalog. |
-| `write-procedural` | Write one procedural memory item. |
+| `write` | Submit a typed factual `MemoryWriteRequest` from `--input <request.json>`; requires `--idempotency-key`. |
+| `finalize-turn` | Submit a canonical turn and typed learning evidence from `--input <request.json>`. |
 | `recall` | Recall memory hits by query. |
 | `project` | Render a memory block for model context. |
 | `inspect` | Return operator inspection data. |
@@ -135,24 +136,9 @@ Attr JSON must target existing transcript turns/messages. Do not put raw prompts
 
 These commands manage existing runtime procedural memory records only. They do not execute skills or install plugins. Standard Agent Skill directories remain host-managed; standalone deployments can mount them with `BM_AGENT_SKILL_DIRS`, and the runtime only scans and recalls them read-only.
 
-```bash
-bm \
-  memory write-procedural \
-  --profile "$BM_HOST_PROFILE" \
-  --store-file /tmp/beetle-memory-store \
-  --chat chat-1 \
-  --runtime-skill-subject agent:agent-main \
-  --replay-candidate-ref cli:release_guard \
-  --verification-receipt-digest sha256:<64-hex> \
-  --runtime-skill-privacy shared-with-subject \
-  --name runtime_skill__release_guard \
-  --title "Release guard" \
-  --topic release \
-  --summary "Verify release artifacts before publishing." \
-  --content "1. run gates
-2. inspect artifacts
-3. dry run publish"
-```
+The CLI intentionally has no create/import command for Runtime Skill memory.
+Initial owners come from the governed post-turn learning worker; the following
+commands only inspect or mutate an owner that already exists.
 
 Run `skill-list` with the same owning scope (`--runtime-skill-subject <subject-id>` or `--runtime-skill-shared-program`) first and read `ownerId` plus `locator.owner_revision_ref.owner_revision`. Every later mutation must continue from the previous response's `currentLocator`; the CLI does not translate a name into an owner.
 
@@ -182,24 +168,7 @@ bm \
 3. inspect changelog"
 ```
 
-## Write And Recall With A File Store
-
-```bash
-bm \
-  memory write-procedural \
-  --profile "$BM_HOST_PROFILE" \
-  --store-file /tmp/beetle-memory-store \
-  --chat chat-1 \
-  --runtime-skill-subject agent:agent-main \
-  --replay-candidate-ref cli:file_store_release_guard \
-  --verification-receipt-digest sha256:<64-hex> \
-  --runtime-skill-privacy shared-with-subject \
-  --name release_guard \
-  --topic release \
-  --title "Release guard" \
-  --summary "Verify release artifacts before publishing." \
-  --content "Run examples, platform gates, and publish dry-run."
-```
+## Recall With A File Store
 
 ```bash
 bm \

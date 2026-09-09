@@ -30,7 +30,7 @@ use bm_sdk::{
 #[cfg(feature = "sqlite-store")]
 use bm_sdk::{
     RuntimeSkillCapabilityAffinity, RuntimeSkillFailureMode, RuntimeSkillPremise,
-    RuntimeSkillPremiseRequirement, RuntimeSkillWrite, RuntimeSkillWriteSource,
+    RuntimeSkillPremiseRequirement, RuntimeSkillWrite,
 };
 use support::{
     empty_store_platform, host_test_profile, open_memory_store, seeded_store_platform, test_runtime,
@@ -87,8 +87,6 @@ fn seed_record(
                 deletes: Vec::new(),
                 skill_writes: Vec::new(),
             },
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
         })
         .expect("seed private governed owner");
     platform
@@ -982,8 +980,8 @@ fn p8_procedural_off_run_disables_only_projection_material_and_executes_nothing(
     .expect("sqlite platform");
     let runtime = test_runtime(platform, profile);
     runtime
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![governed_runtime_skill_write(RuntimeSkillWrite {
+        .seed_runtime_skills_for_replay(
+            vec![governed_runtime_skill_write(RuntimeSkillWrite {
                 name: "runtime_skill__release_guard".into(),
                 topic: "release".into(),
                 title: "Release guard".into(),
@@ -993,9 +991,8 @@ fn p8_procedural_off_run_disables_only_projection_material_and_executes_nothing(
                 source_chat_id: Some("chat-1".into()),
                 observed_at: 1_800_000_000,
             })],
-            owning_scope: runtime_skill_subject_scope(),
-            source: RuntimeSkillWriteSource::Manual,
-        })
+            runtime_skill_subject_scope(),
+        )
         .expect("seed governed RuntimeSkill");
     let report = runtime
         .p8_semantic_off_run(P8SemanticOffRunRequest::new(MemoryRecallRequest {
@@ -1065,8 +1062,8 @@ fn p8_environment_premise_off_run_is_safe_only_and_executes_nothing() {
     .expect("sqlite platform");
     let runtime = test_runtime(platform.clone(), profile);
     runtime
-        .write(MemoryWriteRequest::Procedural {
-            writes: vec![governed_runtime_skill_write(RuntimeSkillWrite {
+        .seed_runtime_skills_for_replay(
+            vec![governed_runtime_skill_write(RuntimeSkillWrite {
                 name: "runtime_skill__premise_guard".into(),
                 topic: "release".into(),
                 title: "Environment premise guard".into(),
@@ -1076,9 +1073,8 @@ fn p8_environment_premise_off_run_is_safe_only_and_executes_nothing() {
                 source_chat_id: Some("chat-1".into()),
                 observed_at: 1_800_000_000,
             })],
-            owning_scope: runtime_skill_subject_scope(),
-            source: RuntimeSkillWriteSource::Manual,
-        })
+            runtime_skill_subject_scope(),
+        )
         .expect("seed governed RuntimeSkill");
     bind_required_missing_presence_premise(&platform);
 

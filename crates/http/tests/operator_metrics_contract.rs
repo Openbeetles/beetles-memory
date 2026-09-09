@@ -23,6 +23,7 @@ fn runtime() -> EntryRuntime {
             owner_id: "operator-owner".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "operator.metrics".to_string(),
             chat_id: "operator-chat".to_string(),
         },
@@ -71,11 +72,7 @@ fn finalize_request() -> MemoryTurnFinalizeRequest {
             external_content_used: false,
             candidate_ids: Vec::new(),
         },
-        tool_calls: 0,
-        runtime_skill_selected_ids: Vec::new(),
-        task_learning_selected_ids: Vec::new(),
-        reuse_outcome_note: String::new(),
-        tool_usage_feedback: None,
+        learning: bm_sdk::PostTurnLearningInputV1::empty(),
         pressure: bm_sdk::PressureLevel::Normal,
         mode_input: bm_sdk::RuntimeLifecycleModeInput::default(),
     }
@@ -84,27 +81,10 @@ fn finalize_request() -> MemoryTurnFinalizeRequest {
 #[test]
 fn operator_overview_exposes_stable_runtime_metrics_fields() {
     let runtime = runtime();
-    let write_body = serde_json::json!({
-        "name": "operator_metrics_contract",
-        "topic": "operator metrics",
-        "title": "Operator metrics contract",
-        "summary": "Operator API displays metrics from runtime reports.",
-        "content": "- record the accepted write from the runtime event stream\n- render write and recall counters from the validated metrics report",
-        "source": "manual",
-        "citations": ["operator-metrics-contract"],
-        "owning_scope": {
-            "kind": "subject",
-            "mounted_subject_id": default_agent_subject_id("operator-metrics-agent"),
-        },
-        "creation_ref": {
-            "kind": "replay_promotion",
-            "candidate_ref": "operator-metrics-contract:write",
-            "verification_receipt_digest":
-                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-        },
-        "privacy_class": "shared_with_subject",
-    })
-    .to_string();
+    let write_body = support::factual_memory_write_body(
+        "operator-metrics-contract",
+        "Operator API displays metrics from accepted factual runtime events.",
+    );
     let write = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::post_json("/memory/write", &write_body)

@@ -1,53 +1,27 @@
-use std::sync::Arc;
-
-use bm_core::llm::{
-    LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, Message, StopReason, ToolChoicePolicy,
-    ToolSpec,
-};
-use bm_core::platform::ResponseBody;
 use bm_evolve::{
-    commit_evolution_proposal, validate_evolution_proposal, EvolutionCandidate, EvolutionProposal,
-    EvolutionSandboxPolicy,
+    validate_evolution_proposal, EvolutionCandidate, EvolutionProposal, EvolutionSandboxPolicy,
 };
 use bm_sdk::{
-    default_agent_subject_id, MemoryCapabilityPolicy, MemoryClock, MemoryIdentity,
-    MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryRuntime, MemoryScope, MemoryStoreHandle,
-    ProfileId, RuntimeSkillListRequest, RuntimeSkillOwningScope, RuntimeSkillWrite,
-    StoreBackendConfig,
+    default_agent_subject_id, MemoryPrivacyClass, ProfileId, RuntimeSkillOwningScope,
+    RuntimeSkillWrite,
 };
 
 #[test]
-fn proposal_commit_uses_sdk_write_governance() {
+fn full_profile_accepts_well_formed_procedural_proposal_without_committing_it() {
     let profile = ProfileId::native_dev_full().expect("supported host-native dev-full profile");
-    let runtime = test_runtime(profile);
     let proposal = procedural_proposal(profile);
-    let owning_scope = proposal.owning_scope.clone();
+    let policy = EvolutionSandboxPolicy::for_profile(profile).expect("full profile policy");
 
-    let report = commit_evolution_proposal(&runtime, proposal).expect("proposal commit");
+    let validation = validate_evolution_proposal(&policy, &proposal);
 
-    assert!(report.accepted, "{report:?}");
-    assert_eq!(report.committed_writes, 1, "{report:?}");
-    assert_eq!(report.write_operation.as_deref(), Some("write.procedural"));
-    assert_eq!(report.lifecycle_operations, vec!["maintain".to_string()]);
-
-    let stored = runtime
-        .list_runtime_skills(RuntimeSkillListRequest {
-            owning_scope,
-            query: Some("release".to_string()),
-            include_disabled: true,
-            include_retired: true,
-            limit: 4,
-        })
-        .expect("list committed proposal");
-    assert_eq!(stored.total, 1, "{stored:?}");
-    assert_eq!(stored.active, 1, "{stored:?}");
-    assert_eq!(stored.skills[0].title, "Release artifact guard");
+    assert!(validation.accepted, "{validation:?}");
+    assert_eq!(validation.accepted_candidates, 1);
+    assert_eq!(validation.rejected_candidates, 0);
 }
 
 #[test]
-fn governance_note_only_proposal_is_report_only_until_sdk_operation_exists() {
+fn governance_note_is_a_valid_proposal_but_not_a_store_mutation_contract() {
     let profile = ProfileId::native_dev_full().expect("supported host-native dev-full profile");
-    let runtime = test_runtime(profile);
     let proposal = EvolutionProposal {
         proposal_id: "governance-note".to_string(),
         profile,
@@ -62,35 +36,31 @@ fn governance_note_only_proposal_is_report_only_until_sdk_operation_exists() {
             summary: "Candidate evidence only, not direct write authority.".to_string(),
         }],
         evidence_refs: vec!["counterfactual-trace".to_string()],
-        rationale: "Sandbox can only submit through SDK-owned operations.".to_string(),
+        rationale: "Sandbox submits a proposal for an authoritative governor.".to_string(),
     };
+    let policy = EvolutionSandboxPolicy::for_profile(profile).expect("full profile policy");
 
-    let report = commit_evolution_proposal(&runtime, proposal).expect("proposal report");
+    let validation = validate_evolution_proposal(&policy, &proposal);
 
-    assert!(!report.accepted);
-    assert_eq!(
-        report.reason,
-        "governance_note_requires_future_sdk_operation"
-    );
-    assert_eq!(report.committed_writes, 0);
+    assert!(validation.accepted, "{validation:?}");
+    assert_eq!(validation.decisions[0].reason, "accepted");
 }
 
 #[test]
-fn embedded_sdk_profile_can_preview_but_cannot_submit_sandbox_proposals() {
-    let runtime = test_runtime(ProfileId::EspEmbeddedSdk);
-    let proposal = procedural_proposal(ProfileId::EspEmbeddedSdk);
-    let policy =
-        EvolutionSandboxPolicy::for_profile(ProfileId::EspEmbeddedSdk).expect("embedded policy");
+fn embedded_sdk_profile_can_preview_but_rejects_procedural_sandbox_candidates() {
+    let profile = ProfileId::EspEmbeddedSdk;
+    let proposal = procedural_proposal(profile);
+    let policy = EvolutionSandboxPolicy::for_profile(profile).expect("embedded policy");
     let validation = validate_evolution_proposal(&policy, &proposal);
 
     assert!(policy.proposal_preview_allowed);
     assert!(!policy.compact_sandbox_allowed);
     assert!(!policy.proposal_submission_allowed);
     assert!(!validation.accepted);
-
-    let report = commit_evolution_proposal(&runtime, proposal).expect("proposal report");
-    assert!(!report.accepted);
-    assert_eq!(report.reason, "proposal_submission_not_allowed_for_profile");
+    assert_eq!(
+        validation.decisions[0].reason,
+        "procedural_candidate_sandbox_not_allowed"
+    );
 }
 
 fn procedural_proposal(profile: ProfileId) -> EvolutionProposal {
@@ -116,66 +86,6 @@ fn procedural_proposal(profile: ProfileId) -> EvolutionProposal {
             },
         }],
         evidence_refs: vec!["proposal-fixture".to_string()],
-        rationale: "Promote repeated release checks into procedural memory.".to_string(),
-    }
-}
-
-fn test_runtime(profile: ProfileId) -> MemoryRuntime {
-    let platform =
-        MemoryStoreHandle::open_in_memory(StoreBackendConfig::in_memory(profile).unwrap()).unwrap();
-    MemoryRuntime::builder()
-        .identity(MemoryIdentity::new("evolve-agent", "evolve-owner").unwrap())
-        .scope(MemoryScope::new("evolve", "evolve-chat").unwrap())
-        .store(platform)
-        .clock(Arc::new(FixedClock))
-        .capability_policy(MemoryCapabilityPolicy::strict_profile())
-        .privacy_policy(MemoryPrivacyPolicy::standard_private_boundary())
-        .build()
-        .unwrap()
-}
-
-struct FixedClock;
-
-impl MemoryClock for FixedClock {
-    fn now_secs(&self) -> u64 {
-        1_800_000_000
-    }
-}
-
-#[allow(dead_code)]
-struct StaticHttpClient;
-
-impl LlmHttpClient for StaticHttpClient {
-    fn do_post(
-        &mut self,
-        _url: &str,
-        _headers: &[(&str, &str)],
-        _body: &[u8],
-    ) -> bm_core::Result<(u16, ResponseBody)> {
-        Ok((200, ResponseBody::Heap(Vec::new())))
-    }
-}
-
-#[allow(dead_code)]
-struct StaticLlmClient;
-
-impl LlmClient for StaticLlmClient {
-    fn model_compat(&self) -> LlmModelCompat {
-        LlmModelCompat::default()
-    }
-
-    fn chat(
-        &self,
-        _http: &mut dyn LlmHttpClient,
-        _system: &str,
-        _messages: &[Message],
-        _tools: Option<&[ToolSpec]>,
-        _tool_choice: ToolChoicePolicy,
-    ) -> bm_core::Result<LlmResponse> {
-        Ok(LlmResponse {
-            content: "Summary: evolve proposal".to_string(),
-            stop_reason: StopReason::EndTurn,
-            tool_calls: None,
-        })
+        rationale: "Promote repeated release checks into a governed proposal.".to_string(),
     }
 }

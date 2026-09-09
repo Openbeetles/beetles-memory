@@ -71,6 +71,7 @@ fn provision(runtime: &MemoryRuntime, label: &str) {
 fn project(runtime: &MemoryRuntime) -> MemoryProjectionOutput {
     runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "Summarize the current work context.".to_string(),

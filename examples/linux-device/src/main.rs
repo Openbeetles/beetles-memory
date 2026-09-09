@@ -4,9 +4,7 @@ use bm_entry::{
     EntryRuntimeConfig, EntryScope, EntryTransportConfig, EntryTransportContext,
 };
 use bm_sdk::{
-    GovernedRuntimeSkillWriteInput, MemoryCapabilityPolicy, MemoryPrivacyClass, MemoryPrivacyPolicy,
-    MemoryRecallRequest, MemoryWriteRequest, ProfileId, RuntimeSkillCreationRef,
-    RuntimeSkillOwningScope, RuntimeSkillWrite, RuntimeSkillWriteSource, StoreBackendConfig,
+    MemoryCapabilityPolicy, MemoryPrivacyPolicy, MemoryRecallRequest, ProfileId, StoreBackendConfig,
 };
 
 fn main() -> bm_sdk::Result<()> {
@@ -19,6 +17,7 @@ fn main() -> bm_sdk::Result<()> {
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "device".to_string(),
             chat_id: "chat-1".to_string(),
         },
@@ -31,34 +30,6 @@ fn main() -> bm_sdk::Result<()> {
         capability,
     })?;
 
-    runtime.handle(
-        context(&runtime, AdapterOperation::Write, "idem-linux-write"),
-        AdapterCommand::Write(MemoryWriteRequest::Procedural {
-            writes: vec![GovernedRuntimeSkillWriteInput {
-                write: RuntimeSkillWrite {
-                    name: "device_entry_guard".to_string(),
-                    topic: "device-entry".to_string(),
-                    title: "Device entry guard".to_string(),
-                    summary: "Linux device deployments keep local entry runtime available."
-                        .to_string(),
-                    content: "1. Open the local file store.\n2. Normalize device source metadata.\n3. Dispatch through EntryRuntime.\n4. Keep server-grade features gated by profile."
-                        .to_string(),
-                    citations: vec!["linux device entry example".to_string()],
-                    source_chat_id: Some("chat-1".to_string()),
-                    observed_at: 1_700_000_000,
-                },
-                creation_ref: RuntimeSkillCreationRef::ReplayPromotion {
-                    candidate_ref: "example:linux-device-entry-guard".to_string(),
-                    verification_receipt_digest:
-                        "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-                            .to_string(),
-                },
-                privacy_class: MemoryPrivacyClass::PublicRuntime,
-            }],
-            owning_scope: RuntimeSkillOwningScope::SharedProgram,
-            source: RuntimeSkillWriteSource::Manual,
-        }),
-    )?;
     let recall = runtime.handle(
         context(&runtime, AdapterOperation::Recall, "idem-linux-recall"),
         AdapterCommand::Recall(MemoryRecallRequest {

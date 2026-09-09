@@ -74,11 +74,11 @@ Conversation discovery 与 navigation 统一使用四个 host-neutral SDK surfac
 
 CTQ1 continuation value 统一为 Store-owned opaque `TranscriptQueryCursor`。宿主不得解码、铸造、签名或注入 cursor secret authority。Runtime validation 绑定 operation、exact MemorySpace、mounted subject、filters、view、query digest、方向/anchor、Store incarnation 与 owner/index generation；每一页都重新校验 current capability、lifecycle、privacy 和 disclosure。篡改、跨主体/conversation/query 复用、过期、Store replacement 或 stale owner/index generation 均 fail closed。现有 forward replay/export cursor 保持当前 bounded surface，但不能代替 conversation catalog 或 timeline。
 
-`HostUi` 只是 host-presentable redacted disclosure view，不是聊天面板、history manager、分页方向、index owner 或 authorization capability。Catalog/timeline 受 `transcript_replay` 控制；indexed search/activity 分别受 `transcript_search` 与 `transcript_activity` 控制。Platform capability snapshot 以 `beetle-memory.platform.capability.v4` 暴露它们。
+`HostUi` 只是 host-presentable redacted disclosure view，不是聊天面板、history manager、分页方向、index owner 或 authorization capability。Catalog/timeline 受 `transcript_replay` 控制；indexed search/activity 分别受 `transcript_search` 与 `transcript_activity` 控制。Platform capability snapshot 以 `beetle-memory.platform.capability.v5` 暴露它们。
 
 日期导航由宿主按用户 IANA timezone 把本地日期转换成 UTC `[start_inclusive, end_exclusive)`。Memory 只接受 canonical range，不猜测或持久化宿主时区。DST 本地日可能为 23 或 25 小时，宿主不能固定增加 86400 秒。Search/activity hydrate canonical turn 后重新执行请求 view；masked/raw-deleted material 的可见结果必须 exact-zero，也不能 fallback legacy archive search 或宿主自建 index。
 
-0.6.0 source candidate 在 Store v12 下继续保持 CTQ1 的 InMemory/File/SQLite 原子 head/catalog/time/search closure 与持久 reopen。Store v11 不提供 compatibility reader 或 migration path；旧代开发数据必须明确重建。Repair/archive closure、private authority exact-zero 与严格回归证据继续是发布门禁。该结论不表示真实数据处理、crates.io/托管 Release 或运行时/UAT 已执行。
+0.6.0 source candidate 在 Store v13 下继续保持 CTQ1 的 InMemory/File/SQLite 原子 head/catalog/time/search closure 与持久 reopen。旧 Store generation 不提供 compatibility reader 或 migration path；开发数据必须明确重建。Repair/archive closure、private authority exact-zero 与严格回归证据继续是发布门禁。该结论不表示真实数据处理、crates.io/托管 Release 或运行时/UAT 已执行。
 
 Transcript attrs 会跟随 target turn/message 一起 replay。`TranscriptAttrEnvelope` 只用于模型用量、latency、retry status、附件摘要、provenance 标签等轻量 metadata；它不替代宿主拥有的 task、capability call、artifact、human gate、file workspace 或 governance command/report 本体。`HostUi` 只看到 HostUi-visible attrs，`ModelContext` 只看到 model-context attrs，`Export` 只看到 export-visible 且 `export_allowed=true` 的 attrs。Profile budget 可以裁剪每 turn/message 可见 attrs，并在 `TranscriptRedactionReportItem` 中用 `AttrValueBudget`、`attr_id`、`attr_key` 记录；当裁剪来自 profile ceiling 时，replay audit 也会记录 `ProfileBudget`。
 
@@ -122,6 +122,8 @@ target_runtime.import_memory_space(MemorySpaceImportRequest {
 source 与 target runtime 必须暴露完全相同的 `MemoryArchiveScope`。request scope、archive root scope 与 private-material policy 会在 replacement 前精确校验。Import 会在任何 backend mutation 之前重算 canonical archive root，并且只原子替换该 scope。
 
 `ExcludePrivate` 会按受治理 owner closure 成组排除 private material。policy 不一致、dependency closure 不完整、root 不一致或 scope 不一致时，都会在任何写入前 fail closed。Opaque archive 不公开 payload；调用方通过 `GovernedScopeArchiveRootV1` 读取 schema、精确 scope、policy、JSON/event count 与 byte count，以及 canonical `closure_sha256`。
+
+Runtime Skill record 及其 scope manifest 是受保护的本地 procedural owner。无论请求哪一种 private-material policy，公开 memory-space archive 都不携带其 raw record 或权威 event。Import 必须精确保留 Store 内已有的本地 Runtime Skill owner，不能把 Runtime Skill 克隆到其他 Store 或 subject；受控 full-snapshot recovery 仍由独立的 owner-only 机制负责。
 
 当 memory-space storage 中存在 transcript evidence 时，`ExcludePrivate` 会把 private transcript material 及其依赖的 `conversation_transcript_attr`、`conversation_transcript_derived_ref` 等 export-visible index 作为一个经过验证的 closure 成组排除。Archive diagnostics 必须保留 raw transcript、redacted transcript slice、accepted memory planes、derived refs 和 opaque host refs 的分层。宿主对象 payload 不由 Beetle Memory 导出；只有在请求 view 允许时才携带 `HostOpaqueRef` metadata 和 relation。`RedactedTranscriptSlice` 会报告 message、attr 和 host-ref redactions，让调用方知道哪些内容被省略，但看不到 raw material。`TranscriptLifecycleReport.derived_memory_refs` 是复核从受影响 transcript evidence 派生出的已接受 Memory material 的清单。
 

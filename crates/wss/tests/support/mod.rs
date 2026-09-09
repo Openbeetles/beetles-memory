@@ -36,7 +36,7 @@ pub fn native_runtime_profile() -> ProfileId {
 #[cfg(feature = "server-std")]
 #[allow(dead_code)]
 pub fn serve_network_frame(
-    runtime: EntryRuntime,
+    runtime: impl std::borrow::Borrow<EntryRuntime>,
     authorization: Option<&str>,
     frame: &str,
 ) -> (bm_sdk::Result<()>, String) {
@@ -69,7 +69,8 @@ pub fn serve_network_frame(
         }
         format!("{header}{response}")
     });
-    let result = bm_wss::serve_wss_accepted_stream(&runtime, &mut accepted, "wss-network-test");
+    let result =
+        bm_wss::serve_wss_accepted_stream(runtime.borrow(), &mut accepted, "wss-network-test");
     drop(accepted);
     (result, client_thread.join().expect("WSS test client"))
 }
@@ -211,4 +212,35 @@ fn read_unmasked_text_frame(stream: &mut TcpStream) -> String {
         .read_exact(&mut payload)
         .expect("read WSS frame body");
     String::from_utf8(payload).expect("WSS frame UTF-8")
+}
+#[allow(dead_code)]
+pub fn factual_write_body() -> serde_json::Value {
+    use bm_sdk::*;
+    let target = MemoryCandidateTarget::LongTermMemory {
+        kind: LongTermMemoryKind::Project,
+        topic: "remote factual project".into(),
+    };
+    serde_json::to_value(MemoryWriteRequest::Candidates {
+        candidates: vec![MemoryWriteCandidate {
+            candidate_id: "remote-fact".into(),
+            authority: MemoryEvidenceAuthority::UserAsserted,
+            target: target.clone(),
+            long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::AllSubjects),
+            privacy: MemoryPrivacyClass::SharedWithSubject,
+            content: MemoryCandidateContent::Text {
+                topic: "remote factual project".into(),
+                body: "The remote project uses the authenticated Entry scope.".into(),
+                keywords: vec![],
+            },
+            evidence_refs: vec![],
+            canonical_entities: vec![],
+            semantic_judgment: Some(MemoryCandidateSemanticJudgment {
+                source: MemorySemanticJudgmentSource::RuntimeGate,
+                decision: MemoryCandidateSemanticDecision::Accept,
+                governed_target: Some(target),
+                reason: "remote factual fixture".into(),
+            }),
+        }],
+    })
+    .unwrap()
 }

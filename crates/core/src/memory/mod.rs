@@ -61,6 +61,7 @@ mod persona_priority;
 mod persona_regression;
 mod personality_closure;
 mod post_turn_governance;
+mod post_turn_learning;
 mod private_docs;
 mod private_garden;
 mod private_garden_governance;
@@ -510,6 +511,24 @@ pub use post_turn_governance::{
     POST_TURN_GOVERNANCE_JOB_SCHEMA_VERSION, POST_TURN_GOVERNANCE_PRIVACY_AUTHORITY_SCHEMA_VERSION,
     POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE, POST_TURN_GOVERNANCE_SCOPE_INDEX_SCHEMA_VERSION,
 };
+pub use post_turn_learning::{
+    AgentSkillUsageFeedbackV1, AgentToolExperienceSelectionV1, AgentToolUsageFeedbackV2,
+    PostTurnLearningEvidenceV1, PostTurnLearningInputV1, ProceduralApplicabilityContextV1,
+    ProceduralAppliedOwnerBindingV1, ProceduralExecutionOutcomeV1,
+    ProceduralFeedbackApplicationLedgerV1, ProceduralFeedbackAuthorityInputV1,
+    ProceduralFeedbackAuthorityV1, ProceduralFeedbackErrorClassV1, ProceduralFeedbackIdentityV1,
+    ProceduralFeedbackJobRefV1, ProceduralFeedbackJobStatusV1, ProceduralFeedbackJobV1,
+    ProceduralFeedbackReceiptV1, ProceduralFeedbackReconciliationCursorV1,
+    ProceduralFeedbackScopeIndexV1, ProceduralProjectionBindingV1, ProceduralProjectionIdentityV1,
+    ProceduralSelectionReceiptV1, RuntimeSkillSelectionV1, RuntimeSkillUsageFeedbackV1,
+    StandardAgentSkillSelectionV1, TaskLearningSelectionV1, TaskLearningUsageFeedbackV1,
+    MAX_PROCEDURAL_FEEDBACK_ACTIVE_JOBS, MAX_PROCEDURAL_FEEDBACK_RECENT_TERMINAL_JOBS,
+    MAX_PROCEDURAL_FEEDBACK_RECONCILIATION_CURSORS, POST_TURN_LEARNING_EVIDENCE_SCHEMA_VERSION,
+    PROCEDURAL_APPLICABILITY_CONTEXT_SCHEMA_VERSION,
+    PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_SCHEMA_VERSION, PROCEDURAL_FEEDBACK_JOB_SCHEMA_VERSION,
+    PROCEDURAL_FEEDBACK_RECEIPT_SCHEMA_VERSION, PROCEDURAL_FEEDBACK_SCOPE_INDEX_SCHEMA_VERSION,
+    PROCEDURAL_SELECTION_RECEIPT_SCHEMA_VERSION,
+};
 pub(crate) use private_docs::estimate_private_doc_workspace_chars;
 pub(crate) use private_docs::run_private_doc_workspace_refresh_with_state;
 pub use private_docs::{
@@ -573,8 +592,9 @@ pub use recall_contract::{
     RecallSelectionReport,
 };
 pub use recall_delivery::{
-    allocate_recall_delivery_candidates, score_recall_delivery_texts, RecallDeliveryCandidate,
-    RecallDeliveryLexicalScore, RecallDeliveryOrderingPolicy, RecallDeliverySelectionDecision,
+    allocate_recall_delivery_candidates, has_recall_delivery_lexical_anchor,
+    score_recall_delivery_texts, RecallDeliveryCandidate, RecallDeliveryLexicalScore,
+    RecallDeliveryOrderingPolicy, RecallDeliverySelectionDecision,
     RecallDeliverySelectionDropReason, RecallDeliverySelectionReport, RecallDeliveryText,
 };
 pub use recall_inspection::{
@@ -748,7 +768,7 @@ pub use temperament_continuity::{
 };
 pub use transcript::{
     filter_host_refs_for_transcript_view, transcript_cursor_governance_context_digest,
-    transcript_message_is_query_index_eligible, ActorAttribution,
+    transcript_message_is_query_index_eligible, ActorAttribution, CanonicalTurnAppendIntent,
     CanonicalTurnTranscriptCommitReport, ConversationCatalogCandidatePage,
     ConversationCatalogEntry, ConversationCatalogHead, ConversationCatalogPage, ConversationKey,
     ConversationTranscriptStore, DerivedMemoryPlane, DerivedMemoryRef, HostOpaqueRef,
@@ -779,10 +799,11 @@ pub use transcript::{
     MAX_TRANSCRIPT_SEARCH_TERMS, TRANSCRIPT_CURSOR_DISCLOSURE_POLICY_SCHEMA_V1,
 };
 pub use turn_commit::{
-    canonical_user_delta, commit_canonical_turn_delta, commit_canonical_turn_delta_with_transcript,
-    CanonicalTurnDelta, CommittedSessionMessage, ConversationScope, MemoryEvidenceAuthority,
-    MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource, SessionTurnCommitReport,
-    ToolObservationDigest, TranscriptInputMessage,
+    canonical_turn_learning_digest, canonical_user_delta, commit_canonical_turn_delta,
+    commit_canonical_turn_delta_with_transcript, CanonicalTurnDelta,
+    CanonicalTurnTranscriptCommitOptions, CommittedSessionMessage, ConversationScope,
+    MemoryEvidenceAuthority, MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource,
+    SessionTurnCommitReport, ToolObservationDigest, TranscriptInputMessage,
 };
 pub use turn_continuity_evidence::{
     TurnContinuityEvidence, TurnContinuityEvidenceStore, REL_PATH_TURN_CONTINUITY_EVIDENCE,
@@ -821,8 +842,9 @@ pub(crate) use world_sense::{
     build_world_snapshot_from_commitments, load_world_snapshot_reminders, load_world_snapshot_tasks,
 };
 pub use write_candidate::{
-    govern_write_candidates, MemoryCandidateContent, MemoryCandidateSemanticDecision,
-    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryWriteCandidate,
+    govern_write_candidates, validate_write_candidate_identities, MemoryCandidateContent,
+    MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
+    MemoryWriteCandidate,
 };
 pub(crate) use write_coordination::whole_record_lease_advanced;
 
@@ -1099,7 +1121,7 @@ pub trait MemoryStore: Send + Sync {
 }
 
 /// 会话单条消息，JSONL 行格式必须带消息主键、时间和宿主内发言者元数据。
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMessage {
     pub message_id: String,
     pub role: String,

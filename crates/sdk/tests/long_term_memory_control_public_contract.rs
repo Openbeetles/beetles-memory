@@ -70,8 +70,6 @@ fn public_detail_returns_memory_space_scoped_human_tombstone_by_record_id() {
 
     runtime
         .write(MemoryWriteRequest::LongTermExtraction {
-            governed_skill_writes: Vec::new(),
-            runtime_skill_owning_scope: None,
             extraction: ParsedLongTermMemoryExtraction {
                 upserts: vec![LongTermMemoryDraft {
                     kind: LongTermMemoryKind::Profile,

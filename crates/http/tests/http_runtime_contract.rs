@@ -31,6 +31,7 @@ fn runtime() -> EntryRuntime {
             owner_id: "owner-default".to_string(),
         },
         scope: EntryScope {
+            conversation_id: None,
             channel: "http".to_string(),
             chat_id: "chat-1".to_string(),
         },
@@ -179,7 +180,7 @@ fn http_runtime_registers_compact_agent_tool_registry_without_router_behavior() 
 }
 
 #[test]
-fn http_runtime_projects_agent_tool_hints_only_after_feedback_experience() {
+fn http_runtime_registry_alone_never_fabricates_agent_tool_experience() {
     let runtime = runtime();
     let registry = agent_tool_registry();
     handle_http_in_process_request(
@@ -196,6 +197,7 @@ fn http_runtime_projects_agent_tool_hints_only_after_feedback_experience() {
         HttpRuntimeRequest::post_json(
             "/memory/project",
             json!({
+                "binding": {"kind": "preview"},
                 "temporal_operation": {"kind": "current"},
                 "user_query": "extract text from this PDF",
                 "system_max_len": 4096,
@@ -213,65 +215,12 @@ fn http_runtime_projects_agent_tool_hints_only_after_feedback_experience() {
         .expect("hints")
         .is_empty());
 
-    let feedback = json!({
-        "tool_usage_feedback": {
-            "registry_ref": registry.registry_ref(),
-            "observations": [
-                {
-                    "observation_id": "obs-1",
-                    "registry_id": "host-tools",
-                    "tool_id": "pdf.extract",
-                    "schema_fingerprint": "schema-pdf-v1",
-                    "call_id": "call-1",
-                    "task_signature": "extract_pdf_text",
-                    "summary": "PDF extraction produced usable text.",
-                    "outcome": "succeeded",
-                    "error_code": null,
-                    "external_content": true,
-                    "private_content_used": false,
-                    "permission_tags": ["filesystem.read"],
-                    "risk_tags": ["external_content"],
-                    "started_at": 1800000000u64,
-                    "completed_at": 1800000001u64
-                },
-                {
-                    "observation_id": "obs-2",
-                    "registry_id": "host-tools",
-                    "tool_id": "pdf.extract",
-                    "schema_fingerprint": "schema-pdf-v1",
-                    "call_id": "call-2",
-                    "task_signature": "extract_pdf_text",
-                    "summary": "PDF extraction produced usable text again.",
-                    "outcome": "succeeded",
-                    "error_code": null,
-                    "external_content": true,
-                    "private_content_used": false,
-                    "permission_tags": ["filesystem.read"],
-                    "risk_tags": ["external_content"],
-                    "started_at": 1800000002u64,
-                    "completed_at": 1800000003u64
-                }
-            ],
-            "user_visible_result_summary": "PDF extraction helped prepare notes.",
-            "reuse_outcome": "succeeded",
-            "operator_note": null
-        }
-    });
-    let write = handle_http_in_process_request(
-        &runtime,
-        HttpRuntimeRequest::post_json("/memory/write", feedback.to_string())
-            .with_idempotency_key("http-runtime-tool-feedback"),
-    )
-    .expect("write feedback");
-    let write_body: Value = serde_json::from_str(&write.body).expect("write json");
-    assert_eq!(write_body["agent_tool_experience"]["accepted"], true);
-    assert_eq!(write_body["changed"], 1);
-
     let projected = handle_http_in_process_request(
         &runtime,
         HttpRuntimeRequest::post_json(
             "/memory/project",
             json!({
+                "binding": {"kind": "preview"},
                 "temporal_operation": {"kind": "current"},
                 "user_query": "extract text from this PDF",
                 "system_max_len": 4096,
@@ -293,14 +242,10 @@ fn http_runtime_projects_agent_tool_hints_only_after_feedback_experience() {
             .chars()
             .count()
     );
-    assert_eq!(
-        projected_body["result"]["report"]["agent_tool_hints"][0]["tool_id"],
-        "pdf.extract"
-    );
-    assert_eq!(
-        projected_body["result"]["report"]["agent_tool_hints"][0]["host_execution_required"],
-        true
-    );
+    assert!(projected_body["result"]["report"]["agent_tool_hints"]
+        .as_array()
+        .expect("hints")
+        .is_empty());
 }
 
 #[test]
@@ -310,7 +255,7 @@ fn http_runtime_decodes_declared_memory_routes_through_entry_runtime() {
     let routes = [
         (
             "/memory/project",
-            r#"{"temporal_operation":{"kind":"current"},"user_query":"release","system_max_len":1024,"recent_messages_limit":2}"#,
+            r#"{"binding":{"kind":"preview"},"temporal_operation":{"kind":"current"},"user_query":"release","system_max_len":1024,"recent_messages_limit":2}"#,
         ),
         (
             "/memory/inspect",

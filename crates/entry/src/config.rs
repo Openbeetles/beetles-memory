@@ -10,6 +10,7 @@ pub struct EntryIdentity {
 pub struct EntryScope {
     pub channel: String,
     pub chat_id: String,
+    pub conversation_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,6 +102,7 @@ impl EntryCapabilityItem {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EntryCapabilityView {
     pub profile: ProfileId,
+    pub procedural_learning: bm_sdk::ProceduralLearningCapability,
     pub cli: EntryCapabilityItem,
     pub http_server: EntryCapabilityItem,
     pub wss_client: EntryCapabilityItem,
@@ -118,6 +120,7 @@ impl EntryCapabilityView {
     ) -> Self {
         Self {
             profile,
+            procedural_learning: catalog.procedural_learning.clone(),
             cli: EntryCapabilityItem::from_adapter(catalog.adapter.cli, transports.cli, false),
             http_server: EntryCapabilityItem::from_adapter(
                 catalog.adapter.http,

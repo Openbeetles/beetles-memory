@@ -47,11 +47,7 @@ fn finalize_request(turn_id: &str) -> MemoryTurnFinalizeRequest {
             external_content_used: false,
             candidate_ids: Vec::new(),
         },
-        tool_calls: 0,
-        runtime_skill_selected_ids: Vec::new(),
-        task_learning_selected_ids: Vec::new(),
-        reuse_outcome_note: String::new(),
-        tool_usage_feedback: None,
+        learning: bm_sdk::PostTurnLearningInputV1::empty(),
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     }
@@ -91,7 +87,6 @@ fn runtime_metrics_report_counts_write_recall_project_finalize_and_deferred_from
                     reason: "runtime_metrics_contract".to_string(),
                 }),
             }],
-            runtime_skill_owning_scope: None,
         })
         .expect("write");
     runtime
@@ -105,6 +100,7 @@ fn runtime_metrics_report_counts_write_recall_project_finalize_and_deferred_from
         .expect("recall");
     runtime
         .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "How should metrics be reported?".to_string(),

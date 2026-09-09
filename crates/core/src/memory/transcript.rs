@@ -13,8 +13,9 @@ use crate::error::{Error, Result};
 
 use super::{
     synthesize_session_message_id, CanonicalTurnDelta, CommittedSessionMessage,
-    MemoryEvidenceAuthority, MemoryTurnDeliveryStatus, MemoryTurnSource, SessionTurnCommitReport,
-    SubjectId, ToolObservationDigest, TranscriptInputMessage, MAX_SESSION_MESSAGE_LEN,
+    MemoryEvidenceAuthority, MemoryTurnDeliveryStatus, MemoryTurnSource,
+    PostTurnLearningEvidenceV1, SessionMessage, SessionTurnCommitReport, SubjectId,
+    ToolObservationDigest, TranscriptInputMessage, MAX_SESSION_MESSAGE_LEN,
 };
 use crate::util::{collect_retrieval_terms, is_cjk, normalize_retrieval_text};
 
@@ -687,6 +688,9 @@ impl TranscriptMessageRecord {
 pub struct TranscriptTurnRecord {
     pub key: ConversationKey,
     pub turn_id: String,
+    /// Digest of the full original canonical intake, before Session deduplication.
+    /// It survives raw deletion and is not inferred from retained message text.
+    pub canonical_turn_digest: String,
     pub sequence: u64,
     pub delivery_status: MemoryTurnDeliveryStatus,
     pub source: MemoryTurnSource,
@@ -699,6 +703,7 @@ pub struct TranscriptTurnRecord {
     pub tool_observations: Vec<ToolObservationDigest>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub host_refs: Vec<HostOpaqueRef>,
+    pub learning_evidence: Option<PostTurnLearningEvidenceV1>,
     pub external_content_used: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidate_ids: Vec<String>,
@@ -708,12 +713,29 @@ pub struct TranscriptTurnRecord {
     pub updated_at: u64,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct TranscriptTurnRecordAttachments {
+    pub host_refs: Vec<HostOpaqueRef>,
+    pub learning_evidence: Option<PostTurnLearningEvidenceV1>,
+}
+
 impl TranscriptTurnRecord {
     pub fn from_delta(
         key: &ConversationKey,
         sequence: u64,
         delta: &CanonicalTurnDelta,
         host_refs: Vec<HostOpaqueRef>,
+        now_secs: u64,
+    ) -> Result<Self> {
+        Self::from_delta_with_learning_evidence(key, sequence, delta, host_refs, None, now_secs)
+    }
+
+    pub fn from_delta_with_learning_evidence(
+        key: &ConversationKey,
+        sequence: u64,
+        delta: &CanonicalTurnDelta,
+        host_refs: Vec<HostOpaqueRef>,
+        learning_evidence: Option<PostTurnLearningEvidenceV1>,
         now_secs: u64,
     ) -> Result<Self> {
         validate_key_matches_delta(key, delta)?;
@@ -760,6 +782,7 @@ impl TranscriptTurnRecord {
         Ok(Self {
             key: key.clone(),
             turn_id: delta.turn_id.clone(),
+            canonical_turn_digest: super::canonical_turn_learning_digest(delta)?,
             sequence,
             delivery_status: delta.delivery_status,
             source: delta.source.clone(),
@@ -769,6 +792,7 @@ impl TranscriptTurnRecord {
             assistant_message,
             tool_observations: delta.tool_observations.clone(),
             host_refs,
+            learning_evidence,
             external_content_used: delta.external_content_used,
             candidate_ids: delta.candidate_ids.clone(),
             lifecycle_state: TranscriptLifecycleState::Active,
@@ -778,13 +802,13 @@ impl TranscriptTurnRecord {
         })
     }
 
-    pub fn from_committed_messages(
+    pub(super) fn from_committed_messages(
         key: &ConversationKey,
         sequence: u64,
         delta: &CanonicalTurnDelta,
         committed_inputs: &[TranscriptInputMessage],
         committed_messages: &[CommittedSessionMessage],
-        host_refs: Vec<HostOpaqueRef>,
+        attachments: TranscriptTurnRecordAttachments,
         now_secs: u64,
     ) -> Result<Self> {
         validate_key_matches_delta(key, delta)?;
@@ -817,6 +841,7 @@ impl TranscriptTurnRecord {
         Ok(Self {
             key: key.clone(),
             turn_id: delta.turn_id.clone(),
+            canonical_turn_digest: super::canonical_turn_learning_digest(delta)?,
             sequence,
             delivery_status: delta.delivery_status,
             source: delta.source.clone(),
@@ -825,7 +850,8 @@ impl TranscriptTurnRecord {
             input_messages,
             assistant_message,
             tool_observations: delta.tool_observations.clone(),
-            host_refs,
+            host_refs: attachments.host_refs,
+            learning_evidence: attachments.learning_evidence,
             external_content_used: delta.external_content_used,
             candidate_ids: delta.candidate_ids.clone(),
             lifecycle_state: TranscriptLifecycleState::Active,
@@ -835,11 +861,26 @@ impl TranscriptTurnRecord {
         })
     }
 
+    pub fn validate_canonical_intake(&self) -> Result<()> {
+        if !canonical_sha256_digest(&self.canonical_turn_digest)
+            || self.learning_evidence.as_ref().is_some_and(|evidence| {
+                evidence.canonical_turn_digest != self.canonical_turn_digest
+            })
+        {
+            return Err(Error::config(
+                "conversation_transcript_intake",
+                "canonical intake digest is missing, invalid, or differs from learning evidence",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn apply_lifecycle_transition(
         &mut self,
         transition: TranscriptLifecycleTransition,
         updated_at: u64,
     ) {
+        let before = self.clone();
         match transition {
             TranscriptLifecycleTransition::Archive => {
                 self.lifecycle_state = TranscriptLifecycleState::Archived;
@@ -856,6 +897,8 @@ impl TranscriptTurnRecord {
             TranscriptLifecycleTransition::DeleteRaw => {
                 self.lifecycle_state = TranscriptLifecycleState::RawDeleted;
                 self.redaction_state = TranscriptRedactionState::RawDeleted;
+                self.learning_evidence = None;
+                self.tool_observations.clear();
                 for message in &mut self.input_messages {
                     message.redact_raw();
                 }
@@ -864,10 +907,19 @@ impl TranscriptTurnRecord {
                 }
             }
         }
-        self.updated_at = updated_at;
+        if *self != before {
+            self.updated_at = updated_at;
+        }
     }
 
     pub fn is_searchable_for_presentation(&self) -> bool {
+        matches!(
+            self.lifecycle_state,
+            TranscriptLifecycleState::Active | TranscriptLifecycleState::Archived
+        ) && self.redaction_state == TranscriptRedactionState::RawAvailable
+    }
+
+    pub fn permits_post_turn_learning(&self) -> bool {
         matches!(
             self.lifecycle_state,
             TranscriptLifecycleState::Active | TranscriptLifecycleState::Archived
@@ -2049,8 +2101,80 @@ pub struct TranscriptAppendIntent {
     pub conversation_alias: Option<TranscriptConversationAlias>,
 }
 
+/// One canonical intake: the exact Session pre-image and its append are
+/// committed together with the authoritative Transcript and its derived roots.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanonicalTurnAppendIntent {
+    pub session_chat_id: String,
+    pub session_before: Vec<SessionMessage>,
+    pub session_append: Vec<SessionMessage>,
+    pub transcript: TranscriptAppendIntent,
+}
+
+impl CanonicalTurnAppendIntent {
+    pub fn validate(&self) -> Result<()> {
+        self.transcript.validate()?;
+        require_canonical_transcript_query_component(&self.session_chat_id, "session_chat_id")?;
+        if self
+            .transcript
+            .conversation_alias
+            .as_ref()
+            .is_some_and(|alias| alias.chat_id != self.session_chat_id)
+        {
+            return Err(Error::config(
+                "canonical_turn_append",
+                "session_alias_owner_mismatch",
+            ));
+        }
+        let messages = self
+            .transcript
+            .record
+            .input_messages
+            .iter()
+            .chain(self.transcript.record.assistant_message.iter())
+            .collect::<Vec<_>>();
+        let matches = |session: &SessionMessage, transcript: &TranscriptMessageRecord| {
+            session.message_id == transcript.message_id
+                && session.role == transcript.role
+                && session.content == transcript.content
+                && session.observed_at == transcript.observed_at
+                && session.created_at == transcript.created_at
+                && session.speaker_id == transcript.actor.speaker_id
+                && session.speaker_kind == transcript.actor.speaker_kind
+        };
+        let valid = if self.session_append.is_empty() {
+            messages.iter().all(|message| {
+                self.session_before
+                    .iter()
+                    .any(|session| matches(session, message))
+            })
+        } else {
+            self.session_append.len() == messages.len()
+                && self
+                    .session_append
+                    .iter()
+                    .zip(messages)
+                    .all(|(session, message)| matches(session, message))
+        };
+        if !valid
+            || self.session_append.iter().any(|message| {
+                message.message_id.trim().is_empty()
+                    || message.role.trim().is_empty()
+                    || message.content.len() > MAX_SESSION_MESSAGE_LEN
+            })
+        {
+            return Err(Error::config(
+                "canonical_turn_append",
+                "session_transcript_post_image_mismatch",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl TranscriptAppendIntent {
     pub fn validate(&self) -> Result<()> {
+        self.record.validate_canonical_intake()?;
         self.record.key.validate()?;
         require_canonical_transcript_query_component(&self.record.subject, "record.subject")?;
         if self
@@ -2067,6 +2191,19 @@ impl TranscriptAppendIntent {
         }
         if let Some(alias) = self.conversation_alias.as_ref() {
             alias.validate_for_transcript_owner(&self.record.key, &self.record.subject)?;
+        }
+        if let Some(evidence) = self.record.learning_evidence.as_ref() {
+            if !evidence.validate_contract()
+                || evidence.memory_space_id != self.record.key.memory_space_id
+                || evidence.mounted_subject_id != self.record.subject
+                || evidence.conversation_id != self.record.key.conversation_id
+                || evidence.turn_id != self.record.turn_id
+            {
+                return Err(Error::config(
+                    "conversation_transcript_append",
+                    "learning evidence must bind the exact transcript owner",
+                ));
+            }
         }
         Ok(())
     }
@@ -2529,6 +2666,10 @@ impl RedactedTranscriptSlice {
 }
 
 pub trait ConversationTranscriptStore: Send + Sync {
+    fn append_canonical_turn_intent(
+        &self,
+        intent: &CanonicalTurnAppendIntent,
+    ) -> Result<TranscriptCommitReport>;
     fn append_turn_intent(&self, intent: &TranscriptAppendIntent)
         -> Result<TranscriptCommitReport>;
     fn append_turn(&self, record: &TranscriptTurnRecord) -> Result<TranscriptCommitReport> {

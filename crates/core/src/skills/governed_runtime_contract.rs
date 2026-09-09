@@ -51,6 +51,9 @@ pub enum RuntimeSkillFeedbackKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RuntimeSkillCreationRef {
+    AgentToolExperiencePromotion {
+        experience_owner_ref: GovernedMemoryOwnerRef,
+    },
     GovernedCandidate {
         candidate_id: String,
         candidate_digest: String,
@@ -73,6 +76,13 @@ pub enum RuntimeSkillCreationRef {
 impl RuntimeSkillCreationRef {
     pub fn validate_contract(&self) -> bool {
         match self {
+            Self::AgentToolExperiencePromotion {
+                experience_owner_ref,
+            } => {
+                experience_owner_ref.is_valid()
+                    && experience_owner_ref.owner_plane
+                        == GovernedMemoryOwnerPlane::AgentToolExperience
+            }
             Self::GovernedCandidate {
                 candidate_id,
                 candidate_digest,
@@ -95,6 +105,12 @@ impl RuntimeSkillCreationRef {
 
     fn hash_fields(&self, hasher: &mut Sha256) {
         match self {
+            Self::AgentToolExperiencePromotion {
+                experience_owner_ref,
+            } => {
+                hash_field(hasher, b"agent_tool_experience_promotion");
+                hash_field(hasher, experience_owner_ref.owner_id.as_bytes());
+            }
             Self::GovernedCandidate {
                 candidate_id,
                 candidate_digest,
@@ -223,6 +239,8 @@ pub fn runtime_skill_scope_manifest_key(
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RuntimeSkillApplicabilityTarget {
     Project { project_id: String },
+    Workspace { workspace_id: String },
+    Conversation { conversation_id: String },
     User { user_ref: String },
     Organization { organization_id: String },
     Device { device_id: String },
@@ -232,6 +250,8 @@ impl RuntimeSkillApplicabilityTarget {
     fn validate_contract(&self) -> bool {
         match self {
             Self::Project { project_id } => is_canonical(project_id),
+            Self::Workspace { workspace_id } => is_canonical(workspace_id),
+            Self::Conversation { conversation_id } => is_canonical(conversation_id),
             Self::User { user_ref } => is_canonical(user_ref),
             Self::Organization { organization_id } => is_canonical(organization_id),
             Self::Device { device_id } => is_canonical(device_id),
@@ -305,6 +325,8 @@ pub struct RuntimeSkillTrigger {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeSkillConstraintKind {
+    /// Observed tool boundary metadata; never grants execution permission.
+    ObservedToolBoundary,
     Profile,
     Privacy,
     ResourceBudget,
@@ -381,6 +403,7 @@ pub enum RuntimeSkillFailureMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeSkillEvidenceKind {
+    ProceduralFeedbackSource,
     GovernedEvidence,
     TaskLearning,
     TaskRun,
@@ -813,6 +836,69 @@ impl RuntimeSkillOwnerRecord {
         )
     }
 
+    /// Reduce actual usage into the existing owner; feedback never edits skill content or policy.
+    pub fn apply_usage_feedback(
+        &self,
+        outcomes: &[crate::memory::ProceduralExecutionOutcomeV1],
+        observed_at: u64,
+    ) -> crate::error::Result<Self> {
+        use crate::memory::ProceduralExecutionOutcomeV1 as Outcome;
+        if !self.validate_contract().accepted || observed_at < self.lifecycle.observed_at {
+            return Err(crate::error::Error::invalid_input(
+                "runtime_skill_usage",
+                "invalid owner or observation timestamp",
+            ));
+        }
+        let actual = outcomes
+            .iter()
+            .filter(|value| **value != Outcome::NotExecuted)
+            .collect::<Vec<_>>();
+        if actual.is_empty() {
+            return Ok(self.clone());
+        }
+        let mut next = self.advance(
+            self.procedural_content.clone(),
+            self.lifecycle.availability,
+            self.lifecycle.state,
+            observed_at,
+        )?;
+        let usage = &mut next.lifecycle.usage_outcome;
+        for outcome in actual {
+            let increment = |value: u32| {
+                value.checked_add(1).ok_or_else(|| {
+                    crate::error::Error::invalid_input(
+                        "runtime_skill_usage",
+                        "usage count exhausted",
+                    )
+                })
+            };
+            usage.observation_count = increment(usage.observation_count)?;
+            usage.last_outcome = Some(match outcome {
+                Outcome::Succeeded => {
+                    usage.succeeded_count = increment(usage.succeeded_count)?;
+                    RuntimeSkillUsageOutcome::Succeeded
+                }
+                Outcome::Mismatch => {
+                    usage.mismatch_count = increment(usage.mismatch_count)?;
+                    RuntimeSkillUsageOutcome::Mismatch
+                }
+                Outcome::Failed | Outcome::Partial | Outcome::Cancelled => {
+                    RuntimeSkillUsageOutcome::Neutral
+                }
+                Outcome::NotExecuted => unreachable!("filtered above"),
+            });
+            usage.last_outcome_at = Some(next.lifecycle.updated_at);
+        }
+        next.content_digest = next.canonical_content_digest()?;
+        if !next.validate_contract().accepted {
+            return Err(crate::error::Error::invalid_input(
+                "runtime_skill_usage",
+                "usage transition is invalid",
+            ));
+        }
+        Ok(next)
+    }
+
     fn advance(
         &self,
         procedural_content: RuntimeSkillProceduralContent,
@@ -1105,7 +1191,11 @@ impl RuntimeSkillOwnerBinding {
         })
     }
 
-    fn validate_for(&self, memory_space_id: &str, owning_scope: &RuntimeSkillOwningScope) -> bool {
+    pub fn validate_for(
+        &self,
+        memory_space_id: &str,
+        owning_scope: &RuntimeSkillOwningScope,
+    ) -> bool {
         self.owner_ref.owner_plane == GovernedMemoryOwnerPlane::RuntimeSkill
             && self.owner_ref.is_valid()
             && self.owner_revision > 0
@@ -1543,6 +1633,10 @@ pub struct RuntimeSkillProjectionMaterial {
 }
 
 impl RuntimeSkillProjectionMaterial {
+    pub fn owner_binding(&self) -> &RuntimeSkillOwnerBinding {
+        &self.owner_binding
+    }
+
     pub fn candidate_ref(&self) -> &str {
         &self.candidate_ref
     }
@@ -1702,6 +1796,16 @@ pub struct RuntimeSkillRecallPlanValidation {
 }
 
 impl RuntimeSkillRecallPlan {
+    pub fn locator(&self) -> RuntimeSkillOwnerLocator {
+        RuntimeSkillOwnerLocator {
+            owning_scope: self.owning_scope.clone(),
+            owner_revision_ref: GovernedOwnerRevisionRef {
+                owner_ref: self.owner_binding.owner_ref.clone(),
+                owner_revision: self.owner_binding.owner_revision,
+            },
+        }
+    }
+
     pub fn premise_report(&self) -> &PremiseEvaluationReport {
         &self.premise_report
     }
@@ -1730,7 +1834,7 @@ impl RuntimeSkillRecallPlan {
         self.manifest_revision
     }
 
-    pub(crate) fn owner_binding(&self) -> &RuntimeSkillOwnerBinding {
+    pub fn owner_binding(&self) -> &RuntimeSkillOwnerBinding {
         &self.owner_binding
     }
 

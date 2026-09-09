@@ -107,12 +107,12 @@ impl StoreCapacityBudget {
             event_log_max_items: 20_000,
             kv_max_entries: 20_000,
             blob_max_bytes: 64 * 1024 * 1024,
-            snapshot_max_bytes: 16 * 1024 * 1024,
+            snapshot_max_bytes: 32 * 1024 * 1024,
             logical_namespace_max_bytes: 128,
             logical_key_max_bytes: 8192,
             event_record_key_max_bytes: 8192,
-            export_max_bytes: 16 * 1024 * 1024,
-            import_max_bytes: 16 * 1024 * 1024,
+            export_max_bytes: 32 * 1024 * 1024,
+            import_max_bytes: 32 * 1024 * 1024,
         }
     }
 

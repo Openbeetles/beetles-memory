@@ -63,6 +63,54 @@ fn procedural_and_premise_participation_cover_all_profiles() {
 }
 
 #[test]
+fn procedural_learning_profile_matrix_is_explicit_and_keeps_esp_recall_only() {
+    let catalog = profile_capability_catalog();
+    let expectations = [
+        (ProfileId::EspStandaloneMemory, false),
+        (ProfileId::EspEmbeddedSdk, false),
+        (ProfileId::LinuxDeviceStandaloneMemory, true),
+        (ProfileId::DesktopMacosStandaloneMemory, true),
+        (ProfileId::DesktopMacosEmbeddedSdk, true),
+        (ProfileId::DesktopMacosDevFull, true),
+        (ProfileId::DesktopLinuxEmbeddedSdk, true),
+        (ProfileId::DesktopWindowsEmbeddedSdk, true),
+        (ProfileId::DesktopWindowsDevFull, true),
+        (ProfileId::ServerLinuxMemoryGateway, true),
+        (ProfileId::ServerLinuxDevFull, true),
+    ];
+
+    assert_eq!(catalog.len(), expectations.len());
+    for (profile, full_learning_allowed) in expectations {
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.profile == profile)
+            .expect("profile catalog entry");
+        let procedural = entry.procedural_learning;
+        for allowed in [
+            procedural.standard_agent_skill_mount,
+            procedural.agent_tool_registry,
+            procedural.agent_tool_experience_read,
+            procedural.agent_tool_hint,
+            procedural.agent_tool_learning,
+            procedural.selection_receipt,
+            procedural.finalize_feedback,
+            procedural.worker,
+        ] {
+            assert_eq!(allowed, full_learning_allowed, "{profile:?} matrix drifted");
+        }
+        if matches!(
+            profile,
+            ProfileId::EspStandaloneMemory | ProfileId::EspEmbeddedSdk
+        ) {
+            assert!(
+                entry.procedural_recall_allowed,
+                "ESP keeps compact Runtime Skill recall without advertising full learning"
+            );
+        }
+    }
+}
+
+#[test]
 fn esp_profiles_keep_sqlite_index_out_and_declare_compact_typed_recall_participation() {
     let catalog = profile_capability_catalog();
 
