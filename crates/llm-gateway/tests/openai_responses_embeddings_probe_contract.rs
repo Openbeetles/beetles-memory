@@ -241,3 +241,84 @@ impl OpenAiGatewayBodyAssertions for OpenAiGatewayBody {
         }
     }
 }
+#[test]
+fn repeated_turn_window_preserves_new_user_even_after_empty_assistant_boundary() {
+    let config = gateway_config();
+    let gateway = GatewayRuntime::open(config.clone()).unwrap();
+    let scope = scope_request();
+    let mut upstream = MockOpenAiUpstream::default();
+    let windows = vec![
+        json!("repeat-cobalt"),
+        json!([
+            {"role":"user","content":"repeat-cobalt"},
+            {"role":"assistant","content":"ok"},
+            {"role":"user","content":[{"type":"input_text","text":"repeat-cobalt"}]}
+        ]),
+        json!([
+            {"role":"user","content":"already-answered-history"},
+            {"type":"function_call","call_id":"call-a","name":"lookup","arguments":"{}"},
+            {"type":"function_call_output","call_id":"call-a","output":"tool output"},
+            {"role":"user","content":"repeat-cobalt"}
+        ]),
+        json!([
+            {"role":"user","content":"history"},
+            {"role":"assistant","content":"ok"},
+            {"role":"user","content":"repeat-cobalt"},
+            {"role":"user","content":"repeat-cobalt"}
+        ]),
+        json!([
+            {"role":"user","content":"already-answered-history"},
+            {"type":"function_call","call_id":"call-b","name":"lookup","arguments":"{}"},
+            {"type":"function_call_output","call_id":"call-b","output":"tool output"}
+        ]),
+    ];
+    for window in windows {
+        handle_openai_request(
+            &gateway,
+            OpenAiGatewayRequest::post_json(
+                "/v1/responses",
+                scope.clone(),
+                json!({"model":"local","stream":false,"input":window}),
+            ),
+            &mut upstream,
+        )
+        .unwrap();
+    }
+    let resolved = bm_llm_gateway::GatewayScopeResolver::new(config.scope.clone())
+        .resolve(&scope)
+        .unwrap();
+    let entry = gateway.runtime_for_scope(resolved.entry_scope).unwrap();
+    let runtime = entry.runtime();
+    for view in [
+        bm_sdk::TranscriptReplayView::HostUi,
+        bm_sdk::TranscriptReplayView::ModelContext,
+    ] {
+        let replay = runtime
+            .replay_transcript(bm_sdk::MemoryTranscriptReplayRequest {
+                memory_space_id: runtime.memory_space_id().into(),
+                channel_id: runtime.scope().channel.clone(),
+                conversation_id: runtime
+                    .scope()
+                    .conversation_id
+                    .clone()
+                    .unwrap_or_else(|| runtime.scope().chat_id.clone()),
+                limit: 8,
+                cursor: None,
+                view,
+            })
+            .unwrap();
+        assert_eq!(replay.slice.turns.len(), 5);
+        let mut ids = std::collections::BTreeSet::new();
+        for (index, turn) in replay.slice.turns.iter().enumerate() {
+            assert_eq!(turn.input_messages.len(), [1, 1, 1, 2, 0][index]);
+            for message in &turn.input_messages {
+                assert_eq!(message.content.as_deref(), Some("repeat-cobalt"));
+                assert!(ids.insert(message.message_id.clone()));
+            }
+            assert_eq!(
+                turn.assistant_message.as_ref().unwrap().content.as_deref(),
+                Some("ok")
+            );
+        }
+    }
+}

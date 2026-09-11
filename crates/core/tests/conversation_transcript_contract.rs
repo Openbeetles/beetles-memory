@@ -1,14 +1,13 @@
 use bm_core::memory::{
-    commit_canonical_turn_delta, commit_canonical_turn_delta_with_transcript,
-    transcript_cursor_governance_context_digest, transcript_message_is_query_index_eligible,
-    ActorAttribution, CanonicalTurnAppendIntent, CanonicalTurnDelta,
-    CanonicalTurnTranscriptCommitOptions, ConversationCatalogHead, ConversationKey,
-    ConversationTranscriptStore, DerivedMemoryPlane, DerivedMemoryRef, HostOpaqueRef,
-    HostRefRelation, HostRefVisibility, MemoryEvidenceAuthority, MemoryTurnDeliveryStatus,
-    MemoryTurnProtocol, MemoryTurnSource, RedactedTranscriptSlice, SessionMessage, SessionStore,
-    ToolObservationDigest, TranscriptActivityBucket, TranscriptAnchor, TranscriptAppendIntent,
-    TranscriptAttrEnvelope, TranscriptAttrGovernance, TranscriptAttrLink,
-    TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
+    commit_canonical_turn_delta_with_transcript, transcript_cursor_governance_context_digest,
+    transcript_message_is_query_index_eligible, ActorAttribution, CanonicalTurnAppendIntent,
+    CanonicalTurnDelta, CanonicalTurnTranscriptCommitOptions, ConversationCatalogHead,
+    ConversationKey, ConversationScope, ConversationTranscriptStore, DerivedMemoryPlane,
+    DerivedMemoryRef, HostOpaqueRef, HostRefRelation, HostRefVisibility, MemoryEvidenceAuthority,
+    MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource, RedactedTranscriptSlice,
+    SessionMessage, SessionStore, ToolObservationDigest, TranscriptActivityBucket,
+    TranscriptAnchor, TranscriptAppendIntent, TranscriptAttrEnvelope, TranscriptAttrGovernance,
+    TranscriptAttrLink, TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
     TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind,
     TranscriptCommitReport, TranscriptConversationAlias, TranscriptCursorDisclosurePolicyV1,
     TranscriptCursorOperationKind, TranscriptEvidenceRef, TranscriptInputMessage,
@@ -1350,18 +1349,23 @@ fn canonical_turn_commit_passes_conversation_alias_in_same_append_intent() {
 }
 
 #[test]
-fn canonical_turn_backfill_passes_conversation_alias_in_same_append_intent() {
+fn canonical_turn_does_not_adopt_same_text_from_session_shadow() {
     let session_store = TranscriptSessionStore::default();
     let transcript_store = RepairFixtureStore {
         sessions: session_store.messages.clone(),
         ..Default::default()
     };
     let delta = delivered_delta("turn-alias-backfill");
-    assert!(
-        commit_canonical_turn_delta(&session_store, &delta)
-            .unwrap()
-            .committed
-    );
+    session_store
+        .append("legacy-chat-a", "user", &delta.input_messages[0].content)
+        .unwrap();
+    session_store
+        .append(
+            "legacy-chat-a",
+            "assistant",
+            &delta.assistant_message.as_ref().unwrap().content,
+        )
+        .unwrap();
     let alias = TranscriptConversationAlias::new(
         "space-a",
         "subject-qingchuan",
@@ -1386,7 +1390,8 @@ fn canonical_turn_backfill_passes_conversation_alias_in_same_append_intent() {
     )
     .unwrap();
 
-    assert!(!report.session_commit.committed);
+    assert!(report.session_commit.committed);
+    assert_eq!(session_store.message_count("legacy-chat-a").unwrap(), 4);
     assert!(report.transcript_commit.unwrap().committed);
     let intents = transcript_store.appended_intents.lock().unwrap();
     assert_eq!(intents.len(), 1);
@@ -1421,6 +1426,100 @@ fn transcript_canonical_intake_digest_is_required_and_survives_raw_deletion() {
         .all(|message| message.content.is_empty()));
     assert_eq!(record.canonical_turn_digest, digest);
     record.validate_canonical_intake().unwrap();
+}
+
+#[test]
+fn distinct_turns_preserve_repeated_user_text_and_message_identity() {
+    for same_reply in [false, true] {
+        let session_store = TranscriptSessionStore::default();
+        let transcript_store = RepairFixtureStore {
+            sessions: session_store.messages.clone(),
+            ..Default::default()
+        };
+        let first = delivered_delta("repeat-first");
+        let mut second = first.clone();
+        second.turn_id = "repeat-second".into();
+        second.source.request_id = Some("request-second".into());
+        second.input_messages[0].observed_at += 10;
+        second.assistant_message.as_mut().unwrap().observed_at += 10;
+        if !same_reply {
+            second.assistant_message.as_mut().unwrap().content = "another answer".into();
+        }
+        for turn in [&first, &second] {
+            let result = commit_canonical_turn_delta_with_transcript(
+                &session_store,
+                &transcript_store,
+                "space-a",
+                turn,
+                CanonicalTurnTranscriptCommitOptions {
+                    host_refs: vec![],
+                    learning_evidence: None,
+                    conversation_alias: None,
+                    now_secs: 1_800_000_030,
+                },
+            )
+            .unwrap();
+            assert!(result.session_commit.committed, "a new turn is not a retry");
+            assert_eq!(result.session_commit.committed_messages.len(), 2);
+        }
+        let intents = transcript_store.appended_intents.lock().unwrap();
+        let a = &intents[0].record.input_messages[0];
+        let b = &intents[1].record.input_messages[0];
+        assert_eq!(a.content, first.input_messages[0].content);
+        assert_eq!(b.content, second.input_messages[0].content);
+        assert_eq!(b.observed_at, second.input_messages[0].observed_at);
+        assert_eq!(b.actor.speaker_id, second.input_messages[0].speaker_id);
+        assert_ne!(a.message_id, b.message_id);
+    }
+}
+
+#[test]
+fn repeated_turn_delivery_status_preserves_only_the_admitted_evidence() {
+    for (status, expected) in [
+        (MemoryTurnDeliveryStatus::Delivered, 2),
+        (MemoryTurnDeliveryStatus::UserOnly, 1),
+        (MemoryTurnDeliveryStatus::UpstreamFailed, 1),
+        (MemoryTurnDeliveryStatus::Cancelled, 1),
+        (MemoryTurnDeliveryStatus::IncompleteStream, 0),
+        (MemoryTurnDeliveryStatus::RejectedByPolicy, 0),
+    ] {
+        let fixture = AtomicTurnFixture::default();
+        for index in 0..2 {
+            let mut turn = delivered_delta(&format!("status-repeat-{index}"));
+            turn.delivery_status = status;
+            let result = commit_canonical_turn_delta(&fixture, &turn).unwrap();
+            assert_eq!(result.committed_messages.len(), expected);
+            assert_eq!(result.committed, expected > 0);
+        }
+        assert_eq!(
+            fixture.message_count("legacy-chat-a").unwrap(),
+            expected * 2
+        );
+    }
+}
+
+#[test]
+fn protocol_window_preserves_unanswered_group_not_text_overlap() {
+    use bm_core::memory::protocol_window_user_delta;
+    let first = TranscriptInputMessage::user("same")
+        .with_observed_at(10)
+        .with_speaker("human-a", "human");
+    let second = TranscriptInputMessage::user("same")
+        .with_observed_at(11)
+        .with_speaker("human-b", "human");
+    assert_eq!(
+        protocol_window_user_delta(&[first.clone(), second.clone()]),
+        vec![first.clone(), second.clone()]
+    );
+    assert_eq!(
+        protocol_window_user_delta(&[
+            first.clone(),
+            TranscriptInputMessage::assistant(""),
+            second.clone()
+        ]),
+        vec![second]
+    );
+    assert!(protocol_window_user_delta(&[first, TranscriptInputMessage::assistant("")]).is_empty());
 }
 
 #[test]
@@ -1668,4 +1767,327 @@ fn transcript_repair_report_flags_mismatched_orphan_duplicate_and_corrupt_record
     assert!(kinds.contains(&TranscriptRepairIssueKind::DuplicateTurnCursor));
     assert!(kinds.contains(&TranscriptRepairIssueKind::OrphanDerivedRef));
     assert!(kinds.contains(&TranscriptRepairIssueKind::MismatchedSourceKey));
+}
+
+struct AtomicTurnFixture {
+    session: TranscriptSessionStore,
+    transcript: RepairFixtureStore,
+}
+
+impl Default for AtomicTurnFixture {
+    fn default() -> Self {
+        let session = TranscriptSessionStore::default();
+        let transcript = RepairFixtureStore {
+            sessions: session.messages.clone(),
+            ..Default::default()
+        };
+        Self {
+            session,
+            transcript,
+        }
+    }
+}
+
+impl std::ops::Deref for AtomicTurnFixture {
+    type Target = TranscriptSessionStore;
+    fn deref(&self) -> &Self::Target {
+        &self.session
+    }
+}
+
+// Exercise the same atomic entry as production; no session-only intake owner.
+fn commit_canonical_turn_delta(
+    store: &AtomicTurnFixture,
+    delta: &CanonicalTurnDelta,
+) -> Result<bm_core::memory::SessionTurnCommitReport> {
+    let result = commit_canonical_turn_delta_with_transcript(
+        &store.session,
+        &store.transcript,
+        "space-a",
+        delta,
+        CanonicalTurnTranscriptCommitOptions {
+            host_refs: vec![],
+            learning_evidence: None,
+            conversation_alias: None,
+            now_secs: 1_800_000_100,
+        },
+    )?;
+    Ok(result.session_commit)
+}
+
+#[test]
+fn canonical_turn_delta_is_idempotent_and_does_not_recommit_full_history() {
+    let store = AtomicTurnFixture::default();
+    store.append("chat-a", "user", "你好").unwrap();
+    store.append("chat-a", "assistant", "你好，我在。").unwrap();
+
+    let delta = CanonicalTurnDelta {
+        turn_id: "turn-0002".to_string(),
+        conversation: ConversationScope {
+            channel: "llm.gateway".to_string(),
+            chat_id: "chat-a".to_string(),
+            conversation_id: Some("ollama-window-a".to_string()),
+        },
+        subject: "subject-qingchuan".to_string(),
+        delivery_status: MemoryTurnDeliveryStatus::Delivered,
+        source: turn_source(),
+        actor: None,
+        input_messages: bm_core::memory::protocol_window_user_delta(&[
+            TranscriptInputMessage::user("你好"),
+            TranscriptInputMessage::assistant("你好，我在。"),
+            TranscriptInputMessage::user("叫我青川"),
+        ]),
+        assistant_message: Some(TranscriptInputMessage::new(
+            "assistant",
+            "你好，青川。",
+            MemoryEvidenceAuthority::AssistantUtterance,
+        )),
+        tool_observations: vec![ToolObservationDigest {
+            observation_id: "tool-1".to_string(),
+            tool_name: "web_fetch".to_string(),
+            summary: "external page was consulted".to_string(),
+            external_content: true,
+        }],
+        external_content_used: true,
+        candidate_ids: vec!["candidate-1".to_string()],
+    };
+
+    assert_eq!(delta.subject, "subject-qingchuan");
+    assert!(delta.external_content_used);
+    assert!(delta.tool_observations[0].external_content);
+    assert_eq!(delta.candidate_ids, vec!["candidate-1"]);
+
+    let first = commit_canonical_turn_delta(&store, &delta).unwrap();
+    assert!(first.committed);
+    assert_eq!(first.after_count, 4);
+    assert_eq!(first.committed_messages.len(), 2);
+    assert_eq!(first.committed_messages[0].role, "user");
+    assert_eq!(first.committed_messages[1].role, "assistant");
+
+    let second = commit_canonical_turn_delta(&store, &delta).unwrap();
+    assert!(!second.committed);
+    assert_eq!(second.after_count, 4);
+    assert_eq!(
+        second.skipped_reason.as_deref(),
+        Some("conversation_transcript_turn_already_committed")
+    );
+}
+
+#[test]
+fn canonical_turn_delta_persists_message_identity_time_and_speaker_metadata() {
+    let store = AtomicTurnFixture::default();
+    let delta = CanonicalTurnDelta {
+        turn_id: "turn-speaker".to_string(),
+        conversation: ConversationScope {
+            channel: "llm.gateway".to_string(),
+            chat_id: "chat-speaker".to_string(),
+            conversation_id: Some("ollama-window-speaker".to_string()),
+        },
+        subject: "subject-qingchuan".to_string(),
+        delivery_status: MemoryTurnDeliveryStatus::Delivered,
+        source: turn_source(),
+        actor: None,
+        input_messages: vec![TranscriptInputMessage::user("Human asks")
+            .with_observed_at(1_800_000_001)
+            .with_speaker("owner-human", "human")],
+        assistant_message: Some(
+            TranscriptInputMessage::assistant("Specialist answers")
+                .with_observed_at(1_800_000_002)
+                .with_speaker("planner-agent", "llm_agent"),
+        ),
+        tool_observations: vec![],
+        external_content_used: false,
+        candidate_ids: vec![],
+    };
+
+    let report = commit_canonical_turn_delta(&store, &delta).unwrap();
+    assert!(report.committed);
+
+    let messages = store.load_recent("chat-speaker", 10).expect("load recent");
+    assert_eq!(messages.len(), 2);
+    assert!(messages[0].message_id.starts_with("msg_"));
+    assert_ne!(messages[0].message_id, messages[1].message_id);
+    assert_eq!(messages[0].role, "user");
+    assert_eq!(messages[0].observed_at, 1_800_000_001);
+    assert!(messages[0].created_at >= messages[0].observed_at);
+    assert_eq!(messages[0].speaker_id, "owner-human");
+    assert_eq!(messages[0].speaker_kind, "human");
+    assert_eq!(messages[1].role, "assistant");
+    assert_eq!(messages[1].observed_at, 1_800_000_002);
+    assert!(messages[1].created_at >= messages[1].observed_at);
+    assert_eq!(messages[1].speaker_id, "planner-agent");
+    assert_eq!(messages[1].speaker_kind, "llm_agent");
+}
+
+fn turn_delta(
+    turn_id: &str,
+    delivery_status: MemoryTurnDeliveryStatus,
+    input_messages: Vec<TranscriptInputMessage>,
+    assistant_message: Option<&str>,
+) -> CanonicalTurnDelta {
+    CanonicalTurnDelta {
+        turn_id: turn_id.to_string(),
+        conversation: ConversationScope {
+            channel: "llm.gateway".to_string(),
+            chat_id: "chat-a".to_string(),
+            conversation_id: Some("ollama-window".to_string()),
+        },
+        subject: "subject-default".to_string(),
+        delivery_status,
+        source: turn_source(),
+        actor: None,
+        input_messages: bm_core::memory::protocol_window_user_delta(&input_messages),
+        assistant_message: assistant_message.map(TranscriptInputMessage::assistant),
+        tool_observations: Vec::new(),
+        external_content_used: false,
+        candidate_ids: Vec::new(),
+    }
+}
+
+#[test]
+fn delivered_turn_commits_user_and_assistant_messages() {
+    let store = AtomicTurnFixture::default();
+
+    let report = commit_canonical_turn_delta(
+        &store,
+        &turn_delta(
+            "turn-1",
+            MemoryTurnDeliveryStatus::Delivered,
+            vec![TranscriptInputMessage::user("叫我青川")],
+            Some("你好，青川。"),
+        ),
+    )
+    .expect("commit succeeds");
+
+    assert!(report.attempted);
+    assert!(report.committed);
+    assert_eq!(report.before_count, 0);
+    assert_eq!(report.after_count, 2);
+    assert_eq!(report.committed_messages.len(), 2);
+    assert_eq!(report.committed_messages[0].role, "user");
+    assert_eq!(report.committed_messages[1].role, "assistant");
+    assert_eq!(report.committed_messages[0].content_chars, 4);
+    assert_eq!(store.message_count("chat-a").unwrap(), 2);
+}
+
+#[test]
+fn full_history_turn_commits_only_new_user_delta_without_losing_latest_message() {
+    let store = AtomicTurnFixture::default();
+    commit_canonical_turn_delta(
+        &store,
+        &turn_delta(
+            "turn-1",
+            MemoryTurnDeliveryStatus::Delivered,
+            vec![TranscriptInputMessage::user("我叫银二")],
+            Some("我记住了。"),
+        ),
+    )
+    .expect("first commit succeeds");
+
+    let report = commit_canonical_turn_delta(
+        &store,
+        &turn_delta(
+            "turn-2",
+            MemoryTurnDeliveryStatus::Delivered,
+            vec![
+                TranscriptInputMessage::user("我叫银二"),
+                TranscriptInputMessage::assistant("我记住了。"),
+                TranscriptInputMessage::user("我喜欢冷萃"),
+            ],
+            Some("冷萃也记下了。"),
+        ),
+    )
+    .expect("second commit succeeds");
+
+    let recent = store.load_recent("chat-a", 10).expect("recent");
+    assert_eq!(report.before_count, 2);
+    assert_eq!(report.after_count, 4);
+    assert_eq!(report.committed_messages.len(), 2);
+    assert_eq!(report.committed_messages[0].role, "user");
+    assert_eq!(
+        report.committed_messages[0].authority,
+        MemoryEvidenceAuthority::UserAsserted
+    );
+    assert_eq!(report.committed_messages[1].role, "assistant");
+    assert_eq!(
+        report.committed_messages[1].authority,
+        MemoryEvidenceAuthority::AssistantUtterance
+    );
+    assert_eq!(recent[2].content, "我喜欢冷萃");
+    assert!(!recent
+        .iter()
+        .any(|message| { message.content == "我叫银二\n我喜欢冷萃" }));
+}
+
+#[test]
+fn assistant_self_description_is_committed_as_low_authority_evidence_not_identity_truth() {
+    let store = AtomicTurnFixture::default();
+
+    let report = commit_canonical_turn_delta(
+        &store,
+        &turn_delta(
+            "turn-1",
+            MemoryTurnDeliveryStatus::Delivered,
+            vec![TranscriptInputMessage::user("你叫什么？")],
+            Some("我是 Beetle Memory 的记忆助手。"),
+        ),
+    )
+    .expect("commit succeeds");
+
+    assert_eq!(report.committed_messages.len(), 2);
+    assert_eq!(
+        report.committed_messages[0].authority,
+        MemoryEvidenceAuthority::UserAsserted
+    );
+    assert_eq!(
+        report.committed_messages[1].authority,
+        MemoryEvidenceAuthority::AssistantUtterance
+    );
+    assert_ne!(
+        report.committed_messages[1].authority,
+        MemoryEvidenceAuthority::SoulGovernance
+    );
+}
+
+#[test]
+fn incomplete_stream_does_not_commit_partial_assistant() {
+    let store = AtomicTurnFixture::default();
+
+    let report = commit_canonical_turn_delta(
+        &store,
+        &turn_delta(
+            "turn-1",
+            MemoryTurnDeliveryStatus::IncompleteStream,
+            vec![TranscriptInputMessage::user("叫我青川")],
+            Some("你好，青"),
+        ),
+    )
+    .expect("commit succeeds");
+
+    assert!(report.attempted);
+    assert!(!report.committed);
+    assert_eq!(report.after_count, 0);
+    assert_eq!(report.committed_messages.len(), 0);
+    assert_eq!(store.message_count("chat-a").unwrap(), 0);
+}
+
+#[test]
+fn user_only_turn_commits_user_without_assistant() {
+    let store = AtomicTurnFixture::default();
+
+    let report = commit_canonical_turn_delta(
+        &store,
+        &turn_delta(
+            "turn-1",
+            MemoryTurnDeliveryStatus::UserOnly,
+            vec![TranscriptInputMessage::user("叫我青川")],
+            None,
+        ),
+    )
+    .expect("commit succeeds");
+
+    assert!(report.committed);
+    assert_eq!(report.after_count, 1);
+    assert_eq!(report.committed_messages.len(), 1);
+    assert_eq!(report.committed_messages[0].role, "user");
 }

@@ -799,11 +799,11 @@ pub use transcript::{
     MAX_TRANSCRIPT_SEARCH_TERMS, TRANSCRIPT_CURSOR_DISCLOSURE_POLICY_SCHEMA_V1,
 };
 pub use turn_commit::{
-    canonical_turn_learning_digest, canonical_user_delta, commit_canonical_turn_delta,
-    commit_canonical_turn_delta_with_transcript, CanonicalTurnDelta,
-    CanonicalTurnTranscriptCommitOptions, CommittedSessionMessage, ConversationScope,
-    MemoryEvidenceAuthority, MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource,
-    SessionTurnCommitReport, ToolObservationDigest, TranscriptInputMessage,
+    canonical_turn_learning_digest, commit_canonical_turn_delta_with_transcript,
+    protocol_window_user_delta, CanonicalTurnDelta, CanonicalTurnTranscriptCommitOptions,
+    CommittedSessionMessage, ConversationScope, MemoryEvidenceAuthority, MemoryTurnDeliveryStatus,
+    MemoryTurnProtocol, MemoryTurnSource, SessionTurnCommitReport, ToolObservationDigest,
+    TranscriptInputMessage,
 };
 pub use turn_continuity_evidence::{
     TurnContinuityEvidence, TurnContinuityEvidenceStore, REL_PATH_TURN_CONTINUITY_EVIDENCE,

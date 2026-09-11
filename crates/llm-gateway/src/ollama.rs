@@ -1034,7 +1034,7 @@ fn extract_chat_input_transcript(messages: Option<&Value>) -> Result<GatewayInpu
             .unwrap_or_default()
             .trim()
             .to_string();
-        if content.is_empty() {
+        if content.is_empty() && !role.eq_ignore_ascii_case("assistant") {
             continue;
         }
         if role.eq_ignore_ascii_case("user") {
@@ -1056,7 +1056,9 @@ fn extract_chat_input_transcript(messages: Option<&Value>) -> Result<GatewayInpu
                 ));
         }
     }
-    Ok(transcript)
+    Ok(GatewayInputTranscript::from_protocol_window(
+        &transcript.messages,
+    ))
 }
 
 fn transcript_message_with_gateway_speaker(

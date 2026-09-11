@@ -587,8 +587,8 @@ fn handle_responses(
         audit.record_note("openai_responses_stateful_passthrough");
     }
     let runtime = gateway.runtime_for_scope_in_request(context, scope.entry_scope.clone())?;
-    let extracted_user_text = extract_response_input_text(body_object.get("input"));
-    let input_transcript = input_transcript_from_user_text(&extracted_user_text);
+    let input_transcript = extract_response_input_transcript(body_object.get("input"));
+    let extracted_user_text = input_transcript.latest_user_text.clone();
     let external_content_used = response_input_uses_external_content(body_object.get("input"))
         || body_object.get("tools").is_some();
     let provider_limit = provider_model_context_limit(provider, model_alias);
@@ -929,7 +929,7 @@ fn extract_chat_input_transcript(messages: Option<&Value>) -> Result<GatewayInpu
         let mut parts = Vec::new();
         extract_content_text(message.get("content"), &mut parts);
         let content = parts.join("\n").trim().to_string();
-        if content.is_empty() {
+        if content.is_empty() && !role.eq_ignore_ascii_case("assistant") {
             continue;
         }
         if role.eq_ignore_ascii_case("user") {
@@ -951,7 +951,9 @@ fn extract_chat_input_transcript(messages: Option<&Value>) -> Result<GatewayInpu
                 ));
         }
     }
-    Ok(transcript)
+    Ok(GatewayInputTranscript::from_protocol_window(
+        &transcript.messages,
+    ))
 }
 
 fn transcript_message_with_gateway_speaker(
@@ -1000,43 +1002,58 @@ fn input_transcript_from_user_text(text: &str) -> GatewayInputTranscript {
     }
 }
 
-fn extract_response_input_text(input: Option<&Value>) -> String {
-    let mut parts = Vec::new();
-    extract_response_value_text(input, &mut parts, true);
-    parts.join("\n").trim().to_string()
-}
-
-fn extract_response_value_text(value: Option<&Value>, parts: &mut Vec<String>, role_allowed: bool) {
-    match value {
-        Some(Value::String(text)) if role_allowed && !text.trim().is_empty() => {
-            parts.push(text.trim().to_string())
+fn extract_response_input_transcript(input: Option<&Value>) -> GatewayInputTranscript {
+    let Some(Value::Array(items)) = input else {
+        return input_transcript_from_user_text(input.and_then(Value::as_str).unwrap_or_default());
+    };
+    let mut transcript = GatewayInputTranscript::default();
+    for item in items {
+        let kind = item
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("message");
+        let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
+        if kind == "function_call" {
+            // A model tool-call is an answered-history boundary, even without text.
+            transcript
+                .messages
+                .push(TranscriptInputMessage::assistant(""));
+            continue;
         }
-        Some(Value::Array(items)) => {
-            for item in items {
-                extract_response_value_text(Some(item), parts, role_allowed);
+        if !matches!(kind, "message" | "input_text") {
+            continue;
+        }
+        let mut parts = Vec::new();
+        if let Some(text) = item.as_str() {
+            parts.push(text.to_string());
+        } else if kind == "input_text" {
+            if let Some(text) = item.get("text").and_then(Value::as_str) {
+                parts.push(text.to_string());
             }
+        } else {
+            extract_content_text(item.get("content"), &mut parts);
         }
-        Some(Value::Object(object)) => {
-            let item_role_allowed = match object.get("role").and_then(Value::as_str) {
-                Some("user") => true,
-                Some(_) => false,
-                None => role_allowed,
-            };
-            if object.get("type").and_then(Value::as_str) == Some("input_text") {
-                if let Some(text) = object.get("text").and_then(Value::as_str) {
-                    if item_role_allowed && !text.trim().is_empty() {
-                        parts.push(text.trim().to_string());
-                    }
-                }
-            } else if let Some(text) = object.get("text").and_then(Value::as_str) {
-                if item_role_allowed && !text.trim().is_empty() {
-                    parts.push(text.trim().to_string());
-                }
-            }
-            extract_response_value_text(object.get("content"), parts, item_role_allowed);
+        let content = parts.join("\n").trim().to_string();
+        if role.eq_ignore_ascii_case("assistant") {
+            transcript
+                .messages
+                .push(transcript_message_with_gateway_speaker(
+                    TranscriptInputMessage::assistant(content),
+                    item,
+                    role,
+                ));
+        } else if role.eq_ignore_ascii_case("user") && !content.is_empty() {
+            transcript.latest_user_text = content.clone();
+            transcript
+                .messages
+                .push(transcript_message_with_gateway_speaker(
+                    TranscriptInputMessage::user(content),
+                    item,
+                    role,
+                ));
         }
-        _ => {}
     }
+    GatewayInputTranscript::from_protocol_window(&transcript.messages)
 }
 
 fn response_input_uses_external_content(input: Option<&Value>) -> bool {
@@ -1089,7 +1106,10 @@ fn extract_content_text(content: Option<&Value>, parts: &mut Vec<String>) {
         Some(Value::String(text)) if !text.trim().is_empty() => parts.push(text.trim().to_string()),
         Some(Value::Array(items)) => {
             for item in items {
-                if item.get("type").and_then(Value::as_str) == Some("text") {
+                if matches!(
+                    item.get("type").and_then(Value::as_str),
+                    Some("text" | "input_text" | "output_text")
+                ) {
                     if let Some(text) = item.get("text").and_then(Value::as_str) {
                         if !text.trim().is_empty() {
                             parts.push(text.trim().to_string());

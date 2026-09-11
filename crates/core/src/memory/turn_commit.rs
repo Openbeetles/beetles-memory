@@ -1,17 +1,16 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::bus::IngressKind;
 use crate::error::Result;
 
 use super::transcript::TranscriptTurnRecordAttachments;
 use super::{
-    default_session_speaker_for_role, synthesize_session_message_id, ActorAttribution,
-    CanonicalTurnAppendIntent, CanonicalTurnTranscriptCommitReport, ConversationKey,
-    ConversationTranscriptStore, HostOpaqueRef, PostTurnLearningEvidenceV1, SessionMessage,
-    SessionMessageRecord, SessionStore, SubjectId, TranscriptAppendIntent, TranscriptCommitReport,
-    TranscriptConversationAlias, TranscriptTurnRecord, MAX_SESSION_ENTRIES,
+    default_session_speaker_for_role, ActorAttribution, CanonicalTurnAppendIntent,
+    CanonicalTurnTranscriptCommitReport, ConversationKey, ConversationTranscriptStore,
+    HostOpaqueRef, PostTurnLearningEvidenceV1, SessionMessage, SessionMessageRecord, SessionStore,
+    SubjectId, TranscriptAppendIntent, TranscriptCommitReport, TranscriptConversationAlias,
+    TranscriptTurnRecord, MAX_SESSION_ENTRIES,
 };
 
 const CANONICAL_TURN_LEARNING_DIGEST_DOMAIN: &str = "canonical_turn_learning_digest_v1";
@@ -208,6 +207,8 @@ pub struct CanonicalTurnDelta {
     pub source: MemoryTurnSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<ActorAttribution>,
+    /// Inputs belonging to this turn only, never a full conversation history.
+    /// Normalize protocol history with `protocol_window_user_delta` before intake.
     #[serde(default)]
     pub input_messages: Vec<TranscriptInputMessage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -269,26 +270,6 @@ pub fn canonical_turn_learning_digest(delta: &CanonicalTurnDelta) -> Result<Stri
     hasher.update((encoded.len() as u64).to_be_bytes());
     hasher.update(encoded);
     Ok(format!("sha256:{:x}", hasher.finalize()))
-}
-
-pub fn commit_canonical_turn_delta(
-    session_store: &dyn SessionStore,
-    delta: &CanonicalTurnDelta,
-) -> Result<SessionTurnCommitReport> {
-    let chat_id = delta.conversation.chat_id.as_str();
-    let prepared = prepare_canonical_turn_delta_commit(session_store, delta)?;
-    if prepared.messages.is_empty() {
-        return Ok(SessionTurnCommitReport {
-            attempted: true,
-            committed: false,
-            chat_id: chat_id.to_string(),
-            before_count: prepared.before_count,
-            after_count: prepared.before_count,
-            committed_messages: Vec::new(),
-            skipped_reason: prepared.skipped_reason,
-        });
-    }
-    commit_prepared_session_messages(session_store, chat_id, prepared)
 }
 
 pub fn commit_canonical_turn_delta_with_transcript(
@@ -374,50 +355,11 @@ pub fn commit_canonical_turn_delta_with_transcript(
             }),
         });
     }
-    let prepared = prepare_canonical_turn_delta_from_records(&recent_records, delta);
+    let prepared = prepare_canonical_turn_delta(before_count, delta);
     let committed_inputs = prepared.messages.clone();
     let (session_append, mut session_commit) =
-        plan_prepared_session_messages(&delta.conversation.chat_id, prepared, now_secs);
+        plan_prepared_session_messages(&key, delta, prepared, now_secs);
     if !session_commit.committed {
-        if session_commit
-            .skipped_reason
-            .as_deref()
-            .is_some_and(|reason| reason == "canonical_turn_delta_already_committed")
-        {
-            let backfill =
-                committed_transcript_backfill_from_session_shadow(&recent_records, delta);
-            if let Some((backfill_inputs, backfill_committed)) = backfill {
-                let record = TranscriptTurnRecord::from_committed_messages(
-                    &key,
-                    0,
-                    delta,
-                    &backfill_inputs,
-                    &backfill_committed,
-                    TranscriptTurnRecordAttachments {
-                        host_refs,
-                        learning_evidence,
-                    },
-                    now_secs,
-                )?;
-                let intent = TranscriptAppendIntent {
-                    record,
-                    conversation_alias: conversation_alias.clone(),
-                };
-                intent.validate()?;
-                let atomic = CanonicalTurnAppendIntent {
-                    session_chat_id: delta.conversation.chat_id.clone(),
-                    session_before,
-                    session_append,
-                    transcript: intent,
-                };
-                atomic.validate()?;
-                let transcript_commit = transcript_store.append_canonical_turn_intent(&atomic)?;
-                return Ok(CanonicalTurnTranscriptCommitReport {
-                    session_commit,
-                    transcript_commit: Some(transcript_commit),
-                });
-            }
-        }
         return Ok(CanonicalTurnTranscriptCommitReport {
             session_commit,
             transcript_commit: None,
@@ -466,46 +408,20 @@ pub fn commit_canonical_turn_delta_with_transcript(
     })
 }
 
-fn prepare_canonical_turn_delta_commit(
-    session_store: &dyn SessionStore,
-    delta: &CanonicalTurnDelta,
-) -> Result<PreparedCanonicalTurnCommit> {
-    let chat_id = delta.conversation.chat_id.as_str();
-    let recent_records = session_store.load_recent_records(chat_id, usize::MAX)?;
-    Ok(prepare_canonical_turn_delta_from_records(
-        &recent_records,
-        delta,
-    ))
-}
-
-fn prepare_canonical_turn_delta_from_records(
-    recent_records: &[SessionMessageRecord],
+fn prepare_canonical_turn_delta(
+    before_count: usize,
     delta: &CanonicalTurnDelta,
 ) -> PreparedCanonicalTurnCommit {
-    let before_count = recent_records.len();
-    let recent_records =
-        &recent_records[recent_records.len().saturating_sub(MAX_SESSION_ENTRIES)..];
-    let user_delta = canonical_user_delta(recent_records, &delta.input_messages);
+    let user_delta = delta
+        .input_messages
+        .iter()
+        .filter(|message| message.is_role("user") && !message.content.trim().is_empty())
+        .cloned();
     let assistant_message = delta
         .assistant_message
         .as_ref()
-        .filter(|message| message.is_role("assistant"))
-        .filter(|message| !message.content.trim().is_empty())
+        .filter(|message| message.is_role("assistant") && !message.content.trim().is_empty())
         .cloned();
-    let assistant_already_committed = assistant_message.as_ref().is_some_and(|message| {
-        recent_records
-            .iter()
-            .rev()
-            .find(|record| record.role.eq_ignore_ascii_case("assistant"))
-            .is_some_and(|record| record.content.trim() == message.content.trim())
-    });
-    if user_delta.is_empty() && assistant_already_committed {
-        return PreparedCanonicalTurnCommit {
-            before_count,
-            messages: Vec::new(),
-            skipped_reason: Some("canonical_turn_delta_already_committed".to_string()),
-        };
-    }
     let mut messages = Vec::new();
     match delta.delivery_status {
         MemoryTurnDeliveryStatus::Delivered => {
@@ -534,109 +450,13 @@ fn prepare_canonical_turn_delta_from_records(
     }
 }
 
-fn committed_transcript_backfill_from_session_shadow(
-    recent_records: &[SessionMessageRecord],
-    delta: &CanonicalTurnDelta,
-) -> Option<(Vec<TranscriptInputMessage>, Vec<CommittedSessionMessage>)> {
-    let recent_records =
-        &recent_records[recent_records.len().saturating_sub(MAX_SESSION_ENTRIES)..];
-    let mut inputs = Vec::new();
-    let mut committed = Vec::new();
-
-    if matches!(
-        delta.delivery_status,
-        MemoryTurnDeliveryStatus::Delivered
-            | MemoryTurnDeliveryStatus::UserOnly
-            | MemoryTurnDeliveryStatus::UpstreamFailed
-            | MemoryTurnDeliveryStatus::Cancelled
-    ) {
-        if let Some(user_message) = delta
-            .input_messages
-            .iter()
-            .rev()
-            .find(|message| message.is_role("user") && !message.content.trim().is_empty())
-            .cloned()
-        {
-            if let Some(record) = matching_recent_session_record(recent_records, &user_message) {
-                let committed_message =
-                    committed_message_from_session_record(record, &user_message);
-                inputs.push(user_message);
-                committed.push(committed_message);
-            }
-        }
-    }
-
-    if delta.delivery_status == MemoryTurnDeliveryStatus::Delivered {
-        if let Some(assistant_message) = delta
-            .assistant_message
-            .as_ref()
-            .filter(|message| message.is_role("assistant"))
-            .filter(|message| !message.content.trim().is_empty())
-            .cloned()
-        {
-            if let Some(record) = matching_recent_session_record(recent_records, &assistant_message)
-            {
-                let committed_message =
-                    committed_message_from_session_record(record, &assistant_message);
-                inputs.push(assistant_message);
-                committed.push(committed_message);
-            }
-        }
-    }
-
-    if inputs.is_empty() {
-        None
-    } else {
-        Some((inputs, committed))
-    }
-}
-
-fn matching_recent_session_record<'a>(
-    recent_records: &'a [SessionMessageRecord],
-    message: &TranscriptInputMessage,
-) -> Option<&'a SessionMessageRecord> {
-    recent_records.iter().rev().find(|record| {
-        record.role.eq_ignore_ascii_case(&message.role)
-            && record.content.trim() == message.content.trim()
-    })
-}
-
-fn committed_message_from_session_record(
-    record: &SessionMessageRecord,
-    message: &TranscriptInputMessage,
-) -> CommittedSessionMessage {
-    CommittedSessionMessage {
-        message_id: record.message_id.clone(),
-        role: record.role.clone(),
-        authority: message.authority,
-        content_chars: record.content.chars().count(),
-        content_bytes: record.content.len(),
-        observed_at: record.observed_at,
-        created_at: record.created_at,
-        speaker_id: record.speaker_id.clone(),
-        speaker_kind: record.speaker_kind.clone(),
-    }
-}
-
-fn commit_prepared_session_messages(
-    session_store: &dyn SessionStore,
-    chat_id: &str,
-    prepared: PreparedCanonicalTurnCommit,
-) -> Result<SessionTurnCommitReport> {
-    let (messages, mut report) =
-        plan_prepared_session_messages(chat_id, prepared, current_unix_secs());
-    if report.committed {
-        session_store.append_batch(chat_id, &messages)?;
-    }
-    report.after_count = session_store.message_count(chat_id)?;
-    Ok(report)
-}
-
 fn plan_prepared_session_messages(
-    chat_id: &str,
+    key: &ConversationKey,
+    delta: &CanonicalTurnDelta,
     prepared: PreparedCanonicalTurnCommit,
     now: u64,
 ) -> (Vec<SessionMessage>, SessionTurnCommitReport) {
+    let chat_id = delta.conversation.chat_id.as_str();
     if prepared.messages.is_empty() {
         return (
             Vec::new(),
@@ -658,19 +478,20 @@ fn plan_prepared_session_messages(
         .enumerate()
         .map(|(index, message)| {
             let authority = message.authority;
-            let occurrence = u32::try_from(
-                prepared
-                    .before_count
-                    .saturating_add(index)
-                    .saturating_add(1),
-            )
-            .unwrap_or(u32::MAX);
-            let message_id = synthesize_session_message_id(
-                chat_id,
-                message.role.as_str(),
-                message.content.as_str(),
-                occurrence,
-            );
+            let mut hasher = Sha256::new();
+            for field in [
+                "bm.canonical-turn.message.v1",
+                key.memory_space_id.as_str(),
+                key.channel_id.as_str(),
+                key.conversation_id.as_str(),
+                delta.subject.as_str(),
+                delta.turn_id.as_str(),
+            ] {
+                hasher.update((field.len() as u64).to_be_bytes());
+                hasher.update(field.as_bytes());
+            }
+            hasher.update((index as u64).to_be_bytes());
+            let message_id = format!("msg_{:x}", hasher.finalize());
             let session_message = message.into_session_message(message_id, now, now);
             (session_message, authority)
         })
@@ -711,40 +532,24 @@ fn plan_prepared_session_messages(
     )
 }
 
-pub fn canonical_user_delta(
-    recent_records: &[SessionMessageRecord],
+/// Resolve the unanswered user-message group of a protocol history window.
+///
+/// Assistant entries (including empty tool-call entries) delimit answered history.
+/// With no assistant boundary, every user entry belongs to the current group.
+/// This is stateless normalization, not retry detection; canonical turn identity
+/// and the immutable Transcript exclusively own idempotency.
+pub fn protocol_window_user_delta(
     input_messages: &[TranscriptInputMessage],
 ) -> Vec<TranscriptInputMessage> {
-    let user_messages = input_messages
+    let start = input_messages
         .iter()
-        .filter(|message| message.is_role("user"))
-        .filter(|message| !message.content.trim().is_empty())
+        .rposition(|message| message.is_role("assistant"))
+        .map_or(0, |index| index + 1);
+    input_messages[start..]
+        .iter()
+        .filter(|message| message.is_role("user") && !message.content.trim().is_empty())
         .cloned()
-        .collect::<Vec<_>>();
-    if user_messages.is_empty() {
-        return Vec::new();
-    }
-
-    let existing_users = recent_records
-        .iter()
-        .filter(|record| record.role.eq_ignore_ascii_case("user"))
-        .map(|record| record.content.trim())
-        .collect::<Vec<_>>();
-    let max_overlap = existing_users.len().min(user_messages.len());
-    let mut overlap = 0;
-    for size in 1..=max_overlap {
-        let input_prefix_matches_existing_tail = user_messages[..size]
-            .iter()
-            .map(|message| message.content.trim())
-            .eq(existing_users[existing_users.len() - size..]
-                .iter()
-                .copied());
-        if input_prefix_matches_existing_tail {
-            overlap = size;
-        }
-    }
-
-    user_messages[overlap..].to_vec()
+        .collect()
 }
 
 fn skipped_reason(status: MemoryTurnDeliveryStatus) -> &'static str {
@@ -756,11 +561,4 @@ fn skipped_reason(status: MemoryTurnDeliveryStatus) -> &'static str {
         MemoryTurnDeliveryStatus::IncompleteStream => "incomplete_stream",
         MemoryTurnDeliveryStatus::RejectedByPolicy => "rejected_by_policy",
     }
-}
-
-fn current_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
 }

@@ -24,6 +24,20 @@ pub(crate) struct GatewayInputTranscript {
     pub(crate) messages: Vec<TranscriptInputMessage>,
 }
 
+impl GatewayInputTranscript {
+    pub(crate) fn from_protocol_window(messages: &[TranscriptInputMessage]) -> Self {
+        let messages = bm_sdk::protocol_window_user_delta(messages);
+        let latest_user_text = messages
+            .last()
+            .map(|message| message.content.clone())
+            .unwrap_or_default();
+        Self {
+            messages,
+            latest_user_text,
+        }
+    }
+}
+
 pub(crate) struct GatewayMaintenancePlan {
     runtime: Arc<EntryRuntime>,
     input_messages: Vec<TranscriptInputMessage>,

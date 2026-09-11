@@ -2,7 +2,6 @@
 
 mod support;
 
-use bm_core::memory::commit_canonical_turn_delta;
 use bm_core::platform::Platform as _;
 use bm_sdk::{
     default_agent_subject_id, primary_human_subject_id, ActorAttribution, CanonicalTurnDelta,
@@ -81,6 +80,221 @@ fn indexed_transcript_turn(index: usize) -> CanonicalTurnDelta {
     );
     request.turn.turn_id = format!("history-turn-{index:03}");
     request.turn
+}
+
+fn repeated_turns_reopen_contract(mut open: impl FnMut() -> bm_sdk::MemoryStoreHandle) {
+    let profile = support::host_test_profile();
+    let mut identities = std::collections::BTreeSet::new();
+    {
+        let platform = open();
+        let runtime = test_runtime_with_scope_and_subject(
+            platform.clone(),
+            profile,
+            "llm.gateway",
+            "chat-a",
+            "subject-default",
+        );
+        // Exceed the Session ring size: its count cannot be a message identity.
+        for index in 0..70 {
+            let mut request = finalize_request("repeated-cobalt-user", "repeated answer");
+            request.turn.turn_id = format!("repeat-{index}");
+            request.turn.source.request_id = Some(format!("request-{index}"));
+            request.turn.input_messages[0].observed_at = 1_800_000_000 + index;
+            request.turn.assistant_message.as_mut().unwrap().observed_at = 1_800_000_000 + index;
+            if index < 2 {
+                runtime.finalize_turn(request.clone()).unwrap();
+                let before = platform.export_replay_snapshot().unwrap();
+                runtime.finalize_turn(request.clone()).unwrap();
+                assert_eq!(platform.export_replay_snapshot().unwrap(), before);
+            } else {
+                runtime
+                    .commit_transcript(MemoryTranscriptCommitRequest {
+                        turn: request.turn.clone(),
+                        host_refs: vec![],
+                    })
+                    .unwrap();
+            }
+            let key =
+                ConversationKey::from_delta(runtime.memory_space_id(), &request.turn).unwrap();
+            let record = platform
+                .replay_harness()
+                .conversation_transcript_store()
+                .get_turn(&key, runtime.subject_id(), &request.turn.turn_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(record.input_messages.len(), 1);
+            assert_eq!(record.input_messages[0].content, "repeated-cobalt-user");
+            assert_eq!(record.input_messages[0].observed_at, 1_800_000_000 + index);
+            assert!(identities.insert(record.input_messages[0].message_id.clone()));
+            assert!(identities.insert(record.assistant_message.unwrap().message_id));
+            if index == 69 {
+                let before = platform.export_replay_snapshot().unwrap();
+                request.turn.input_messages[0].content = "changed payload".into();
+                assert!(runtime
+                    .commit_transcript(MemoryTranscriptCommitRequest {
+                        turn: request.turn,
+                        host_refs: vec![]
+                    })
+                    .is_err());
+                assert_eq!(platform.export_replay_snapshot().unwrap(), before);
+            }
+        }
+    }
+    let platform = open();
+    let runtime = test_runtime_with_scope_and_subject(
+        platform.clone(),
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    for view in [
+        TranscriptReplayView::HostUi,
+        TranscriptReplayView::ModelContext,
+    ] {
+        let mut cursor = None;
+        let mut restored_ids = std::collections::BTreeSet::new();
+        loop {
+            let page = runtime
+                .replay_transcript(MemoryTranscriptReplayRequest {
+                    memory_space_id: runtime.memory_space_id().into(),
+                    channel_id: "llm.gateway".into(),
+                    conversation_id: "conversation-a".into(),
+                    limit: 8,
+                    cursor,
+                    view,
+                })
+                .unwrap();
+            for turn in &page.slice.turns {
+                assert_eq!(turn.input_messages.len(), 1);
+                assert_eq!(
+                    turn.input_messages[0].content.as_deref(),
+                    Some("repeated-cobalt-user")
+                );
+                assert_eq!(
+                    turn.input_messages[0].observed_at,
+                    1_800_000_000 + turn.sequence - 1
+                );
+                for message in turn
+                    .input_messages
+                    .iter()
+                    .chain(turn.assistant_message.iter())
+                {
+                    assert!(
+                        restored_ids.insert(message.message_id.clone()),
+                        "replay must not overlap"
+                    );
+                }
+            }
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(
+            restored_ids, identities,
+            "reopen replay must neither omit nor invent messages"
+        );
+        let timeline = runtime
+            .query_transcript_timeline(MemoryTranscriptTimelineRequest {
+                channel_id: "llm.gateway".into(),
+                conversation_id: "conversation-a".into(),
+                anchor: TranscriptTimelineAnchor::Latest,
+                limit: 8,
+                cursor: None,
+                view,
+            })
+            .unwrap();
+        assert_eq!(timeline.page.turns.len(), 8);
+        for turn in &timeline.page.turns {
+            assert_eq!(turn.input_messages.len(), 1);
+            assert_eq!(
+                turn.input_messages[0].content.as_deref(),
+                Some("repeated-cobalt-user")
+            );
+            assert!(identities.contains(&turn.input_messages[0].message_id));
+        }
+        let search = runtime
+            .search_transcripts(MemoryTranscriptSearchRequest {
+                scope: MemoryTranscriptSearchScope::ExactConversation {
+                    channel_id: "llm.gateway".into(),
+                    conversation_id: "conversation-a".into(),
+                },
+                query_text: "cobalt".into(),
+                sort: TranscriptSearchSort::ObservedAtDescending,
+                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+                limit: 8,
+                cursor: None,
+                view,
+            })
+            .unwrap();
+        assert_eq!(search.page.hits.len(), 8);
+    }
+    let other = test_runtime_with_scope_and_subject(
+        platform,
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-other",
+    );
+    let replay = other
+        .replay_transcript(MemoryTranscriptReplayRequest {
+            memory_space_id: other.memory_space_id().into(),
+            channel_id: "llm.gateway".into(),
+            conversation_id: "conversation-a".into(),
+            limit: 8,
+            cursor: None,
+            view: TranscriptReplayView::HostUi,
+        })
+        .unwrap();
+    assert!(replay.slice.turns.is_empty());
+}
+
+#[test]
+fn repeated_turns_survive_in_memory_runtime_recreation() {
+    let store = empty_store_platform(support::host_test_profile());
+    repeated_turns_reopen_contract(|| store.clone());
+}
+
+#[test]
+fn repeated_turns_survive_file_close_reopen() {
+    let root = std::env::temp_dir().join(format!(
+        "bm-repeat-file-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    repeated_turns_reopen_contract(|| {
+        support::open_memory_store(
+            bm_sdk::StoreBackendConfig::file(&root, support::host_test_profile()).unwrap(),
+        )
+        .unwrap()
+    });
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(feature = "sqlite-store")]
+fn repeated_turns_survive_sqlite_close_reopen() {
+    let root = std::env::temp_dir().join(format!(
+        "bm-repeat-sqlite-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    repeated_turns_reopen_contract(|| {
+        support::open_memory_store(
+            bm_sdk::StoreBackendConfig::sqlite(root.join("store.db"), support::host_test_profile())
+                .unwrap(),
+        )
+        .unwrap()
+    });
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 fn host_ref() -> HostOpaqueRef {
@@ -2297,7 +2511,7 @@ fn manual_transcript_commit_is_idempotent_by_transcript_turn_even_if_session_sha
 }
 
 #[test]
-fn manual_transcript_commit_backfills_when_session_shadow_already_has_turn() {
+fn manual_transcript_commit_does_not_adopt_same_text_from_session_shadow() {
     let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
@@ -2310,8 +2524,16 @@ fn manual_transcript_commit_backfills_when_session_shadow_already_has_turn() {
     let request = finalize_request("旧 session 已有", "回填 transcript。");
     let turn = request.turn.clone();
     let session_store = runtime.replay_harness().session_store();
-    let legacy_session = commit_canonical_turn_delta(session_store.as_ref(), &turn).unwrap();
-    assert!(legacy_session.committed);
+    session_store
+        .append("chat-a", "user", &turn.input_messages[0].content)
+        .unwrap();
+    session_store
+        .append(
+            "chat-a",
+            "assistant",
+            &turn.assistant_message.as_ref().unwrap().content,
+        )
+        .unwrap();
 
     let commit = runtime
         .commit_transcript(MemoryTranscriptCommitRequest {
@@ -2320,11 +2542,8 @@ fn manual_transcript_commit_backfills_when_session_shadow_already_has_turn() {
         })
         .unwrap();
 
-    assert!(!commit.session_commit.committed);
-    assert_eq!(
-        commit.session_commit.skipped_reason.as_deref(),
-        Some("canonical_turn_delta_already_committed")
-    );
+    assert!(commit.session_commit.committed);
+    assert_eq!(commit.session_commit.committed_messages.len(), 2);
     assert!(commit
         .transcript_commit
         .as_ref()
@@ -2335,7 +2554,7 @@ fn manual_transcript_commit_backfills_when_session_shadow_already_has_turn() {
             .session_store()
             .message_count("chat-a")
             .unwrap(),
-        2
+        4
     );
     let replay = runtime
         .replay_transcript(MemoryTranscriptReplayRequest {
@@ -2355,7 +2574,7 @@ fn manual_transcript_commit_backfills_when_session_shadow_already_has_turn() {
 }
 
 #[test]
-fn finalize_turn_reports_transcript_backfill_as_committed_when_session_shadow_already_has_turn() {
+fn finalize_turn_preserves_new_evidence_despite_same_text_in_session_shadow() {
     let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope_and_subject(
@@ -2368,18 +2587,23 @@ fn finalize_turn_reports_transcript_backfill_as_committed_when_session_shadow_al
     let request = finalize_request("finalize 回填", "回填 transcript。");
     let turn = request.turn.clone();
     let session_store = runtime.replay_harness().session_store();
-    let legacy_session = commit_canonical_turn_delta(session_store.as_ref(), &turn).unwrap();
-    assert!(legacy_session.committed);
+    session_store
+        .append("chat-a", "user", &turn.input_messages[0].content)
+        .unwrap();
+    session_store
+        .append(
+            "chat-a",
+            "assistant",
+            &turn.assistant_message.as_ref().unwrap().content,
+        )
+        .unwrap();
 
     let report = runtime
         .finalize_turn_with_inline_governance(None, None, request)
         .unwrap();
 
-    assert!(!report.session_commit.committed);
-    assert_eq!(
-        report.session_commit.skipped_reason.as_deref(),
-        Some("canonical_turn_delta_already_committed")
-    );
+    assert!(report.session_commit.committed);
+    assert_eq!(report.session_commit.committed_messages.len(), 2);
     assert!(report
         .transcript_commit
         .as_ref()
@@ -2426,8 +2650,16 @@ fn transcript_backfill_rejects_session_shadow_owned_by_another_subject_without_m
     );
     let owner_turn = finalize_request("subject owner session", "owner response").turn;
     let session_store = owner_runtime.replay_harness().session_store();
-    let session_commit = commit_canonical_turn_delta(session_store.as_ref(), &owner_turn).unwrap();
-    assert!(session_commit.committed);
+    session_store
+        .append("chat-a", "user", &owner_turn.input_messages[0].content)
+        .unwrap();
+    session_store
+        .append(
+            "chat-a",
+            "assistant",
+            &owner_turn.assistant_message.as_ref().unwrap().content,
+        )
+        .unwrap();
 
     let mut other_turn = owner_turn.clone();
     other_turn.subject = "subject-other".to_string();
