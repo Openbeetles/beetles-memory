@@ -53,6 +53,7 @@ required_docs=(
   "docs/en/adapters.md"
   "docs/en/operator-guide.md"
   "docs/en/release-checklist.md"
+  "docs/en/release-notes-0.7.0.md"
   "docs/en/release-notes-0.6.0.md"
   "docs/en/release-notes-0.5.0.md"
   "docs/en/release-notes-0.4.0.md"
@@ -68,6 +69,7 @@ required_docs=(
   "docs/zh-CN/adapters.md"
   "docs/zh-CN/operator-guide.md"
   "docs/zh-CN/release-checklist.md"
+  "docs/zh-CN/release-notes-0.7.0.md"
   "docs/zh-CN/release-notes-0.6.0.md"
   "docs/zh-CN/release-notes-0.5.0.md"
   "docs/zh-CN/release-notes-0.4.0.md"
@@ -88,7 +90,7 @@ for doc in "${required_docs[@]}"; do
   fi
 done
 
-release_version="0.6.0"
+release_version="0.7.0"
 version_manifests=(
   "crates/core/Cargo.toml"
   "crates/store-contract-tests/Cargo.toml"
@@ -175,10 +177,10 @@ for desktop_identity in apps/desktop/package.json apps/desktop/package-lock.json
   }
 done
 
-for doc in docs/en/release-notes-0.6.0.md docs/zh-CN/release-notes-0.6.0.md; do
-  for marker in 'Store v12' 'material v5' 'Adapter V2' 'automatic migration' 'Job V3' 'MemoryLearningEngine' 'MemoryLearningService' 'operation-aware' 'typed inspection authority'; do
+for doc in docs/en/release-notes-0.7.0.md docs/zh-CN/release-notes-0.7.0.md; do
+  for marker in 'Store v13' 'material v5' 'Adapter V2' 'automatic migration' 'Job V3' 'MemoryLearningEngine' 'MemoryLearningService' 'operation-aware' 'typed inspection authority' 'ProceduralSelectionReceiptV1' 'protocol_window_user_delta'; do
     rg -F -q "$marker" "$doc" || {
-      echo "0.6.0 source candidate notes omit required compatibility marker: doc=$doc marker=$marker" >&2
+      echo "0.7.0 source candidate notes omit required compatibility marker: doc=$doc marker=$marker" >&2
       exit 1
     }
   done
@@ -514,6 +516,18 @@ cargo test --locked -p bm-store-contract-tests --test subject_soul_store_contrac
 
 # PL2 is feature-gated and must not disappear behind a default-workspace 0-test result.
 cargo test --locked -p bm-core --test post_turn_memory_governance_contract
+# PFI1 must execute its production and harness contracts, not default 0-test crates.
+cargo test --locked -p bm-sdk --no-default-features \
+  --features nonproduction-replay-harness,sqlite-store \
+  --test procedural_selection_receipt_contract \
+  --test production_runtime_skill_promotion_contract \
+  --test procedural_projection_security_contract \
+  --test runtime_skill_archive_lifecycle_contract \
+  --test public_procedural_write_authority_contract \
+  --test public_transcript_actor_authority_contract \
+  --test public_candidate_decision_binding_contract \
+  --test public_memory_write_wire_contract \
+  --test conversation_transcript_runtime_contract
 cargo test --locked -p bm-sdk --test post_turn_deferred_governance_contract \
   --no-default-features --features nonproduction-replay-harness,sqlite-store
 cargo test --locked -p bm-entry --no-default-features \

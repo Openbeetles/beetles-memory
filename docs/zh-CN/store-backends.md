@@ -38,11 +38,11 @@ let config = StoreBackendConfig::file("/var/lib/beetle-memory", profile)?
     .with_fsync(true);
 ```
 
-## 0.6.0 源码候选 Schema Admission
+## 0.7.0 Schema Admission
 
-0.6.0 源码候选只接受 Store v12 与 immutable long-term material v5。Store v12 增加 exact Post-Turn Governance Job V3 / Scope Index V3 / Job Ref V2 closure，以及 Store-owned immutable binding snapshot 和有界 binding revision index。File、SQLite 与 in-memory admission 会在每个相关 transaction 内验证变更的 Job/Index/Binding owner；持久 reopen 与 snapshot import 会验证全量 closure。
+0.7.0 源码只接受 Store v13 与 immutable long-term material v5。Store v13 保留 semantic Post-Turn Governance Job V3 与 immutable binding closure，增加 subject-owned Agent Tool experience material/manifest、procedural evidence/job/receipt/application ledger、protected signing authority 与受治理 Runtime Skill dependency。File、SQLite 与 in-memory admission 在每个事务验证 typed post-image，reopen/snapshot import 验证完整 owner/dependency closure。Canonical Session/Transcript 原子 intake 保留 exact turn digest。
 
-不提供 v11→v12 migration API、compatibility reader、双写或 automatic migration。Store v11、governance V2、partial v12 state、orphaned binding/job/index document 与 foreign schema 都会 fail closed。旧代开发数据只能由其 owner 明确删除并重建。Archive export/import 不是 schema migration 或 compatibility path，本版本也不声明任何真实用户 Store migration。
+不提供 migration API、compatibility reader、双写或 automatic migration。Store v12 及更早代、partial v13 state、孤儿 owner/dependency 与 foreign schema 均 fail closed。可丢弃的旧开发数据由其 owner 明确重建，本版本不自动删除真实数据。公开 archive export/import 不是 schema migration，也不能搬运 signing authority 或复活 protected Runtime Skill owner。
 
 ## File Path Budget
 

@@ -716,7 +716,12 @@ pub(crate) fn run_p8_gate_contract() -> Result<(), String> {
                 title: "P8 gate privacy contract".into(),
                 summary: "Verify that governed private procedures never cross safe surfaces."
                     .into(),
-                content: content.into(),
+                content: format!(
+                    "{content}\n\
+                     1. Resolve the procedure owner and its privacy scope.\n\
+                     2. Check disclosure authority before reading private evidence.\n\
+                     3. Return only the permitted method; withhold private details."
+                ),
                 citations: vec!["p8 gate contract".into()],
                 source_chat_id: Some("chat-a".into()),
                 observed_at: 1_780_000_000,

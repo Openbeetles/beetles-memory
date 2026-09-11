@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bm_desktop::{
@@ -8,10 +9,19 @@ use bm_entry::{
     EntryScope, EntryTransportConfig,
 };
 use bm_sdk::{
-    default_agent_subject_id, GovernedRuntimeSkillWriteInput, MemoryCapabilityPolicy,
-    MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryProjectionRequest, PressureLevel,
-    ProceduralProjectionBindingV1, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillCreationRef,
-    RuntimeSkillOwningScope, RuntimeSkillWrite, StoreBackendConfig,
+    AgentToolDescriptor, AgentToolObservationDigest, AgentToolOutcome, AgentToolRegistrySnapshot,
+    AgentToolUsageFeedbackV2, AuthorizedGovernanceEnvelope, CanonicalTurnDelta, ConversationScope,
+    GovernanceEgressAuthority, GovernanceExecutionOperation, GovernanceExecutionPort,
+    GovernanceExecutionPortFailure, ImmutableGovernanceExecutionBinding, IngressKind,
+    LongTermMemoryDraft, LongTermMemoryKind, LongTermMemoryProvenance, MemoryCapabilityPolicy,
+    MemoryEvidenceAuthority, MemoryIdentity, MemoryLearningCycleOutcome,
+    MemoryLearningCycleRequest, MemoryLearningEngine, MemoryPrivacyClass, MemoryPrivacyPolicy,
+    MemoryProjectionRequest, MemoryRuntime, MemoryScope, MemoryStoreHandle,
+    MemorySubjectVisibilityPolicy, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest,
+    MemoryTurnProtocol, MemoryTurnSource, MemoryWriteRequest, ParsedLongTermMemoryExtraction,
+    PostTurnLearningInputV1, PressureLevel, ProceduralExecutionOutcomeV1,
+    ProceduralProjectionBindingV1, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillListRequest,
+    RuntimeSkillOwningScope, StoreBackendConfig, ToolObservationDigest, TranscriptInputMessage,
 };
 use serde_json::Value;
 
@@ -57,35 +67,7 @@ fn desktop_console_serves_ollama_transparent_status_without_404() {
 #[test]
 fn desktop_console_mutates_skills_through_entry_runtime() {
     let data_dir = test_store_dir("skills-mutation");
-    let seed_runtime = runtime_for_store(data_dir.join("store"));
-    seed_runtime
-        .runtime()
-        .seed_runtime_skills_for_replay(
-            vec![GovernedRuntimeSkillWriteInput {
-                write: RuntimeSkillWrite {
-                    name: "runtime_skill__desktop_console".to_string(),
-                    topic: "desktop_console".to_string(),
-                    title: "Desktop direct skill".to_string(),
-                    summary: "Desktop commands must use the in-process entry runtime.".to_string(),
-                    content: "1. open the Tauri app\n2. call the shared console API\n3. verify the returned report".to_string(),
-                    citations: vec!["desktop contract test".to_string()],
-                    source_chat_id: Some("local-desktop".to_string()),
-                    observed_at: 1_800_000_000,
-                },
-                creation_ref: RuntimeSkillCreationRef::ReplayPromotion {
-                    candidate_ref: "desktop-test:runtime-skill".to_string(),
-                    verification_receipt_digest:
-                        "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-                            .to_string(),
-                },
-                privacy_class: MemoryPrivacyClass::SharedWithSubject,
-            }],
-            RuntimeSkillOwningScope::Subject {
-                mounted_subject_id: default_agent_subject_id("bm-desktop"),
-            },
-        )
-        .expect("seed runtime skill");
-    drop(seed_runtime);
+    learn_runtime_skill(data_dir.join("store"));
     let state = DesktopConsoleState::open(desktop_config(data_dir)).expect("desktop state");
 
     let create_forbidden = state
@@ -107,6 +89,7 @@ fn desktop_console_mutates_skills_through_entry_runtime() {
         .unwrap();
     assert_eq!(list.status_code, 200);
     let list_body: Value = serde_json::from_str(&list.body).expect("skill list json");
+    assert_eq!(list_body["skills"]["skills"].as_array().unwrap().len(), 1);
     let locator = list_body["skills"]["skills"][0]["locator"].clone();
     let edit_body = serde_json::json!({
         "locator": locator,
@@ -186,7 +169,16 @@ fn desktop_console_mutates_skills_through_entry_runtime() {
 fn desktop_console_overview_includes_ollama_transparent_memory_store_events() {
     let data_dir = test_store_dir("ollama-transparent-overview");
     let transparent_runtime = runtime_for_store(data_dir.join("store"));
-    seed_memory_runtime_activity(&transparent_runtime);
+    let changed = seed_memory_runtime_activity(&transparent_runtime);
+    let metrics = transparent_runtime
+        .runtime()
+        .runtime_metrics_report()
+        .unwrap();
+    assert_eq!(
+        metrics.counters.write_changed_count,
+        u64::try_from(changed).unwrap()
+    );
+    drop(transparent_runtime);
     let state = DesktopConsoleState::open(desktop_config(data_dir)).unwrap();
 
     let response = state
@@ -195,7 +187,10 @@ fn desktop_console_overview_includes_ollama_transparent_memory_store_events() {
 
     assert_eq!(response.status_code, 200, "{}", response.body);
     let body: Value = serde_json::from_str(&response.body).expect("overview json");
-    assert_eq!(body["overview"]["writesToday"]["value"], "1");
+    assert_eq!(
+        body["overview"]["writesToday"]["value"],
+        changed.to_string()
+    );
     assert_eq!(body["overview"]["recall"]["value"], "0.0%");
     assert!(body["overview"]["projection"]["desc"]
         .as_str()
@@ -305,36 +300,42 @@ fn runtime_for_store(path: std::path::PathBuf) -> EntryRuntime {
     .expect("entry runtime")
 }
 
-fn seed_memory_runtime_activity(runtime: &EntryRuntime) {
-    runtime
+fn seed_memory_runtime_activity(runtime: &EntryRuntime) -> usize {
+    let write = runtime
         .runtime()
-        .seed_runtime_skills_for_replay(
-            vec![GovernedRuntimeSkillWriteInput {
-                write: RuntimeSkillWrite {
-                    name: "desktop_ollama_overview".to_string(),
-                    topic: "desktop ollama overview".to_string(),
-                    title: "Desktop Ollama overview".to_string(),
-                    summary: "Desktop overview must include transparent Ollama memory events."
-                        .to_string(),
-                    content: "1. read the transparent Ollama memory store\n2. merge store events into the Desktop overview\n3. keep writes and projection hits on the shared metrics path"
-                        .to_string(),
-                    citations: vec!["desktop console overview contract".to_string()],
-                    source_chat_id: Some("local-desktop".to_string()),
-                    observed_at: 1_800_000_000,
-                },
-                creation_ref: RuntimeSkillCreationRef::ReplayPromotion {
-                    candidate_ref: "desktop-test:ollama-overview".to_string(),
-                    verification_receipt_digest:
-                        "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-                            .to_string(),
-                },
-                privacy_class: MemoryPrivacyClass::SharedWithSubject,
-            }],
-            RuntimeSkillOwningScope::Subject {
-                mounted_subject_id: default_agent_subject_id("bm-desktop"),
+        .write(MemoryWriteRequest::LongTermExtraction {
+            extraction: ParsedLongTermMemoryExtraction {
+                upserts: vec![LongTermMemoryDraft {
+                    kind: LongTermMemoryKind::Project,
+                    topic: "desktop_overview".into(),
+                    content: "The desktop and transparent gateway share one memory store.".into(),
+                    keywords: vec!["desktop".into()],
+                    privacy: MemoryPrivacyClass::SharedWithSubject,
+                    source_chat_id: Some("local-desktop".into()),
+                    source_type: None,
+                    source_scope: None,
+                    subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
+                    provenance: LongTermMemoryProvenance::new(
+                        MemoryEvidenceAuthority::RuntimeObservation,
+                    ),
+                    confidence: None,
+                    freshness: None,
+                    stale_hint: None,
+                    supporting_citations: vec!["fixture:desktop-overview".into()],
+                    canonical_entities: Vec::new(),
+                    evidence_count: Some(1),
+                    observed_at: None,
+                    source_revision: None,
+                }],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
             },
-        )
+        })
         .expect("write");
+    assert_eq!(
+        write.changed, 1,
+        "one real accepted fact, not a fabricated event"
+    );
     runtime
         .runtime()
         .project(MemoryProjectionRequest {
@@ -349,4 +350,167 @@ fn seed_memory_runtime_activity(runtime: &EntryRuntime) {
             tool_registry_refs: Vec::new(),
         })
         .expect("project");
+    write.changed
+}
+
+struct NoProvider;
+
+impl GovernanceExecutionPort for NoProvider {
+    fn execute(
+        &mut self,
+        _: &AuthorizedGovernanceEnvelope,
+        _: &ImmutableGovernanceExecutionBinding,
+        _: &GovernanceEgressAuthority,
+        _: &mut dyn GovernanceExecutionOperation,
+    ) -> Result<(), GovernanceExecutionPortFailure> {
+        panic!("procedural fixture must not invoke a Provider")
+    }
+}
+
+fn learn_runtime_skill(path: std::path::PathBuf) {
+    let registry = AgentToolRegistrySnapshot::compact(
+        "desktop-tools",
+        "host",
+        vec![AgentToolDescriptor::compact(
+            "desktop.inspect",
+            "Inspect desktop",
+            "desktop-v1",
+        )],
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    );
+    let memory = Arc::new(
+        MemoryRuntime::builder()
+            .identity(MemoryIdentity::new("bm-desktop", "local-owner").unwrap())
+            .scope(MemoryScope::new("desktop", "local-desktop").unwrap())
+            .store(
+                MemoryStoreHandle::open(
+                    StoreBackendConfig::file(path, ProfileId::DesktopMacosStandaloneMemory)
+                        .unwrap()
+                        .with_fsync(false),
+                )
+                .unwrap(),
+            )
+            .agent_tool_registry(registry.clone())
+            .build()
+            .unwrap(),
+    );
+    let list_request = RuntimeSkillListRequest {
+        owning_scope: RuntimeSkillOwningScope::Subject {
+            mounted_subject_id: memory.subject_id().into(),
+        },
+        query: None,
+        include_disabled: true,
+        include_retired: true,
+        limit: 8,
+    };
+    assert!(memory
+        .list_runtime_skills(list_request.clone())
+        .unwrap()
+        .skills
+        .is_empty());
+    for (index, turn_id) in ["desktop-method-first", "desktop-method-second"]
+        .into_iter()
+        .enumerate()
+    {
+        let observations: Vec<_> = ["first", "second"].into_iter().map(|call| AgentToolObservationDigest {
+            observation_id: format!("{turn_id}-{call}-observation"),
+            registry_id: registry.registry_id.clone(), tool_id: "desktop.inspect".into(),
+            schema_fingerprint: "desktop-v1".into(), call_id: Some(format!("{turn_id}-{call}")),
+            task_signature: "desktop_console".into(),
+            summary: "1. open the desktop app\n2. call the shared console API\n3. verify the returned report".into(),
+            outcome: AgentToolOutcome::Succeeded, error_code: None,
+            external_content: false, private_content_used: false,
+            permission_tags: Vec::new(), risk_tags: Vec::new(), started_at: None, completed_at: None,
+        }).collect();
+        let finalized = memory
+            .finalize_turn(MemoryTurnFinalizeRequest {
+                turn: CanonicalTurnDelta {
+                    turn_id: turn_id.into(),
+                    conversation: ConversationScope {
+                        channel: "desktop".into(),
+                        chat_id: "local-desktop".into(),
+                        conversation_id: Some("local-desktop".into()),
+                    },
+                    subject: memory.subject_id().into(),
+                    delivery_status: MemoryTurnDeliveryStatus::Delivered,
+                    source: MemoryTurnSource {
+                        ingress: IngressKind::User,
+                        channel: "desktop".into(),
+                        provider: None,
+                        protocol: MemoryTurnProtocol::Native,
+                        endpoint: None,
+                        model_alias: None,
+                        model_resolved: None,
+                        request_id: None,
+                        client_conversation_hint: None,
+                    },
+                    actor: None,
+                    input_messages: vec![TranscriptInputMessage::user("Inspect desktop console")],
+                    assistant_message: Some(TranscriptInputMessage::assistant(
+                        "Desktop console verified",
+                    )),
+                    tool_observations: observations
+                        .iter()
+                        .map(|observation| ToolObservationDigest {
+                            observation_id: observation.observation_id.clone(),
+                            tool_name: observation.tool_id.clone(),
+                            summary: observation.summary.clone(),
+                            external_content: false,
+                        })
+                        .collect(),
+                    external_content_used: false,
+                    candidate_ids: Vec::new(),
+                },
+                learning: PostTurnLearningInputV1 {
+                    tool_call_count: 2,
+                    agent_tool_feedback: vec![AgentToolUsageFeedbackV2 {
+                        registry_ref: registry.registry_ref(),
+                        tool_id: "desktop.inspect".into(),
+                        schema_fingerprint: "desktop-v1".into(),
+                        observations,
+                        outcome: ProceduralExecutionOutcomeV1::Succeeded,
+                        user_visible_result_summary: Some("Desktop console verified".into()),
+                        operator_note: None,
+                    }],
+                    ..PostTurnLearningInputV1::empty()
+                },
+                pressure: PressureLevel::Normal,
+                mode_input: RuntimeLifecycleModeInput::default(),
+            })
+            .unwrap();
+        let outcome = MemoryLearningEngine::attach(memory.clone())
+            .unwrap()
+            .run_due_cycle(
+                MemoryLearningCycleRequest {
+                    lease_owner: "desktop-contract-worker".into(),
+                    lease_duration_secs: 60,
+                },
+                &mut NoProvider,
+            )
+            .unwrap();
+        let MemoryLearningCycleOutcome::ProceduralCompleted(report) = outcome else {
+            panic!("official learning completion required: {outcome:?}")
+        };
+        assert_eq!(
+            Some(report.job.job_id),
+            finalized.procedural_learning.job_id
+        );
+        assert_eq!(report.receipt.accepted_count, 1);
+        assert!(report.receipt.changed_count > 0);
+        let skills = memory
+            .list_runtime_skills(list_request.clone())
+            .unwrap()
+            .skills;
+        assert_eq!(
+            skills.len(),
+            index,
+            "only two independent accepted turns create a skill"
+        );
+        if let Some(skill) = skills.first() {
+            assert_eq!(skill.locator.owner_revision(), 1);
+        }
+    }
 }

@@ -20,7 +20,7 @@ Beetle Memory 是面向 agent 系统的 Rust 记忆运行时。它提供 SDK-fir
 | 模型网关与透明本地模型控制 | `bm-llm-gateway`, `bm-ollama-transparent` |
 | Adapters | `bm-cli`, `bm-http`, `bm-wss`, `bm-mcp`, `bm-a2a` |
 
-当前 Cargo workspace 已准备为本地 `0.6.0` source candidate。打开持久 Store 前，请先阅读 [0.6.0 源码候选说明](docs/zh-CN/release-notes-0.6.0.md)。这是 clean-break Store v12 发布，不提供 v11 migration 或兼容 reader。仓库包含 `examples/` 下的五个 smoke 示例，以及 `fixtures/platform/capabilities/` 下的 profile capability fixtures。
+当前 Cargo workspace 为 `0.7.0` 源码线。打开持久 Store 前，请阅读 [0.7.0 发布说明](docs/zh-CN/release-notes-0.7.0.md)，了解受治理程序性学习和 Transcript 完整性变更。这是 clean-break Store v13，不提供 automatic migration 或兼容 reader；Git tag、crates.io、二进制和部署分别需要独立发布证据。仓库包含 `examples/` 下的五个 smoke 示例，以及 `fixtures/platform/capabilities/` 下的 profile capability fixtures。
 
 ## 能力范围
 
@@ -121,6 +121,7 @@ fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
 - [回放与归档](docs/zh-CN/replay-and-archive.md)
 - [运维与检查](docs/zh-CN/operator-guide.md)
 - [发布清单](docs/zh-CN/release-checklist.md)
+- [0.7.0 源码候选说明](docs/zh-CN/release-notes-0.7.0.md)
 - [0.6.0 源码候选说明](docs/zh-CN/release-notes-0.6.0.md)
 - [0.5.0 发布说明](docs/zh-CN/release-notes-0.5.0.md)
 - [0.4.0 发布说明](docs/zh-CN/release-notes-0.4.0.md)
@@ -140,6 +141,7 @@ English documentation:
 - [Replay and Archive](docs/en/replay-and-archive.md)
 - [Operator Guide](docs/en/operator-guide.md)
 - [Release Checklist](docs/en/release-checklist.md)
+- [0.7.0 Source Candidate Notes](docs/en/release-notes-0.7.0.md)
 - [0.6.0 Source Candidate Notes](docs/en/release-notes-0.6.0.md)
 - [0.5.0 Release Notes](docs/en/release-notes-0.5.0.md)
 - [0.4.0 Release Notes](docs/en/release-notes-0.4.0.md)

@@ -680,6 +680,20 @@ mod tests {
     use super::*;
 
     #[cfg(target_os = "macos")]
+    struct FixtureJobCleanup(Option<String>);
+
+    #[cfg(target_os = "macos")]
+    impl Drop for FixtureJobCleanup {
+        fn drop(&mut self) {
+            if let Some(service_target) = &self.0 {
+                let _ = Command::new("launchctl")
+                    .args(["bootout", service_target])
+                    .output();
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     #[test]
     fn macos_external_pid_cannot_be_promoted_to_stop_authority() {
         let error = AttachedProcessAuthority::attach(std::process::id())
@@ -731,6 +745,9 @@ mod tests {
             &root.join("stderr.log"),
         )
         .expect("submit launchd fixture");
+        let persisted = spawned.persisted_authority().expect("launchd authority");
+        let PersistedProcessAuthority::LaunchdJob { service_target, .. } = &persisted;
+        let mut cleanup = FixtureJobCleanup(Some(service_target.clone()));
         let pid = spawned.id();
         let receipt = (0..50)
             .find_map(|_| {
@@ -745,23 +762,35 @@ mod tests {
                 None
             })
             .expect("observe executed launchd fixture");
-        let address = (0..100)
-            .find_map(|_| {
-                let address = std::fs::read_to_string(root.join("stdout.log"))
-                    .ok()
-                    .and_then(|output| {
-                        output
-                            .lines()
-                            .find_map(|line| line.strip_prefix("READY "))
-                            .and_then(|address| address.parse::<std::net::SocketAddr>().ok())
-                    });
-                if address.is_none() {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                address
-            })
-            .expect("fixture ready address");
-        let mut stream = std::net::TcpStream::connect(address).expect("connect fixture");
+        // A published executable may be observed before dyld reaches main.
+        // Use the managed-upstream readiness budget, not a one-second poll count.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let address = loop {
+            let address = std::fs::read_to_string(root.join("stdout.log"))
+                .ok()
+                .and_then(|output| {
+                    output
+                        .lines()
+                        .find_map(|line| line.strip_prefix("READY "))
+                        .and_then(|address| address.parse::<std::net::SocketAddr>().ok())
+                });
+            if let Some(address) = address {
+                break address;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fixture ready address timed out"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let mut stream = std::net::TcpStream::connect_timeout(&address, Duration::from_secs(2))
+            .expect("connect fixture");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read timeout");
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .expect("write timeout");
         use std::io::{Read, Write};
         stream
             .write_all(b"GET /authority HTTP/1.0\r\n\r\n")
@@ -769,9 +798,6 @@ mod tests {
         let mut response = String::new();
         stream.read_to_string(&mut response).expect("response");
         assert!(response.ends_with("authority-ok"));
-        let persisted = spawned
-            .persisted_authority()
-            .expect("persist launchd authority");
         drop(spawned);
 
         let mut recovered = SpawnedProcess::recover(
@@ -785,6 +811,8 @@ mod tests {
         assert_eq!(recovered.id(), pid);
         recovered.terminate().expect("terminate recovered job");
         recovered.wait_after_terminate();
+        assert!(launchd_job_snapshot(service_target).unwrap().is_none());
+        cleanup.0 = None;
         let mut permissions = std::fs::metadata(
             published
                 .path()

@@ -30,7 +30,7 @@ crates 发布后：
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.6.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.7.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 每次构建只使用一个 profile feature。Linux desktop、Linux device 与 Linux server 是三个不同部署目标，禁止相互替代。
@@ -193,8 +193,8 @@ raw credential 永不持久化。
 
 宿主不得自行 claim job、运行 governance transition、拼装 memory mutation，也不得维护第二套
 queue/worker/retry policy。Operator 与 attachment status read 必须携带 SDK 铸造的 typed inspection authority；
-无权或跨主体请求必须在返回 job identity 或 reason detail 前失败。早于 v12
-的 Store schema 直接拒绝，由 operator 清空重建；v0.6.0 不提供自动迁移或兼容 reader。
+无权或跨主体请求必须在返回 job identity 或 reason detail 前失败。Store v12 及更早 schema
+直接拒绝；可丢弃的开发 Store 由 owner 明确重建。v0.7.0 不自动删除真实数据，也不提供自动迁移或兼容 reader。
 
 `project()` 返回的 `MemoryProjectionReport.audit` 是投影诊断真源，包含 source plane、selected ids、
 section chars、source/render budget、scope 和 private gate decision。宿主可以展示这些字段，

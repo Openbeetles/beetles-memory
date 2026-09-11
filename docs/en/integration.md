@@ -30,7 +30,7 @@ After the crates are published:
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.6.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.7.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 Use exactly one profile feature for a build. Linux desktop, Linux device, and Linux server are distinct deployment targets; do not substitute one for another.
@@ -202,9 +202,9 @@ Hosts must not claim jobs, run governance transitions, assemble memory
 mutations, or implement a second queue/worker/retry policy. Operator and
 attachment status reads must use the SDK-minted typed inspection authority;
 unauthorized or cross-subject requests fail before job identity or reason detail
-is returned. Store schemas older than v12 are rejected and must be reset by the
-operator; v0.6.0 does not provide an automatic migration or compatibility
-reader.
+is returned. Store v12 and earlier schemas are rejected. Owners may explicitly
+recreate disposable development stores; v0.7.0 neither deletes real data nor
+provides automatic migration or a compatibility reader.
 
 `project()` returns `MemoryProjectionReport.audit` as the projection diagnostic
 source of truth. It includes source planes, selected ids, section chars,

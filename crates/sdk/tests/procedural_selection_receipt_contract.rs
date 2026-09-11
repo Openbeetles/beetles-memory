@@ -260,6 +260,7 @@ fn assert_unavailable_runtime_skill_transport(store: MemoryStoreHandle) {
         .is_none_or(|receipt| receipt.runtime_skills.is_empty()));
 }
 
+#[cfg(feature = "sqlite-store")]
 fn assert_runtime_skill_usage_lifecycle(config: Option<StoreBackendConfig>) {
     let mut store = config
         .as_ref()

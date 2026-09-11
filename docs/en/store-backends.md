@@ -38,11 +38,11 @@ let config = StoreBackendConfig::file("/var/lib/beetle-memory", profile)?
     .with_fsync(true);
 ```
 
-## 0.6.0 Source Candidate Schema Admission
+## 0.7.0 Schema Admission
 
-The 0.6.0 source candidate accepts Store v12 and immutable long-term material v5 only. Store v12 adds the exact Post-Turn Governance Job V3 / Scope Index V3 / Job Ref V2 closure plus Store-owned immutable binding snapshots and a bounded binding revision index. File, SQLite, and in-memory admission verify Job/Index/Binding ownership during every changed transaction; persistent reopen and snapshot import verify the complete closure.
+The 0.7.0 source accepts Store v13 and immutable long-term material v5 only. Store v13 preserves semantic Post-Turn Governance Job V3 and immutable binding closure, and adds subject-owned Agent Tool experience material/manifests, procedural evidence/jobs/receipts/application ledgers, protected signing authority and governed Runtime Skill dependencies. File, SQLite and in-memory admission validate typed post-images in each transaction; reopen and snapshot import verify complete owner/dependency closure. Canonical Session/Transcript intake is atomic and retains an exact turn digest.
 
-There is no v11-to-v12 migration API, compatibility reader, dual write, or automatic migration. Store v11, governance V2, partial v12 state, orphaned binding/job/index documents, and foreign schemas fail closed. Older development data must be explicitly discarded and recreated by its owner. Archive export/import is not schema migration or a compatibility path, and no real user Store migration is claimed.
+There is no migration API, compatibility reader, dual write, or automatic migration. Store v12 and earlier generations, partial v13 state, orphaned owners/dependencies and foreign schemas fail closed. Older disposable development data must be explicitly recreated by its owner; this release does not delete real data. Public archive export/import is neither a schema migration nor a way to carry signing authority or revive protected Runtime Skill owners.
 
 ## File Path Budget
 

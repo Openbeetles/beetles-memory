@@ -64,7 +64,7 @@ Status and recovery controls require opaque SDK-minted capabilities. `MemoryRunt
 
 ## Subject Soul Provisioning
 
-`bm-sdk` 0.6.0 exposes a host-neutral Subject Soul provisioning and lifecycle contract. Hosts submit typed intent only; Core, SDK, and Store own Soul revisions, generations, material, manifests, ledgers, audit records, events, and durable operation receipts in one transaction. Adapters, HTTP, MCP, Console, and host databases must not maintain a second Soul state or create a default personality and overwrite it later.
+`bm-sdk` 0.7.0 exposes a host-neutral Subject Soul provisioning and lifecycle contract. Hosts submit typed intent only; Core, SDK, and Store own Soul revisions, generations, material, manifests, ledgers, audit records, events, and durable operation receipts in one transaction. Adapters, HTTP, MCP, Console, and host databases must not maintain a second Soul state or create a default personality and overwrite it later.
 
 | Operation | SDK surface | Contract |
 | --- | --- | --- |
@@ -113,7 +113,7 @@ CTQ1 query surfaces use the Store-owned `TranscriptQueryCursor`. Treat it as opa
 
 `HostUi` is only the host-presentable redacted disclosure view. It is not a chat-window API, pagination direction, product name, transcript index owner, or authorization token. Catalog, timeline, search, and activity return only candidates that remain visible after Runtime hydration and redaction for the requested view. Search hits contain a governed Unicode-safe excerpt and durable `TranscriptAnchor`; pass that anchor to `TranscriptTimelineAnchor::Around` instead of asking the host UI to scan or re-match transcript text.
 
-Store v13 is the only accepted Store generation in the current unreleased source candidate. There is no public Store migration API, compatibility reader, dual write, or automatic migration. Older, partial, and foreign schema payloads fail closed. Development data from an older generation must be explicitly discarded and recreated by its owner; archive export/import is not schema migration.
+Store v13 is the only accepted Store generation in the 0.7.0 source line. There is no public Store migration API, compatibility reader, dual write, or automatic migration. Older, partial, and foreign schema payloads fail closed. Development data from an older generation must be explicitly discarded and recreated by its owner; archive export/import is not schema migration.
 
 Timeline supports latest, before, after, around-anchor, around-sequence, around-time, and first-visible-in-range queries. Page turns stay in sequence order and reports may carry opaque older/newer cursors. Calendar conversion stays with the host: resolve the user's IANA time zone and local date into a canonical UTC `[start_inclusive, end_exclusive)` range before calling Memory. Do not assume every local day is 86,400 seconds; DST days can be 23 or 25 hours. Beetle Memory does not store or guess the host time zone.
 
@@ -150,7 +150,9 @@ Privacy and projection boundaries:
 - `HostUi` replay must not expose private garden, inner-life, soul-private raw material, backend traces, or operator-only audit content.
 - `ModelContext` replay must pass through privacy gates, profile budget, and model-facing projection policy.
 - Host references stay opaque by default; replay can show metadata and relation, not host object payloads. `Export` returns only export-visible refs, and `ModelContext` returns only model-context refs.
-- `MemoryRuntime::finalize_turn` reports both session commit and transcript commit status, so transcript backfill is not treated as a no-op when the legacy session shadow already contains the turn.
+- `MemoryRuntime::finalize_turn` reports both session and transcript commit status. Transcript owner identity, turn id, and canonical digest determine retries and conflicts; matching text in the session shadow never proves a turn was committed and is not used to backfill a new turn.
+
+`CanonicalTurnDelta.input_messages` contains only the current turn's inputs. For a full protocol history, decode messages and use `bm_sdk::protocol_window_user_delta(&messages)` before intake: it selects nonempty user messages after the last assistant entry, including an empty assistant/tool-call boundary. Without an assistant boundary, all user entries form the current unanswered group. A tool continuation with no new user has no new user input. Do not compare message text against stored history: different turn ids preserve repeated text as distinct evidence. Retry the same turn with its original id and canonical payload; a changed payload conflicts. The former Core session-only `commit_canonical_turn_delta` and text-overlap `canonical_user_delta` helpers have been removed; SDK hosts use `finalize_turn` or `commit_transcript`.
 
 ## Request Shapes
 

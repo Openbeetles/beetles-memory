@@ -64,7 +64,7 @@ Status read 与 recovery control 必须携带 SDK 铸造的 opaque capability。
 
 ## Subject Soul Provisioning
 
-`bm-sdk` 0.6.0 提供宿主无关的 Subject Soul 建档与生命周期公共合同。宿主只能提交 typed intent；Soul revision、generation、material、manifest、ledger、审计、事件和 durable operation receipt 由 Core、SDK 与 Store 在同一事务中拥有。Adapter、HTTP、MCP、Console 或宿主数据库不得维护第二套 Soul 状态，也不得先写默认人格再覆盖。
+`bm-sdk` 0.7.0 提供宿主无关的 Subject Soul 建档与生命周期公共合同。宿主只能提交 typed intent；Soul revision、generation、material、manifest、ledger、审计、事件和 durable operation receipt 由 Core、SDK 与 Store 在同一事务中拥有。Adapter、HTTP、MCP、Console 或宿主数据库不得维护第二套 Soul 状态，也不得先写默认人格再覆盖。
 
 | 操作 | SDK surface | 合同 |
 | --- | --- | --- |
@@ -113,7 +113,7 @@ CTQ1 query surface 统一使用 Store-owned `TranscriptQueryCursor`。调用方�
 
 `HostUi` 只是 **host-presentable redacted disclosure view**。它不是聊天窗口 API、分页方向、宿主产品名、transcript index owner 或 authorization token。Catalog、timeline、search、activity 只返回 Runtime hydration 后仍能通过请求 view 脱敏规则的结果。Search hit 携带受治理的 Unicode-safe excerpt 和 durable `TranscriptAnchor`；宿主应把 anchor 交给 `TranscriptTimelineAnchor::Around`，不得在 UI 内扫描或二次匹配 transcript 正文。
 
-当前未发布 source candidate 只接受 Store v13，不提供 public Store migration API、compatibility reader、双写或 automatic migration。旧代、partial 与 foreign schema payload 都会 fail closed。旧代开发数据只能由其 owner 明确删除并重建；archive export/import 不是 schema migration。
+0.7.0 源码 只接受 Store v13，不提供 public Store migration API、compatibility reader、双写或 automatic migration。旧代、partial 与 foreign schema payload 都会 fail closed。旧代开发数据只能由其 owner 明确删除并重建；archive export/import 不是 schema migration。
 
 Timeline 支持 latest、before、after、around-anchor、around-sequence、around-time 与 first-visible-in-range；页内 turn 始终按 sequence 正序，report 可返回 opaque older/newer cursor。日历换算归宿主：按用户 IANA timezone 把本地日期转换为 canonical UTC `[start_inclusive, end_exclusive)` 后再调用 Memory。不得假设每天都是 86400 秒，DST 当天可以是 23 或 25 小时；Beetle Memory 不保存也不猜宿主时区。
 
@@ -150,7 +150,9 @@ Transcript attrs 是 Memory-owned transcript metadata，不是宿主业务对象
 - `HostUi` replay 不得泄漏 private garden、inner-life、soul-private raw material、backend trace 或 operator-only audit 内容。
 - `ModelContext` replay 必须经过 privacy gate、profile budget 和模型可见 projection policy。
 - Host refs 默认保持 opaque；replay 可以展示 metadata 和 relation，不返回宿主对象 payload。`Export` 只返回 export-visible refs，`ModelContext` 只返回 model-context refs。
-- `MemoryRuntime::finalize_turn` 同时报告 session commit 和 transcript commit 状态；当 legacy session shadow 已有该 turn 但 transcript backfill 成功时，不会被误报成 no-op。
+- `MemoryRuntime::finalize_turn` 同时报告 session 和 transcript commit 状态。Transcript owner identity、turn id 与 canonical digest 判定重试和冲突；Session shadow 中正文相同不代表该 turn 已提交，也不能用来回填新 turn。
+
+`CanonicalTurnDelta.input_messages` 只包含本轮输入。对于 full-history 协议请求，先解码消息并调用 `bm_sdk::protocol_window_user_delta(&messages)`：它选择最后一个 assistant entry 之后的非空 user 消息，空 assistant/tool-call 同样是边界；没有 assistant 边界时，全部 user 都属于当前未回答组。只有工具续接、没有新 user 时，不产生新 user 输入。不要比较历史正文去重：不同 turn id 的相同发言仍是独立证据。同一 turn 重试应复用原 id 与原 canonical payload，修改 payload 会冲突。旧 Core Session-only `commit_canonical_turn_delta` 和正文重叠 `canonical_user_delta` 已删除；SDK 宿主使用 `finalize_turn` 或 `commit_transcript`。
 
 ## Request Shapes
 
