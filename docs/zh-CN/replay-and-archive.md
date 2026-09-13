@@ -78,7 +78,7 @@ CTQ1 continuation value 统一为 Store-owned opaque `TranscriptQueryCursor`。�
 
 日期导航由宿主按用户 IANA timezone 把本地日期转换成 UTC `[start_inclusive, end_exclusive)`。Memory 只接受 canonical range，不猜测或持久化宿主时区。DST 本地日可能为 23 或 25 小时，宿主不能固定增加 86400 秒。Search/activity hydrate canonical turn 后重新执行请求 view；masked/raw-deleted material 的可见结果必须 exact-zero，也不能 fallback legacy archive search 或宿主自建 index。
 
-当前源码在 Store v13 下继续保持 CTQ1 的 InMemory/File/SQLite 原子 head/catalog/time/search closure 与持久 reopen。旧 Store generation 不提供 compatibility reader 或 migration path；开发数据必须明确重建。Repair/archive closure、private authority exact-zero 与严格回归证据继续是发布门禁。该结论不表示真实数据处理、crates.io/托管 Release 或运行时/UAT 已执行。
+已发布 v0.7.0 在 Store v13 下保持 CTQ1 的 InMemory/File/SQLite 原子 head/catalog/time/search closure；0.8.0 使用 Store v14 并保留这些合同。旧 Store generation 不提供 compatibility reader 或 migration path；开发数据必须明确重建。Repair/archive closure、private authority exact-zero 与严格回归证据继续是发布门禁。该结论不表示真实数据处理、crates.io/托管 Release 或运行时/UAT 已执行。
 
 0.7.0 的 turn intake 修复保留不同回合的相同正文；message identity 绑定 conversation owner、subject、turn 与 ordinal，而不是有界 Session 计数。同一 turn 精确重试保持幂等，修改 canonical payload 则冲突。该修复不改变 Store schema 或 replay cursor，不重建旧代码漏记的消息，也不执行数据迁移。提交前的协议历史归一化见 [API 合同](./api.md#memory-evidence-system)。
 
@@ -125,7 +125,9 @@ source 与 target runtime 必须暴露完全相同的 `MemoryArchiveScope`。req
 
 `ExcludePrivate` 会按受治理 owner closure 成组排除 private material。policy 不一致、dependency closure 不完整、root 不一致或 scope 不一致时，都会在任何写入前 fail closed。Opaque archive 不公开 payload；调用方通过 `GovernedScopeArchiveRootV1` 读取 schema、精确 scope、policy、JSON/event count 与 byte count，以及 canonical `closure_sha256`。
 
-Runtime Skill record 及其 scope manifest 是受保护的本地 procedural owner。无论请求哪一种 private-material policy，公开 memory-space archive 都不携带其 raw record 或权威 event。Import 必须精确保留 Store 内已有的本地 Runtime Skill owner，不能把 Runtime Skill 克隆到其他 Store 或 subject；受控 full-snapshot recovery 仍由独立的 owner-only 机制负责。
+Runtime Skill record 及其 scope manifest 是受保护的本地 procedural owner。无论请求哪一种 private-material policy，公开 memory-space archive 都不携带其 raw record 或权威 event。Import 必须精确保留 Store 内已有的本地 Runtime Skill owner，不能把 Runtime Skill 克隆到其他 Store 或 subject；受控 full-snapshot recovery 仍由独立的 owner-only 机制负责。0.8.0 同时排除内部 procedural source/job 审计事件：import 保留目标已有的受保护审计，并原子记录本地产生的来源变化，不移植源 Store 的审计权威。
+
+0.8.0（Store v14；v0.7.0 为 v13）恢复现有 Transcript 的完全相同公开投影时，会保留本 Store 的真实记录及本地学习证明，不向新 Store 导入证据或 producer 权限。归档省略本地保留学习来源时返回 typed `MemorySpaceImportConflict::ProtectedTranscriptSourceMissing`；现有同一回合不一致，包括以旧正文覆盖 `RawDeleted`，返回 `ExistingTranscriptDiffers`；两者都保持全库不变。归档须保留目标的当前来源投影；确需撤回来源时先显式调用 Transcript lifecycle，并使用符合当前终态的归档。Import 不暗中执行永久学习撤回。没有学习证据或保留学习引用的普通 Transcript 省略项仍按原 scope replacement 处理。public-only 替换保留其他主体共用的 cursor keyring；完整 Transcript 恢复会生成新的 cursor incarnation。
 
 当 memory-space storage 中存在 transcript evidence 时，`ExcludePrivate` 会把 private transcript material 及其依赖的 `conversation_transcript_attr`、`conversation_transcript_derived_ref` 等 export-visible index 作为一个经过验证的 closure 成组排除。Archive diagnostics 必须保留 raw transcript、redacted transcript slice、accepted memory planes、derived refs 和 opaque host refs 的分层。宿主对象 payload 不由 Beetle Memory 导出；只有在请求 view 允许时才携带 `HostOpaqueRef` metadata 和 relation。`RedactedTranscriptSlice` 会报告 message、attr 和 host-ref redactions，让调用方知道哪些内容被省略，但看不到 raw material。`TranscriptLifecycleReport.derived_memory_refs` 是复核从受影响 transcript evidence 派生出的已接受 Memory material 的清单。
 

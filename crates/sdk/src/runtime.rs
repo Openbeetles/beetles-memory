@@ -94,10 +94,10 @@ use bm_core::memory::{
     validate_governed_evidence_source_ref, validate_memory_facet_manifest,
     validate_memory_facet_posting, validate_memory_facet_read_chain,
     validate_memory_graph_read_chain, validate_memory_graph_revision_doc,
-    validate_memory_graph_scope_manifest, AgentToolUsageFeedbackV2, AutonomyStrategy,
-    AutonomyStrategyStore, CanonicalTurnDelta, CanonicalTurnTranscriptCommitOptions,
-    CompactMemoryGraph, ContinuitySnapshotImportContext, ContinuitySnapshotImportPlan,
-    ConversationKey, ConversationTranscriptStore, CoreRevisionLedger, CoreRevisionLedgerStore,
+    validate_memory_graph_scope_manifest, AutonomyStrategy, AutonomyStrategyStore,
+    CanonicalTurnDelta, CanonicalTurnTranscriptCommitOptions, CompactMemoryGraph,
+    ContinuitySnapshotImportContext, ContinuitySnapshotImportPlan, ConversationKey,
+    ConversationTranscriptStore, CoreRevisionLedger, CoreRevisionLedgerStore,
     DeferredGovernanceQueueReport, DerivedMemoryPlane, DerivedMemoryRef,
     DroppedProjectionCandidate, DynamicStateResolutionReport, EvidenceBacklink,
     FacetCoverageSelectionReport, FacetRankFusionCandidateReport, FacetRankFusionReport,
@@ -139,36 +139,35 @@ use bm_core::memory::{
     PostTurnGovernanceBindingSnapshotV1, PostTurnGovernanceDecisionSummaryV1,
     PostTurnGovernanceExecutionBindingV1, PostTurnGovernanceIdentityV2,
     PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV3, PostTurnGovernancePrivacyAuthorityV1,
-    PostTurnLearningEvidenceV1, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
+    PostTurnLearningEvidenceV2, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
     PremiseTypedSource, PrivateDocStore, PrivateDocWorkspace, PrivateGardenDoc,
     PrivateGardenDocRecord, PrivateGardenGovernanceContext, PrivateGardenGovernanceInput,
     PrivateGardenGovernanceManifestEntry, PrivateGardenGovernanceOutcome, PrivateGardenStore,
-    ProceduralExecutionOutcomeV1, ProceduralFeedbackAuthorityV1, ProceduralFeedbackIdentityV1,
-    ProceduralFeedbackJobV1, ProceduralMemoryDeliveryReport, ProjectionBudgetDecision,
-    ProjectionFaithfulnessCheck, ProjectionPrivacyDecision, PromptMemoryContextParams,
-    PromptParticipationPlan, PromptProjectionSource, PromptProjectionSurfaceRole,
-    PromptRecallIntent, QueryFacet, QueryFacetInput, QueryFacetParser, RecallCandidate,
-    RecallDeliveryCandidate, RecallDeliveryOrderingPolicy, RecallDeliveryText,
-    RecallSelectionReport, RedactedTranscriptSlice, RelationshipConstitution,
-    RelationshipConstitutionStore, RelationshipPortfolio, RelationshipPortfolioStore,
-    RelationshipSourceConstitutionV1, RelationshipSourceControlAuthorityV1,
-    RelationshipSourceControlErrorKeyV1, RelationshipSourceControlIntentV1,
-    RelationshipSourceControlReportV1, RelationshipSourceExpectedStateV1,
-    RelationshipSourceReadRequestV1, RelationshipSourceReadSelectorV1, RelationshipTopology,
-    RelationshipTopologyStore, SelfAuthoredCore, SelfAuthoredCoreRefreshPlanV1,
-    SelfAuthoredCoreStore, SelfContinuity, SelfContinuityStore, SelfModel, SelfModelStore,
-    SelfRuntimeContext, SelfRuntimeInitialPlanningStateV1, SelfRuntimeJobPayload,
-    SelfRuntimePlannedEffectV1, SelfRuntimeTrigger, SessionMessage, SessionMessageRecord,
-    SessionStore, SessionSummaryStore, SharedFactWriteGovernanceContext, SharedMemoryWriteAction,
-    SharedMemoryWriteOutcome, SharedMemoryWriteReason, SharedMemoryWriteSource, SubjectKind,
-    SubjectLifecycleState, SubjectProjectionBoundaryProtocolReport, SubjectProjectionMountReport,
-    SubjectProjectionReport, SubjectProjectionWorkIntegrityReport, SubjectRegistry,
-    SubjectRelationshipGraph, SubjectRelationshipKind, SubjectScopedRuntime,
-    SubjectSoulAutonomousCycleIntentV1, SubjectSoulAutonomousCyclePlanV1,
-    SubjectSoulAutonomousRevisionDeltaV1, SubjectSoulExpectedStateV1,
-    SubjectSoulGenerationLayerKindV1, SubjectSoulGenerationLayerMutationV1,
-    SubjectSoulGenerationTombstoneV1, SubjectSoulLifecycleActionV1,
-    SubjectSoulLifecycleAuthorityV1, SubjectSoulLifecycleErrorKey,
+    ProceduralFeedbackAuthorityV2, ProceduralFeedbackIdentityV1, ProceduralFeedbackJobV2,
+    ProceduralMemoryDeliveryReport, ProjectionBudgetDecision, ProjectionFaithfulnessCheck,
+    ProjectionPrivacyDecision, PromptMemoryContextParams, PromptParticipationPlan,
+    PromptProjectionSource, PromptProjectionSurfaceRole, PromptRecallIntent, QueryFacet,
+    QueryFacetInput, QueryFacetParser, RecallCandidate, RecallDeliveryCandidate,
+    RecallDeliveryOrderingPolicy, RecallDeliveryText, RecallSelectionReport,
+    RedactedTranscriptSlice, RelationshipConstitution, RelationshipConstitutionStore,
+    RelationshipPortfolio, RelationshipPortfolioStore, RelationshipSourceConstitutionV1,
+    RelationshipSourceControlAuthorityV1, RelationshipSourceControlErrorKeyV1,
+    RelationshipSourceControlIntentV1, RelationshipSourceControlReportV1,
+    RelationshipSourceExpectedStateV1, RelationshipSourceReadRequestV1,
+    RelationshipSourceReadSelectorV1, RelationshipTopology, RelationshipTopologyStore,
+    SelfAuthoredCore, SelfAuthoredCoreRefreshPlanV1, SelfAuthoredCoreStore, SelfContinuity,
+    SelfContinuityStore, SelfModel, SelfModelStore, SelfRuntimeContext,
+    SelfRuntimeInitialPlanningStateV1, SelfRuntimeJobPayload, SelfRuntimePlannedEffectV1,
+    SelfRuntimeTrigger, SessionMessage, SessionMessageRecord, SessionStore, SessionSummaryStore,
+    SharedFactWriteGovernanceContext, SharedMemoryWriteAction, SharedMemoryWriteOutcome,
+    SharedMemoryWriteReason, SharedMemoryWriteSource, SubjectKind, SubjectLifecycleState,
+    SubjectProjectionBoundaryProtocolReport, SubjectProjectionMountReport, SubjectProjectionReport,
+    SubjectProjectionWorkIntegrityReport, SubjectRegistry, SubjectRelationshipGraph,
+    SubjectRelationshipKind, SubjectScopedRuntime, SubjectSoulAutonomousCycleIntentV1,
+    SubjectSoulAutonomousCyclePlanV1, SubjectSoulAutonomousRevisionDeltaV1,
+    SubjectSoulExpectedStateV1, SubjectSoulGenerationLayerKindV1,
+    SubjectSoulGenerationLayerMutationV1, SubjectSoulGenerationTombstoneV1,
+    SubjectSoulLifecycleActionV1, SubjectSoulLifecycleAuthorityV1, SubjectSoulLifecycleErrorKey,
     SubjectSoulLifecycleMutationRequestV1, SubjectSoulLifecycleStateV1,
     SubjectSoulManifestAddressV1, SubjectSoulMutationOutcomeV1, SubjectSoulMutationReportV1,
     SubjectSoulOperatorSafeExportV1, SubjectSoulOwnedDocumentV1, SubjectSoulOwnerV1,
@@ -218,11 +217,10 @@ use bm_core::skills::{
     retrieve_agent_skill_hits, runtime_skill_projection_candidate_ref,
     runtime_skill_scope_manifest_key, select_subject_agent_tool_hints,
     validate_agent_tool_registry_snapshot, AgentSkillDirConfig, AgentSkillProjectionAudit,
-    AgentSkillRegistrySnapshot, AgentToolExperienceConfidence, AgentToolExperienceHeadBindingV1,
-    AgentToolExperienceOwnerHeadV2, AgentToolExperienceOwningScopeV1,
-    AgentToolExperienceRetainedRevisionDigestV2, AgentToolExperienceRevisionMaterialV2,
-    AgentToolExperienceScopeManifestV1, AgentToolExperienceSelectionInput,
-    AgentToolExperienceStatus, AgentToolOutcome, AgentToolProjectionAudit, AgentToolRegistryReport,
+    AgentSkillRegistrySnapshot, AgentToolExperienceHeadBindingV1, AgentToolExperienceOwnerHeadV3,
+    AgentToolExperienceOwningScopeV1, AgentToolExperienceRetainedRevisionDigestV3,
+    AgentToolExperienceRevisionMaterialV3, AgentToolExperienceScopeManifestV1,
+    AgentToolExperienceSelectionInput, AgentToolProjectionAudit, AgentToolRegistryReport,
     AgentToolRegistrySnapshot, AgentToolSelectionReport, RuntimeSkillApplicabilityContext,
     RuntimeSkillAvailability, RuntimeSkillCreationRef, RuntimeSkillDeliveryDropReason,
     RuntimeSkillLifecycleState, RuntimeSkillOperationAuthorityRef, RuntimeSkillOwnerBinding,
@@ -268,8 +266,8 @@ use crate::store_internal::procedural_feedback::{
     claim_procedural_feedback_job, complete_procedural_feedback_job,
     ensure_post_turn_learning_intents as ensure_durable_post_turn_learning_intents,
     list_due_procedural_feedback_jobs, read_scope_index as read_procedural_feedback_scope_index,
-    reconcile_procedural_feedback_intents, repair_required_procedural_feedback_job,
-    retry_procedural_feedback_job, ProceduralFeedbackCompletionInput,
+    reconcile_procedural_feedback_intents, retry_procedural_feedback_job,
+    terminate_procedural_feedback_job, ProceduralFeedbackCompletionInput,
     ProceduralFeedbackCompletionOutcome, ProceduralIntentEnsureOutcome,
 };
 use crate::{
@@ -1125,6 +1123,8 @@ struct ProceduralFeedbackApplicationPlan {
     preconditions: Vec<StoreJsonPrecondition>,
     owner_bindings: Vec<bm_core::memory::ProceduralAppliedOwnerBindingV1>,
     accepted_count: u32,
+    partially_accepted_count: u32,
+    method_dispositions: Vec<bm_core::memory::ProceduralFeedbackMethodDispositionV1>,
     deferred_count: u32,
     rejected_count: u32,
     changed_count: u32,
@@ -7717,7 +7717,14 @@ impl MemoryRuntime {
         }
         let registries = self.agent_tool_registries();
         let mut report = build_agent_tool_registry_report(self.config.profile, &registries, &[]);
-        if report.forbidden_by_profile || !self.procedural_subject_active() {
+        if report.forbidden_by_profile {
+            return Ok(report);
+        }
+        if !self.procedural_subject_active() {
+            report.read_availability =
+                crate::ProceduralLearningReadAvailabilityV1::SubjectUnavailable;
+            report.governed_experiences = None;
+            report.stale_experiences = None;
             return Ok(report);
         }
         let store = self.config.store_platform.as_ref().ok_or_else(|| {
@@ -7740,6 +7747,7 @@ impl MemoryRuntime {
                 budget
                     .governed_state_budget
                     .max_agent_tool_experience_revisions_per_owner,
+                None,
             )?;
             let view = context.take_materialized_view();
             let closure = view
@@ -7750,20 +7758,16 @@ impl MemoryRuntime {
                         "exact scope was not materialized",
                     )
                 })?;
-            for head in closure.heads().iter().filter(|head| {
-                head.state == bm_core::skills::AgentToolExperienceHeadStateV2::Active
-            }) {
-                let material = closure
-                    .materials()
-                    .iter()
-                    .find(|material| {
-                        material.owner_ref == head.owner_ref
-                            && material.owner_revision == head.current_revision
-                    })
-                    .ok_or_else(|| {
-                        Error::config("agent_tool_registry_report", "current material is missing")
-                    })?;
-                report.governed_experiences += 1;
+            report.read_availability = closure.read_availability();
+            if !report.read_availability.is_ready() {
+                report.governed_experiences = None;
+                report.stale_experiences = None;
+                return Ok(report);
+            }
+            let mut governed = 0;
+            let mut stale = 0;
+            for material in closure.owners().iter().filter_map(|owner| owner.material()) {
+                governed += 1;
                 if !registries.iter().any(|registry| {
                     registry.registry_id == material.registry_id
                         && registry.scope == material.registry_scope
@@ -7772,9 +7776,11 @@ impl MemoryRuntime {
                                 && tool.schema_fingerprint == material.schema_fingerprint
                         })
                 }) {
-                    report.stale_experiences += 1;
+                    stale += 1;
                 }
             }
+            report.governed_experiences = Some(governed);
+            report.stale_experiences = Some(stale);
             Ok(report)
         })?;
         Ok(outcome.output)
@@ -7823,7 +7829,10 @@ impl MemoryRuntime {
         max_hints: usize,
     ) -> Result<AgentToolSelectionReport> {
         if !self.procedural_subject_active() {
-            return Ok(AgentToolSelectionReport::empty(registry_refs.len(), 0));
+            return Ok(AgentToolSelectionReport::unavailable(
+                registry_refs.len(),
+                crate::ProceduralLearningReadAvailabilityV1::SubjectUnavailable,
+            ));
         }
         let owning_scope = AgentToolExperienceOwningScopeV1::Subject {
             mounted_subject_id: self.config.scoped_runtime.mounted_subject_id.clone(),
@@ -7831,8 +7840,17 @@ impl MemoryRuntime {
         let Some(closure) =
             view.agent_tool_experience_scope(&self.config.memory_space_id, &owning_scope)
         else {
-            return Ok(AgentToolSelectionReport::empty(registry_refs.len(), 0));
+            return Ok(AgentToolSelectionReport::unavailable(
+                registry_refs.len(),
+                crate::ProceduralLearningReadAvailabilityV1::NotMaterialized,
+            ));
         };
+        if !closure.read_availability().is_ready() {
+            return Ok(AgentToolSelectionReport::unavailable(
+                registry_refs.len(),
+                closure.read_availability(),
+            ));
+        }
         let applicability = self.procedural_applicability_for_conversation(
             self.config
                 .scope
@@ -7844,8 +7862,7 @@ impl MemoryRuntime {
             query,
             memory_space_id: &self.config.memory_space_id,
             owning_scope: &owning_scope,
-            heads: closure.heads(),
-            materials: closure.materials(),
+            owners: closure.owners(),
             registries: &self.agent_tool_registries(),
             registry_refs,
             applicability: &applicability,
@@ -12705,24 +12722,60 @@ impl MemoryRuntime {
         )
     }
 
+    /// Public inspection consumes the same immutable authority as recall. Raw
+    /// snapshots remain private to mutation planning and exact CAS closure.
+    fn read_public_runtime_skill_scope(
+        &self,
+        owning_scope: &RuntimeSkillOwningScope,
+    ) -> Result<(
+        crate::ProceduralLearningReadAvailabilityV1,
+        Vec<RuntimeSkillOwnerRecord>,
+    )> {
+        self.runtime_skill_transaction_scope(owning_scope)?;
+        if !self.procedural_subject_active() {
+            return Ok((
+                crate::ProceduralLearningReadAvailabilityV1::SubjectUnavailable,
+                Vec::new(),
+            ));
+        }
+        let budget = self.runtime_budget();
+        let store = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config("runtime_skill_inspection", "store platform is required")
+        })?;
+        let outcome = store.with_recall_immutable_read_session(&budget, |context| {
+            context.materialize_runtime_skill_scope(
+                &self.config.memory_space_id,
+                owning_scope,
+                budget
+                    .governed_state_budget
+                    .max_retained_runtime_skill_owners_per_scope,
+            )?;
+            let view = context.take_materialized_view();
+            let closure = view
+                .runtime_skill_scope(&self.config.memory_space_id, owning_scope)
+                .ok_or_else(|| {
+                    Error::config(
+                        "runtime_skill_inspection",
+                        "exact scope was not materialized",
+                    )
+                })?;
+            Ok((closure.read_availability(), closure.records().to_vec()))
+        })?;
+        Ok(outcome.output)
+    }
+
     pub fn list_runtime_skills(
         &self,
         request: RuntimeSkillListRequest,
     ) -> Result<RuntimeSkillListReport> {
+        if RuntimeBudgetLease::active_report(&self.config.runtime_budget_authority).is_none() {
+            let lease = self.acquire_runtime_budget_lease()?;
+            return self
+                .execute_with_runtime_budget_lease(&lease, || self.list_runtime_skills(request));
+        }
         self.ensure_visible("inspect.skills", self.capabilities.inspection)?;
-        self.runtime_skill_transaction_scope(&request.owning_scope)?;
-        let runtime_budget = self.runtime_budget();
-        let snapshot = read_runtime_skill_scope_snapshot(
-            self.config
-                .store_platform
-                .as_ref()
-                .ok_or_else(|| Error::config("runtime_skill_list", "store platform is required"))?,
-            &self.config.memory_space_id,
-            &request.owning_scope,
-            runtime_budget
-                .governed_state_budget
-                .max_retained_runtime_skill_owners_per_scope,
-        )?;
+        let (read_availability, records) =
+            self.read_public_runtime_skill_scope(&request.owning_scope)?;
         let mut rows = Vec::new();
         let query = request
             .query
@@ -12731,7 +12784,7 @@ impl MemoryRuntime {
             .filter(|value| !value.is_empty())
             .map(str::to_ascii_lowercase);
 
-        for record in snapshot.records {
+        for record in records {
             let summary = runtime_skill_summary(&record);
             if !request.include_disabled && !summary.enabled {
                 continue;
@@ -12772,10 +12825,11 @@ impl MemoryRuntime {
         };
         self.audit("inspect.skills", true, "skill_list_completed");
         Ok(RuntimeSkillListReport {
-            total,
-            active,
-            disabled: disabled_count,
-            runtime_skills: total,
+            read_availability,
+            total: read_availability.is_ready().then_some(total),
+            active: read_availability.is_ready().then_some(active),
+            disabled: read_availability.is_ready().then_some(disabled_count),
+            runtime_skills: read_availability.is_ready().then_some(total),
             skills,
         })
     }
@@ -12784,17 +12838,52 @@ impl MemoryRuntime {
         &self,
         request: RuntimeSkillDetailRequest,
     ) -> Result<RuntimeSkillDetailReport> {
+        if RuntimeBudgetLease::active_report(&self.config.runtime_budget_authority).is_none() {
+            let lease = self.acquire_runtime_budget_lease()?;
+            return self
+                .execute_with_runtime_budget_lease(&lease, || self.get_runtime_skill(request));
+        }
         self.ensure_visible("inspect.skills", self.capabilities.inspection)?;
-        let snapshot =
-            self.read_runtime_skill_locator_snapshot(&request.locator, "skill_detail")?;
-        let record = runtime_skill_record_for_locator(&snapshot, &request.locator, "skill_detail")?;
+        if !request.locator.validate_for(&self.config.memory_space_id) {
+            return Err(Error::invalid_input(
+                "skill_detail",
+                "runtime skill owner locator is invalid",
+            ));
+        }
+        let (availability, records) =
+            self.read_public_runtime_skill_scope(request.locator.owning_scope())?;
+        if !availability.is_ready()
+            && !records.iter().any(|record| {
+                record.owner_ref.owner_id == request.locator.owner_id()
+                    && record.owner_revision == request.locator.owner_revision()
+            })
+        {
+            return Err(Error::Other {
+                stage: "skill_detail",
+                source: Box::new(crate::ProceduralLearningSdkError {
+                    operation: crate::ProceduralLearningSdkOperation::ReadExperience,
+                    key: crate::ProceduralLearningErrorKeyV1::ProducerAuthorityDenied,
+                    disposition: crate::ProceduralLearningSdkErrorDisposition::AuthorityRejected,
+                }),
+            });
+        }
+        let record =
+            find_runtime_skill_record_for_locator(&records, &request.locator, "skill_detail")?;
         let summary = runtime_skill_summary(record);
-        let raw_content = serde_json::to_string_pretty(record)
+        // This public field is canonical method content, not a Store export.
+        // Source commitments and retained contribution directories stay private.
+        let raw_content = serde_json::to_string_pretty(&record.procedural_content)
             .map_err(|error| Error::config("skill_detail", error.to_string()))?;
         let citations = record
             .intrinsic_contract
             .evidence_bindings
             .iter()
+            .filter(|_| {
+                !matches!(
+                    record.creation_ref,
+                    RuntimeSkillCreationRef::AgentToolExperiencePromotion { .. }
+                )
+            })
             .map(|binding| binding.safe_ref.clone())
             .collect();
         let lineage = record
@@ -12803,12 +12892,13 @@ impl MemoryRuntime {
             .predecessor
             .iter()
             .chain(record.lifecycle.lineage.successor.iter())
-            .map(|binding| {
-                format!(
-                    "{}@{}:{}",
-                    binding.owner_ref.owner_id, binding.owner_revision, binding.content_digest
-                )
+            .filter(|binding| {
+                records.iter().any(|candidate| {
+                    RuntimeSkillOwnerBinding::from_record(candidate)
+                        .is_ok_and(|actual| actual == **binding)
+                })
             })
+            .map(|binding| format!("{}@{}", binding.owner_ref.owner_id, binding.owner_revision))
             .collect();
         self.audit("inspect.skills", true, "skill_detail_completed");
         Ok(RuntimeSkillDetailReport {
@@ -13092,6 +13182,12 @@ impl MemoryRuntime {
                 },
                 governed_state_budget.max_agent_tool_experience_owners_per_subject,
                 governed_state_budget.max_agent_tool_experience_revisions_per_owner,
+                match temporal_operation {
+                    crate::MemoryRecallTemporalOperation::Current => None,
+                    crate::MemoryRecallTemporalOperation::HistoricalAsOf { as_of_time } => {
+                        Some(as_of_time)
+                    }
+                },
             )?;
         }
         let runtime_skill_materializer = self
@@ -17467,7 +17563,7 @@ impl MemoryRuntime {
         &self,
         request: MemoryTurnFinalizeRequest,
     ) -> Result<MemoryTurnFinalizeReport> {
-        self.finalize_turn_internal(None, None, request)
+        self.finalize_turn_internal(None, None, request, None)
     }
 
     /// Non-production seam for semantic contract and replay harnesses.
@@ -17479,7 +17575,7 @@ impl MemoryRuntime {
         llm: Option<&(dyn CoreLlmClient + Send + Sync + '_)>,
         request: MemoryTurnFinalizeRequest,
     ) -> Result<MemoryTurnFinalizeReport> {
-        self.finalize_turn_internal(http, llm, request)
+        self.finalize_turn_internal(http, llm, request, None)
     }
 
     fn finalize_turn_internal(
@@ -17487,6 +17583,7 @@ impl MemoryRuntime {
         http: Option<&mut (dyn LlmHttpClient + '_)>,
         llm: Option<&(dyn CoreLlmClient + Send + Sync + '_)>,
         request: MemoryTurnFinalizeRequest,
+        producer: Option<&procedural::ProceduralSubmissionContext>,
     ) -> Result<MemoryTurnFinalizeReport> {
         self.ensure_visible("write.turn", self.capabilities.write)?;
         validate_turn_scope(
@@ -17498,8 +17595,30 @@ impl MemoryRuntime {
         let platform = self.config.platform.as_ref();
         let session_store = platform.session_store();
         let transcript_store = platform.conversation_transcript_store();
-        let learning_evidence = self.build_post_turn_learning_evidence(&request)?;
-        let core_report = commit_canonical_turn_delta_with_transcript(
+        let learning_evidence = self.build_post_turn_learning_evidence(&request, producer)?;
+        let intake_authority = producer
+            .filter(|_| request.learning.has_feedback())
+            .map(|context| -> Result<_> {
+                Ok(crate::learning::ProceduralIntakeAuthorization {
+                    store_authority_digest: self
+                        .config
+                        .store_platform
+                        .as_ref()
+                        .expect("evidence requires StorePlatform")
+                        .learning_store_authority_digest(),
+                    store_incarnation: self
+                        .config
+                        .store_platform
+                        .as_ref()
+                        .expect("evidence requires StorePlatform")
+                        .procedural_store_incarnation(&self.config.memory_space_id)?,
+                    current_head: context.head.clone(),
+                    evidence: learning_evidence.clone(),
+                    source_preconditions: context.source_preconditions.clone(),
+                })
+            })
+            .transpose()?;
+        let plan = bm_core::memory::plan_canonical_turn_delta_with_transcript(
             session_store.as_ref(),
             transcript_store.as_ref(),
             &self.config.memory_space_id,
@@ -17511,6 +17630,17 @@ impl MemoryRuntime {
                 now_secs: self.config.clock.now_secs(),
             },
         )?;
+        let core_report = plan.commit_with(|intent| {
+            if let Some(authority) = intake_authority.as_ref() {
+                self.config
+                    .store_platform
+                    .as_ref()
+                    .expect("evidence requires StorePlatform")
+                    .append_authorized_canonical_turn(intent, authority)
+            } else {
+                transcript_store.append_canonical_turn_intent(intent)
+            }
+        })?;
         let transcript_commit = core_report.transcript_commit;
         let transcript_committed = transcript_commit
             .as_ref()
@@ -18337,7 +18467,7 @@ impl MemoryRuntime {
         record: &TranscriptTurnRecord,
         chat_id: &str,
         now_secs: u64,
-    ) -> Result<Option<ProceduralFeedbackJobV1>> {
+    ) -> Result<Option<ProceduralFeedbackJobV2>> {
         if !record.permits_post_turn_learning() || !self.procedural_subject_active() {
             return Ok(None);
         }
@@ -18369,7 +18499,7 @@ impl MemoryRuntime {
             &record.key.conversation_id,
             &record.turn_id,
         )?;
-        let job = ProceduralFeedbackJobV1::pending(
+        let job = ProceduralFeedbackJobV2::pending(
             identity,
             record.sequence,
             post_turn_governance_transcript_digest(record)?,
@@ -18384,24 +18514,11 @@ impl MemoryRuntime {
     pub(crate) fn due_procedural_feedback_jobs(
         &self,
         limit: usize,
-    ) -> Result<Vec<ProceduralFeedbackJobV1>> {
+    ) -> Result<Vec<ProceduralFeedbackJobV2>> {
         if !self.procedural_subject_active() {
             return Ok(Vec::new());
         }
-        let conversation_id = self
-            .config
-            .scope
-            .conversation_id
-            .as_deref()
-            .unwrap_or(self.config.scope.chat_id.as_str());
-        let identity = ProceduralFeedbackIdentityV1::new(
-            &self.config.memory_space_id,
-            &self.config.subject_id,
-            &self.config.scope.channel,
-            &self.config.scope.chat_id,
-            conversation_id,
-            "scope-discovery",
-        )?;
+        let scope_key = self.procedural_producer_scope().scope_index_key()?;
         let store = self.config.store_platform.as_ref().ok_or_else(|| {
             Error::config(
                 "procedural_feedback_discover",
@@ -18410,7 +18527,11 @@ impl MemoryRuntime {
         })?;
         list_due_procedural_feedback_jobs(
             store,
-            &identity.scope_id(),
+            &scope_key,
+            &bm_core::memory::ProceduralSubjectScopeV1 {
+                memory_space_id: self.config.memory_space_id.clone(),
+                mounted_subject_id: self.config.scoped_runtime.mounted_subject_id.clone(),
+            },
             self.config.clock.now_secs(),
             limit,
         )
@@ -18421,7 +18542,7 @@ impl MemoryRuntime {
         job_id: &str,
         lease_owner: &str,
         lease_until: u64,
-    ) -> Result<ProceduralFeedbackJobV1> {
+    ) -> Result<ProceduralFeedbackJobV2> {
         if !self.capabilities.procedural_learning.worker.visible {
             return Err(Error::Other {
                 stage: "procedural_feedback_claim",
@@ -18457,10 +18578,10 @@ impl MemoryRuntime {
 
     pub(crate) fn retry_claimed_procedural_feedback_job(
         &self,
-        job: &ProceduralFeedbackJobV1,
+        job: &ProceduralFeedbackJobV2,
         lease_owner: &str,
         error_class: bm_core::memory::ProceduralFeedbackErrorClassV1,
-    ) -> Result<ProceduralFeedbackJobV1> {
+    ) -> Result<ProceduralFeedbackJobV2> {
         let store = self.config.store_platform.as_ref().ok_or_else(|| {
             Error::config(
                 "procedural_feedback_retry",
@@ -18479,19 +18600,19 @@ impl MemoryRuntime {
         )
     }
 
-    pub(crate) fn mark_claimed_procedural_feedback_repair_required(
+    pub(crate) fn terminate_claimed_procedural_feedback_job(
         &self,
-        job: &ProceduralFeedbackJobV1,
+        job: &ProceduralFeedbackJobV2,
         lease_owner: &str,
         error_class: bm_core::memory::ProceduralFeedbackErrorClassV1,
-    ) -> Result<ProceduralFeedbackJobV1> {
+    ) -> Result<ProceduralFeedbackJobV2> {
         let store = self.config.store_platform.as_ref().ok_or_else(|| {
             Error::config(
                 "procedural_feedback_repair_required",
                 "durable procedural terminal transition requires StorePlatform",
             )
         })?;
-        repair_required_procedural_feedback_job(
+        terminate_procedural_feedback_job(
             store,
             self.memory_write_transaction_scope(),
             &self.runtime_budget(),
@@ -19709,7 +19830,7 @@ impl MemoryRuntime {
         let turn = canonical_turn_delta_from_transcript(&leased, &transcript)?;
         let finalize_request = MemoryTurnFinalizeRequest {
             turn,
-            learning: bm_core::memory::PostTurnLearningInputV1::with_tool_call_count(
+            learning: bm_core::memory::PostTurnLearningInputV2::with_tool_call_count(
                 leased.tool_call_count,
             ),
             pressure: PressureLevel::Normal,
@@ -19949,6 +20070,19 @@ impl MemoryRuntime {
     }
 
     fn exact_system_governor_actor(&self, stage: &'static str) -> Result<String> {
+        let governor = self.active_governing_system_subject(stage)?;
+        if self.config.scoped_runtime.actor_subject_id != governor {
+            return Err(Error::config(
+                stage,
+                "exact active governing SystemGovernor actor is required",
+            ));
+        }
+        Ok(governor)
+    }
+
+    /// Current composition-root authority, shared by direct control and sealed
+    /// delegated submissions. Possessing an old grant never replaces this edge.
+    fn active_governing_system_subject(&self, stage: &'static str) -> Result<String> {
         let registry = &self.config.subject_registry;
         let graph = &self.config.subject_relationship_graph;
         if !registry.validate_contract().accepted
@@ -19963,7 +20097,6 @@ impl MemoryRuntime {
             .system_governor()
             .ok_or_else(|| Error::config(stage, "SystemGovernor is not registered"))?;
         if governor.lifecycle_state != SubjectLifecycleState::Active
-            || self.config.scoped_runtime.actor_subject_id != governor.subject_id
             || !graph.edges.iter().any(|edge| {
                 edge.kind == SubjectRelationshipKind::Governs
                     && edge.from_subject_id == governor.subject_id
@@ -23237,12 +23370,11 @@ fn render_llm_runtime_projection_envelope(envelope: &LLMRuntimeProjectionEnvelop
             };
             let _ = writeln!(
                 out,
-                "- {} [registry={} experience={} fp={} confidence={:?} host_execution_required={}]: {} Constraints: {}",
+                "- {} [registry={} experience={} fp={} host_execution_required={}]: {} Constraints: {}",
                 hint.tool_id,
                 hint.registry_id,
                 hint.experience_id,
                 hint.schema_fingerprint,
-                hint.confidence,
                 hint.host_execution_required,
                 hint.reason,
                 constraints
@@ -31474,14 +31606,22 @@ fn runtime_skill_record_for_locator<'a>(
     locator: &RuntimeSkillOwnerLocator,
     stage: &'static str,
 ) -> Result<&'a RuntimeSkillOwnerRecord> {
-    if let Some(record) = snapshot.records.iter().find(|record| {
+    find_runtime_skill_record_for_locator(&snapshot.records, locator, stage)
+}
+
+fn find_runtime_skill_record_for_locator<'a>(
+    records: &'a [RuntimeSkillOwnerRecord],
+    locator: &RuntimeSkillOwnerLocator,
+    stage: &'static str,
+) -> Result<&'a RuntimeSkillOwnerRecord> {
+    if let Some(record) = records.iter().find(|record| {
         record.owner_ref.owner_id == locator.owner_id()
             && record.owner_revision == locator.owner_revision()
             && &record.owning_scope == locator.owning_scope()
     }) {
         return Ok(record);
     }
-    if snapshot.records.iter().any(|record| {
+    if records.iter().any(|record| {
         record.owner_ref.owner_id == locator.owner_id()
             && &record.owning_scope == locator.owning_scope()
     }) {
@@ -32142,6 +32282,7 @@ mod recall_immutable_session_observer_tests {
         receipt_count: usize,
         direct_read_count: usize,
         direct_read_operations: Vec<String>,
+        requested_json_keys: BTreeSet<(String, String)>,
         json_reads: Vec<StoreBoundedKnownJsonRead>,
         blob_reads: Vec<StoreBoundedKnownBlobRead>,
         inner_receipt: Option<crate::StoreReadReceipt>,
@@ -32155,14 +32296,14 @@ mod recall_immutable_session_observer_tests {
         observation: RecallReadObservation,
     }
 
-    struct ObservedStoreEngine {
+    pub(super) struct ObservedStoreEngine {
         inner: Arc<dyn StoreEngine>,
         state: Arc<Mutex<RecallReadObserverState>>,
         before_next_commit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     }
 
     impl ObservedStoreEngine {
-        fn new(inner: Arc<dyn StoreEngine>) -> Self {
+        pub(super) fn new(inner: Arc<dyn StoreEngine>) -> Self {
             Self {
                 inner,
                 state: Arc::new(Mutex::new(RecallReadObserverState::default())),
@@ -32198,6 +32339,21 @@ mod recall_immutable_session_observer_tests {
                 .lock()
                 .expect("observer state")
                 .observation
+                .clone()
+        }
+
+        #[cfg(feature = "sqlite-store")]
+        pub(super) fn begin_source_read_observation(&self) {
+            *self.state.lock().expect("observer state") = RecallReadObserverState::default();
+        }
+
+        #[cfg(feature = "sqlite-store")]
+        pub(super) fn requested_json_keys(&self) -> BTreeSet<(String, String)> {
+            self.state
+                .lock()
+                .expect("observer state")
+                .observation
+                .requested_json_keys
                 .clone()
         }
 
@@ -32337,6 +32493,12 @@ mod recall_immutable_session_observer_tests {
             include_events: bool,
             capacity: StoreCapacityBudget,
         ) -> Result<StoreBoundedKnownKeyReadResult> {
+            self.state
+                .lock()
+                .expect("observer state")
+                .observation
+                .requested_json_keys
+                .extend(json_keys.iter().cloned());
             self.reject_direct_read_if_armed("read_consistent_known_keys")?;
             self.inner
                 .read_consistent_known_keys(json_keys, blob_keys, include_events, capacity)
@@ -32384,6 +32546,12 @@ mod recall_immutable_session_observer_tests {
         }
 
         fn get_json_value(&self, namespace: &str, key: &str) -> Result<Option<serde_json::Value>> {
+            self.state
+                .lock()
+                .expect("observer state")
+                .observation
+                .requested_json_keys
+                .insert((namespace.into(), key.into()));
             self.reject_direct_read_if_armed(&format!("get_json_value:{namespace}"))?;
             self.inner.get_json_value(namespace, key)
         }
@@ -33041,6 +33209,28 @@ mod recall_immutable_session_observer_tests {
         addresses
     }
 
+    fn expected_procedural_validity_addresses(
+        memory_space_id: &str,
+        mounted_subject_id: &str,
+    ) -> BTreeSet<(String, String)> {
+        let scope = bm_core::memory::ProceduralSubjectScopeV1 {
+            memory_space_id: memory_space_id.into(),
+            mounted_subject_id: mounted_subject_id.into(),
+        };
+        [
+            (
+                crate::store_internal::schema::PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE.into(),
+                scope.root_key().unwrap(),
+            ),
+            (
+                crate::store_internal::schema::PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE.into(),
+                bm_core::memory::ProceduralSubjectInitializationV1::key(&scope).unwrap(),
+            ),
+        ]
+        .into_iter()
+        .collect()
+    }
+
     #[test]
     fn production_recall_uses_one_session_and_receipt_from_exact_known_key_reads() {
         let profile = ProfileId::EspStandaloneMemory;
@@ -33164,6 +33354,12 @@ mod recall_immutable_session_observer_tests {
             },
         );
         let mut expected_runtime_skill_addresses = BTreeSet::new();
+        expected_addresses
+            .json
+            .extend(expected_procedural_validity_addresses(
+                "space:owner-default",
+                "agent:agent-main",
+            ));
         expected_addresses.json.insert((
             AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE.to_string(),
             agent_tool_experience_scope_manifest_key(
@@ -34001,6 +34197,10 @@ mod recall_immutable_session_observer_tests {
             "space:owner-default",
             "space:owner-default",
         );
+        expected_json_addresses.extend(expected_procedural_validity_addresses(
+            "space:owner-default",
+            "agent:agent-main",
+        ));
         expected_json_addresses.insert((
             AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE.to_string(),
             agent_tool_experience_scope_manifest_key(

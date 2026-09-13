@@ -30,7 +30,7 @@ crates 发布后：
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.7.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.8.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 每次构建只使用一个 profile feature。Linux desktop、Linux device 与 Linux server 是三个不同部署目标，禁止相互替代。
@@ -123,9 +123,50 @@ let preview_block = projection.provider_payload().system_memory_block();
 `Preview` 只用于检查，不返回 selection receipt。真实 model/tool turn 必须由宿主在请求入口
 一次性选择稳定 turn id，再用 `ProceduralProjectionBindingV1::Turn { turn_id }` 投影并把
 该 memory block 放入模型上下文。完成同一个 canonical turn 时，要在
-`PostTurnLearningInputV1` 中原样提交完整 `selection_receipt`。同一 turn 的重试复用 id 与
+`PostTurnLearningInputV2` 中原样提交完整 `selection_receipt`。同一 turn 的重试复用 id 与
 receipt；即使输入正文相同，另一个 turn 也必须使用新 id。禁止从 selected ids 或 digest
 重建 receipt。
+
+0.8.0 中，有反馈的提交还必须使用显式签发的
+`MemoryProceduralSubmissionCapability` 和 `finalize_turn_with_procedural_evidence`。
+无反馈普通回合仍直接使用 `finalize_turn`，不要求 producer grant。
+受信初始化、部分接受、撤权与容量恢复见 [程序性证据声明权](api.md#程序性证据声明权)。
+这不是与已发布 0.7.0 feedback input 兼容的合同。
+
+重开后通过 `MemoryRuntime::procedural_reconciliation_status` 或官方服务 attachment 的
+`status().procedural_reconciliation` 发现当前重算状态。容量阻断返回绑定主体范围的
+job/revision 引用；解决容量问题后，仍须使用原有 SystemGovernor 控制能力显式恢复。
+不要另存恢复任务目录、把旧报告当作当前授权，或期待 wake/重开自动解除阻断。
+
+### 可编译的官方学习服务示例
+
+现有 Rust embedded 工程的 [learning-service 入口](../../examples/rust-sdk-embedded/src/bin/learning-service.rs)
+展示同一 Store/SubjectRegistry 下两个主体的 Runtime、按 mounted scope 的 SystemGovernor 控制能力、
+官方服务附着、一次显式 producer 注册、typed 执行事实/方法提交、无反馈普通回合和有期限的关闭。
+两个主体分别使用自己的 `chat_id` 和 `conversation_id`；共享 Store/MemorySpace 不等于共享一条主体拥有的会话。
+它不使用测试专用 harness，也不创建宿主自己的 worker、grant 表或学习规则。
+
+在仓库根目录静态检查（不启动服务）：
+
+```sh
+cargo check --manifest-path examples/rust-sdk-embedded/Cargo.toml --features learning-service --all-targets
+cargo clippy --manifest-path examples/rust-sdk-embedded/Cargo.toml --features learning-service --all-targets -- -D warnings
+```
+
+Linux/Windows 配置分别增加 `--no-default-features --features desktop-linux,learning-service`
+或 `--no-default-features --features desktop-windows,learning-service`，替代原 `--features`。
+在 macOS 上检查这些 feature 只证明配置编译，不证明 Windows/Linux 目标运行。
+编译缓存可通过 `CARGO_TARGET_DIR` 指向外置工作目录。
+
+如需亲自运行合成演示，使用 `cargo run --manifest-path examples/rust-sdk-embedded/Cargo.toml --features learning-service --bin learning-service`。
+运行时仅创建进程内 InMemory Store 和官方后台线程，执行固定合成文本的词数统计；不打开真实数据，
+不监听网络，不读取 Key，也不调用 Provider。未配置模型时，提交成功不等于语义学习完成；一次方法见证也不等于方法已激活或 Skill 已晋升。
+该示例没有验证持久重开或等待全部后台任务结束，不能当作这些能力的验收证明。
+
+示例的 `expected_revision: None` 只用于本次新建的易失 Store。持久宿主应保存/查询既有 binding 引用并显式管理其 revision，
+不能在每次启动或每个回合自动重授权限。真实模型配置与凭证分别通过既有 `GovernanceBindingSource`、
+`GovernanceCredentialResolver` 接入产品的同一配置真源；本示例刻意不配置它们。
+行为变更与发布边界见 [0.8.0 源码发布说明](release-notes-0.8.0.md)。
 
 system、developer、user、tool message 的最终排序仍归宿主 prompt assembly。
 
@@ -193,8 +234,8 @@ raw credential 永不持久化。
 
 宿主不得自行 claim job、运行 governance transition、拼装 memory mutation，也不得维护第二套
 queue/worker/retry policy。Operator 与 attachment status read 必须携带 SDK 铸造的 typed inspection authority；
-无权或跨主体请求必须在返回 job identity 或 reason detail 前失败。Store v12 及更早 schema
-直接拒绝；可丢弃的开发 Store 由 owner 明确重建。v0.7.0 不自动删除真实数据，也不提供自动迁移或兼容 reader。
+无权或跨主体请求必须在返回 job identity 或 reason detail 前失败。Store v13 及更早 schema
+直接拒绝；可丢弃的开发 Store 由 owner 明确重建。v0.8.0 不自动删除真实数据，也不提供自动迁移或兼容 reader。
 
 `project()` 返回的 `MemoryProjectionReport.audit` 是投影诊断真源，包含 source plane、selected ids、
 section chars、source/render budget、scope 和 private gate decision。宿主可以展示这些字段，

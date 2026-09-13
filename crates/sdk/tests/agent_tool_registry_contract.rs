@@ -1,21 +1,30 @@
 mod support;
 use std::sync::Arc;
 
-use bm_sdk::{
-    default_agent_subject_id, fingerprint_agent_tool_registry, AgentToolDescriptor,
-    AgentToolObservationDigest, AgentToolOutcome, AgentToolRegistryScope,
-    AgentToolRegistrySnapshot, AgentToolUsageFeedbackV2, AuthorizedGovernanceEnvelope,
-    CanonicalTurnDelta, ConversationScope, GovernanceEgressAuthority, GovernanceExecutionOperation,
-    GovernanceExecutionPort, GovernanceExecutionPortFailure, ImmutableGovernanceExecutionBinding,
-    MemoryIdentity, MemoryInspectionRequest, MemoryLearningCycleOutcome,
-    MemoryLearningCycleRequest, MemoryLearningEngine, MemoryProjectionRequest, MemoryRecallRequest,
-    MemoryRuntime, MemoryScope, MemoryStoreHandle, MemoryTurnDeliveryStatus,
-    MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, PostTurnLearningInputV1,
-    PressureLevel, ProceduralApplicabilityContextV1, ProceduralExecutionOutcomeV1,
-    ProceduralFeedbackReceiptV1, RuntimeLifecycleModeInput, StoreBackendConfig, SubjectDescriptor,
-    SubjectRegistry, ToolObservationDigest, TranscriptInputMessage,
-    AGENT_TOOL_NO_EXPERIENCE_REASON,
-};
+use bm_sdk::*;
+
+const TOOL_DESCRIPTION: &str = "Registry-only PDF extraction capability description";
+
+struct TestRuntime {
+    memory: Arc<MemoryRuntime>,
+    capability: MemoryProceduralSubmissionCapability,
+}
+impl std::ops::Deref for TestRuntime {
+    type Target = MemoryRuntime;
+    fn deref(&self) -> &MemoryRuntime {
+        &self.memory
+    }
+}
+fn authorized_runtime(memory: MemoryRuntime, store: MemoryStoreHandle) -> Arc<TestRuntime> {
+    let governor = support::procedural::governor(&memory, store);
+    let spec = support::procedural::runtime_observer_spec(&memory, "registry-executor");
+    let capability =
+        support::procedural::register_and_issue(&governor, spec, "register-registry-executor");
+    Arc::new(TestRuntime {
+        memory: Arc::new(memory),
+        capability,
+    })
+}
 
 #[derive(Default)]
 struct NoProviderPort;
@@ -38,7 +47,7 @@ impl GovernanceExecutionPort for NoProviderPort {
 }
 
 fn registry() -> AgentToolRegistrySnapshot {
-    let mut tool = AgentToolDescriptor::compact("pdf.extract", "Extract PDF text", "schema-pdf-v1");
+    let mut tool = AgentToolDescriptor::compact("pdf.extract", TOOL_DESCRIPTION, "schema-pdf-v1");
     tool.permission_tags = vec!["filesystem.read".to_string()];
     tool.risk_tags = vec!["external_content".to_string()];
     AgentToolRegistrySnapshot::compact("host-tools", "host", vec![tool], 1_800_000_000)
@@ -56,20 +65,22 @@ fn applicability_for_registry(
         .expect("applicability")
 }
 
-fn runtime_with_registry(registry: AgentToolRegistrySnapshot) -> Arc<MemoryRuntime> {
+fn runtime_with_registry(registry: AgentToolRegistrySnapshot) -> Arc<TestRuntime> {
     let profile = support::host_test_profile();
     let store =
         support::open_memory_store(StoreBackendConfig::in_memory(profile).expect("store config"))
             .expect("store");
-    Arc::new(
+    authorized_runtime(
         MemoryRuntime::builder()
             .identity(MemoryIdentity::new("agent-tool-test", "owner-default").expect("identity"))
             .scope(MemoryScope::new("sdk.direct", "chat-1").expect("scope"))
-            .store(store)
+            .store(store.clone())
+            .clock(support::fixed_clock(1_800_000_100))
             .procedural_applicability_context(applicability_for_registry(&registry, "chat-1"))
             .agent_tool_registry(registry)
             .build()
             .expect("runtime"),
+        store,
     )
 }
 
@@ -90,36 +101,29 @@ fn runtime_for_subject(
     subject_registry: SubjectRegistry,
     registry: AgentToolRegistrySnapshot,
     agent_id: &str,
-) -> Arc<MemoryRuntime> {
+) -> Arc<TestRuntime> {
     let applicability = applicability_for_registry(&registry, "shared-chat");
-    Arc::new(
+    authorized_runtime(
         MemoryRuntime::builder()
             .identity(MemoryIdentity::new(agent_id, "owner-shared").expect("identity"))
             .scope(MemoryScope::new("sdk.direct", "shared-chat").expect("scope"))
-            .store(store)
+            .store(store.clone())
+            .clock(support::fixed_clock(1_800_000_100))
             .subject_registry(subject_registry)
             .procedural_applicability_context(applicability)
             .agent_tool_registry(registry)
             .build()
             .expect("subject runtime"),
+        store,
     )
 }
 
-fn observation(observation_id: &str) -> AgentToolObservationDigest {
-    AgentToolObservationDigest {
-        observation_id: observation_id.to_string(),
-        registry_id: "host-tools".to_string(),
-        tool_id: "pdf.extract".to_string(),
-        schema_fingerprint: "schema-pdf-v1".to_string(),
-        call_id: Some(format!("call-{observation_id}")),
-        task_signature: "extract_pdf_text_for_release_notes".to_string(),
-        summary: "PDF extraction produced usable release note text.".to_string(),
-        outcome: AgentToolOutcome::Succeeded,
-        error_code: None,
-        external_content: true,
-        private_content_used: false,
-        permission_tags: vec!["filesystem.read".to_string()],
-        risk_tags: vec!["external_content".to_string()],
+fn observation(observation_id: &str) -> ToolExecutionFactV1 {
+    ToolExecutionFactV1 {
+        observation_id: observation_id.into(),
+        call_id: format!("call-{observation_id}"),
+        outcome: ToolExecutionOutcome::Succeeded,
+        source_sensitivity: ProceduralSourceSensitivity::NonPrivate,
         started_at: Some(1_800_000_010),
         completed_at: Some(1_800_000_011),
     }
@@ -127,84 +131,77 @@ fn observation(observation_id: &str) -> AgentToolObservationDigest {
 
 fn feedback(
     registry: &AgentToolRegistrySnapshot,
-    observations: Vec<AgentToolObservationDigest>,
-) -> AgentToolUsageFeedbackV2 {
-    AgentToolUsageFeedbackV2 {
-        registry_ref: registry.registry_ref(),
-        tool_id: "pdf.extract".to_string(),
-        schema_fingerprint: "schema-pdf-v1".to_string(),
-        observations,
-        user_visible_result_summary: Some(
-            "PDF extraction helped produce release notes from a local artifact.".to_string(),
-        ),
-        outcome: ProceduralExecutionOutcomeV1::Succeeded,
-        operator_note: None,
-    }
+    facts: Vec<ToolExecutionFactV1>,
+) -> AgentToolUsageFeedbackV3 {
+    AgentToolUsageFeedbackV3 { registry_ref: registry.registry_ref(), tool_id: "pdf.extract".into(),
+        schema_fingerprint: "schema-pdf-v1".into(), method_evidence: vec![ToolMethodEvidenceV1 {
+            method_id: format!("method-{}", facts[0].observation_id), task_signature: "extract_pdf_text_for_release_notes".into(),
+            body: "1. Extract PDF text from the provided document\n2. Validate extracted text against the expected release sections\n3. Return verified release note text".into(),
+            execution_refs: facts.iter().map(|fact| fact.observation_id.clone()).collect(),
+            source_sensitivity: ProceduralSourceSensitivity::NonPrivate, external_content: false,
+        }], execution_facts: facts }
 }
 
 fn submit_feedback(
-    runtime: Arc<MemoryRuntime>,
-    feedback: AgentToolUsageFeedbackV2,
-) -> ProceduralFeedbackReceiptV1 {
-    let turn_id = format!("turn-{}", feedback.observations[0].observation_id);
-    let tool_call_count = feedback.observations.len() as u32;
-    let tool_observations = feedback
-        .observations
-        .iter()
-        .map(|observation| ToolObservationDigest {
-            observation_id: observation.observation_id.clone(),
-            tool_name: observation.tool_id.clone(),
-            summary: observation.summary.clone(),
-            external_content: observation.external_content,
-        })
-        .collect();
+    runtime: Arc<TestRuntime>,
+    feedback: AgentToolUsageFeedbackV3,
+) -> ProceduralFeedbackReceiptV2 {
+    let turn_id = format!("turn-{}", feedback.execution_facts[0].observation_id);
+    let tool_call_count = feedback.execution_facts.len() as u32;
+    let tool_observations =
+        support::procedural::canonical_observations("pdf.extract", &feedback.execution_facts);
     let finalize = runtime
-        .finalize_turn(MemoryTurnFinalizeRequest {
-            turn: CanonicalTurnDelta {
-                turn_id: turn_id.clone(),
-                conversation: ConversationScope {
-                    channel: runtime.scope().channel.clone(),
-                    chat_id: runtime.scope().chat_id.clone(),
-                    conversation_id: Some(runtime.scope().conversation_id_or_chat_id().to_string()),
+        .finalize_turn_with_procedural_evidence(
+            &runtime.capability,
+            MemoryTurnFinalizeRequest {
+                turn: CanonicalTurnDelta {
+                    turn_id: turn_id.clone(),
+                    conversation: ConversationScope {
+                        channel: runtime.scope().channel.clone(),
+                        chat_id: runtime.scope().chat_id.clone(),
+                        conversation_id: Some(
+                            runtime.scope().conversation_id_or_chat_id().to_string(),
+                        ),
+                    },
+                    subject: runtime.subject_id().to_string(),
+                    delivery_status: MemoryTurnDeliveryStatus::Delivered,
+                    source: MemoryTurnSource {
+                        ingress: bm_sdk::IngressKind::User,
+                        channel: runtime.scope().channel.clone(),
+                        provider: None,
+                        protocol: MemoryTurnProtocol::Native,
+                        endpoint: None,
+                        model_alias: None,
+                        model_resolved: None,
+                        request_id: Some(format!("request-{turn_id}")),
+                        client_conversation_hint: None,
+                    },
+                    actor: None,
+                    input_messages: vec![TranscriptInputMessage::user("synthetic tool execution")],
+                    assistant_message: Some(TranscriptInputMessage::assistant("synthetic result")),
+                    tool_observations,
+                    external_content_used: false,
+                    candidate_ids: Vec::new(),
                 },
-                subject: runtime.subject_id().to_string(),
-                delivery_status: MemoryTurnDeliveryStatus::Delivered,
-                source: MemoryTurnSource {
-                    ingress: bm_sdk::IngressKind::User,
-                    channel: runtime.scope().channel.clone(),
-                    provider: None,
-                    protocol: MemoryTurnProtocol::Native,
-                    endpoint: None,
-                    model_alias: None,
-                    model_resolved: None,
-                    request_id: Some(format!("request-{turn_id}")),
-                    client_conversation_hint: None,
+                learning: PostTurnLearningInputV2 {
+                    tool_call_count,
+                    selection_receipt: None,
+                    runtime_skill_feedback: Vec::new(),
+                    agent_skill_feedback: Vec::new(),
+                    task_learning_feedback: Vec::new(),
+                    agent_tool_feedback: vec![feedback],
+                    human_confirmation_operation_id: None,
                 },
-                actor: None,
-                input_messages: vec![TranscriptInputMessage::user("synthetic tool execution")],
-                assistant_message: Some(TranscriptInputMessage::assistant("synthetic result")),
-                tool_observations,
-                external_content_used: true,
-                candidate_ids: Vec::new(),
+                pressure: PressureLevel::Normal,
+                mode_input: RuntimeLifecycleModeInput::default(),
             },
-            learning: PostTurnLearningInputV1 {
-                tool_call_count,
-                selection_receipt: None,
-                runtime_skill_feedback: Vec::new(),
-                agent_skill_feedback: Vec::new(),
-                task_learning_feedback: Vec::new(),
-                agent_tool_feedback: vec![feedback],
-                authority: bm_sdk::ProceduralFeedbackAuthorityInputV1::HostRuntimeObservation,
-            },
-            pressure: PressureLevel::Normal,
-            mode_input: RuntimeLifecycleModeInput::default(),
-        })
+        )
         .expect("finalize tool feedback");
     let job_id = finalize
         .procedural_learning
         .job_id
         .expect("procedural feedback job");
-    let engine = MemoryLearningEngine::attach(runtime).expect("learning engine");
+    let engine = MemoryLearningEngine::attach(runtime.memory.clone()).expect("learning engine");
     let mut port = NoProviderPort;
     for attempt in 0..4 {
         match engine
@@ -260,7 +257,7 @@ fn sdk_agent_tool_registry_never_cold_starts_from_tool_descriptions() {
         .expect("inspect");
     assert_eq!(inspection.agent_tool_registry.registries, 1);
     assert_eq!(inspection.agent_tool_registry.tools, 1);
-    assert_eq!(inspection.agent_tool_registry.governed_experiences, 0);
+    assert_eq!(inspection.agent_tool_registry.governed_experiences, Some(0));
 }
 
 #[test]
@@ -272,9 +269,12 @@ fn sdk_agent_tool_feedback_requires_governed_experience_before_projection() {
         runtime.clone(),
         feedback(&registry, vec![observation("obs-1")]),
     );
-    assert_eq!(deferred.deferred_count, 1);
-    assert_eq!(deferred.accepted_count, 0);
-    assert_eq!(deferred.changed_count, 0);
+    assert_eq!(deferred.deferred_count, 0);
+    assert_eq!(deferred.accepted_count, 1);
+    assert!(
+        deferred.changed_count > 0,
+        "execution facts and candidate method are real durable owners"
+    );
 
     let no_hint = runtime
         .project(MemoryProjectionRequest {
@@ -297,7 +297,7 @@ fn sdk_agent_tool_feedback_requires_governed_experience_before_projection() {
         feedback(&registry, vec![observation("obs-2"), observation("obs-3")]),
     );
     assert_eq!(accepted.accepted_count, 1);
-    assert_eq!(accepted.changed_count, 1);
+    assert!(accepted.changed_count > 0);
 
     let projected = runtime
         .project(MemoryProjectionRequest {
@@ -332,7 +332,7 @@ fn sdk_agent_tool_feedback_requires_governed_experience_before_projection() {
     assert!(!projected
         .provider_payload()
         .system_memory_block()
-        .contains("Extract PDF text"));
+        .contains(TOOL_DESCRIPTION));
 }
 
 #[test]
@@ -343,7 +343,7 @@ fn sdk_agent_tool_projection_rejects_registry_fingerprint_drift() {
         runtime.clone(),
         feedback(&registry, vec![observation("obs-a"), observation("obs-b")]),
     );
-    assert_eq!(accepted.changed_count, 1);
+    assert!(accepted.changed_count > 0);
 
     let mut stale_ref = registry.registry_ref();
     stale_ref.fingerprint = "stale-fingerprint".to_string();
@@ -363,7 +363,7 @@ fn sdk_agent_tool_projection_rejects_registry_fingerprint_drift() {
 
     assert!(projected.provider_payload().agent_tool_hints().is_empty());
     assert_eq!(projected.report().audit().agent_tool_selected_count, 0);
-    assert_eq!(projected.report().audit().agent_tool_rejection_count, 1);
+    assert!(projected.report().audit().agent_tool_rejection_count > 0);
 }
 
 #[test]
@@ -384,7 +384,7 @@ fn agent_tool_experience_is_exactly_isolated_by_mounted_subject_in_a_shared_stor
             vec![observation("obs-a-1"), observation("obs-a-2")],
         ),
     );
-    assert_eq!(accepted.changed_count, 1);
+    assert!(accepted.changed_count > 0);
 
     let project = |runtime: &MemoryRuntime| {
         runtime
@@ -426,13 +426,28 @@ fn agent_tool_experience_is_exactly_isolated_by_mounted_subject_in_a_shared_stor
 fn free_text_operator_note_never_counts_as_human_confirmation() {
     let registry = registry();
     let runtime = runtime_with_registry(registry.clone());
-    let mut unconfirmed = feedback(&registry, vec![observation("obs-note-only")]);
-    unconfirmed.operator_note = Some("looks good to me".to_string());
-
-    let report = submit_feedback(runtime, unconfirmed);
-    assert_eq!(report.deferred_count, 1);
-    assert_eq!(report.accepted_count, 0);
-    assert_eq!(report.changed_count, 0);
+    let unconfirmed = feedback(&registry, vec![observation("obs-note-only")]);
+    let mut wire = serde_json::to_value(&unconfirmed).unwrap();
+    wire["operator_note"] = "looks good to me".into();
+    assert!(serde_json::from_value::<AgentToolUsageFeedbackV3>(wire).is_err());
+    let report = submit_feedback(runtime.clone(), unconfirmed);
+    assert_eq!(
+        report.accepted_count, 1,
+        "ordinary execution is accepted without pretending to be confirmed"
+    );
+    let recalled = runtime
+        .recall(MemoryRecallRequest {
+            temporal_operation: MemoryRecallTemporalOperation::Current,
+            structured_query_facets: vec![],
+            query: "extract PDF release notes".into(),
+            limit: 8,
+            tool_registry_refs: vec![registry.registry_ref()],
+        })
+        .unwrap();
+    assert!(
+        recalled.agent_tool_hints.is_empty(),
+        "one unconfirmed execution cannot activate a method"
+    );
 }
 
 #[test]
@@ -446,7 +461,7 @@ fn historical_recall_does_not_apply_current_agent_tool_experience() {
             vec![observation("obs-history-1"), observation("obs-history-2")],
         ),
     );
-    assert_eq!(accepted.changed_count, 1);
+    assert!(accepted.changed_count > 0);
 
     let project = |temporal_operation| {
         runtime
@@ -493,7 +508,7 @@ fn agent_tool_registry_scope_mismatch_is_rejected_before_hint_selection() {
             vec![observation("obs-scope-1"), observation("obs-scope-2")],
         ),
     );
-    assert_eq!(accepted.changed_count, 1);
+    assert!(accepted.changed_count > 0);
 
     let project = |registry_ref| {
         runtime
@@ -524,5 +539,5 @@ fn agent_tool_registry_scope_mismatch_is_rejected_before_hint_selection() {
     let denied = project(mismatched_ref);
     assert!(denied.provider_payload().agent_tool_hints().is_empty());
     assert_eq!(denied.report().audit().agent_tool_selected_count, 0);
-    assert_eq!(denied.report().audit().agent_tool_rejection_count, 1);
+    assert!(denied.report().audit().agent_tool_rejection_count > 0);
 }

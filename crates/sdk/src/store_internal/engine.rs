@@ -117,6 +117,9 @@ pub struct StoreScopedProjectionReplaceRequest {
     pub json_docs: Vec<StoreSnapshotJsonDoc>,
     pub events: Vec<MemoryStoreEvent>,
     pub preserve_protected_owner_state: bool,
+    /// Store-planned, non-wire source closure. Raw backend harness requests may
+    /// omit it only when no governed source is present in the replaced image.
+    pub source_closure: Option<Box<super::platform::scoped_projection_source::ScopedSourceClosure>>,
 }
 
 fn operation_kind_is_protected_owner(operation_kind: MemoryMutationOperationKind) -> bool {
@@ -133,6 +136,7 @@ fn operation_kind_is_protected_owner(operation_kind: MemoryMutationOperationKind
             | MemoryMutationOperationKind::RelationshipControl
             | MemoryMutationOperationKind::ProceduralLearning
             | MemoryMutationOperationKind::ProceduralLifecycle
+            | MemoryMutationOperationKind::ProceduralProducerControl
     )
 }
 
@@ -147,6 +151,11 @@ pub(crate) fn json_document_is_protected_owner(namespace: &str, value: &Value) -
                 | crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE
                 | crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE
                 | crate::store_internal::schema::PROCEDURAL_FEEDBACK_JOB_NAMESPACE
+                | crate::store_internal::schema::PROCEDURAL_PRODUCER_BINDING_NAMESPACE
+                | crate::store_internal::schema::PROCEDURAL_PRODUCER_HEAD_NAMESPACE
+                | crate::store_internal::schema::PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE
+                | crate::store_internal::schema::PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE
+                | crate::store_internal::schema::PROCEDURAL_SOURCE_DEPENDENTS_NAMESPACE
                 | crate::store_internal::schema::PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE
                 | crate::store_internal::schema::PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE
         )
@@ -172,7 +181,8 @@ pub(crate) fn json_document_is_protected_owner(namespace: &str, value: &Value) -
 }
 
 pub(crate) fn event_is_protected_owner(event: &MemoryStoreEvent) -> bool {
-    event.plane == super::procedural_selection::NAMESPACE
+    event.plane == super::procedural_feedback::EVENT_PLANE
+        || event.plane == super::procedural_selection::NAMESPACE
         || crate::store_internal::schema::is_runtime_skill_protected_json_namespace(&event.plane)
         || event
             .payload
@@ -190,6 +200,27 @@ pub(crate) fn event_is_protected_owner(event: &MemoryStoreEvent) -> bool {
                 || operation.starts_with("post_turn.procedural.")
                 || operation == "conversation.transcript.lifecycle"
         })
+}
+
+pub(crate) fn json_document_is_preserved_by_scoped_projection(
+    namespace: &str,
+    value: &Value,
+    request: &StoreScopedProjectionReplaceRequest,
+) -> Result<bool> {
+    // A public-only subject archive carries no transcript query replacement.
+    // Its omission must not delete the MemorySpace-wide cursor authority used
+    // by retained conversations in other subjects. Full transcript restores
+    // still replace this authority with the freshly planned incarnation.
+    if namespace == super::transcript_query::TRANSCRIPT_QUERY_KEYRING_NAMESPACE
+        && !request
+            .json_docs
+            .iter()
+            .any(|doc| doc.namespace == namespace)
+    {
+        return Ok(true);
+    }
+    Ok(request.preserve_protected_owner_state
+        && json_document_is_protected_owner(namespace, value)?)
 }
 
 pub(crate) fn event_is_replaced_by_scoped_projection(

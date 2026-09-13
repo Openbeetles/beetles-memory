@@ -42,7 +42,56 @@ fn registry() -> AgentToolRegistrySnapshot {
     )
 }
 
-fn runtime(store: MemoryStoreHandle, clock: Arc<Clock>, agent: &str) -> MemoryRuntime {
+struct TestRuntime {
+    memory: Arc<MemoryRuntime>,
+    governor: MemoryRuntime,
+    capability: MemoryProceduralSubmissionCapability,
+    store: MemoryStoreHandle,
+}
+impl std::ops::Deref for TestRuntime {
+    type Target = MemoryRuntime;
+    fn deref(&self) -> &MemoryRuntime {
+        &self.memory
+    }
+}
+impl TestRuntime {
+    fn new(
+        memory: MemoryRuntime,
+        store: MemoryStoreHandle,
+        binding: &str,
+        source: ProceduralProducerSourceAuthorityV1,
+    ) -> Self {
+        let governor = support::procedural::governor(&memory, store.clone());
+        let mut spec = support::procedural::runtime_observer_spec(&memory, binding);
+        spec.source_authority = source;
+        let capability = support::procedural::register_and_issue(
+            &governor,
+            spec,
+            &format!("register-{binding}"),
+        );
+        Self {
+            memory: Arc::new(memory),
+            governor,
+            capability,
+            store,
+        }
+    }
+    fn submit(&self, input: MemoryTurnFinalizeRequest) -> Result<MemoryTurnFinalizeReport> {
+        self.memory
+            .finalize_turn_with_procedural_evidence(&self.capability, input)
+    }
+    fn model_capability(&self) -> MemoryProceduralSubmissionCapability {
+        let mut spec = support::procedural::runtime_observer_spec(&self.memory, "receipt-model");
+        spec.source_authority = ProceduralProducerSourceAuthorityV1::ModelInferred {
+            subject_id: self.subject_id().into(),
+        };
+        spec.claims.execution_facts = false;
+        spec.claims.usage_feedback = false;
+        support::procedural::register_and_issue(&self.governor, spec, "register-receipt-model")
+    }
+}
+
+fn runtime(store: MemoryStoreHandle, clock: Arc<Clock>, agent: &str) -> TestRuntime {
     let mut subjects = SubjectRegistry::single_agent_default("receipt-owner", "agent-a").unwrap();
     subjects
         .upsert_subject(SubjectDescriptor::agent_persona(
@@ -50,17 +99,23 @@ fn runtime(store: MemoryStoreHandle, clock: Arc<Clock>, agent: &str) -> MemoryRu
             "Agent B",
         ))
         .unwrap();
-    MemoryRuntime::builder()
+    let memory = MemoryRuntime::builder()
         .identity(MemoryIdentity::new(agent, "receipt-owner").unwrap())
         .scope(MemoryScope::new("sdk.direct", "receipt-chat").unwrap())
         .subject_registry(subjects)
-        .store(store)
+        .store(store.clone())
         .clock(clock)
         .capability_policy(MemoryCapabilityPolicy::strict_profile())
         .privacy_policy(MemoryPrivacyPolicy::standard_private_boundary())
         .agent_tool_registry(registry())
         .build()
-        .unwrap()
+        .unwrap();
+    TestRuntime::new(
+        memory,
+        store,
+        "receipt-executor",
+        ProceduralProducerSourceAuthorityV1::RuntimeObservation,
+    )
 }
 
 fn request(
@@ -69,35 +124,18 @@ fn request(
     receipt: Option<ProceduralSelectionReceiptV1>,
 ) -> MemoryTurnFinalizeRequest {
     let now = runtime.config().clock.now_secs();
-    let observations = ["a", "b"]
+    let facts = ["a", "b"]
         .into_iter()
-        .map(|suffix| AgentToolObservationDigest {
+        .map(|suffix| ToolExecutionFactV1 {
             observation_id: format!("observation-{turn}-{suffix}"),
-            registry_id: "receipt-tools".into(),
-            tool_id: "archive.unpack".into(),
-            schema_fingerprint: "schema-archive-v1".into(),
-            call_id: Some(format!("call-{turn}-{suffix}")),
-            task_signature: "unpack_archive".into(),
-            summary: "archive unpack completed successfully".into(),
-            outcome: AgentToolOutcome::Succeeded,
-            error_code: None,
-            external_content: false,
-            private_content_used: false,
-            permission_tags: vec![],
-            risk_tags: vec![],
+            call_id: format!("call-{turn}-{suffix}"),
+            outcome: ToolExecutionOutcome::Succeeded,
+            source_sensitivity: ProceduralSourceSensitivity::NonPrivate,
             started_at: Some(now),
             completed_at: Some(now),
         })
         .collect::<Vec<_>>();
-    let canonical = observations
-        .iter()
-        .map(|observation| ToolObservationDigest {
-            observation_id: observation.observation_id.clone(),
-            tool_name: observation.tool_id.clone(),
-            summary: observation.summary.clone(),
-            external_content: observation.external_content,
-        })
-        .collect();
+    let canonical = support::procedural::canonical_observations("archive.unpack", &facts);
     MemoryTurnFinalizeRequest {
         turn: CanonicalTurnDelta {
             turn_id: turn.into(),
@@ -128,22 +166,21 @@ fn request(
             external_content_used: false,
             candidate_ids: vec![],
         },
-        learning: PostTurnLearningInputV1 {
+        learning: PostTurnLearningInputV2 {
             tool_call_count: 2,
             selection_receipt: receipt,
             runtime_skill_feedback: vec![],
             agent_skill_feedback: vec![],
             task_learning_feedback: vec![],
-            agent_tool_feedback: vec![AgentToolUsageFeedbackV2 {
-                registry_ref: registry().registry_ref(),
-                tool_id: "archive.unpack".into(),
-                schema_fingerprint: "schema-archive-v1".into(),
-                observations,
-                outcome: ProceduralExecutionOutcomeV1::Succeeded,
-                user_visible_result_summary: Some("archive unpack completed successfully".into()),
-                operator_note: None,
+            agent_tool_feedback: vec![AgentToolUsageFeedbackV3 {
+                registry_ref: registry().registry_ref(), tool_id: "archive.unpack".into(), schema_fingerprint: "schema-archive-v1".into(),
+                method_evidence: vec![ToolMethodEvidenceV1 { method_id: format!("method-{turn}"), task_signature: "unpack_archive".into(),
+                    body: "1. Inspect the archive manifest\n2. Unpack archive into the selected workspace\n3. Verify extracted files".into(),
+                    execution_refs: facts.iter().map(|fact| fact.observation_id.clone()).collect(),
+                    source_sensitivity: ProceduralSourceSensitivity::NonPrivate, external_content: false,
+                }], execution_facts: facts,
             }],
-            authority: ProceduralFeedbackAuthorityInputV1::HostRuntimeObservation,
+            human_confirmation_operation_id: None,
         },
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
@@ -170,27 +207,63 @@ fn project(
         .unwrap()
 }
 
-fn complete(runtime: Arc<MemoryRuntime>, expected_job: &str) {
-    complete_counts(runtime, expected_job, 1, 1);
+fn complete(runtime: Arc<TestRuntime>, expected_job: &str) {
+    let report = complete_job(runtime, expected_job);
+    assert_eq!(report.receipt.accepted_count, 1);
+    assert!(report.receipt.changed_count > 0);
 }
-
-fn complete_counts(runtime: Arc<MemoryRuntime>, expected_job: &str, accepted: u32, changed: u32) {
-    let engine = MemoryLearningEngine::attach(runtime).unwrap();
-    let outcome = engine
-        .run_due_cycle(
-            MemoryLearningCycleRequest {
-                lease_owner: "receipt-worker".into(),
-                lease_duration_secs: 60,
-            },
-            &mut NoProvider,
-        )
-        .unwrap();
-    let MemoryLearningCycleOutcome::ProceduralCompleted(report) = outcome else {
-        panic!("the official engine must complete the procedural job; safe state: {outcome:?}");
-    };
-    assert_eq!(report.job.job_id, expected_job);
+fn complete_counts(runtime: Arc<TestRuntime>, expected_job: &str, accepted: u32, changed: u32) {
+    let report = complete_job(runtime, expected_job);
     assert_eq!(report.receipt.accepted_count, accepted);
     assert_eq!(report.receipt.changed_count, changed);
+}
+fn complete_job(
+    runtime: Arc<TestRuntime>,
+    expected_job: &str,
+) -> MemoryProceduralLearningRunReport {
+    let engine = MemoryLearningEngine::attach(runtime.memory.clone()).unwrap();
+    for _ in 0..16 {
+        match engine
+            .run_due_cycle(
+                MemoryLearningCycleRequest {
+                    lease_owner: "receipt-worker".into(),
+                    lease_duration_secs: 60,
+                },
+                &mut NoProvider,
+            )
+            .unwrap()
+        {
+            MemoryLearningCycleOutcome::ProceduralCompleted(report) => {
+                assert_eq!(report.job.job_id, expected_job);
+                let snapshot = runtime.store.export_replay_snapshot().unwrap();
+                let ledger: bm_core::memory::ProceduralFeedbackApplicationLedgerV2 =
+                    serde_json::from_value(
+                        snapshot
+                            .json_docs
+                            .iter()
+                            .find(|doc| {
+                                doc.namespace == "procedural_feedback_application_ledgers"
+                                    && doc.value["job_id"] == expected_job
+                            })
+                            .unwrap()
+                            .value
+                            .clone(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    report.receipt.changed_count as usize,
+                    ledger.applied_owner_bindings.len(),
+                    "receipt must describe the exact real application"
+                );
+                return report;
+            }
+            MemoryLearningCycleOutcome::Blocked(report) => {
+                assert_eq!(report.reason, "governance_execution_binding_unavailable")
+            }
+            other => panic!("expected real procedural completion: {other:?}"),
+        }
+    }
+    panic!("bounded official worker did not complete");
 }
 
 fn empty_feedback_request(
@@ -306,7 +379,7 @@ fn assert_runtime_skill_usage_lifecycle(config: Option<StoreBackendConfig>) {
                 outcome,
                 observation_ref: format!("execution-{turn}"),
             });
-        let report = runtime.finalize_turn(input).unwrap();
+        let report = runtime.submit(input).unwrap();
         complete_counts(
             runtime.clone(),
             &report.procedural_learning.job_id.unwrap(),
@@ -346,7 +419,25 @@ fn assert_runtime_skill_usage_lifecycle(config: Option<StoreBackendConfig>) {
             reason: "synthetic privacy withdrawal".into(),
         })
         .unwrap();
-    assert!(!current_skill(&runtime, true).enabled);
+    let withdrawn = runtime
+        .list_runtime_skills(RuntimeSkillListRequest {
+            owning_scope: RuntimeSkillOwningScope::Subject {
+                mounted_subject_id: runtime.subject_id().into(),
+            },
+            query: None,
+            include_disabled: true,
+            include_retired: true,
+            limit: 20,
+        })
+        .unwrap();
+    assert!(
+        withdrawn.skills.is_empty(),
+        "withdrawal must close the public body path immediately"
+    );
+    assert_eq!(
+        withdrawn.runtime_skills, None,
+        "unavailable is not a fabricated zero count"
+    );
     let denied = project(
         &runtime,
         ProceduralProjectionBindingV1::Turn {
@@ -370,7 +461,7 @@ fn assert_runtime_skill_usage_lifecycle(config: Option<StoreBackendConfig>) {
 
 #[cfg(feature = "sqlite-store")]
 #[test]
-fn inferred_success_is_not_validated_runtime_skill_success() {
+fn inferred_runtime_skill_usage_is_rejected_before_intake() {
     let path = root("inferred-runtime");
     std::fs::create_dir_all(&path).unwrap();
     let store = support::open_memory_store(
@@ -396,7 +487,7 @@ fn inferred_success_is_not_validated_runtime_skill_success() {
         .expect("nonempty positive selection")
         .clone();
     let mut input = empty_feedback_request(&runtime, "inferred-skill", receipt);
-    input.learning.authority = ProceduralFeedbackAuthorityInputV1::ModelInferred;
+    let model_capability = runtime.model_capability();
     input
         .learning
         .runtime_skill_feedback
@@ -406,12 +497,26 @@ fn inferred_success_is_not_validated_runtime_skill_success() {
             outcome: ProceduralExecutionOutcomeV1::Succeeded,
             observation_ref: "model-inferred-execution".into(),
         });
-    let result = runtime.finalize_turn(input).unwrap();
-    complete_counts(
-        runtime.clone(),
-        &result.procedural_learning.job_id.unwrap(),
-        1,
-        0,
+    let snapshot_before = runtime.store.export_replay_snapshot().unwrap();
+    let rejected = runtime
+        .finalize_turn_with_procedural_evidence(&model_capability, input)
+        .err()
+        .expect("a model cannot witness RuntimeSkill usage, even with a real selection");
+    let Error::Other { source, .. } = rejected else {
+        panic!("typed authority rejection required");
+    };
+    let safe = source.downcast_ref::<ProceduralLearningSdkError>().unwrap();
+    assert_eq!(
+        safe.key,
+        ProceduralLearningErrorKeyV1::ProducerAuthorityDenied
+    );
+    assert_eq!(
+        safe.disposition,
+        ProceduralLearningSdkErrorDisposition::AuthorityRejected
+    );
+    assert_eq!(
+        runtime.store.export_replay_snapshot().unwrap(),
+        snapshot_before
     );
     assert_eq!(current_skill(&runtime, false), before);
     drop(runtime);
@@ -419,36 +524,56 @@ fn inferred_success_is_not_validated_runtime_skill_success() {
 }
 
 #[test]
-fn inferred_tool_success_is_durable_evidence_without_promoting_experience() {
+fn inferred_tool_execution_is_rejected_but_model_method_provenance_is_preserved() {
     let store = memory_store();
     let runtime = Arc::new(runtime(store.clone(), clock(), "agent-a"));
-    let mut input = request(&runtime, "model-tool", None);
-    input.learning.authority = ProceduralFeedbackAuthorityInputV1::ModelInferred;
-    let result = runtime.finalize_turn(input).unwrap();
-    complete_counts(
-        runtime.clone(),
-        &result.procedural_learning.job_id.unwrap(),
-        1,
-        0,
+    let model = runtime.model_capability();
+    let before = store.export_replay_snapshot().unwrap();
+    let invalid = runtime
+        .finalize_turn_with_procedural_evidence(&model, request(&runtime, "model-execution", None))
+        .err()
+        .expect("model cannot witness execution");
+    let Error::Other { source, .. } = invalid else {
+        panic!("typed rejection required")
+    };
+    assert_eq!(
+        source
+            .downcast_ref::<ProceduralLearningSdkError>()
+            .unwrap()
+            .key,
+        ProceduralLearningErrorKeyV1::ProducerAuthorityDenied
     );
+    assert_eq!(store.export_replay_snapshot().unwrap(), before);
+    let mut proposal = request(&runtime, "model-method", None);
+    proposal.turn.tool_observations.clear();
+    proposal.learning.tool_call_count = 0;
+    proposal.learning.agent_tool_feedback[0]
+        .execution_facts
+        .clear();
+    proposal.learning.agent_tool_feedback[0].method_evidence[0]
+        .execution_refs
+        .clear();
+    let result = runtime
+        .finalize_turn_with_procedural_evidence(&model, proposal)
+        .unwrap();
+    complete(runtime.clone(), &result.procedural_learning.job_id.unwrap());
     let snapshot = store.export_replay_snapshot().unwrap();
-    let evidence = &snapshot
-        .json_docs
-        .iter()
-        .find(|doc| {
-            doc.namespace == "conversation_transcript" && doc.value["turn_id"] == "model-tool"
-        })
-        .unwrap()
-        .value["learning_evidence"];
-    assert_eq!(evidence["authority"]["kind"], "model_inferred");
-    assert!(!evidence["agent_tool_feedback"]
-        .as_array()
-        .unwrap()
-        .is_empty());
-    assert!(!snapshot
-        .json_docs
-        .iter()
-        .any(|doc| doc.namespace == "agent_tool_experience_owner_heads"));
+    let evidence: PostTurnLearningEvidenceV2 = serde_json::from_value(
+        snapshot
+            .json_docs
+            .iter()
+            .find(|doc| {
+                doc.namespace == "conversation_transcript" && doc.value["turn_id"] == "model-method"
+            })
+            .unwrap()
+            .value["learning_evidence"]
+            .clone(),
+    )
+    .unwrap();
+    assert!(evidence.authority.is_model_inferred());
+    assert!(!evidence.authority.is_human_confirmation());
+    assert!(evidence.agent_tool_feedback[0].execution_facts.is_empty());
+    assert!(!evidence.agent_tool_feedback[0].method_evidence.is_empty());
     assert!(
         project(&runtime, ProceduralProjectionBindingV1::Preview, 16_384)
             .provider_payload()
@@ -522,7 +647,7 @@ fn shared_program_usage_records_evidence_without_subject_owner_mutation() {
             outcome: ProceduralExecutionOutcomeV1::Succeeded,
             observation_ref: "shared-execution".into(),
         });
-    let result = runtime.finalize_turn(input).unwrap();
+    let result = runtime.submit(input).unwrap();
     complete_counts(
         runtime.clone(),
         &result.procedural_learning.job_id.unwrap(),
@@ -620,7 +745,7 @@ fn mixed_subject_and_shared_runtime_feedback_mutates_only_the_subject_owner() {
             observation_ref: format!("mixed-execution-{index}"),
         })
         .collect();
-    let result = runtime.finalize_turn(input).unwrap();
+    let result = runtime.submit(input).unwrap();
     complete_counts(
         runtime.clone(),
         &result.procedural_learning.job_id.unwrap(),
@@ -652,76 +777,88 @@ fn human_confirmation_uses_registry_actor_and_note_cannot_substitute() {
     let time = clock();
     let agent = runtime(store.clone(), time.clone(), "agent-a");
     let mut unauthorized = request(&agent, "false-human", None);
-    unauthorized.learning.authority = ProceduralFeedbackAuthorityInputV1::HumanConfirmed {
-        operation_id: "confirmation-false".into(),
-    };
+    unauthorized.learning.human_confirmation_operation_id = Some("confirmation-false".into());
     let before = store.export_replay_snapshot().unwrap();
-    assert!(agent.finalize_turn(unauthorized).is_err());
-    assert_eq!(
-        before.json_docs,
-        store.export_replay_snapshot().unwrap().json_docs
-    );
+    assert!(agent.submit(unauthorized).is_err());
+    assert_eq!(before, store.export_replay_snapshot().unwrap());
     let mut scoped = agent.scoped_runtime().clone();
-    scoped.actor_subject_id = primary_human_subject_id("receipt-owner");
-    let human = Arc::new(
-        MemoryRuntime::builder()
-            .identity(agent.identity().clone())
-            .scope(agent.scope().clone())
-            .subject_registry(agent.subject_registry().clone())
-            .scoped_runtime(scoped)
-            .store(store.clone())
-            .clock(time)
-            .capability_policy(MemoryCapabilityPolicy::strict_profile())
-            .agent_tool_registry(registry())
-            .build()
-            .unwrap(),
-    );
-    let mut input = request(&human, "real-human", None);
-    input.turn.tool_observations.truncate(1);
-    input.learning.tool_call_count = 1;
-    input.learning.agent_tool_feedback[0]
-        .observations
-        .truncate(1);
-    input.learning.authority = ProceduralFeedbackAuthorityInputV1::HumanConfirmed {
-        operation_id: "confirmation-real".into(),
-    };
-    let result = human.finalize_turn(input).unwrap();
-    complete_counts(
-        human.clone(),
-        &result.procedural_learning.job_id.unwrap(),
-        1,
-        1,
-    );
-    let snapshot = store.export_replay_snapshot().unwrap();
-    let evidence = &snapshot
-        .json_docs
-        .iter()
-        .find(|doc| {
-            doc.namespace == "conversation_transcript" && doc.value["turn_id"] == "real-human"
-        })
-        .unwrap()
-        .value["learning_evidence"];
-    let typed: PostTurnLearningEvidenceV1 = serde_json::from_value(evidence.clone()).unwrap();
-    assert!(typed.validate_contract());
-    assert!(matches!(
-        typed.authority,
-        ProceduralFeedbackAuthorityV1::HumanConfirmed { .. }
+    let human_id = primary_human_subject_id("receipt-owner");
+    scoped.actor_subject_id = human_id.clone();
+    let memory = MemoryRuntime::builder()
+        .identity(agent.identity().clone())
+        .scope(agent.scope().clone())
+        .subject_registry(agent.subject_registry().clone())
+        .scoped_runtime(scoped)
+        .store(store.clone())
+        .clock(time)
+        .capability_policy(MemoryCapabilityPolicy::strict_profile())
+        .agent_tool_registry(registry())
+        .build()
+        .unwrap();
+    let human = Arc::new(TestRuntime::new(
+        memory,
+        store.clone(),
+        "human-confirmation",
+        ProceduralProducerSourceAuthorityV1::HumanUser {
+            subject_id: human_id.clone(),
+        },
     ));
-    let mut note = request(&agent, "note-only", None);
-    note.turn.tool_observations.truncate(1);
-    note.learning.tool_call_count = 1;
-    note.learning.agent_tool_feedback[0]
-        .observations
-        .truncate(1);
-    note.learning.agent_tool_feedback[0].operator_note =
-        Some("User confirmed this should count".into());
-    let result = agent.finalize_turn(note).unwrap();
-    complete_counts(
-        Arc::new(agent),
-        &result.procedural_learning.job_id.unwrap(),
-        0,
-        0,
+    let single = |runtime: &MemoryRuntime, id: &str| {
+        let mut input = request(runtime, id, None);
+        input.turn.tool_observations.truncate(1);
+        input.learning.tool_call_count = 1;
+        input.learning.agent_tool_feedback[0]
+            .execution_facts
+            .truncate(1);
+        input.learning.agent_tool_feedback[0].method_evidence[0]
+            .execution_refs
+            .truncate(1);
+        input
+    };
+    let mut input = single(&human, "real-human");
+    input.learning.human_confirmation_operation_id = Some("confirmation-real".into());
+    let result = human.submit(input).unwrap();
+    complete(human.clone(), &result.procedural_learning.job_id.unwrap());
+    let snapshot = store.export_replay_snapshot().unwrap();
+    let typed: PostTurnLearningEvidenceV2 = serde_json::from_value(
+        snapshot
+            .json_docs
+            .iter()
+            .find(|doc| {
+                doc.namespace == "conversation_transcript" && doc.value["turn_id"] == "real-human"
+            })
+            .unwrap()
+            .value["learning_evidence"]
+            .clone(),
+    )
+    .unwrap();
+    assert!(typed.validate_contract());
+    assert!(
+        matches!(typed.authority, ProceduralFeedbackAuthorityV2::Producer {
+        source_authority: ProceduralProducerSourceAuthorityV1::HumanUser { subject_id },
+        confirmation: Some(ProceduralHumanConfirmationV1 { actor_subject_id, operation_id, .. }), ..
+    } if subject_id == human_id && actor_subject_id == human_id && operation_id == "confirmation-real")
     );
+    let note = single(&agent, "note-only");
+    let mut wire = serde_json::to_value(&note.learning).unwrap();
+    wire["agent_tool_feedback"][0]["operator_note"] = "User confirmed this should count".into();
+    assert!(serde_json::from_value::<PostTurnLearningInputV2>(wire).is_err());
+    let result = agent.submit(note).unwrap();
+    complete(Arc::new(agent), &result.procedural_learning.job_id.unwrap());
+    let snapshot = store.export_replay_snapshot().unwrap();
+    let ordinary: PostTurnLearningEvidenceV2 = serde_json::from_value(
+        snapshot
+            .json_docs
+            .iter()
+            .find(|doc| {
+                doc.namespace == "conversation_transcript" && doc.value["turn_id"] == "note-only"
+            })
+            .unwrap()
+            .value["learning_evidence"]
+            .clone(),
+    )
+    .unwrap();
+    assert!(!ordinary.authority.is_human_confirmation());
 }
 
 #[test]
@@ -737,7 +874,7 @@ fn standard_package_and_task_evidence_are_consumed_without_rewriting_their_owner
     std::fs::write(&skill_file, skill_text).unwrap();
     let store = memory_store();
     let time = clock();
-    let runtime = Arc::new(
+    let runtime = Arc::new(TestRuntime::new(
         MemoryRuntime::builder()
             .identity(MemoryIdentity::new("agent-a", "receipt-owner").unwrap())
             .scope(MemoryScope::new("sdk.direct", "receipt-chat").unwrap())
@@ -748,7 +885,10 @@ fn standard_package_and_task_evidence_are_consumed_without_rewriting_their_owner
             .agent_tool_registry(registry())
             .build()
             .unwrap(),
-    );
+        store.clone(),
+        "package-executor",
+        ProceduralProducerSourceAuthorityV1::RuntimeObservation,
+    ));
     for (id, status) in [
         ("previous-archive-run", TaskRunStatus::Completed),
         ("current-archive-run", TaskRunStatus::Running),
@@ -856,7 +996,7 @@ fn standard_package_and_task_evidence_are_consumed_without_rewriting_their_owner
             learning_digest: task.learning_digest,
             outcome: ProceduralExecutionOutcomeV1::Mismatch,
         });
-    let result = runtime.finalize_turn(input).unwrap();
+    let result = runtime.submit(input).unwrap();
     complete_counts(
         runtime.clone(),
         &result.procedural_learning.job_id.unwrap(),
@@ -896,9 +1036,7 @@ fn standard_package_and_task_evidence_are_consumed_without_rewriting_their_owner
 
 fn seed(store: MemoryStoreHandle, clock: Arc<Clock>) {
     let runtime = Arc::new(runtime(store, clock, "agent-a"));
-    let result = runtime
-        .finalize_turn(request(&runtime, "seed", None))
-        .unwrap();
+    let result = runtime.submit(request(&runtime, "seed", None)).unwrap();
     complete(runtime, &result.procedural_learning.job_id.unwrap());
 }
 
@@ -934,12 +1072,12 @@ fn production_receipt_binds_final_delivery_and_survives_runtime_reopen() {
     };
     let runtime = Arc::new(runtime(store.clone(), time.clone(), "agent-a"));
     let input = request(&runtime, "use", Some(receipt.clone()));
-    let report = runtime.finalize_turn(input.clone()).unwrap();
+    let report = runtime.submit(input.clone()).unwrap();
     let job = report.procedural_learning.job_id.unwrap();
     complete(runtime.clone(), &job);
     let before = store.export_replay_snapshot().unwrap();
     time.0.fetch_add(86_401, Ordering::SeqCst);
-    let replay = runtime.finalize_turn(input).unwrap();
+    let replay = runtime.submit(input).unwrap();
     assert_eq!(
         replay.procedural_learning.job_id.as_deref(),
         Some(job.as_str())
@@ -1032,15 +1170,13 @@ fn forged_scope_tamper_and_expired_first_intake_are_atomic_zero_write() {
     let mut scoped = receipt.clone();
     scoped.identity.chat_id = "other-chat".into();
     for forged in [altered, scoped] {
-        assert!(a.finalize_turn(request(&a, "guard", Some(forged))).is_err());
+        assert!(a.submit(request(&a, "guard", Some(forged))).is_err());
     }
     assert!(b
-        .finalize_turn(request(&b, "guard", Some(receipt.clone())))
+        .submit(request(&b, "guard", Some(receipt.clone())))
         .is_err());
     time.0.store(receipt.expires_at, Ordering::SeqCst);
-    assert!(a
-        .finalize_turn(request(&a, "guard", Some(receipt)))
-        .is_err());
+    assert!(a.submit(request(&a, "guard", Some(receipt))).is_err());
     let after = store.export_replay_snapshot().unwrap();
     assert_eq!(before.json_docs, after.json_docs);
     assert_eq!(before.events, after.events);
@@ -1183,7 +1319,7 @@ fn persistent_reopen(config: StoreBackendConfig) {
         let store = support::open_memory_store(config.clone()).unwrap();
         let runtime = Arc::new(runtime(store, time.clone(), "agent-a"));
         let result = runtime
-            .finalize_turn(request(&runtime, "reopen-use", Some(receipt.clone())))
+            .submit(request(&runtime, "reopen-use", Some(receipt.clone())))
             .unwrap();
         complete(runtime, &result.procedural_learning.job_id.unwrap());
     }

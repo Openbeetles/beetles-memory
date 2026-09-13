@@ -398,10 +398,10 @@ pub struct EntryConsoleWorkbenchProjectionInspector {
 #[serde(rename_all = "camelCase")]
 pub struct EntryConsoleWorkbenchProceduralEvolution {
     pub status: EntryConsoleWorkbenchStatus,
-    pub total_skills: usize,
-    pub active_skills: usize,
-    pub runtime_learned: usize,
-    pub disabled: usize,
+    pub total_skills: Option<usize>,
+    pub active_skills: Option<usize>,
+    pub runtime_learned: Option<usize>,
+    pub disabled: Option<usize>,
     pub top_skills: Vec<EntryConsoleWorkbenchSkillRef>,
 }
 
@@ -438,8 +438,9 @@ pub struct EntryConsoleWorkbenchSoulHealth {
     pub safe_actions: Vec<String>,
     pub agent_tool_registries: usize,
     pub agent_tool_registry_tools: usize,
-    pub agent_tool_experiences: usize,
-    pub agent_tool_stale_experiences: usize,
+    pub agent_tool_read_availability: bm_sdk::ProceduralLearningReadAvailabilityV1,
+    pub agent_tool_experiences: Option<usize>,
+    pub agent_tool_stale_experiences: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -556,10 +557,11 @@ pub struct EntryConsoleSkillSummary {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryConsoleSkillList {
-    pub total: usize,
-    pub active: usize,
-    pub disabled: usize,
-    pub runtime_learned: usize,
+    pub read_availability: bm_sdk::ProceduralLearningReadAvailabilityV1,
+    pub total: Option<usize>,
+    pub active: Option<usize>,
+    pub disabled: Option<usize>,
+    pub runtime_learned: Option<usize>,
     pub skills: Vec<EntryConsoleSkillSummary>,
 }
 
@@ -1082,6 +1084,7 @@ impl EntryConsoleState {
 impl From<RuntimeSkillListReport> for EntryConsoleSkillList {
     fn from(report: RuntimeSkillListReport) -> Self {
         Self {
+            read_availability: report.read_availability,
             total: report.total,
             active: report.active,
             disabled: report.disabled,

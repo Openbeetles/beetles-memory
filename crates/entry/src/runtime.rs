@@ -338,6 +338,7 @@ fn governor_control_runtime(
         .capability_policy(runtime.config().capability_policy.clone())
         .privacy_policy(runtime.config().privacy_policy.clone())
         .audit_sink(Arc::clone(&runtime.config().audit_sink))
+        .agent_tool_registries(runtime.agent_tool_registries())
         .build()
 }
 
@@ -505,6 +506,25 @@ impl EntryRuntime {
 
     pub fn runtime(&self) -> &MemoryRuntime {
         &self.runtime
+    }
+
+    /// Trusted in-process management only. No transport command grants this
+    /// authority, and reopening Entry does not register or restore permissions.
+    pub fn control_procedural_producer(
+        &self,
+        request: bm_sdk::MemoryProceduralProducerControlRequest,
+    ) -> Result<bm_sdk::MemoryProceduralProducerControlReport> {
+        governor_control_runtime(&self.runtime, self.store.clone())?
+            .control_procedural_producer(request)
+    }
+
+    /// Handoff of an existing durable grant, never deserialization of authority.
+    pub fn procedural_submission_capability(
+        &self,
+        reference: &bm_sdk::ProceduralProducerRevisionRefV1,
+    ) -> Result<bm_sdk::MemoryProceduralSubmissionCapability> {
+        governor_control_runtime(&self.runtime, self.store.clone())?
+            .procedural_submission_capability(reference)
     }
 
     pub fn memory_learning_service_report(
@@ -968,7 +988,11 @@ impl EntryRuntime {
             limit: 8,
         }) {
             Ok(report) => EntryConsoleWorkbenchProceduralEvolution {
-                status: EntryConsoleWorkbenchStatus::ready("sdk_skill_evolution_surface_available"),
+                status: if report.read_availability.is_ready() {
+                    EntryConsoleWorkbenchStatus::ready("sdk_skill_evolution_surface_available")
+                } else {
+                    EntryConsoleWorkbenchStatus::blocked(report.read_availability.reason())
+                },
                 total_skills: report.total,
                 active_skills: report.active,
                 runtime_learned: report.runtime_skills,
@@ -989,10 +1013,10 @@ impl EntryRuntime {
             },
             Err(error) => EntryConsoleWorkbenchProceduralEvolution {
                 status: EntryConsoleWorkbenchStatus::blocked(error.to_string()),
-                total_skills: 0,
-                active_skills: 0,
-                runtime_learned: 0,
-                disabled: 0,
+                total_skills: None,
+                active_skills: None,
+                runtime_learned: None,
+                disabled: None,
                 top_skills: Vec::new(),
             },
         }
@@ -1043,6 +1067,7 @@ impl EntryRuntime {
                 safe_actions: report.operator_action_report.safe_actions_available,
                 agent_tool_registries: report.agent_tool_registry.registries,
                 agent_tool_registry_tools: report.agent_tool_registry.tools,
+                agent_tool_read_availability: report.agent_tool_registry.read_availability,
                 agent_tool_experiences: report.agent_tool_registry.governed_experiences,
                 agent_tool_stale_experiences: report.agent_tool_registry.stale_experiences,
             },
@@ -1057,8 +1082,10 @@ impl EntryRuntime {
                 safe_actions: Vec::new(),
                 agent_tool_registries: 0,
                 agent_tool_registry_tools: 0,
-                agent_tool_experiences: 0,
-                agent_tool_stale_experiences: 0,
+                agent_tool_read_availability:
+                    bm_sdk::ProceduralLearningReadAvailabilityV1::NotMaterialized,
+                agent_tool_experiences: None,
+                agent_tool_stale_experiences: None,
             },
         }
     }
@@ -1342,6 +1369,22 @@ impl EntryRuntime {
                 lease.report().clone(),
             ));
         }
+        if matches!(&command, AdapterCommand::FinalizeTurn(request) if request.learning.has_feedback())
+        {
+            if let Some(capability) = services.procedural_submission {
+                let matches_principal = context.auth().bearer_principal().is_some_and(|principal|
+                    matches!(capability.principal(), bm_sdk::ProceduralProducerPrincipalV1::EntryPrincipal { principal_id, owner_id }
+                        if principal_id == principal.principal_id() && owner_id == principal.owner_id()
+                            && owner_id == &self.config.identity.owner_id));
+                if !context.auth().is_authenticated() || !matches_principal {
+                    return Ok(EntryResponse::from_adapter(AdapterResponse::Rejected {
+                        request_id: context.request_id().into(), audit_id: context.audit_id().into(),
+                        error_key: AdapterErrorKey::Forbidden,
+                        reason: "procedural submission authority does not match the authenticated Entry principal".into(),
+                    }, lease.report().clone()));
+                }
+            }
+        }
         let _idempotency_reservation = if command.operation().requires_in_flight_reservation() {
             let fingerprint_material = command
                 .idempotency_fingerprint_material()
@@ -1569,3 +1612,7 @@ mod runtime_cache_budget_tests {
         assert_eq!(effective_runtime_cache_limit(Some(6), 0), 1);
     }
 }
+
+#[cfg(test)]
+#[path = "runtime/procedural_authority_tests.rs"]
+mod procedural_authority_tests;

@@ -104,6 +104,7 @@ pub enum MemoryMutationOperationKind {
     RelationshipControl,
     ProceduralLearning,
     ProceduralLifecycle,
+    ProceduralProducerControl,
     GovernanceCredentialRecovery,
     GovernanceProviderPermissionRecovery,
 }
@@ -126,6 +127,7 @@ impl MemoryMutationOperationKind {
             Self::RelationshipControl => "relationship_control".to_string(),
             Self::ProceduralLearning => "procedural_learning".to_string(),
             Self::ProceduralLifecycle => "procedural_lifecycle".to_string(),
+            Self::ProceduralProducerControl => "procedural_producer_control".to_string(),
             Self::GovernanceCredentialRecovery => "governance_credential_recovery".to_string(),
             Self::GovernanceProviderPermissionRecovery => {
                 "governance_provider_permission_recovery".to_string()

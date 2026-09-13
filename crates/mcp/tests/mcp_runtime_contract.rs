@@ -199,7 +199,8 @@ fn mcp_write_accepts_typed_factual_candidates_and_rejects_procedural_creation() 
             limit: 16,
         })
         .expect("runtime skill list");
-    assert_eq!(skills.total, 0);
+    assert!(skills.read_availability.is_ready());
+    assert_eq!(skills.total, Some(0));
     assert!(skills.skills.is_empty());
 }
 
@@ -235,7 +236,7 @@ fn finalize_arguments() -> String {
             }],
             "external_content_used": false
         },
-        "learning": bm_sdk::PostTurnLearningInputV1::empty()
+        "learning": bm_sdk::PostTurnLearningInputV2::empty()
     })
     .to_string()
 }

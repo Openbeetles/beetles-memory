@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub(crate) mod scoped_projection_source;
+
 use bm_core::agent::{ActiveWorkRecord, ActiveWorkStore};
 #[cfg(feature = "nonproduction-replay-harness")]
 use bm_core::budget::{BenchmarkStoreCapacityExtension, StoreRuntimeBudget};
@@ -271,6 +273,8 @@ pub(crate) struct StoreMutationOperationPlan {
     committed_at_unix_secs: u64,
     transaction_id: String,
     subject_soul_authorized: bool,
+    procedural_mutation_authority:
+        Option<super::procedural_feedback::ProceduralMutationAuthorization>,
 }
 
 impl StoreMutationOperationPlan {
@@ -316,6 +320,7 @@ impl StoreMutationOperationPlan {
             committed_at_unix_secs,
             transaction_id,
             subject_soul_authorized: false,
+            procedural_mutation_authority: None,
         })
     }
 
@@ -331,11 +336,41 @@ impl StoreMutationOperationPlan {
         &self.intent_digest
     }
 
+    pub(crate) fn procedural_mutation_authority(
+        &self,
+    ) -> Option<&super::procedural_feedback::ProceduralMutationAuthorization> {
+        self.procedural_mutation_authority.as_ref()
+    }
+
     pub(crate) fn authorize_subject_soul(
         mut self,
         _authority: SubjectSoulStoreMutationAuthority,
     ) -> Self {
         self.subject_soul_authorized = true;
+        self
+    }
+
+    pub(crate) fn authorize_procedural_producer(
+        mut self,
+        authority: super::procedural_feedback::ProceduralProducerControlAuthorization,
+    ) -> Self {
+        self.procedural_mutation_authority = Some(
+            super::procedural_feedback::ProceduralMutationAuthorization::ProducerControl(Box::new(
+                authority,
+            )),
+        );
+        self
+    }
+
+    pub(crate) fn authorize_procedural_reconciliation(
+        mut self,
+        authority: super::procedural_feedback::ProceduralReconciliationAuthorization,
+    ) -> Self {
+        self.procedural_mutation_authority = Some(
+            super::procedural_feedback::ProceduralMutationAuthorization::Reconciliation(Box::new(
+                authority,
+            )),
+        );
         self
     }
 
@@ -1257,20 +1292,35 @@ impl StorePlatform {
         operation: &StoreMutationOperationPreflight,
     ) -> Result<Option<MemoryMutationReceipt>> {
         operation.identity.validate_contract()?;
-        self.load_committed_mutation_operation_parts(&operation.identity, &operation.intent_digest)
+        self.load_committed_mutation_operation_parts(
+            &operation.identity,
+            Some(&operation.intent_digest),
+        )
     }
 
     fn load_committed_mutation_operation(
         &self,
         operation: &StoreMutationOperationPlan,
     ) -> Result<Option<MemoryMutationReceipt>> {
-        self.load_committed_mutation_operation_parts(&operation.identity, &operation.intent_digest)
+        self.load_committed_mutation_operation_parts(
+            &operation.identity,
+            Some(&operation.intent_digest),
+        )
+    }
+
+    /// Internal reconciliation replay only: its content-addressed identity was
+    /// derived from the complete claimed job, before any new page is planned.
+    pub(crate) fn read_reconciliation_page_operation(
+        &self,
+        authority: &bm_core::memory::ProceduralReconciliationPageAuthorityV1,
+    ) -> Result<Option<MemoryMutationReceipt>> {
+        self.load_committed_mutation_operation_parts(&authority.operation, None)
     }
 
     fn load_committed_mutation_operation_parts(
         &self,
         identity: &MemoryMutationOperationIdentity,
-        intent_digest: &str,
+        intent_digest: Option<&str>,
     ) -> Result<Option<MemoryMutationReceipt>> {
         let key = identity.storage_key();
         let addresses = [
@@ -1303,7 +1353,7 @@ impl StorePlatform {
             (None, None) => Ok(None),
             (Some(receipt), Some(audit)) => {
                 receipt
-                    .classify_replay(identity, intent_digest)
+                    .classify_replay(identity, intent_digest.unwrap_or(&receipt.intent_digest))
                     .map_err(|error| {
                         if error.class() == Some(bm_core::ErrorClass::Conflict) {
                             error
@@ -1345,12 +1395,34 @@ impl StorePlatform {
 
     fn commit_governed_memory_transaction_authorized(
         &self,
+        batch: StoreMutationBatch,
+        commit_preconditions: StoreCommitPreconditions<'_>,
+        graph_repair_authority: Option<GraphRepairAuthority>,
+        pinned_runtime_budget: Option<&RuntimeBudgetReport>,
+        runtime_timestamp_unix_secs: Option<u64>,
+        mutation_operation: Option<&StoreMutationOperationPlan>,
+    ) -> Result<StoreMutationBatchReport> {
+        self.commit_governed_memory_transaction_with_intake_authority(
+            batch,
+            commit_preconditions,
+            graph_repair_authority,
+            pinned_runtime_budget,
+            runtime_timestamp_unix_secs,
+            mutation_operation,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn commit_governed_memory_transaction_with_intake_authority(
+        &self,
         mut batch: StoreMutationBatch,
         commit_preconditions: StoreCommitPreconditions<'_>,
         graph_repair_authority: Option<GraphRepairAuthority>,
         pinned_runtime_budget: Option<&RuntimeBudgetReport>,
         runtime_timestamp_unix_secs: Option<u64>,
         mutation_operation: Option<&StoreMutationOperationPlan>,
+        intake_authority: Option<&crate::learning::ProceduralIntakeAuthorization>,
     ) -> Result<StoreMutationBatchReport> {
         let mut preconditions = commit_preconditions.json.to_vec();
         let blob_preconditions = commit_preconditions.blobs;
@@ -1375,13 +1447,6 @@ impl StorePlatform {
                 "operation is required",
             ));
         }
-        append_mutation_operation_records(
-            &mut batch,
-            &mut preconditions,
-            mutation_operation,
-            transaction_timestamp,
-        )?;
-
         let owned_runtime_budget;
         let runtime_budget = if let Some(runtime_budget) = pinned_runtime_budget {
             runtime_budget
@@ -1397,6 +1462,29 @@ impl StorePlatform {
         }
         let operation_capacity =
             StoreCapacityBudget::from_runtime_budget(runtime_budget.store_budget);
+
+        super::procedural_feedback::source_dependents::append(
+            self,
+            &mut batch,
+            &mut preconditions,
+            mutation_operation.map(|operation| &operation.identity),
+            transaction_timestamp,
+            operation_capacity,
+        )?;
+        super::procedural_feedback::runtime_skill_control::append(
+            self,
+            &mut batch,
+            &mut preconditions,
+            mutation_operation,
+            transaction_timestamp,
+            operation_capacity,
+        )?;
+        append_mutation_operation_records(
+            &mut batch,
+            &mut preconditions,
+            mutation_operation,
+            transaction_timestamp,
+        )?;
 
         validate_batch_mutation_namespaces(&batch, &preconditions, |namespace, key| {
             self.engine.get_blob(namespace, key)
@@ -1649,7 +1737,7 @@ impl StorePlatform {
         governed_json_reads.extend(self.procedural_transaction_dependency_json_reads(
             &batch,
             &preconditions,
-            operation_capacity.kv_max_entries,
+            operation_capacity,
         )?);
         let mut request = StoreTransactionRequest::new(
             batch.transaction_id.clone(),
@@ -1682,6 +1770,23 @@ impl StorePlatform {
             },
         )
         .include_governed_json_reads(governed_json_reads);
+        if let Some(authority) = intake_authority {
+            if authority.store_authority_digest != self.learning_store_authority_digest()
+                || authority.store_incarnation
+                    != self.procedural_store_incarnation(&authority.evidence.memory_space_id)?
+            {
+                return Err(Error::config(
+                    "procedural_intake_authority",
+                    "submission proof belongs to another Store",
+                ));
+            }
+            request = request.authorize_procedural_intake(authority.clone());
+        }
+        if let Some(authority) = mutation_operation
+            .and_then(|operation| operation.procedural_mutation_authority.as_ref())
+        {
+            request = request.authorize_procedural_mutation(authority.clone());
+        }
         if batch.mutations.iter().any(|mutation| {
             matches!(mutation,
                 StoreMutation::PutJson { namespace, .. } | StoreMutation::DeleteJson { namespace, .. }
@@ -2148,6 +2253,11 @@ impl StorePlatform {
             .map(super::procedural_selection::ProceduralSelectionSigner::from_authority)
     }
 
+    pub(crate) fn procedural_store_incarnation(&self, space: &str) -> Result<String> {
+        self.procedural_selection_authority(space)
+            .map(|authority| authority.incarnation().to_owned())
+    }
+
     pub(crate) fn verify_procedural_selection_receipt(
         &self,
         receipt: &bm_core::memory::ProceduralSelectionReceiptV1,
@@ -2160,35 +2270,40 @@ impl StorePlatform {
         &self,
         batch: &StoreMutationBatch,
         preconditions: &[StoreJsonPrecondition],
-        max_entries: usize,
+        capacity: StoreCapacityBudget,
     ) -> Result<BTreeSet<(String, String)>> {
-        use crate::store_internal::schema::{
+        use super::schema::{
             AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE, AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE,
             AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE, RUNTIME_SKILL_RECORD_NAMESPACE,
         };
-        use bm_core::skills::{
-            agent_tool_experience_head_key, agent_tool_experience_scope_manifest_key,
-            AgentToolExperienceHeadStateV2, AgentToolExperienceOwnerHeadV2,
-            AgentToolExperienceOwningScopeV1, AgentToolExperienceRevisionMaterialV2,
-            AgentToolExperienceScopeManifestV1,
-        };
         let stage = "procedural_transaction_dependency_read_set";
         let relevant = |namespace: &str| {
-            matches!(
-                namespace,
-                PROCEDURAL_FEEDBACK_JOB_NAMESPACE
-                    | PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE
-                    | PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE
-                    | AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE
-                    | AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE
-                    | AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE
-                    | RUNTIME_SKILL_RECORD_NAMESPACE
-                    | MEMORY_MUTATION_RECEIPT_NAMESPACE
-                    | MEMORY_MUTATION_AUDIT_NAMESPACE
-                    | "conversation_transcript"
-                    | super::procedural_selection::NAMESPACE
-            )
+            super::procedural_feedback::source_dependents::relevant(namespace)
+                || matches!(
+                    namespace,
+                    PROCEDURAL_FEEDBACK_JOB_NAMESPACE
+                        | super::schema::PROCEDURAL_PRODUCER_HEAD_NAMESPACE
+                        | super::schema::PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE
+                        | super::schema::PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE
+                        | PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE
+                        | PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE
+                        | AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE
+                        | AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE
+                        | AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE
+                        | RUNTIME_SKILL_RECORD_NAMESPACE
+                        | MEMORY_MUTATION_RECEIPT_NAMESPACE
+                        | MEMORY_MUTATION_AUDIT_NAMESPACE
+                        | "conversation_transcript"
+                        | super::procedural_selection::NAMESPACE
+                )
         };
+        let proof =
+            super::procedural_feedback::source_dependents::SourceDependencyReadProof::prepare(
+                self,
+                batch,
+                preconditions,
+                capacity,
+            )?;
         let mut pending = Vec::new();
         for mutation in &batch.mutations {
             if let StoreMutation::PutJson {
@@ -2215,295 +2330,35 @@ impl StorePlatform {
                 }
             }
         }
+        let mut reads = proof.actual_reads().cloned().collect::<BTreeSet<_>>();
         let mut scheduled = pending
             .iter()
             .map(|(namespace, key, _)| (namespace.clone(), key.clone()))
             .collect::<BTreeSet<_>>();
-        if scheduled.len() > max_entries {
-            return Err(Error::config(
-                stage,
+        if scheduled.union(&reads).count() > capacity.kv_max_entries {
+            return Err(store_budget_error(
                 "procedural dependency closure exceeds Store KV budget",
             ));
         }
-        let mut reads = BTreeSet::new();
-        let scope = AgentToolExperienceOwningScopeV1::Subject {
-            mounted_subject_id: batch.scope.subject_id.clone(),
-        };
         while let Some((namespace, key, value)) = pending.pop() {
             admit_store_json_document(&namespace, &key, &value, stage)?;
-            let mut dependencies = Vec::<(String, String)>::new();
-            match namespace.as_str() {
-                RUNTIME_SKILL_RECORD_NAMESPACE => {
-                    use bm_core::skills::{
-                        RuntimeSkillCreationRef, RuntimeSkillEvidenceKind,
-                        RuntimeSkillLifecycleState,
-                    };
-                    let owner: RuntimeSkillOwnerRecord =
-                        decode_transaction_dependency(&value, "runtime promotion owner")?;
-                    if matches!(
-                        owner.creation_ref,
-                        RuntimeSkillCreationRef::AgentToolExperiencePromotion { .. }
-                    ) {
-                        let needs_live_source = !matches!(
-                            owner.lifecycle.state,
-                            RuntimeSkillLifecycleState::Retired
-                                | RuntimeSkillLifecycleState::Superseded
-                        );
-                        for source in &owner.intrinsic_contract.evidence_bindings {
-                            if source.kind != RuntimeSkillEvidenceKind::ProceduralFeedbackSource {
-                                continue;
-                            }
-                            dependencies.push((
-                                PROCEDURAL_FEEDBACK_JOB_NAMESPACE.to_owned(),
-                                source.safe_ref.clone(),
-                            ));
-                            dependencies.push((
-                                PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE.to_owned(),
-                                source.safe_ref.clone(),
-                            ));
-                            if needs_live_source {
-                                if let Some(value) = self.engine.get_json_value(
-                                    PROCEDURAL_FEEDBACK_JOB_NAMESPACE,
-                                    &source.safe_ref,
-                                )? {
-                                    admit_store_json_document(
-                                        PROCEDURAL_FEEDBACK_JOB_NAMESPACE,
-                                        &source.safe_ref,
-                                        &value,
-                                        stage,
-                                    )?;
-                                    let job: ProceduralFeedbackJobV1 =
-                                        decode_transaction_dependency(
-                                            &value,
-                                            "runtime promotion source job",
-                                        )?;
-                                    if job.identity.memory_space_id != batch.scope.memory_space_id
-                                        || job.identity.mounted_subject_id != batch.scope.subject_id
-                                    {
-                                        return Err(Error::config(
-                                            stage,
-                                            "runtime source dependency crosses exact subject scope",
-                                        ));
-                                    }
-                                    let conversation = ConversationKey::new(
-                                        &job.identity.memory_space_id,
-                                        &job.identity.channel_id,
-                                        &job.identity.conversation_id,
-                                    )?;
-                                    dependencies.push((
-                                        "conversation_transcript".to_owned(),
-                                        transcript_turn_storage_key(
-                                            &conversation,
-                                            &job.identity.mounted_subject_id,
-                                            &job.identity.turn_id,
-                                        ),
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-                "conversation_transcript" => {
-                    let record: TranscriptTurnRecord =
-                        decode_transaction_dependency(&value, "procedural receipt transcript")?;
-                    if record
-                        .learning_evidence
-                        .as_ref()
-                        .and_then(|evidence| evidence.selection_receipt.as_ref())
-                        .is_some()
-                    {
-                        dependencies.push((
-                            super::procedural_selection::NAMESPACE.to_owned(),
-                            super::procedural_selection::authority_key(&record.key.memory_space_id),
-                        ));
-                    }
-                    dependencies.extend(super::procedural_selection::intake_dependencies(&record)?);
-                }
-                PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE => {
-                    let index: ProceduralFeedbackScopeIndexV1 =
-                        decode_transaction_dependency(&value, "procedural scope index")?;
-                    if index.memory_space_id != batch.scope.memory_space_id
-                        || index.mounted_subject_id != batch.scope.subject_id
-                    {
-                        return Err(Error::config(
-                            stage,
-                            "procedural index dependency crosses exact subject scope",
-                        ));
-                    }
-                    dependencies.extend(
-                        index
-                            .active_jobs
-                            .iter()
-                            .chain(&index.recent_terminal_jobs)
-                            .map(|job| {
-                                (
-                                    PROCEDURAL_FEEDBACK_JOB_NAMESPACE.to_string(),
-                                    job.job_id.clone(),
-                                )
-                            }),
-                    );
-                }
-                PROCEDURAL_FEEDBACK_JOB_NAMESPACE => {
-                    let job: ProceduralFeedbackJobV1 =
-                        decode_transaction_dependency(&value, "procedural job")?;
-                    if job.identity.memory_space_id != batch.scope.memory_space_id
-                        || job.identity.mounted_subject_id != batch.scope.subject_id
-                    {
-                        return Err(Error::config(
-                            stage,
-                            "procedural job dependency crosses exact subject scope",
-                        ));
-                    }
-                    dependencies.push((
-                        PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE.to_string(),
-                        job.scope_index_key,
-                    ));
-                    if let Some(receipt) = job.receipt {
-                        dependencies.push((
-                            PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE.to_string(),
-                            job.job_id,
-                        ));
-                        dependencies.push((
-                            MEMORY_MUTATION_RECEIPT_NAMESPACE.to_string(),
-                            receipt.mutation_receipt_key.clone(),
-                        ));
-                        dependencies.push((
-                            MEMORY_MUTATION_AUDIT_NAMESPACE.to_string(),
-                            receipt.mutation_receipt_key,
-                        ));
-                    }
-                }
-                PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE => {
-                    let ledger: ProceduralFeedbackApplicationLedgerV1 =
-                        decode_transaction_dependency(&value, "procedural application ledger")?;
-                    if ledger.identity.memory_space_id != batch.scope.memory_space_id
-                        || ledger.identity.mounted_subject_id != batch.scope.subject_id
-                    {
-                        return Err(Error::config(
-                            stage,
-                            "procedural application dependency crosses exact subject scope",
-                        ));
-                    }
-                    dependencies
-                        .push((PROCEDURAL_FEEDBACK_JOB_NAMESPACE.to_string(), ledger.job_id));
-                    for applied in ledger.applied_owner_bindings {
-                        match applied {
-                            bm_core::memory::ProceduralAppliedOwnerBindingV1::AgentToolExperience { owner_revision, .. } => dependencies.push((
-                                AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE.to_string(),
-                                agent_tool_experience_head_key(&batch.scope.memory_space_id, &scope, &owner_revision.owner_ref)?,
-                            )),
-                            bm_core::memory::ProceduralAppliedOwnerBindingV1::RuntimeSkill { binding } => dependencies.push((
-                                super::schema::RUNTIME_SKILL_RECORD_NAMESPACE.to_owned(), binding.owner_physical_key,
-                            )),
-                        }
-                    }
-                }
-                AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE => {
-                    let manifest: AgentToolExperienceScopeManifestV1 =
-                        decode_transaction_dependency(&value, "experience scope manifest")?;
-                    if manifest.memory_space_id != batch.scope.memory_space_id
-                        || manifest.owning_scope != scope
-                    {
-                        return Err(Error::config(
-                            stage,
-                            "experience manifest dependency crosses exact subject scope",
-                        ));
-                    }
-                    for binding in manifest.bindings {
-                        let expected = agent_tool_experience_head_key(
-                            &batch.scope.memory_space_id,
-                            &scope,
-                            &binding.owner_ref,
-                        )?;
-                        if expected != binding.head_key {
-                            return Err(Error::config(
-                                stage,
-                                "experience binding redirects canonical head address",
-                            ));
-                        }
-                        dependencies
-                            .push((AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE.to_string(), expected));
-                    }
-                }
-                AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE => {
-                    let head: AgentToolExperienceOwnerHeadV2 =
-                        decode_transaction_dependency(&value, "experience head")?;
-                    if head.memory_space_id != batch.scope.memory_space_id
-                        || head.owning_scope != scope
-                    {
-                        return Err(Error::config(
-                            stage,
-                            "experience head dependency crosses exact subject scope",
-                        ));
-                    }
-                    dependencies.push((
-                        AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE.to_string(),
-                        agent_tool_experience_scope_manifest_key(
-                            &batch.scope.memory_space_id,
-                            &scope,
-                        )?,
-                    ));
-                    if head.state == AgentToolExperienceHeadStateV2::Active {
-                        dependencies.extend(head.retained_revisions.into_iter().map(|revision| {
-                            (
-                                AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE.to_string(),
-                                revision.material_key,
-                            )
-                        }));
-                    }
-                }
-                AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE => {
-                    let material: AgentToolExperienceRevisionMaterialV2 =
-                        decode_transaction_dependency(&value, "experience material")?;
-                    if material.memory_space_id != batch.scope.memory_space_id
-                        || material.owning_scope != scope
-                    {
-                        return Err(Error::config(
-                            stage,
-                            "experience material dependency crosses exact subject scope",
-                        ));
-                    }
-                    dependencies.push((
-                        AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE.to_string(),
-                        agent_tool_experience_head_key(
-                            &batch.scope.memory_space_id,
-                            &scope,
-                            &material.owner_ref,
-                        )?,
-                    ));
-                }
-                MEMORY_MUTATION_RECEIPT_NAMESPACE => {
-                    let receipt: MemoryMutationReceipt =
-                        decode_transaction_dependency(&value, "procedural mutation receipt")?;
-                    if receipt.identity.memory_space_id() != batch.scope.memory_space_id
-                        || receipt.identity.mounted_subject_id() != batch.scope.subject_id
-                    {
-                        return Err(Error::config(
-                            stage,
-                            "mutation receipt dependency crosses exact subject scope",
-                        ));
-                    }
-                }
-                MEMORY_MUTATION_AUDIT_NAMESPACE => {
-                    let audit: MemoryMutationAuditRecord =
-                        decode_transaction_dependency(&value, "procedural mutation audit")?;
-                    if audit.identity.memory_space_id() != batch.scope.memory_space_id
-                        || audit.identity.mounted_subject_id() != batch.scope.subject_id
-                    {
-                        return Err(Error::config(
-                            stage,
-                            "mutation audit dependency crosses exact subject scope",
-                        ));
-                    }
-                }
-                _ => {}
-            }
-            for (namespace, key) in dependencies {
+            // Proposed roots never grant reverse-fanout read authority. The
+            // independent, verified before-image walk already supplies it.
+            let node =
+                super::procedural_feedback::procedural_dependency_node(&namespace, &value, false)?;
+            proof.admit_node(
+                &namespace,
+                &key,
+                &value,
+                node.subject_scope.as_ref(),
+                batch,
+                &node.addresses,
+            )?;
+            for (namespace, key) in node.addresses {
                 reads.insert((namespace.clone(), key.clone()));
                 if scheduled.insert((namespace.clone(), key.clone())) {
-                    if scheduled.len() > max_entries {
-                        return Err(Error::config(
-                            stage,
+                    if scheduled.union(&reads).count() > capacity.kv_max_entries {
+                        return Err(store_budget_error(
                             "procedural dependency closure exceeds Store KV budget",
                         ));
                     }
@@ -2541,12 +2396,12 @@ impl StorePlatform {
     pub(crate) fn read_procedural_application_ledgers_with_runtime_budget(
         &self,
         runtime_budget: &RuntimeBudgetReport,
+        keys: &[String],
     ) -> Result<Vec<StoreSnapshotJsonDoc>> {
         runtime_budget.validate_for_admission(current_unix_secs())?;
         let namespace = PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE;
         let stage = "procedural_application_ledger_read";
         let budget = runtime_budget.store_budget;
-        let keys = self.engine.list_json_keys(namespace)?;
         if keys.len() > budget.kv_max_entries {
             return Err(store_budget_error(
                 "procedural ledger keys exceed request KV budget",
@@ -2555,16 +2410,13 @@ impl StorePlatform {
         let mut bytes = 0usize;
         let mut docs = Vec::with_capacity(keys.len());
         for key in keys {
-            let value = self
-                .engine
-                .get_json_value(namespace, &key)?
-                .ok_or_else(|| {
-                    Error::config(stage, "listed immutable procedural ledger is missing")
-                })?;
-            admit_store_json_document(namespace, &key, &value, stage)?;
+            let Some(value) = self.engine.get_json_value(namespace, key)? else {
+                continue;
+            };
+            admit_store_json_document(namespace, key, &value, stage)?;
             let document = StoreSnapshotJsonDoc {
                 namespace: namespace.to_string(),
-                key,
+                key: key.clone(),
                 value,
             };
             let document_bytes = serde_json::to_vec(&document)
@@ -2900,18 +2752,20 @@ impl StorePlatform {
         )?;
         validate_scoped_projection_governed_closure(&admitted_snapshot, scope)?;
         let admission = self.store_transaction_admission_for_report(runtime_budget)?;
-        let replace = self.engine.replace_scoped_projection(
-            &StoreScopedProjectionReplaceRequest {
-                scope: scope.clone(),
-                json_namespaces: store_memory_space_archive_json_namespaces()
-                    .map(str::to_string)
-                    .collect(),
-                json_docs: admitted_snapshot.json_docs,
-                events: admitted_snapshot.events,
-                preserve_protected_owner_state: true,
-            },
-            &admission,
-        )?;
+        let mut request = StoreScopedProjectionReplaceRequest {
+            scope: scope.clone(),
+            json_namespaces: store_memory_space_archive_json_namespaces()
+                .map(str::to_string)
+                .collect(),
+            json_docs: admitted_snapshot.json_docs,
+            events: admitted_snapshot.events,
+            preserve_protected_owner_state: true,
+            source_closure: None,
+        };
+        self.bind_scoped_source_closure(&mut request, operation_capacity, current_unix_secs())?;
+        let replace = self
+            .engine
+            .replace_scoped_projection(&request, &admission)?;
         Ok(replace)
     }
 
@@ -3008,9 +2862,28 @@ impl StorePlatform {
         &self,
         operation: &str,
         scope: StoreEventScope,
+        owner_mutations: Vec<StoreMutation>,
+        indexes: Vec<RecallIndexMutationPlan>,
+        preconditions: Vec<StoreJsonPrecondition>,
+    ) -> Result<StoreMutationBatchReport> {
+        self.commit_recall_indexed_mutations_with_intake_authority(
+            operation,
+            scope,
+            owner_mutations,
+            indexes,
+            preconditions,
+            None,
+        )
+    }
+
+    fn commit_recall_indexed_mutations_with_intake_authority(
+        &self,
+        operation: &str,
+        scope: StoreEventScope,
         mut owner_mutations: Vec<StoreMutation>,
         indexes: Vec<RecallIndexMutationPlan>,
         mut preconditions: Vec<StoreJsonPrecondition>,
+        intake_authority: Option<&crate::learning::ProceduralIntakeAuthorization>,
     ) -> Result<StoreMutationBatchReport> {
         for (namespace, key, value, before) in indexes {
             preconditions.push(match before {
@@ -3033,7 +2906,7 @@ impl StorePlatform {
                 record_key: key,
             });
         }
-        self.commit_governed_memory_transaction_authorized(
+        self.commit_governed_memory_transaction_with_intake_authority(
             StoreMutationBatch {
                 transaction_id: format!("recall-index:{operation}:{}", current_unix_nanos()),
                 operation: operation.to_string(),
@@ -3045,6 +2918,7 @@ impl StorePlatform {
             None,
             None,
             None,
+            intake_authority,
         )
     }
 
@@ -4755,6 +4629,8 @@ fn validate_protected_json_mutation_preconditions(
     operation_authorized: bool,
 ) -> Result<()> {
     const PROTECTED_NAMESPACES: &[&str] = &[
+        crate::store_internal::schema::PROCEDURAL_PRODUCER_BINDING_NAMESPACE,
+        crate::store_internal::schema::PROCEDURAL_PRODUCER_HEAD_NAMESPACE,
         crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
         crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
         crate::store_internal::schema::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
@@ -6035,6 +5911,13 @@ pub(crate) fn validate_governed_transaction_post_image(
         limits.agent_tool_experience,
     )?;
     if batch_mutates_namespace(batch, PROCEDURAL_FEEDBACK_JOB_NAMESPACE)
+        || batch_mutates_namespace(batch, super::schema::PROCEDURAL_PRODUCER_BINDING_NAMESPACE)
+        || batch_mutates_namespace(batch, super::schema::PROCEDURAL_PRODUCER_HEAD_NAMESPACE)
+        || batch_mutates_namespace(batch, super::schema::PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE)
+        || batch_mutates_namespace(
+            batch,
+            super::schema::PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE,
+        )
         || batch_mutates_namespace(batch, PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE)
         || batch_mutates_namespace(batch, PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE)
         || batch_mutates_namespace(batch, super::schema::RUNTIME_SKILL_RECORD_NAMESPACE)
@@ -6413,6 +6296,32 @@ fn validate_long_term_version_store_image(
             max_retained,
             stage,
         )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_runtime_skill_owner_transitions(
+    before: &BackendTransactionState,
+    after: &BackendTransactionState,
+    changed: &BTreeSet<(String, String)>,
+) -> Result<()> {
+    for address in changed.iter().filter(|(namespace, _)| {
+        namespace == crate::store_internal::schema::RUNTIME_SKILL_RECORD_NAMESPACE
+    }) {
+        if let (Some(old), Some(new)) = (before.json.get(address), after.json.get(address)) {
+            if old == new {
+                continue;
+            }
+            let decode = |value: &serde_json::Value| {
+                serde_json::from_value::<RuntimeSkillOwnerRecord>(value.clone()).map_err(|_| {
+                    Error::config(
+                        "memory_write_transaction_runtime_skill_post_image_invalid",
+                        "invalid runtime skill transition image",
+                    )
+                })
+            };
+            decode(old)?.validate_successor(&decode(new)?)?;
+        }
     }
     Ok(())
 }
@@ -9256,10 +9165,7 @@ fn memory_write_transaction_preflight_error(error: Error) -> Error {
     if error.stage() == "memory_write_transaction_preflight_failed" {
         error
     } else {
-        Error::config(
-            "memory_write_transaction_preflight_failed",
-            error.to_string(),
-        )
+        Error::storage("memory_write_transaction_preflight_failed", error)
     }
 }
 
@@ -9290,7 +9196,7 @@ fn memory_write_transaction_commit_error(error: Error, subject_soul_authorized: 
         | "memory_write_transaction_evidence_source_ref_post_image_invalid"
         | "store_transaction_busy"
         | "memory_write_transaction_repair_required" => error,
-        _ => Error::config("memory_write_transaction_commit_failed", error.to_string()),
+        _ => Error::storage("memory_write_transaction_commit_failed", error),
     }
 }
 
@@ -9324,6 +9230,7 @@ pub(crate) fn snapshot_namespace_requires_private_export(namespace: &str) -> boo
             | crate::store_internal::transcript_query::TRANSCRIPT_SEARCH_MESSAGE_MANIFEST_NAMESPACE
             | crate::store_internal::transcript_query::TRANSCRIPT_QUERY_KEYRING_NAMESPACE
             | super::procedural_selection::NAMESPACE
+            | super::schema::PROCEDURAL_SOURCE_DEPENDENTS_NAMESPACE
             | GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE
             | GOVERNED_EVIDENCE_SOURCE_REF_NAMESPACE
             | GOVERNED_EVIDENCE_SOURCE_CLAIM_MANIFEST_NAMESPACE
@@ -11405,6 +11312,7 @@ impl StorePlatform {
         &self,
         intent: &TranscriptAppendIntent,
         canonical: Option<&CanonicalTurnAppendIntent>,
+        intake_authority: Option<&crate::learning::ProceduralIntakeAuthorization>,
     ) -> Result<TranscriptCommitReport> {
         intent.validate()?;
         if let Some(canonical) = canonical {
@@ -11778,12 +11686,29 @@ impl StorePlatform {
                 });
             }
         }
-        self.commit_recall_indexed_mutations_with_preconditions(
+        if let Some(authority) = intake_authority {
+            if !authority.authorizes(&record) {
+                return Err(Error::config(
+                    "procedural_intake_authority",
+                    "submission proof differs from the admitted turn",
+                ));
+            }
+            owner_preconditions.extend(authority.source_preconditions.clone());
+            owner_preconditions.push(StoreJsonPrecondition::Exact {
+                namespace: super::schema::PROCEDURAL_PRODUCER_HEAD_NAMESPACE.into(),
+                key: authority.current_head.binding_key.clone(),
+                value: serde_json::to_value(&authority.current_head).map_err(|_| {
+                    Error::config("procedural_intake_authority", "invalid producer head")
+                })?,
+            });
+        }
+        self.commit_recall_indexed_mutations_with_intake_authority(
             "conversation.transcript.append",
             scope,
             owner_mutations,
             index_plans,
             owner_preconditions,
+            intake_authority,
         )?;
         Ok(TranscriptCommitReport {
             key: record.key,
@@ -11795,6 +11720,14 @@ impl StorePlatform {
             skipped_reason: None,
         })
     }
+
+    pub(crate) fn append_authorized_canonical_turn(
+        &self,
+        intent: &CanonicalTurnAppendIntent,
+        authority: &crate::learning::ProceduralIntakeAuthorization,
+    ) -> Result<TranscriptCommitReport> {
+        self.append_transcript_intake_atomic(&intent.transcript, Some(intent), Some(authority))
+    }
 }
 
 impl ConversationTranscriptStore for StorePlatform {
@@ -11802,14 +11735,14 @@ impl ConversationTranscriptStore for StorePlatform {
         &self,
         intent: &TranscriptAppendIntent,
     ) -> Result<TranscriptCommitReport> {
-        self.append_transcript_intake_atomic(intent, None)
+        self.append_transcript_intake_atomic(intent, None, None)
     }
 
     fn append_canonical_turn_intent(
         &self,
         intent: &CanonicalTurnAppendIntent,
     ) -> Result<TranscriptCommitReport> {
-        self.append_transcript_intake_atomic(&intent.transcript, Some(intent))
+        self.append_transcript_intake_atomic(&intent.transcript, Some(intent), None)
     }
 
     fn remember_conversation_alias(&self, alias: &TranscriptConversationAlias) -> Result<()> {
@@ -15004,6 +14937,16 @@ fn validate_procedural_feedback_engine_open_closure(engine: &dyn StoreEngine) ->
         super::procedural_selection::NAMESPACE,
         "conversation_transcript",
         PROCEDURAL_FEEDBACK_JOB_NAMESPACE,
+        super::schema::PROCEDURAL_PRODUCER_BINDING_NAMESPACE,
+        super::schema::PROCEDURAL_PRODUCER_HEAD_NAMESPACE,
+        super::schema::PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE,
+        super::schema::PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE,
+        super::schema::PROCEDURAL_SOURCE_DEPENDENTS_NAMESPACE,
+        super::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+        super::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+        super::schema::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
+        LONG_TERM_CONTROL_REVISION_NAMESPACE,
+        GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE,
         PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE,
         PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE,
         crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE,
@@ -15022,6 +14965,10 @@ fn validate_procedural_feedback_engine_open_closure(engine: &dyn StoreEngine) ->
             state.json.insert((namespace.to_string(), key), value);
         }
     }
+    super::procedural_feedback::source_dependents::validate_image(
+        &state.json,
+        super::procedural_feedback::source_dependents::SourceValidationScope::StoreOpen,
+    )?;
     super::procedural_selection::validate_store_image(&state.json)?;
     crate::store_internal::procedural_feedback::validate_procedural_feedback_store_image(
         &state,
@@ -16779,6 +16726,190 @@ mod transaction_error_contract_tests {
         compile_error!("store preparation tests require a supported host target");
     }
 
+    #[test]
+    #[cfg(feature = "sqlite-store")]
+    fn pfi2_producer_control_three_backend_consistency_and_persistent_reopen() {
+        use crate::store_internal::procedural_feedback::control_procedural_producer;
+        use crate::store_internal::schema::{
+            PROCEDURAL_PRODUCER_BINDING_NAMESPACE as MATERIAL,
+            PROCEDURAL_PRODUCER_HEAD_NAMESPACE as HEAD,
+        };
+        use bm_core::memory::*;
+        let root = SyntheticStoreDir::create("pfi2-producer-control");
+        let profile = native_production_profile();
+        let configs = [
+            StoreBackendConfig::in_memory(profile).unwrap(),
+            StoreBackendConfig::file(root.0.join("file"), profile).unwrap(),
+            StoreBackendConfig::sqlite(root.0.join("sqlite.db"), profile).unwrap(),
+        ];
+        for config in configs {
+            let platform = StorePlatform::open(config.clone()).unwrap();
+            let image = |platform: &StorePlatform| {
+                let documents = crate::store_internal::schema::store_json_namespaces()
+                    .flat_map(|namespace| {
+                        platform
+                            .engine
+                            .list_json_keys(namespace)
+                            .unwrap()
+                            .into_iter()
+                            .map(|key| {
+                                let value = platform
+                                    .engine
+                                    .get_json_value(namespace, &key)
+                                    .unwrap()
+                                    .unwrap();
+                                (namespace.to_owned(), key, value)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                (documents, platform.engine.read_events().unwrap())
+            };
+            let now = current_unix_secs();
+            let budget = platform.current_runtime_budget(now);
+            let scope = StoreEventScope::new("agent-a", "owner-a", "sdk.direct", "chat-a")
+                .with_memory_space("space-a")
+                .with_subject("agent-a");
+            let spec = ProceduralProducerSpecV1 {
+                binding_id: "usage-reporter".into(),
+                scope: ProceduralProducerScopeV1 {
+                    memory_space_id: "space-a".into(),
+                    mounted_subject_id: "agent-a".into(),
+                    channel_id: "sdk.direct".into(),
+                    chat_id: "chat-a".into(),
+                },
+                principal: ProceduralProducerPrincipalV1::LocalCapability {
+                    capability_id: "executor-a".into(),
+                },
+                source_authority: ProceduralProducerSourceAuthorityV1::RuntimeObservation,
+                claims: ProceduralProducerClaimsV1 {
+                    execution_facts: false,
+                    method_declarations: false,
+                    usage_feedback: true,
+                    source_classifications: Vec::new(),
+                },
+                tools: Vec::new(),
+                source_config_ref: "synthetic-config".into(),
+            };
+            let operation = |id| {
+                MemoryMutationOperationIdentity::new(
+                    id,
+                    "space-a",
+                    "agent-a",
+                    "governor-a",
+                    MemoryMutationOperationKind::ProceduralProducerControl,
+                )
+                .unwrap()
+            };
+            let (binding, receipt) = control_procedural_producer(
+                &platform,
+                scope.clone(),
+                &budget,
+                operation("grant"),
+                spec.clone(),
+                ProceduralProducerStateV1::Active,
+                None,
+                now,
+                &[],
+            )
+            .expect("first-turn producer registration");
+            assert!(platform
+                .read_json_namespace("conversation_transcript")
+                .unwrap()
+                .is_empty());
+            let index = crate::store_internal::procedural_feedback::read_scope_index(
+                &platform,
+                &spec.scope.scope_index_key().unwrap(),
+            )
+            .unwrap()
+            .expect("producer root exists without a conversation alias");
+            assert_eq!(index.producer_heads, vec![binding.revision_ref().unwrap()]);
+            assert_eq!(receipt.identity, binding.operation_identity);
+            assert!(platform
+                .read_json_docs_by_keys(
+                    MEMORY_MUTATION_AUDIT_NAMESPACE,
+                    &[receipt.identity.storage_key()]
+                )
+                .unwrap()
+                .pop()
+                .is_some());
+            let before = image(&platform);
+            let replay = control_procedural_producer(
+                &platform,
+                scope.clone(),
+                &budget,
+                operation("grant"),
+                spec.clone(),
+                ProceduralProducerStateV1::Active,
+                None,
+                now + 1,
+                &[],
+            )
+            .unwrap();
+            assert_eq!(replay, (binding.clone(), receipt));
+            assert_eq!(image(&platform), before);
+            let key = binding.revision_ref().unwrap().material_key();
+            let existing = serde_json::to_value(&binding).unwrap();
+            let unauthorized = StoreTransactionRequest::new(
+                "forged-producer-write",
+                vec![StoreJsonPrecondition::Exact {
+                    namespace: MATERIAL.into(),
+                    key: key.clone(),
+                    value: existing.clone(),
+                }],
+                vec![StoreEngineMutation::PutJson {
+                    namespace: MATERIAL.into(),
+                    key,
+                    value: existing,
+                }],
+                None,
+            );
+            let admission = platform
+                .store_transaction_admission_for_report(&budget)
+                .unwrap();
+            assert!(platform
+                .engine
+                .commit_transaction_admitted(&unauthorized, &admission)
+                .is_err());
+            assert_eq!(image(&platform), before);
+            let (revoked, _) = control_procedural_producer(
+                &platform,
+                scope,
+                &budget,
+                operation("revoke"),
+                spec.clone(),
+                ProceduralProducerStateV1::Revoked,
+                Some(binding.revision_ref().unwrap()),
+                now + 1,
+                &[],
+            )
+            .unwrap();
+            let reopened = if config.backend == StoreBackendKind::InMemory {
+                platform.clone()
+            } else {
+                drop(platform);
+                StorePlatform::open(config).expect("valid revoked producer history reopens")
+            };
+            let head: ProceduralProducerHeadV1 = serde_json::from_value(
+                reopened
+                    .read_json_docs_by_keys(HEAD, &[spec.binding_key().unwrap()])
+                    .unwrap()
+                    .pop()
+                    .unwrap()
+                    .value,
+            )
+            .unwrap();
+            assert_eq!(head.current, revoked.revision_ref().unwrap());
+            assert_eq!(
+                head.retained_revisions,
+                vec![
+                    binding.revision_ref().unwrap(),
+                    revoked.revision_ref().unwrap()
+                ]
+            );
+        }
+    }
+
     fn governance_job_and_index(
         now_secs: u64,
     ) -> (PostTurnGovernanceJobV3, PostTurnGovernanceScopeIndexV3) {
@@ -17170,6 +17301,46 @@ mod transaction_error_contract_tests {
     }
 
     #[test]
+    fn pfi2_transaction_wrappers_preserve_typed_capacity_and_busy_recovery() {
+        use crate::{
+            ProceduralLearningSdkError, ProceduralLearningSdkErrorDisposition as D,
+            ProceduralLearningSdkOperation,
+        };
+        for (error, expected) in [
+            (
+                Error::config("store_budget_exceeded", "synthetic-private-capacity"),
+                D::CapacityRejected,
+            ),
+            (
+                Error::config(
+                    "store_consistent_read_budget_exceeded",
+                    "synthetic-private-read",
+                ),
+                D::CapacityRejected,
+            ),
+            (
+                Error::config("store_transaction_busy", "synthetic-private-lock"),
+                D::StoreCommitRejected,
+            ),
+            (
+                Error::Io {
+                    stage: "file_io",
+                    source: std::io::Error::other("synthetic-private-io"),
+                },
+                D::StoreCommitRejected,
+            ),
+        ] {
+            let wrapped = memory_write_transaction_commit_error(error, false);
+            let safe = ProceduralLearningSdkError::from_owner_error(
+                ProceduralLearningSdkOperation::Reconcile,
+                &wrapped,
+            );
+            assert_eq!(safe.disposition, expected);
+            assert!(!safe.to_string().contains("synthetic-private"));
+        }
+    }
+
+    #[test]
     fn subject_soul_capacity_stage_survives_the_production_coordinator() {
         for stage in ["store_budget_exceeded", "store_event_log"] {
             let mapped = memory_write_transaction_commit_error(Error::config(stage, "proof"), true);
@@ -17528,9 +17699,12 @@ mod transaction_error_contract_tests {
         let error = commit("operation-capacity-second", "disabled", 'b')
             .expect_err("second operation must fail before evicting the first receipt");
         assert_eq!(error.stage(), "memory_write_transaction_preflight_failed");
-        assert!(
-            error.to_string().contains("store_budget_exceeded"),
-            "{error}"
+        assert_eq!(
+            std::error::Error::source(&error)
+                .and_then(|source| source.downcast_ref::<Error>())
+                .expect("capacity cause must remain typed")
+                .stage(),
+            "store_budget_exceeded"
         );
         let after = platform
             .export_store_snapshot()
@@ -18118,7 +18292,7 @@ mod transaction_error_contract_tests {
                 .expect("foreign authority")
                 .sign(&mut selection)
                 .expect("canonical signed receipt");
-            let mut evidence = PostTurnLearningEvidenceV1 {
+            let mut evidence = PostTurnLearningEvidenceV2 {
                 schema_version: POST_TURN_LEARNING_EVIDENCE_SCHEMA_VERSION,
                 memory_space_id: "space-a".into(),
                 mounted_subject_id: "subject-a".into(),
@@ -18131,7 +18305,7 @@ mod transaction_error_contract_tests {
                 agent_skill_feedback: Vec::new(),
                 task_learning_feedback: Vec::new(),
                 agent_tool_feedback: Vec::new(),
-                authority: ProceduralFeedbackAuthorityV1::HostRuntimeObservation,
+                authority: ProceduralFeedbackAuthorityV2::Empty,
                 learning_evidence_digest: String::new(),
             };
             evidence.learning_evidence_digest =
@@ -18160,9 +18334,13 @@ mod transaction_error_contract_tests {
                 },
             )
             .expect_err("Store authority closure must reject foreign receipt");
-            assert!(
-                error.to_string().contains("procedural"),
-                "{backend}: {error}"
+            assert_eq!(
+                std::error::Error::source(&error)
+                    .and_then(|source| source.downcast_ref::<Error>())
+                    .expect("receipt rejection must retain its typed cause")
+                    .stage(),
+                "procedural_selection_authority",
+                "{backend}"
             );
             let after = platform.export_store_snapshot().expect("after");
             assert_eq!(
@@ -18493,6 +18671,7 @@ mod transaction_error_contract_tests {
             json_docs: Vec::new(),
             events: Vec::new(),
             preserve_protected_owner_state: false,
+            source_closure: None,
         }
     }
 
@@ -18579,6 +18758,20 @@ mod transaction_error_contract_tests {
                 .engine
                 .replace_scoped_projection(&empty_scoped_replace(), admission)
                 .expect_err("expired admission must fail inside the typed replace fence");
+            for error in [&write_error, &replace_error] {
+                let safe = crate::ProceduralLearningSdkError::from_owner_error(
+                    crate::ProceduralLearningSdkOperation::ProducerControl,
+                    error,
+                );
+                assert_eq!(
+                    safe.key,
+                    crate::ProceduralLearningErrorKeyV1::StoreUnavailable
+                );
+                assert_eq!(
+                    safe.disposition,
+                    crate::ProceduralLearningSdkErrorDisposition::StoreCommitRejected
+                );
+            }
             assert_eq!(
                 replace_error.stage(),
                 "memory_write_transaction_resource_admission",
@@ -18589,6 +18782,19 @@ mod transaction_error_contract_tests {
                 .get_json_value("admission_contract", name)
                 .expect("read admission fixture")
                 .is_none());
+            let fresh = platform
+                .current_store_transaction_admission()
+                .expect("readmit");
+            // Rebuild this independent write under the new budget; never reuse the old admission.
+            platform
+                .engine
+                .commit_transaction_admitted(&admission_write_request(name), &fresh)
+                .expect("freshly admitted write must commit");
+            assert!(platform
+                .engine
+                .get_json_value("admission_contract", name)
+                .unwrap()
+                .is_some());
         }
         let _ = std::fs::remove_dir_all(root);
     }
@@ -18623,6 +18829,35 @@ mod transaction_error_contract_tests {
             assert!(error
                 .to_string()
                 .contains("current exact runtime authority"));
+            let safe = crate::ProceduralLearningSdkError::from_owner_error(
+                crate::ProceduralLearningSdkOperation::ProducerControl,
+                &error,
+            );
+            assert_eq!(
+                safe.key,
+                crate::ProceduralLearningErrorKeyV1::StoreUnavailable
+            );
+            assert_eq!(
+                safe.disposition,
+                crate::ProceduralLearningSdkErrorDisposition::StoreCommitRejected
+            );
+            assert!(platform
+                .engine
+                .get_json_value("admission_contract", name)
+                .unwrap()
+                .is_none());
+            let fresh = platform
+                .current_store_transaction_admission()
+                .expect("readmit contracted budget");
+            platform
+                .engine
+                .commit_transaction_admitted(&admission_write_request(name), &fresh)
+                .expect("replanned write under the contracted budget must commit");
+            assert!(platform
+                .engine
+                .get_json_value("admission_contract", name)
+                .unwrap()
+                .is_some());
         }
         let _ = std::fs::remove_dir_all(root);
     }

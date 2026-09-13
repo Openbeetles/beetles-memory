@@ -18,6 +18,15 @@ use crate::skills::{
 use crate::{Error, Result};
 
 pub const GOVERNED_MEMORY_LIFECYCLE_SCHEMA_VERSION: u32 = 1;
+
+/// Deleted source identities cannot be resurrected by ordinary source upserts.
+/// Recovery/generation, when provided, belongs to the original source owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
+pub enum GovernedSourceLifecycleError {
+    #[error("deleted source identity cannot be recreated; a new source owner id is required")]
+    DeletedIdentityCannotBeRecreated,
+}
 pub const MAX_GOVERNED_ELIGIBILITY_REASONS: usize = 12;
 pub const MAX_GOVERNED_PREMISE_DECISION_REF_BYTES: usize = 256;
 

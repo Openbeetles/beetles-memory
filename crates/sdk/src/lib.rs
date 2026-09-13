@@ -177,8 +177,9 @@ pub use bm_core::budget::{
     GraphExpansionRuntimeBudget, LlmGatewayBudget, MaintenanceBudget, MemoryCoreBudget,
     MutationOperationReceiptCapacityExhaustion, MutationOperationReceiptQuota,
     MutationOperationReceiptRetentionPolicy, ProjectionRenderBudget, ProjectionSourceBudget,
-    ProviderModelContextLimit, RecallDeliveryRuntimeBudget, RuntimeBudgetReport, RuntimeJobBudget,
-    RuntimeRetentionQuotaReport, StoreRuntimeBudget, TranscriptGovernanceBudget,
+    ProviderModelContextLimit, RecallDeliveryRuntimeBudget, RuntimeBudgetReadmissionRequired,
+    RuntimeBudgetReport, RuntimeJobBudget, RuntimeRetentionQuotaReport, StoreRuntimeBudget,
+    TranscriptGovernanceBudget,
 };
 pub use bm_core::feature_gate::{ProfileId, RoleFeature, TargetFeature};
 pub use bm_core::llm::{
@@ -304,20 +305,27 @@ pub use bm_core::memory::{
 };
 pub use bm_core::memory::{
     governed_evidence_document_content_digest, governed_evidence_source_locator_digest,
-    AgentSkillUsageFeedbackV1, AgentToolExperienceSelectionV1, AgentToolUsageFeedbackV2,
-    FacetReportView, ForgettingDecisionReport, GovernedEvidenceDocumentChunk,
-    GovernedEvidenceDocumentDraft, GovernedEvidenceDocumentSourceKind, GovernedMemoryOwnerPlane,
-    GovernedMemoryOwnerRef, GovernedOwnerTermination, GovernedOwnerTransition,
-    GovernedRecallEligibility, GovernedRecallEligibilityReason, LongTermMemoryGovernedContent,
+    AdmittedAgentToolEvidenceV1, AgentSkillUsageFeedbackV1, AgentToolExperienceSelectionV1,
+    AgentToolUsageFeedbackV3, FacetReportView, ForgettingDecisionReport,
+    GovernedEvidenceDocumentChunk, GovernedEvidenceDocumentDraft,
+    GovernedEvidenceDocumentSourceKind, GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef,
+    GovernedOwnerTermination, GovernedOwnerTransition, GovernedRecallEligibility,
+    GovernedRecallEligibilityReason, GovernedSourceLifecycleError, LongTermMemoryGovernedContent,
     LongTermMemoryHeadManifest, LongTermMemoryRetainedRevisionDigest,
     LongTermMemoryVersionMaterial, LongTermMemoryVersionOrigin, LongTermMemoryVersionScopeManifest,
-    MemoryLongTermAffectedFacetDoc, MemoryUpdateLineageFailure, PostTurnLearningEvidenceV1,
-    PostTurnLearningInputV1, PremiseEvaluationDecision, PremiseTypedSource,
-    ProceduralApplicabilityContextV1, ProceduralExecutionOutcomeV1,
-    ProceduralFeedbackAuthorityInputV1, ProceduralFeedbackAuthorityV1, ProceduralFeedbackReceiptV1,
-    ProceduralProjectionBindingV1, ProceduralProjectionIdentityV1, ProceduralSelectionReceiptV1,
+    MemoryLongTermAffectedFacetDoc, MemoryUpdateLineageFailure, PostTurnLearningEvidenceV2,
+    PostTurnLearningInputV2, PremiseEvaluationDecision, PremiseTypedSource,
+    ProceduralApplicabilityContextV1, ProceduralExecutionOutcomeV1, ProceduralFeedbackAuthorityV2,
+    ProceduralFeedbackMethodDispositionV1, ProceduralFeedbackReceiptV2,
+    ProceduralHumanConfirmationV1, ProceduralLearningReadAvailabilityV1, ProceduralLearningWorkV1,
+    ProceduralMethodDispositionPhaseV1, ProceduralProducerClaimsV1, ProceduralProducerErrorV1,
+    ProceduralProducerPrincipalV1, ProceduralProducerRevisionRefV1, ProceduralProducerScopeV1,
+    ProceduralProducerSourceAuthorityV1, ProceduralProducerSpecV1, ProceduralProducerStateV1,
+    ProceduralProducerToolV1, ProceduralProjectionBindingV1, ProceduralProjectionIdentityV1,
+    ProceduralReconciliationBlockV1, ProceduralSelectionReceiptV1, ProceduralSourceSensitivity,
     RuntimeSkillSelectionV1, RuntimeSkillUsageFeedbackV1, StandardAgentSkillSelectionV1,
-    TaskLearningSelectionV1, TaskLearningUsageFeedbackV1,
+    TaskLearningSelectionV1, TaskLearningUsageFeedbackV1, ToolExecutionCountsV1,
+    ToolExecutionFactV1, ToolExecutionOutcome, ToolMethodEvidenceV1,
     GOVERNED_EVIDENCE_DOCUMENT_SCHEMA_VERSION, LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION,
 };
 pub use bm_core::metrics::{
@@ -344,19 +352,18 @@ pub use bm_core::skills::{
     AgentSkillPackageWarning, AgentSkillProjectionAudit, AgentSkillProjectionRejection,
     AgentSkillProjectionSource, AgentSkillRecallHit, AgentSkillRefreshPolicy,
     AgentSkillRegistrySnapshot, AgentSkillResourceSummary, AgentSkillScope, AgentSkillTrust,
-    AgentToolDescriptor, AgentToolExperienceConfidence, AgentToolExperienceOwnerLocatorV2,
+    AgentToolDescriptor, AgentToolExperienceConfidence, AgentToolExperienceOwnerLocatorV3,
     AgentToolExperienceOwningScopeV1, AgentToolExperienceRecord, AgentToolExperienceStatus,
-    AgentToolExperienceStatusReport, AgentToolHint, AgentToolObservationDigest, AgentToolOutcome,
-    AgentToolProjectionAudit, AgentToolProjectionRejection, AgentToolRegistryOwner,
-    AgentToolRegistryRef, AgentToolRegistryReport, AgentToolRegistryScope,
-    AgentToolRegistrySnapshot, AgentToolSelectionReport, CapabilityAtomImportOutcome,
-    CapabilityAtomSyncOutcome, ProjectedAgentSkillHint, RuntimeSkillApplicability,
-    RuntimeSkillApplicabilityContext, RuntimeSkillApplicabilityTarget,
-    RuntimeSkillCapabilityAffinity, RuntimeSkillConstraint, RuntimeSkillConstraintKind,
-    RuntimeSkillCreationRef, RuntimeSkillDeliveryDropReason, RuntimeSkillEvidenceBinding,
-    RuntimeSkillEvidenceKind, RuntimeSkillFailureMode, RuntimeSkillFeedbackKind,
-    RuntimeSkillGovernanceOutcome, RuntimeSkillIntrinsicContract, RuntimeSkillOrigin,
-    RuntimeSkillOwnerLocator, RuntimeSkillOwningScope, RuntimeSkillPremise,
+    AgentToolExperienceStatusReport, AgentToolHint, AgentToolOutcome, AgentToolProjectionAudit,
+    AgentToolProjectionRejection, AgentToolRegistryOwner, AgentToolRegistryRef,
+    AgentToolRegistryReport, AgentToolRegistryScope, AgentToolRegistrySnapshot,
+    AgentToolSelectionReport, CapabilityAtomImportOutcome, CapabilityAtomSyncOutcome,
+    ProjectedAgentSkillHint, RuntimeSkillApplicability, RuntimeSkillApplicabilityContext,
+    RuntimeSkillApplicabilityTarget, RuntimeSkillCapabilityAffinity, RuntimeSkillConstraint,
+    RuntimeSkillConstraintKind, RuntimeSkillCreationRef, RuntimeSkillDeliveryDropReason,
+    RuntimeSkillEvidenceBinding, RuntimeSkillEvidenceKind, RuntimeSkillFailureMode,
+    RuntimeSkillFeedbackKind, RuntimeSkillGovernanceOutcome, RuntimeSkillIntrinsicContract,
+    RuntimeSkillOrigin, RuntimeSkillOwnerLocator, RuntimeSkillOwningScope, RuntimeSkillPremise,
     RuntimeSkillPremiseObservation, RuntimeSkillPremiseRequirement, RuntimeSkillProjectionPolicy,
     RuntimeSkillReuseOutcome, RuntimeSkillSafeEvidenceRef, RuntimeSkillTrigger,
     RuntimeSkillTriggerKind, RuntimeSkillVersionConstraint, RuntimeSkillWrite,
@@ -390,7 +397,11 @@ pub use learning::{
     MemoryLearningServiceControlAuthorities, MemoryLearningServiceControlAuthority,
     MemoryLearningServiceControlOperation, MemoryLearningServiceStatusAuthority,
     MemoryLearningStateReport, MemoryLearningWakeSink, MemoryProceduralLearningRunReport,
-    MemoryProceduralLearningStateReport,
+    MemoryProceduralLearningStateReport, MemoryProceduralProducerControlReport,
+    MemoryProceduralProducerControlRequest, MemoryProceduralReconciliationRecoveryTarget,
+    MemoryProceduralReconciliationResumeReport, MemoryProceduralReconciliationResumeRequest,
+    MemoryProceduralReconciliationRunReport, MemoryProceduralReconciliationStatusReport,
+    MemoryProceduralReconciliationStatusRequest, MemoryProceduralSubmissionCapability,
 };
 #[cfg(feature = "nonproduction-replay-harness")]
 pub use ops::GovernedRuntimeSkillWriteInput;
@@ -429,12 +440,12 @@ pub use ops::{
     MemoryRecallSelectionDecision, MemoryRecallSelectionDropReason, MemoryRecallTemporalOperation,
     MemoryRecoverReport, MemoryRecoverRequest, MemoryRenderedEvidenceCapsule, MemoryReplayReport,
     MemoryReplayRequest, MemoryRetentionCompactionReport, MemoryRetentionCompactionRequest,
-    MemorySpaceArchive, MemorySpaceExportReport, MemorySpaceExportRequest, MemorySpaceImportReport,
-    MemorySpaceImportRequest, MemorySpacePrivateMaterialPolicy, MemorySpaceProjectionScope,
-    MemoryTranscriptActivityReport, MemoryTranscriptActivityRequest,
-    MemoryTranscriptAttrWriteReport, MemoryTranscriptAttrWriteRequest,
-    MemoryTranscriptCommitReport, MemoryTranscriptCommitRequest, MemoryTranscriptExportReport,
-    MemoryTranscriptExportRequest, MemoryTranscriptLifecycleReport,
+    MemorySpaceArchive, MemorySpaceExportReport, MemorySpaceExportRequest,
+    MemorySpaceImportConflict, MemorySpaceImportReport, MemorySpaceImportRequest,
+    MemorySpacePrivateMaterialPolicy, MemorySpaceProjectionScope, MemoryTranscriptActivityReport,
+    MemoryTranscriptActivityRequest, MemoryTranscriptAttrWriteReport,
+    MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitReport, MemoryTranscriptCommitRequest,
+    MemoryTranscriptExportReport, MemoryTranscriptExportRequest, MemoryTranscriptLifecycleReport,
     MemoryTranscriptLifecycleRequest, MemoryTranscriptRepairReport, MemoryTranscriptRepairRequest,
     MemoryTranscriptReplayReport, MemoryTranscriptReplayRequest, MemoryTranscriptSearchReport,
     MemoryTranscriptSearchRequest, MemoryTranscriptSearchScope, MemoryTranscriptTimelineReport,
@@ -812,6 +823,15 @@ fn validate_public_procedural_archive_boundary(snapshot: &StoreSnapshot) -> Resu
     Ok(())
 }
 
+fn public_procedural_transcript_projection(
+    record: &bm_core::memory::TranscriptTurnRecord,
+) -> bm_core::memory::TranscriptTurnRecord {
+    let mut projected = record.clone();
+    projected.learning_evidence = None;
+    projected.tool_observations.clear();
+    projected
+}
+
 fn redact_procedural_archive_evidence(snapshot: &mut StoreSnapshot) -> Result<usize> {
     let before = snapshot.json_docs.len();
     let docs = std::mem::take(&mut snapshot.json_docs);
@@ -825,16 +845,16 @@ fn redact_procedural_archive_evidence(snapshot: &mut StoreSnapshot) -> Result<us
         if doc.namespace != "conversation_transcript" {
             continue;
         }
-        let mut record: bm_core::memory::TranscriptTurnRecord =
+        let record: bm_core::memory::TranscriptTurnRecord =
             serde_json::from_value(doc.value.clone()).map_err(|_| {
                 Error::config("memory_space_export", "invalid transcript archive record")
             })?;
-        if record.learning_evidence.take().is_some() || !record.tool_observations.is_empty() {
+        let projected = public_procedural_transcript_projection(&record);
+        if projected != record {
             // A public archive is a disclosed projection, not a raw backup of the
             // learning worker. Preserve chat identity/content without exporting
             // tool results or creating a replayable feedback authority.
-            record.tool_observations.clear();
-            doc.value = serde_json::to_value(record)
+            doc.value = serde_json::to_value(projected)
                 .map_err(|error| Error::config("memory_space_export", error.to_string()))?;
             redactions = redactions.saturating_add(1);
         }
@@ -2311,7 +2331,7 @@ fn count_private_snapshot_entries(snapshot: &StoreSnapshot) -> usize {
 fn snapshot_doc_requires_private_export(doc: &StoreSnapshotJsonDoc) -> bool {
     match doc.namespace.as_str() {
         store_internal::schema::AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE => {
-            serde_json::from_value::<bm_core::skills::AgentToolExperienceRevisionMaterialV2>(
+            serde_json::from_value::<bm_core::skills::AgentToolExperienceRevisionMaterialV3>(
                 doc.value.clone(),
             )
             .map(|owner| !owner.privacy_class.projection_content_allowed())
@@ -2404,6 +2424,7 @@ mod p7_6_memory_space_projection_tests {
                 assistant_message: None,
                 tool_observations: vec![ToolObservationDigest {
                     observation_id: "RAW_OBSERVATION_ID".into(),
+                    call_id: "RAW_CALL_ID".into(),
                     tool_name: "tool-a".into(),
                     summary: "RAW_TOOL_OUTPUT".into(),
                     external_content: false,

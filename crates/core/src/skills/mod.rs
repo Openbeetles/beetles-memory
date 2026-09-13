@@ -33,10 +33,10 @@ mod runtime;
 mod tool_promotion;
 
 pub use tool_promotion::{
-    agent_tool_observation_matches_transcript, plan_runtime_skill_promotion_from_tool_evidence,
-    runtime_skill_applicability_for_tool_scope, RuntimeSkillToolPromotionDecision,
-    RuntimeSkillToolPromotionInput, RuntimeSkillToolPromotionReason,
-    RuntimeSkillToolPromotionSource,
+    agent_tool_execution_matches_transcript, agent_tool_method_execution_matches_source,
+    plan_runtime_skill_promotion_from_tool_evidence, runtime_skill_applicability_for_tool_scope,
+    RuntimeSkillToolPromotionDecision, RuntimeSkillToolPromotionInput,
+    RuntimeSkillToolPromotionReason, RuntimeSkillToolPromotionSource,
 };
 
 pub use agent_skill::{
@@ -54,22 +54,23 @@ pub use agent_tool::{
     fingerprint_agent_tool_descriptor, fingerprint_agent_tool_registry,
     select_subject_agent_tool_hints, validate_agent_tool_registry_snapshot, AgentToolDescriptor,
     AgentToolExperienceConfidence, AgentToolExperienceRecord, AgentToolExperienceSelectionInput,
-    AgentToolExperienceStatus, AgentToolExperienceStatusReport, AgentToolHint,
-    AgentToolObservationDigest, AgentToolOutcome, AgentToolProjectionAudit,
-    AgentToolProjectionRejection, AgentToolRegistryOwner, AgentToolRegistryRef,
-    AgentToolRegistryReport, AgentToolRegistryScope, AgentToolRegistrySnapshot,
-    AgentToolSelectionReport, AGENT_TOOL_NO_EXPERIENCE_REASON,
+    AgentToolExperienceStatus, AgentToolExperienceStatusReport, AgentToolHint, AgentToolOutcome,
+    AgentToolProjectionAudit, AgentToolProjectionRejection, AgentToolRegistryOwner,
+    AgentToolRegistryRef, AgentToolRegistryReport, AgentToolRegistryScope,
+    AgentToolRegistrySnapshot, AgentToolSelectionReport, AGENT_TOOL_NO_EXPERIENCE_REASON,
     AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH, AGENT_TOOL_REGISTRY_FORBIDDEN_BY_PROFILE,
 };
 pub use agent_tool_experience_contract::{
     agent_tool_experience_head_key, agent_tool_experience_material_key,
     agent_tool_experience_scope_manifest_key, canonical_agent_tool_experience_owner_id,
     validate_agent_tool_experience_owner_history, validate_agent_tool_experience_scope_closure,
-    AgentToolExperienceContractFailure, AgentToolExperienceContractValidation,
-    AgentToolExperienceHeadBindingV1, AgentToolExperienceHeadStateV2,
-    AgentToolExperienceOwnerHeadV2, AgentToolExperienceOwnerLocatorV2,
-    AgentToolExperienceOwningScopeV1, AgentToolExperienceRetainedRevisionDigestV2,
-    AgentToolExperienceRevisionMaterialV2, AgentToolExperienceScopeManifestV1,
+    AgentToolExperienceBodyV1, AgentToolExperienceContractFailure,
+    AgentToolExperienceContractValidation, AgentToolExperienceFocusV1,
+    AgentToolExperienceHeadBindingV1, AgentToolExperienceHeadStateV3,
+    AgentToolExperienceOwnerHeadV3, AgentToolExperienceOwnerLocatorV3,
+    AgentToolExperienceOwningScopeV1, AgentToolExperienceReadProjectionV1,
+    AgentToolExperienceRetainedRevisionDigestV3, AgentToolExperienceRevisionMaterialV3,
+    AgentToolExperienceScopeManifestV1, AgentToolMethodSourceRefV1,
     AGENT_TOOL_EXPERIENCE_HEAD_SCHEMA_VERSION, AGENT_TOOL_EXPERIENCE_MATERIAL_SCHEMA_VERSION,
     AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_SCHEMA_VERSION,
 };
@@ -115,14 +116,15 @@ pub use runtime::{
     build_runtime_skill_operator_summary, build_runtime_skill_recall_block,
     govern_runtime_skill_write_shapes, is_runtime_skill_name, list_runtime_skill_records,
     plan_governed_runtime_skills, retrieve_runtime_skill_hits, runtime_skill_owner_updated_at,
-    RuntimeSkillDoctrineClauseRecord, RuntimeSkillDoctrineSnapshot, RuntimeSkillGenomeDisposition,
-    RuntimeSkillGenomeLineageRecord, RuntimeSkillGenomeNode, RuntimeSkillGenomeSnapshot,
-    RuntimeSkillGovernanceOutcome, RuntimeSkillHit, RuntimeSkillOperatorRecord,
-    RuntimeSkillOperatorSummary, RuntimeSkillOrigin, RuntimeSkillRecallScoreBreakdown,
-    RuntimeSkillRecord, RuntimeSkillReuseOutcome, RuntimeSkillStatus, RuntimeSkillStorageMutation,
-    RuntimeSkillStrategyDiff, RuntimeSkillStrategyDiffKind, RuntimeSkillWriteAction,
-    RuntimeSkillWriteItemReport, RuntimeSkillWriteOutcome, RuntimeSkillWritePlan,
-    RuntimeSkillWriteReason, RuntimeSkillWriteSource,
+    validate_runtime_skill_method_shape, RuntimeSkillDoctrineClauseRecord,
+    RuntimeSkillDoctrineSnapshot, RuntimeSkillGenomeDisposition, RuntimeSkillGenomeLineageRecord,
+    RuntimeSkillGenomeNode, RuntimeSkillGenomeSnapshot, RuntimeSkillGovernanceOutcome,
+    RuntimeSkillHit, RuntimeSkillOperatorRecord, RuntimeSkillOperatorSummary, RuntimeSkillOrigin,
+    RuntimeSkillRecallScoreBreakdown, RuntimeSkillRecord, RuntimeSkillReuseOutcome,
+    RuntimeSkillStatus, RuntimeSkillStorageMutation, RuntimeSkillStrategyDiff,
+    RuntimeSkillStrategyDiffKind, RuntimeSkillWriteAction, RuntimeSkillWriteItemReport,
+    RuntimeSkillWriteOutcome, RuntimeSkillWritePlan, RuntimeSkillWriteReason,
+    RuntimeSkillWriteSource,
 };
 pub(crate) use runtime::{
     govern_runtime_skills, retrieve_runtime_skill_hits_with_backend,

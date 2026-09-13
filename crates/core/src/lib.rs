@@ -31,7 +31,7 @@ pub mod util;
 
 pub use budget::{
     EvidenceDocumentRuntimeBudget, GovernedStateRuntimeBudget, RuntimeBudgetAuthority,
-    RuntimeBudgetReport,
+    RuntimeBudgetReadmissionRequired, RuntimeBudgetReport,
 };
 pub use error::{Error, ErrorClass, Result};
 pub use platform::Platform;

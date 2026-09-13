@@ -144,6 +144,10 @@ fn sqlite_multiprocess_transaction_worker() {
     let outcome = match engine.commit_transaction(&writer_request(&writer)) {
         Ok(_) => SUCCESS,
         Err(error) if error.stage() == "memory_write_transaction_precondition_failed" => {
+            assert!(
+                matches!(error, bm_core::Error::Conflict { .. }),
+                "a real loser after waiting on the Store lock is a retryable CAS conflict"
+            );
             CAS_CONFLICT
         }
         Err(error) => panic!("worker must receive a typed CAS conflict, got {error}"),

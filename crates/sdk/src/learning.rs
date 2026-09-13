@@ -4,7 +4,7 @@ use std::sync::Arc;
 use bm_core::llm::{LlmClient, LlmHttpClient};
 use bm_core::memory::{
     PostTurnGovernanceErrorClassV2, PostTurnGovernanceJobStatusV2, ProceduralFeedbackErrorClassV1,
-    ProceduralFeedbackJobStatusV1, ProceduralFeedbackJobV1, ProceduralFeedbackReceiptV1,
+    ProceduralFeedbackJobStatusV1, ProceduralFeedbackJobV2, ProceduralFeedbackReceiptV2,
 };
 use bm_core::{Error, Result};
 
@@ -20,6 +20,100 @@ use crate::{
 
 const MAX_LEARNING_CYCLE_JOBS: usize = 32;
 const MAX_LEARNING_LEASE_SECS: u64 = 15 * 60;
+
+/// Management intent, accepted only from the mounted runtime's active governing
+/// SystemGovernor. It never grants reporting authority merely by deserialization.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryProceduralProducerControlRequest {
+    pub operation_id: String,
+    pub spec: bm_core::memory::ProceduralProducerSpecV1,
+    pub state: bm_core::memory::ProceduralProducerStateV1,
+    pub expected_revision: Option<bm_core::memory::ProceduralProducerRevisionRefV1>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct MemoryProceduralProducerControlReport {
+    pub binding: bm_core::memory::ProceduralProducerBindingV1,
+    pub receipt: bm_core::memory::MemoryMutationReceipt,
+}
+
+/// Explicit capacity recovery, accepted only from the governing SystemGovernor.
+/// Wake or runtime reopen never imply permission to remove a durable block.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryProceduralReconciliationResumeRequest {
+    pub operation_id: String,
+    pub job_id: String,
+    pub expected_state_revision: u64,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct MemoryProceduralReconciliationResumeReport {
+    pub job: ProceduralFeedbackJobV2,
+    pub receipt: bm_core::memory::MemoryMutationReceipt,
+    pub replayed: bool,
+}
+
+/// Read-only discovery for the exact mounted subject; not recovery authority.
+#[derive(Clone, Debug)]
+pub struct MemoryProceduralReconciliationStatusRequest {
+    pub authority: MemoryLearningAttachmentStatusAuthority,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct MemoryProceduralReconciliationRecoveryTarget {
+    pub job_id: String,
+    pub expected_state_revision: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct MemoryProceduralReconciliationStatusReport {
+    pub read_availability: bm_core::memory::ProceduralLearningReadAvailabilityV1,
+    pub block_reason: Option<bm_core::memory::ProceduralReconciliationBlockV1>,
+    pub recovery: Option<MemoryProceduralReconciliationRecoveryTarget>,
+}
+
+/// An in-process reporting capability minted by the active governing runtime.
+/// It is deliberately neither serializable nor caller-constructible. Persistent
+/// producer metadata alone cannot be converted into submission authority.
+#[derive(Clone)]
+pub struct MemoryProceduralSubmissionCapability {
+    pub(crate) identity: MemoryLearningAttachmentIdentity,
+    pub(crate) store_incarnation: String,
+    pub(crate) binding: bm_core::memory::ProceduralProducerBindingV1,
+}
+
+impl MemoryProceduralSubmissionCapability {
+    /// Identity metadata for trusted ingress matching, not a constructor or a
+    /// substitute for the SDK's current Store/registry/revision checks.
+    pub fn principal(&self) -> &bm_core::memory::ProceduralProducerPrincipalV1 {
+        &self.binding.spec.principal
+    }
+}
+
+/// Non-wire proof for exactly one admitted canonical turn. Kept out of the
+/// persistent record and out of every public Store mutation constructor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProceduralIntakeAuthorization {
+    pub(crate) store_authority_digest: String,
+    pub(crate) store_incarnation: String,
+    pub(crate) current_head: bm_core::memory::ProceduralProducerHeadV1,
+    pub(crate) evidence: bm_core::memory::PostTurnLearningEvidenceV2,
+    pub(crate) source_preconditions: Vec<crate::StoreJsonPrecondition>,
+}
+
+impl ProceduralIntakeAuthorization {
+    pub(crate) fn authorizes(&self, record: &bm_core::memory::TranscriptTurnRecord) -> bool {
+        record.learning_evidence.as_ref() == Some(&self.evidence)
+            && record.canonical_turn_digest == self.evidence.canonical_turn_digest
+            && record.key.memory_space_id == self.evidence.memory_space_id
+            && record.subject == self.evidence.mounted_subject_id
+            && record.key.conversation_id == self.evidence.conversation_id
+            && record.turn_id == self.evidence.turn_id
+            && record.key.channel_id == self.current_head.scope.channel_id
+    }
+}
 
 pub trait MemoryLearningWakeSink: Send + Sync {
     fn wake(&self);
@@ -353,14 +447,24 @@ pub struct MemoryLearningStateReport {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryProceduralLearningStateReport {
-    pub job: ProceduralFeedbackJobV1,
+    pub job: ProceduralFeedbackJobV2,
     pub reason: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryProceduralLearningRunReport {
-    pub job: ProceduralFeedbackJobV1,
-    pub receipt: ProceduralFeedbackReceiptV1,
+    pub job: ProceduralFeedbackJobV2,
+    pub receipt: ProceduralFeedbackReceiptV2,
+    pub replayed: bool,
+}
+
+/// A durable page in the same procedural lane. Progress is not a retry or a
+/// completed feedback application, and has no invented turn/count receipt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryProceduralReconciliationRunReport {
+    pub job: ProceduralFeedbackJobV2,
+    pub receipt: bm_core::memory::MemoryMutationReceipt,
+    pub completed: bool,
     pub replayed: bool,
 }
 
@@ -373,7 +477,9 @@ pub enum MemoryLearningCycleOutcome {
     Cancelled(MemoryLearningStateReport),
     Failed(MemoryLearningStateReport),
     ProceduralCompleted(MemoryProceduralLearningRunReport),
+    ProceduralReconciliation(MemoryProceduralReconciliationRunReport),
     ProceduralRetrying(MemoryProceduralLearningStateReport),
+    ProceduralBlocked(MemoryProceduralLearningStateReport),
     ProceduralFailed(MemoryProceduralLearningStateReport),
 }
 
@@ -613,7 +719,7 @@ impl MemoryLearningEngine {
 
     fn run_procedural_cycle(
         &self,
-        job: ProceduralFeedbackJobV1,
+        job: ProceduralFeedbackJobV2,
         request: &MemoryLearningCycleRequest,
         now_secs: u64,
     ) -> Result<MemoryLearningCycleOutcome> {
@@ -633,10 +739,31 @@ impl MemoryLearningEngine {
             }
             Err(error) => return Err(error),
         };
-        match self
-            .runtime
-            .run_claimed_procedural_feedback_job(&claimed, &request.lease_owner)
-        {
+        let result = if matches!(
+            claimed.work,
+            bm_core::memory::ProceduralLearningWorkV1::Reconcile { .. }
+        ) {
+            match self
+                .runtime
+                .run_claimed_procedural_reconciliation_job(&claimed, &request.lease_owner)
+            {
+                Ok(page) => {
+                    return Ok(MemoryLearningCycleOutcome::ProceduralReconciliation(
+                        MemoryProceduralReconciliationRunReport {
+                            job: page.job,
+                            receipt: page.receipt,
+                            completed: page.completed,
+                            replayed: page.replayed,
+                        },
+                    ))
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            self.runtime
+                .run_claimed_procedural_feedback_job(&claimed, &request.lease_owner)
+        };
+        match result {
             Ok(ProceduralFeedbackCompletionOutcome::Committed { job, receipt }) => {
                 Ok(MemoryLearningCycleOutcome::ProceduralCompleted(
                     MemoryProceduralLearningRunReport {
@@ -657,18 +784,22 @@ impl MemoryLearningEngine {
             }
             Err(error) => {
                 let (error_class, repair_required) = classify_procedural_error(&error);
-                if repair_required {
-                    let failed = self
-                        .runtime
-                        .mark_claimed_procedural_feedback_repair_required(
-                            &claimed,
-                            &request.lease_owner,
-                            error_class,
-                        )?;
+                if repair_required || error_class == ProceduralFeedbackErrorClassV1::AuthorityDenied
+                {
+                    let failed = self.runtime.terminate_claimed_procedural_feedback_job(
+                        &claimed,
+                        &request.lease_owner,
+                        error_class,
+                    )?;
                     return Ok(MemoryLearningCycleOutcome::ProceduralFailed(
                         MemoryProceduralLearningStateReport {
                             job: failed,
-                            reason: "procedural_feedback_repair_required".to_string(),
+                            reason: if repair_required {
+                                "procedural_feedback_repair_required"
+                            } else {
+                                "procedural_feedback_authority_denied"
+                            }
+                            .to_string(),
                         },
                     ));
                 }
@@ -677,7 +808,15 @@ impl MemoryLearningEngine {
                     &request.lease_owner,
                     error_class,
                 )?;
-                if retrying.status == ProceduralFeedbackJobStatusV1::DeadLetter {
+                if retrying.status == ProceduralFeedbackJobStatusV1::BlockedCapacity {
+                    Ok(MemoryLearningCycleOutcome::ProceduralBlocked(
+                        MemoryProceduralLearningStateReport {
+                            job: retrying,
+                            reason: "procedural_reconciliation_capacity_requires_explicit_resume"
+                                .into(),
+                        },
+                    ))
+                } else if retrying.status == ProceduralFeedbackJobStatusV1::DeadLetter {
                     Ok(MemoryLearningCycleOutcome::ProceduralFailed(
                         MemoryProceduralLearningStateReport {
                             job: retrying,
@@ -1006,41 +1145,203 @@ fn classify_execution_error(error: &Error) -> PostTurnGovernanceErrorClassV2 {
 }
 
 fn classify_procedural_error(error: &Error) -> (ProceduralFeedbackErrorClassV1, bool) {
-    match error {
-        Error::Conflict { stage, .. }
-            if matches!(
-                *stage,
-                "procedural_feedback_evidence"
-                    | "procedural_feedback_completion"
-                    | "procedural_feedback_store_closure"
-                    | "agent_tool_experience_store_closure"
-            ) =>
-        {
+    // Public redaction and durable scheduling consume one classification owner;
+    // wrapping or unwrapping a Store error cannot change its recovery semantics.
+    let typed = crate::ProceduralLearningSdkError::from_owner_error(
+        crate::ProceduralLearningSdkOperation::ApplyFeedback,
+        error,
+    );
+    use crate::ProceduralLearningSdkErrorDisposition as D;
+    match typed.disposition {
+        D::RepairRequired | D::ContractRejected => {
             (ProceduralFeedbackErrorClassV1::ClosureRejected, true)
         }
-        Error::Conflict { .. } => (ProceduralFeedbackErrorClassV1::CasConflict, false),
-        Error::Config { stage, .. } if *stage == "procedural_feedback_registry_unavailable" => {
-            (ProceduralFeedbackErrorClassV1::RegistryUnavailable, false)
+        D::AuthorityRejected => (ProceduralFeedbackErrorClassV1::AuthorityDenied, false),
+        D::ExpectedStateConflict => (ProceduralFeedbackErrorClassV1::CasConflict, false),
+        D::CapacityRejected => (ProceduralFeedbackErrorClassV1::BudgetExceeded, false),
+        D::RegistryRejected => (ProceduralFeedbackErrorClassV1::RegistryUnavailable, false),
+        D::StoreCommitRejected => (ProceduralFeedbackErrorClassV1::StoreUnavailable, false),
+    }
+}
+
+#[cfg(test)]
+mod procedural_error_tests {
+    use super::*;
+
+    #[test]
+    fn pfi2_budget_readmission_preserves_retry_but_never_washes_identity_damage() {
+        use bm_core::budget::{RuntimeBudgetAuthority, RuntimeStoreMedium, StaticPlatformManifest};
+        let profile = match std::env::consts::OS {
+            "macos" => crate::ProfileId::DesktopMacosEmbeddedSdk,
+            "linux" => crate::ProfileId::DesktopLinuxEmbeddedSdk,
+            "windows" => crate::ProfileId::DesktopWindowsEmbeddedSdk,
+            other => panic!("no production host profile for {other}"),
+        };
+        let authority = RuntimeBudgetAuthority::with_default_host_probe(
+            profile,
+            StaticPlatformManifest::for_profile(profile, RuntimeStoreMedium::VolatileMemory),
+            None,
+            1,
+        )
+        .expect("real runtime budget authority");
+        let report = authority.current_report(1);
+        report
+            .validate_for_admission(1)
+            .expect("positive fresh admission");
+        let expired = report
+            .validate_for_admission(u64::MAX)
+            .expect_err("natural expiry");
+        let expected = (ProceduralFeedbackErrorClassV1::StoreUnavailable, false);
+        assert_eq!(classify_procedural_error(&expired), expected);
+        let wrapped = Error::storage("synthetic_admission_wrapper", expired);
+        assert_eq!(classify_procedural_error(&wrapped), expected);
+        let safe = crate::ProceduralLearningSdkError::from_owner_error(
+            crate::ProceduralLearningSdkOperation::ProducerControl,
+            &wrapped,
+        );
+        assert_eq!(classify_procedural_error(&safe.into_core_error()), expected);
+
+        let mut tampered = report;
+        tampered.store_budget.kv_max_entries =
+            tampered.store_budget.kv_max_entries.saturating_add(1);
+        let error = tampered
+            .validate_for_admission(u64::MAX)
+            .expect_err("tamper despite expiry");
+        assert_eq!(
+            classify_procedural_error(&error),
+            (ProceduralFeedbackErrorClassV1::ClosureRejected, true)
+        );
+        for stage in [
+            "runtime_budget_admission",
+            "memory_write_transaction_resource_admission",
+        ] {
+            let error = Error::config(
+                stage,
+                "same stage is not proof of a valid expired admission",
+            );
+            assert_eq!(
+                classify_procedural_error(&error),
+                (ProceduralFeedbackErrorClassV1::ClosureRejected, true)
+            );
         }
-        Error::Config { stage, .. }
-            if matches!(
-                *stage,
-                "memory_write_transaction_budget"
-                    | "agent_tool_experience_store_budget"
-                    | "procedural_feedback_store_budget"
-            ) =>
-        {
+    }
+
+    #[test]
+    fn pfi2_consistent_read_capacity_is_not_transient_storage_failure() {
+        let capacity = Error::config(
+            "store_consistent_read_budget_exceeded",
+            "synthetic private read detail",
+        );
+        assert_eq!(
+            classify_procedural_error(&capacity),
             (ProceduralFeedbackErrorClassV1::BudgetExceeded, false)
+        );
+        let safe = crate::ProceduralLearningSdkError::from_owner_error(
+            crate::ProceduralLearningSdkOperation::ApplyFeedback,
+            &capacity,
+        );
+        assert_eq!(
+            safe.disposition,
+            crate::ProceduralLearningSdkErrorDisposition::CapacityRejected
+        );
+        assert!(!safe.to_string().contains("synthetic private read detail"));
+    }
+
+    #[test]
+    fn pfi2_typed_repair_and_conflict_are_not_transient_store_failures() {
+        for (key, disposition, expected) in [
+            (
+                crate::ProceduralLearningErrorKeyV1::RepairRequired,
+                crate::ProceduralLearningSdkErrorDisposition::RepairRequired,
+                (ProceduralFeedbackErrorClassV1::ClosureRejected, true),
+            ),
+            (
+                crate::ProceduralLearningErrorKeyV1::EvidenceConflict,
+                crate::ProceduralLearningSdkErrorDisposition::ExpectedStateConflict,
+                (ProceduralFeedbackErrorClassV1::CasConflict, false),
+            ),
+        ] {
+            let error = Error::Other {
+                stage: "post_turn_learning_evidence",
+                source: Box::new(crate::ProceduralLearningSdkError {
+                    operation: crate::ProceduralLearningSdkOperation::FinalizeTurn,
+                    key,
+                    disposition,
+                }),
+            };
+            assert_eq!(classify_procedural_error(&error), expected);
         }
-        Error::InvalidInput { .. } | Error::NotFound { .. } => {
-            (ProceduralFeedbackErrorClassV1::ClosureRejected, true)
+    }
+
+    #[test]
+    fn pfi2_source_error_redaction_preserves_retry_capacity_and_authority_classes() {
+        const PRIVATE_MARKER: &str = "synthetic-private-error-chain-271828";
+        let examples = [
+            (
+                Error::config("recall_immutable_read_session", PRIVATE_MARKER),
+                ProceduralFeedbackErrorClassV1::ClosureRejected,
+                true,
+            ),
+            (
+                Error::config("store_budget_exceeded", PRIVATE_MARKER),
+                ProceduralFeedbackErrorClassV1::BudgetExceeded,
+                false,
+            ),
+            (
+                Error::conflict("memory_mutation_cas", PRIVATE_MARKER),
+                ProceduralFeedbackErrorClassV1::CasConflict,
+                false,
+            ),
+            (
+                Error::conflict("procedural_producer_authority", PRIVATE_MARKER),
+                ProceduralFeedbackErrorClassV1::AuthorityDenied,
+                false,
+            ),
+            (
+                Error::Io {
+                    stage: "synthetic_source_read",
+                    source: std::io::Error::other(PRIVATE_MARKER),
+                },
+                ProceduralFeedbackErrorClassV1::StoreUnavailable,
+                false,
+            ),
+            (
+                Error::Io {
+                    stage: "synthetic_source_read",
+                    source: std::io::Error::new(std::io::ErrorKind::InvalidData, PRIVATE_MARKER),
+                },
+                ProceduralFeedbackErrorClassV1::ClosureRejected,
+                true,
+            ),
+        ];
+        for (original, class, repair) in examples {
+            for operation in [
+                crate::ProceduralLearningSdkOperation::ProducerControl,
+                crate::ProceduralLearningSdkOperation::FinalizeTurn,
+                crate::ProceduralLearningSdkOperation::ApplyFeedback,
+            ] {
+                let safe =
+                    crate::ProceduralLearningSdkError::from_owner_error(operation, &original);
+                assert_eq!(safe.operation, operation);
+                assert!(!format!("{safe}\n{safe:?}").contains(PRIVATE_MARKER));
+                assert!(std::error::Error::source(&safe).is_none());
+                assert_eq!(
+                    classify_procedural_error(&safe.into_core_error()),
+                    (class, repair)
+                );
+            }
         }
-        Error::Io { .. }
-        | Error::Other { .. }
-        | Error::Nvs { .. }
-        | Error::Storage { .. }
-        | Error::Esp { .. }
-        | Error::Http { .. }
-        | Error::Config { .. } => (ProceduralFeedbackErrorClassV1::StoreUnavailable, false),
+        let nested = Error::storage(
+            "synthetic_source_read",
+            Error::config("store_budget_exceeded", PRIVATE_MARKER),
+        );
+        let safe = crate::ProceduralLearningSdkError::from_owner_error(
+            crate::ProceduralLearningSdkOperation::ApplyFeedback,
+            &nested,
+        );
+        assert_eq!(
+            classify_procedural_error(&safe.into_core_error()),
+            (ProceduralFeedbackErrorClassV1::BudgetExceeded, false)
+        );
     }
 }

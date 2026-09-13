@@ -8,21 +8,21 @@ use bm_adapter::{
     AdapterRuntimeServices, AdapterSdkReport, AdapterSource, TransportKind, TransportMode,
 };
 use bm_sdk::{
-    AgentToolDescriptor, AgentToolObservationDigest, AgentToolOutcome, AgentToolRegistrySnapshot,
-    AgentToolUsageFeedbackV2, CanonicalTurnDelta, ConversationKey, ConversationScope,
-    HostRefVisibility, LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, LongTermMemoryKind,
-    MemoryCandidateContent, MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment,
-    MemoryCandidateTarget, MemoryCapabilityPolicy, MemoryClock, MemoryCloseRequest,
-    MemoryEvidenceAuthority, MemoryIdentity, MemoryLongTermControlView, MemoryLongTermListRequest,
-    MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest,
-    MemoryRuntime, MemoryScope, MemorySemanticJudgmentSource, MemoryStoreHandle,
-    MemorySubjectVisibilityPolicy, MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitRequest,
-    MemoryTranscriptReplayRequest, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest,
-    MemoryTurnProtocol, MemoryTurnSource, MemoryWriteCandidate, MemoryWriteRequest, Message,
-    NoopMemoryAuditSink, PostTurnLearningInputV1, PressureLevel, ProceduralApplicabilityContextV1,
-    ProceduralExecutionOutcomeV1, ProfileId, QueryFacetInput, ResponseBody,
-    RuntimeLifecycleModeInput, RuntimeSkillListRequest, RuntimeSkillOwningScope, StopReason,
-    StoreBackendConfig, ToolChoicePolicy, ToolObservationDigest, ToolSpec, TranscriptAttrEnvelope,
+    AgentToolDescriptor, AgentToolRegistrySnapshot, AgentToolUsageFeedbackV3, CanonicalTurnDelta,
+    ConversationKey, ConversationScope, HostRefVisibility, LlmClient, LlmHttpClient,
+    LlmModelCompat, LlmResponse, LongTermMemoryKind, MemoryCandidateContent,
+    MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment, MemoryCandidateTarget,
+    MemoryCapabilityPolicy, MemoryClock, MemoryCloseRequest, MemoryEvidenceAuthority,
+    MemoryIdentity, MemoryLongTermControlView, MemoryLongTermListRequest, MemoryPrivacyClass,
+    MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest, MemoryRuntime, MemoryScope,
+    MemorySemanticJudgmentSource, MemoryStoreHandle, MemorySubjectVisibilityPolicy,
+    MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitRequest, MemoryTranscriptReplayRequest,
+    MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource,
+    MemoryWriteCandidate, MemoryWriteRequest, Message, NoopMemoryAuditSink,
+    PostTurnLearningInputV2, PressureLevel, ProceduralApplicabilityContextV1, ProfileId,
+    QueryFacetInput, ResponseBody, RuntimeLifecycleModeInput, RuntimeSkillListRequest,
+    RuntimeSkillOwningScope, StopReason, StoreBackendConfig, ToolChoicePolicy, ToolExecutionFactV1,
+    ToolExecutionOutcome, ToolObservationDigest, ToolSpec, TranscriptAttrEnvelope,
     TranscriptAttrGovernance, TranscriptAttrLink, TranscriptAttrRedactionPolicy,
     TranscriptAttrScope, TranscriptAttrSource, TranscriptAttrSourceKind, TranscriptAttrTarget,
     TranscriptAttrValueKind, TranscriptInputMessage, TranscriptReplayView,
@@ -560,7 +560,7 @@ fn adapter_rejects_procedural_candidate_without_creating_a_runtime_skill() {
             limit: 16,
         })
         .expect("runtime skill list");
-    assert_eq!(report.total, 0);
+    assert_eq!(report.total, Some(0));
     assert!(report.skills.is_empty());
 }
 
@@ -634,7 +634,7 @@ fn v1_rejects_every_mutation_reliability_class_but_keeps_reads() {
                 external_content_used: false,
                 candidate_ids: Vec::new(),
             },
-            learning: bm_sdk::PostTurnLearningInputV1::empty(),
+            learning: bm_sdk::PostTurnLearningInputV2::empty(),
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
         })),
@@ -1249,7 +1249,11 @@ fn transcript_turn() -> CanonicalTurnDelta {
     }
 }
 
-fn runtime_with_tool_registry() -> (MemoryRuntime, AgentToolRegistrySnapshot) {
+fn runtime_with_tool_registry() -> (
+    MemoryRuntime,
+    AgentToolRegistrySnapshot,
+    bm_sdk::MemoryProceduralSubmissionCapability,
+) {
     let mut tool = AgentToolDescriptor::compact("pdf.extract", "Extract PDF text", "schema-pdf-v1");
     tool.permission_tags = vec!["filesystem.read".to_string()];
     tool.risk_tags = vec!["external_content".to_string()];
@@ -1263,7 +1267,7 @@ fn runtime_with_tool_registry() -> (MemoryRuntime, AgentToolRegistrySnapshot) {
     let runtime = MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-main", "owner-default").expect("identity"))
         .scope(MemoryScope::new("local", "chat-1").expect("scope"))
-        .store(store)
+        .store(store.clone())
         .clock(Arc::new(FixedClock))
         .capability_policy(MemoryCapabilityPolicy::strict_profile())
         .privacy_policy(MemoryPrivacyPolicy::standard_private_boundary())
@@ -1279,16 +1283,71 @@ fn runtime_with_tool_registry() -> (MemoryRuntime, AgentToolRegistrySnapshot) {
         .agent_tool_registry(registry.clone())
         .build()
         .expect("runtime with tool registry");
-    (runtime, registry)
+    let mut scoped = runtime.scoped_runtime().clone();
+    scoped.actor_subject_id = runtime
+        .subject_registry()
+        .system_governor()
+        .unwrap()
+        .subject_id
+        .clone();
+    let governor = MemoryRuntime::builder()
+        .identity(runtime.identity().clone())
+        .scope(runtime.scope().clone())
+        .subject_registry(runtime.subject_registry().clone())
+        .scoped_runtime(scoped)
+        .store(store)
+        .clock(Arc::new(FixedClock))
+        .agent_tool_registry(registry.clone())
+        .build()
+        .unwrap();
+    let registered = governor
+        .control_procedural_producer(bm_sdk::MemoryProceduralProducerControlRequest {
+            operation_id: "adapter-fixture-register-producer".into(),
+            expected_revision: None,
+            state: bm_sdk::ProceduralProducerStateV1::Active,
+            spec: bm_sdk::ProceduralProducerSpecV1 {
+                binding_id: "adapter-fixture".into(),
+                scope: bm_sdk::ProceduralProducerScopeV1 {
+                    memory_space_id: runtime.memory_space_id().into(),
+                    mounted_subject_id: runtime.subject_id().into(),
+                    channel_id: runtime.scope().channel.clone(),
+                    chat_id: runtime.scope().chat_id.clone(),
+                },
+                principal: bm_sdk::ProceduralProducerPrincipalV1::LocalCapability {
+                    capability_id: "adapter-fixture-local".into(),
+                },
+                source_authority: bm_sdk::ProceduralProducerSourceAuthorityV1::RuntimeObservation,
+                claims: bm_sdk::ProceduralProducerClaimsV1 {
+                    execution_facts: true,
+                    method_declarations: true,
+                    usage_feedback: false,
+                    source_classifications: vec![bm_sdk::ProceduralSourceSensitivity::NonPrivate],
+                },
+                tools: vec![bm_sdk::ProceduralProducerToolV1 {
+                    registry_ref: registry.registry_ref(),
+                    tool_id: "pdf.extract".into(),
+                    schema_fingerprint: "schema-pdf-v1".into(),
+                }],
+                source_config_ref: "synthetic-adapter-config".into(),
+            },
+        })
+        .unwrap();
+    let capability = governor
+        .procedural_submission_capability(&registered.binding.revision_ref().unwrap())
+        .unwrap();
+    (runtime, registry, capability)
 }
 
 fn adapter_finalize_report_json(
     runtime: &MemoryRuntime,
     turn: CanonicalTurnDelta,
-    learning: PostTurnLearningInputV1,
+    learning: PostTurnLearningInputV2,
+    capability: Option<&bm_sdk::MemoryProceduralSubmissionCapability>,
 ) -> serde_json::Value {
-    let response = dispatch_adapter_command(
+    let lease = runtime.acquire_runtime_budget_lease().unwrap();
+    let response = dispatch_adapter_command_with_services(
         runtime,
+        &lease,
         envelope(
             runtime,
             AdapterOperation::FinalizeTurn,
@@ -1299,6 +1358,11 @@ fn adapter_finalize_report_json(
                 mode_input: RuntimeLifecycleModeInput::default(),
             })),
         ),
+        AdapterRuntimeServices {
+            http: None,
+            llm: None,
+            procedural_submission: capability,
+        },
     )
     .expect("finalize dispatch");
     let AdapterResponse::Accepted {
@@ -1422,7 +1486,7 @@ fn json_decoder_covers_adapter_memory_operations() {
 
     let finalize_body = json!({
         "turn": transcript_turn(),
-        "learning": bm_sdk::PostTurnLearningInputV1::empty()
+        "learning": bm_sdk::PostTurnLearningInputV2::empty()
     })
     .to_string();
     let finalize = decode_json_adapter_command(AdapterOperation::FinalizeTurn, &finalize_body)
@@ -1520,6 +1584,7 @@ fn maintain_dispatch_uses_injected_runtime_services() {
         AdapterRuntimeServices {
             http: Some(&mut http),
             llm: Some(&llm),
+            procedural_submission: None,
         },
     )
     .expect("dispatch");
@@ -1544,7 +1609,7 @@ fn finalize_dispatch_queues_governance_even_when_request_services_are_injected()
         AdapterOperation::FinalizeTurn,
         &json!({
             "turn": transcript_turn(),
-            "learning": bm_sdk::PostTurnLearningInputV1::empty()
+            "learning": bm_sdk::PostTurnLearningInputV2::empty()
         })
         .to_string(),
     )
@@ -1559,6 +1624,7 @@ fn finalize_dispatch_queues_governance_even_when_request_services_are_injected()
         AdapterRuntimeServices {
             http: Some(&mut http),
             llm: Some(&llm),
+            procedural_submission: None,
         },
     )
     .expect("dispatch");
@@ -1585,7 +1651,8 @@ fn finalize_report_serializes_distinct_procedural_learning_intent() {
     let no_feedback = adapter_finalize_report_json(
         &no_feedback_runtime,
         transcript_turn(),
-        PostTurnLearningInputV1::empty(),
+        PostTurnLearningInputV2::empty(),
+        None,
     );
     assert_eq!(no_feedback["proceduralLearning"]["state"], "not_scheduled");
     assert!(no_feedback["proceduralLearning"]["jobId"].is_null());
@@ -1594,56 +1661,45 @@ fn finalize_report_serializes_distinct_procedural_learning_intent() {
         "no_actionable_procedural_feedback"
     );
 
-    let (queued_runtime, registry) = runtime_with_tool_registry();
-    let observation = AgentToolObservationDigest {
+    let (queued_runtime, registry, capability) = runtime_with_tool_registry();
+    let observation = ToolExecutionFactV1 {
         observation_id: "adapter-tool-observation-1".to_string(),
-        registry_id: registry.registry_id.clone(),
-        tool_id: "pdf.extract".to_string(),
-        schema_fingerprint: "schema-pdf-v1".to_string(),
-        call_id: Some("adapter-tool-call-1".to_string()),
-        task_signature: "extract_pdf_text_for_release_notes".to_string(),
-        summary: "PDF extraction produced usable release note text.".to_string(),
-        outcome: AgentToolOutcome::Succeeded,
-        error_code: None,
-        external_content: true,
-        private_content_used: false,
-        permission_tags: vec!["filesystem.read".to_string()],
-        risk_tags: vec!["external_content".to_string()],
-        started_at: Some(1_800_000_010),
-        completed_at: Some(1_800_000_011),
+        call_id: "adapter-tool-call-1".to_string(),
+        outcome: ToolExecutionOutcome::Succeeded,
+        source_sensitivity: bm_sdk::ProceduralSourceSensitivity::NonPrivate,
+        started_at: Some(1_800_000_000),
+        completed_at: Some(1_800_000_000),
     };
     let mut queued_turn = transcript_turn();
     queued_turn.turn_id = "turn-adapter-procedural-1".to_string();
     queued_turn.source.request_id = Some("adapter-req-procedural-1".to_string());
     queued_turn.tool_observations = vec![ToolObservationDigest {
         observation_id: observation.observation_id.clone(),
-        tool_name: observation.tool_id.clone(),
-        summary: observation.summary.clone(),
-        external_content: observation.external_content,
+        call_id: observation.call_id.clone(),
+        tool_name: "pdf.extract".into(),
+        summary: "Synthetic PDF execution outcome".into(),
+        external_content: false,
     }];
     queued_turn.external_content_used = true;
     let queued = adapter_finalize_report_json(
         &queued_runtime,
         queued_turn,
-        PostTurnLearningInputV1 {
+        PostTurnLearningInputV2 {
             tool_call_count: 1,
             selection_receipt: None,
             runtime_skill_feedback: Vec::new(),
             agent_skill_feedback: Vec::new(),
             task_learning_feedback: Vec::new(),
-            agent_tool_feedback: vec![AgentToolUsageFeedbackV2 {
+            agent_tool_feedback: vec![AgentToolUsageFeedbackV3 {
                 registry_ref: registry.registry_ref(),
-                tool_id: observation.tool_id.clone(),
-                schema_fingerprint: observation.schema_fingerprint.clone(),
-                observations: vec![observation],
-                outcome: ProceduralExecutionOutcomeV1::Succeeded,
-                user_visible_result_summary: Some(
-                    "PDF extraction supported the release-note task.".to_string(),
-                ),
-                operator_note: None,
+                tool_id: "pdf.extract".into(),
+                schema_fingerprint: "schema-pdf-v1".into(),
+                execution_facts: vec![observation],
+                method_evidence: Vec::new(),
             }],
-            authority: bm_sdk::ProceduralFeedbackAuthorityInputV1::HostRuntimeObservation,
+            human_confirmation_operation_id: None,
         },
+        Some(&capability),
     );
     assert_eq!(queued["proceduralLearning"]["state"], "queued");
     assert!(queued["proceduralLearning"]["jobId"]

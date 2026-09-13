@@ -20,7 +20,7 @@ The project is not a vector database, a generic RAG framework, a chat-history du
 | Model gateway and transparent local-model control | `bm-llm-gateway`, `bm-ollama-transparent` |
 | Adapters | `bm-cli`, `bm-http`, `bm-wss`, `bm-mcp`, `bm-a2a` |
 
-The Cargo workspace is on the `0.7.0` source line. Read the [0.7.0 release notes](docs/en/release-notes-0.7.0.md) for governed procedural learning and transcript integrity changes. This is a clean-break Store v13 generation with no compatibility reader or automatic migration. Git tags, crates.io packages, binaries and deployment each require separate release evidence. The repository includes smoke-test examples under `examples/` and platform capability fixtures under `fixtures/platform/capabilities/`.
+This source tree is [0.8.0](docs/en/release-notes-0.8.0.md), with [Store v14](docs/en/store-backends.md) and [explicit procedural evidence authority](docs/en/api.md#procedural-evidence-authority). The 0.7.0 source uses Store v13. There is no compatibility reader or automatic migration between generations. Release identity is determined by the corresponding Git tag, not a working-tree version number; crates.io packages, binaries and deployment each require separate release evidence. The repository includes smoke-test examples under `examples/` and platform capability fixtures under `fixtures/platform/capabilities/`.
 
 ## Capabilities
 
@@ -126,6 +126,7 @@ English documentation:
 - [Replay and Archive](docs/en/replay-and-archive.md)
 - [Operator Guide](docs/en/operator-guide.md)
 - [Release Checklist](docs/en/release-checklist.md)
+- [0.8.0 Source Release Notes](docs/en/release-notes-0.8.0.md)
 - [0.7.0 Source Candidate Notes](docs/en/release-notes-0.7.0.md)
 - [0.6.0 Source Candidate Notes](docs/en/release-notes-0.6.0.md)
 - [0.5.0 Release Notes](docs/en/release-notes-0.5.0.md)
@@ -147,6 +148,7 @@ English documentation:
 - [回放与归档](docs/zh-CN/replay-and-archive.md)
 - [运维与检查](docs/zh-CN/operator-guide.md)
 - [发布清单](docs/zh-CN/release-checklist.md)
+- [0.8.0 源码发布说明](docs/zh-CN/release-notes-0.8.0.md)
 - [0.7.0 源码候选说明](docs/zh-CN/release-notes-0.7.0.md)
 - [0.6.0 源码候选说明](docs/zh-CN/release-notes-0.6.0.md)
 - [0.5.0 发布说明](docs/zh-CN/release-notes-0.5.0.md)

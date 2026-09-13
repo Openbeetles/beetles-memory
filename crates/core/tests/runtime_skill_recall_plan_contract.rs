@@ -177,6 +177,50 @@ fn owner_record(scope: RuntimeSkillOwningScope) -> RuntimeSkillOwnerRecord {
     owner_record_with_intrinsic(scope, intrinsic())
 }
 
+fn usage_contributions(
+    record: &RuntimeSkillOwnerRecord,
+    turn_id: &str,
+    outcomes: &[bm_core::memory::ProceduralExecutionOutcomeV1],
+    observed_at: u64,
+) -> Vec<bm_core::memory::RuntimeSkillUsageContributionV1> {
+    use bm_core::memory::*;
+    let RuntimeSkillOwningScope::Subject { mounted_subject_id } = &record.owning_scope else {
+        panic!("subject fixture required");
+    };
+    outcomes
+        .iter()
+        .enumerate()
+        .map(|(ordinal, outcome)| {
+            RuntimeSkillUsageContributionV1::build(
+                ProceduralFeedbackIdentityV1::new(
+                    &record.memory_space_id,
+                    mounted_subject_id,
+                    "sdk.direct",
+                    "chat-1",
+                    "conversation-1",
+                    turn_id,
+                )
+                .unwrap(),
+                digest('e'),
+                ProceduralProducerRevisionRefV1 {
+                    binding_key: digest('a'),
+                    revision: 1,
+                    content_digest: digest('b'),
+                },
+                &RuntimeSkillUsageFeedbackV1 {
+                    locator: RuntimeSkillOwnerLocator::from_record(record),
+                    selected_content_digest: record.content_digest.clone(),
+                    outcome: *outcome,
+                    observation_ref: format!("observation-{ordinal}"),
+                },
+                ordinal as u32,
+                observed_at,
+            )
+            .unwrap()
+        })
+        .collect()
+}
+
 #[test]
 fn usage_feedback_reduces_into_exact_owner_without_reauthoring_skill() {
     use bm_core::memory::ProceduralExecutionOutcomeV1 as Outcome;
@@ -185,25 +229,36 @@ fn usage_feedback_reduces_into_exact_owner_without_reauthoring_skill() {
     });
     assert_eq!(
         before
-            .apply_usage_feedback(&[Outcome::NotExecuted], 110)
+            .apply_usage_contributions(
+                &usage_contributions(&before, "not-executed", &[Outcome::NotExecuted], 110),
+                16,
+                110
+            )
             .unwrap(),
         before
     );
+    let original_sources = usage_contributions(
+        &before,
+        "first",
+        &[
+            Outcome::Succeeded,
+            Outcome::Failed,
+            Outcome::Mismatch,
+            Outcome::NotExecuted,
+        ],
+        110,
+    );
     let after = before
-        .apply_usage_feedback(
-            &[
-                Outcome::Succeeded,
-                Outcome::Failed,
-                Outcome::Mismatch,
-                Outcome::NotExecuted,
-            ],
-            110,
-        )
+        .apply_usage_contributions(&original_sources, 16, 110)
         .unwrap();
     assert_eq!(after.owner_revision, before.owner_revision + 1);
     assert_eq!(after.lifecycle.usage_outcome.observation_count, 3);
     assert_eq!(after.lifecycle.usage_outcome.succeeded_count, 1);
     assert_eq!(after.lifecycle.usage_outcome.mismatch_count, 1);
+    let usage_wire = serde_json::to_value(&after.lifecycle.usage_outcome).unwrap();
+    assert!(usage_wire.get("contributions").and_then(serde_json::Value::as_array)
+        .is_some_and(|references| !references.is_empty()),
+        "persisted usage must retain exact source contributions so revocation can reconstruct counts and last outcome");
     assert_eq!(after.procedural_content, before.procedural_content);
     assert_eq!(after.intrinsic_contract, before.intrinsic_contract);
     assert_eq!(after.privacy_class, before.privacy_class);
@@ -211,16 +266,170 @@ fn usage_feedback_reduces_into_exact_owner_without_reauthoring_skill() {
         after.lifecycle.lineage.predecessor,
         Some(RuntimeSkillOwnerBinding::from_record(&before).unwrap())
     );
-    let failed = after.apply_usage_feedback(&[Outcome::Failed], 120).unwrap();
+    let mut all_sources = original_sources.clone();
+    all_sources.extend(usage_contributions(
+        &after,
+        "second",
+        &[Outcome::Failed],
+        120,
+    ));
+    let failed = after
+        .apply_usage_contributions(&all_sources, 16, 120)
+        .unwrap();
     assert_eq!(
         failed.lifecycle.usage_outcome.last_outcome,
         Some(RuntimeSkillUsageOutcome::Neutral)
     );
     assert_eq!(failed.lifecycle.usage_outcome.mismatch_count, 1);
+    let withdrawn = failed
+        .apply_usage_contributions(&original_sources, 16, 130)
+        .unwrap();
+    let mut expected = after.lifecycle.usage_outcome.clone();
+    expected.retained_contributions = failed
+        .lifecycle
+        .usage_outcome
+        .retained_contributions
+        .clone();
+    assert_eq!(
+        withdrawn.lifecycle.usage_outcome, expected,
+        "withdrawing the most recent source restores the original last outcome and original time"
+    );
+    assert_eq!(withdrawn.lifecycle.usage_outcome.last_outcome_at, Some(110));
+    assert_eq!(
+        withdrawn
+            .apply_usage_contributions(&original_sources, 16, 140)
+            .unwrap(),
+        withdrawn,
+        "replay must not create another owner revision"
+    );
+    let cleared = withdrawn.apply_usage_contributions(&[], 16, 140).unwrap();
+    assert_eq!(
+        cleared.lifecycle.usage_outcome,
+        RuntimeSkillUsageOutcomeSummary {
+            retained_contributions: failed
+                .lifecycle
+                .usage_outcome
+                .retained_contributions
+                .clone(),
+            ..RuntimeSkillUsageOutcomeSummary::default()
+        }
+    );
     assert!(before
         .retire(110)
         .unwrap()
-        .apply_usage_feedback(&[Outcome::Succeeded], 120)
+        .apply_usage_contributions(
+            &usage_contributions(&before, "retired", &[Outcome::Succeeded], 120),
+            16,
+            120
+        )
+        .is_err());
+}
+
+#[test]
+fn pfi2_same_second_usage_reconciliation_preserves_wall_clock_and_logical_revision_time() {
+    use bm_core::memory::ProceduralExecutionOutcomeV1 as Outcome;
+    let initial = owner_record(RuntimeSkillOwningScope::Subject {
+        mounted_subject_id: "subject-1".into(),
+    });
+    let now = initial.lifecycle.observed_at;
+    let sources = usage_contributions(&initial, "same-second", &[Outcome::Succeeded], now);
+    let applied = initial
+        .apply_usage_contributions(&sources, 16, now)
+        .unwrap();
+    assert!(applied.lifecycle.updated_at > now);
+    assert_eq!(
+        applied
+            .apply_usage_contributions(&sources, 16, now)
+            .unwrap(),
+        applied
+    );
+    let retired = applied.retire(now).unwrap();
+    let cleared = retired.apply_usage_contributions(&[], 16, now).unwrap();
+    assert_eq!(cleared.lifecycle.state, RuntimeSkillLifecycleState::Retired);
+    assert_eq!(
+        cleared.lifecycle.availability,
+        RuntimeSkillAvailability::Disabled
+    );
+    assert_eq!(cleared.lifecycle.usage_outcome.observation_count, 0);
+    assert!(cleared.lifecycle.updated_at > retired.lifecycle.updated_at);
+    assert_eq!(cleared.procedural_content, retired.procedural_content);
+    let restored = cleared
+        .apply_usage_contributions(&sources, 16, now)
+        .unwrap();
+    assert_eq!(
+        restored.lifecycle.usage_outcome,
+        retired.lifecycle.usage_outcome
+    );
+    assert_eq!(
+        restored
+            .apply_usage_contributions(&sources, 16, now)
+            .unwrap(),
+        restored
+    );
+    assert!(initial.apply_usage_contributions(&[], 16, now - 1).is_err());
+    assert!(
+        applied
+            .apply_usage_contributions(
+                &usage_contributions(&initial, "future", &[Outcome::Succeeded], now + 1),
+                16,
+                now,
+            )
+            .is_err(),
+        "logical owner time must not authorize a future observation"
+    );
+}
+
+#[test]
+fn terminal_usage_reconciliation_preserves_state_content_and_retained_identity() {
+    use bm_core::memory::ProceduralExecutionOutcomeV1 as Outcome;
+    let initial = owner_record(RuntimeSkillOwningScope::Subject {
+        mounted_subject_id: "subject-1".into(),
+    });
+    let sources = usage_contributions(&initial, "retained-source", &[Outcome::Succeeded], 110);
+    let applied = initial
+        .apply_usage_contributions(&sources, 16, 110)
+        .unwrap();
+    let retired = applied.retire(120).unwrap();
+    let cleared = retired
+        .apply_usage_contributions(&[], 16, 130)
+        .expect("terminal statistics still obey source withdrawal");
+    assert_eq!(cleared.lifecycle.state, RuntimeSkillLifecycleState::Retired);
+    assert_eq!(
+        cleared.lifecycle.availability,
+        RuntimeSkillAvailability::Disabled
+    );
+    assert_eq!(cleared.lifecycle.usage_outcome.observation_count, 0);
+    assert_eq!(
+        cleared.lifecycle.usage_outcome.retained_contributions,
+        retired.lifecycle.usage_outcome.retained_contributions
+    );
+    assert_eq!(cleared.procedural_content, retired.procedural_content);
+    assert_eq!(cleared.owner_ref, retired.owner_ref);
+    let restored = cleared
+        .apply_usage_contributions(&sources, 16, 140)
+        .unwrap();
+    assert_eq!(
+        restored.lifecycle.usage_outcome,
+        retired.lifecycle.usage_outcome
+    );
+    assert_eq!(
+        restored
+            .apply_usage_contributions(&sources, 16, 150)
+            .unwrap(),
+        restored
+    );
+    assert!(restored
+        .revise_availability(RuntimeSkillAvailability::Enabled, 150)
+        .is_err());
+    assert!(restored
+        .revise_procedural_content(initial.procedural_content.clone(), 150)
+        .is_err());
+    assert!(restored
+        .apply_usage_contributions(
+            &usage_contributions(&initial, "unseen-source", &[Outcome::Succeeded], 150),
+            16,
+            150
+        )
         .is_err());
 }
 
@@ -1341,13 +1550,19 @@ fn runtime_skill_lifecycle_closes_availability_state_lineage_time_and_usage() {
         },
         observed_at: 100,
         updated_at: 120,
-        usage_outcome: RuntimeSkillUsageOutcomeSummary {
-            observation_count: 1,
-            succeeded_count: 1,
-            mismatch_count: 0,
-            last_outcome: Some(RuntimeSkillUsageOutcome::Succeeded),
-            last_outcome_at: Some(115),
-        },
+        usage_outcome: bm_core::memory::reduce_runtime_skill_usage_contributions(
+            &created.memory_space_id,
+            "subject-a",
+            &created.owner_ref.owner_id,
+            &usage_contributions(
+                &created,
+                "lifecycle-usage",
+                &[bm_core::memory::ProceduralExecutionOutcomeV1::Succeeded],
+                115,
+            ),
+            16,
+        )
+        .unwrap(),
     };
     let revised = RuntimeSkillOwnerRecord::build(
         "space-1",
@@ -1453,6 +1668,90 @@ fn runtime_skill_lifecycle_closes_availability_state_lineage_time_and_usage() {
         MemoryPrivacyClass::SharedWithSubject,
     )
     .is_err());
+}
+
+#[test]
+fn pfi2_runtime_usage_reduction_retains_complete_applied_source_directory() {
+    let created = owner_record(RuntimeSkillOwningScope::Subject {
+        mounted_subject_id: "subject-a".into(),
+    });
+    let contributions = usage_contributions(
+        &created,
+        "retained-usage",
+        &[
+            bm_core::memory::ProceduralExecutionOutcomeV1::Succeeded,
+            bm_core::memory::ProceduralExecutionOutcomeV1::Mismatch,
+        ],
+        115,
+    );
+    let applied = created
+        .apply_usage_contributions(&contributions, 16, 120)
+        .unwrap();
+    assert_eq!(applied.lifecycle.usage_outcome.observation_count, 2);
+    let withdrawn = applied.apply_usage_contributions(&[], 16, 121).unwrap();
+    assert_eq!(withdrawn.lifecycle.usage_outcome.observation_count, 0);
+    let encoded = serde_json::to_value(&withdrawn).unwrap();
+    let mut references = contributions
+        .iter()
+        .map(|contribution| contribution.reference().unwrap())
+        .collect::<Vec<_>>();
+    references.sort_by(|a, b| a.contribution_id.cmp(&b.contribution_id));
+    assert_eq!(encoded["lifecycle"]["usage_outcome"]["retained_contributions"], serde_json::to_value(&references).unwrap(),
+        "zero active usage cannot discard the actual applied provenance required for governed recovery");
+    let reopened: RuntimeSkillOwnerRecord = serde_json::from_value(encoded).unwrap();
+    assert!(reopened.validate_contract().accepted);
+    let restored = reopened
+        .apply_usage_contributions(&contributions, 16, 122)
+        .unwrap();
+    assert_eq!(
+        restored.lifecycle.usage_outcome,
+        applied.lifecycle.usage_outcome
+    );
+    assert_eq!(restored.owner_ref, created.owner_ref);
+    assert_eq!(
+        restored
+            .apply_usage_contributions(&contributions, 16, 123)
+            .unwrap(),
+        restored
+    );
+    assert!(
+        restored.apply_usage_contributions(&[], 1, 123).is_err(),
+        "retained sources still consume the owner budget"
+    );
+    let mut missing_directory = serde_json::to_value(&restored).unwrap();
+    missing_directory["lifecycle"]["usage_outcome"]
+        .as_object_mut()
+        .unwrap()
+        .remove("retained_contributions");
+    assert!(
+        serde_json::from_value::<RuntimeSkillOwnerRecord>(missing_directory).is_err(),
+        "no missing-field compatibility default"
+    );
+    for corruption in ["missing", "duplicate", "conflicting"] {
+        let mut forged = restored.clone();
+        match corruption {
+            "missing" => forged
+                .lifecycle
+                .usage_outcome
+                .retained_contributions
+                .clear(),
+            "duplicate" => forged
+                .lifecycle
+                .usage_outcome
+                .retained_contributions
+                .push(references[0].clone()),
+            "conflicting" => {
+                forged.lifecycle.usage_outcome.retained_contributions[0].source_job_id =
+                    "different-source-job".into()
+            }
+            _ => unreachable!(),
+        }
+        forged.content_digest = forged.canonical_content_digest().unwrap();
+        assert!(
+            !forged.validate_contract().accepted,
+            "{corruption}: resealing cannot forge the exact active subset"
+        );
+    }
 }
 
 #[test]

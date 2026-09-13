@@ -7,6 +7,7 @@ use std::sync::Arc;
 use bm_core::feature_gate::ProfileId;
 use bm_core::memory::{
     MemoryMutationAuditRecord, MemoryMutationOperationKind, MemoryMutationReceipt,
+    ProceduralSourceDependentsRootV1,
 };
 use bm_core::skills::RuntimeSkillOwnerRecord;
 use bm_sdk::nonproduction_replay_harness::{
@@ -306,6 +307,7 @@ fn scoped_non_soul_event_ids(
                 .is_some_and(|event| {
                     !is_subject_soul_event(event)
                         && !is_runtime_event(event)
+                        && event.plane != "procedural_feedback"
                         && event.plane != "procedural_selection_authorities_private"
                         && !matches!(
                             event.plane.as_str(),
@@ -506,12 +508,36 @@ fn assert_backend_scoped_archive_restore(backend: &str, root: &Path, scenario: A
         &source,
         MemoryArchiveScope::shared_program(MEMORY_SPACE_ID).expect("shared archive scope"),
     );
+    assert!(
+        source_snapshot
+            .events
+            .iter()
+            .any(|event| event.plane == "procedural_feedback"),
+        "source mutation really emitted protected dependency audit events"
+    );
     for archive in [&subject_archive, &shared_archive] {
+        assert!(
+            !archive.contains_event_plane("procedural_feedback"),
+            "{backend}: source-derived learning audit must not enter a public archive"
+        );
         for namespace in ["runtime_skill_records", "runtime_skill_scope_manifests"] {
             assert!(!archive.contains_json_namespace(namespace));
             assert!(!archive.contains_event_plane(namespace));
         }
     }
+    let private_archive = export_memory_space(
+        &source,
+        MemorySpaceExportRequest {
+            scope: archive_scope_subject(SUBJECT_A),
+            private_material_policy: MemorySpacePrivateMaterialPolicy::IncludePrivate,
+        },
+    )
+    .unwrap()
+    .archive;
+    assert!(
+        !private_archive.contains_event_plane("procedural_feedback"),
+        "private-content disclosure does not export procedural authority or its internal audit"
+    );
     assert!(subject_archive.contains_json_namespace("governed_evidence_documents"));
     assert!(
         !subject_archive.contains_event_plane("governed_evidence_documents"),
@@ -538,6 +564,78 @@ fn assert_backend_scoped_archive_restore(backend: &str, root: &Path, scenario: A
     )
     .unwrap_or_else(|error| panic!("{backend} Subject replace: {error}"));
     let after_subject = full_snapshot(&target);
+    let procedural_events = |snapshot: &StoreSnapshot| {
+        snapshot
+            .events
+            .iter()
+            .filter(|event| event.plane == "procedural_feedback")
+            .map(|event| (event.event_id.clone(), event.clone()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let prior_events = procedural_events(&target_before);
+    let resulting_events = procedural_events(&after_subject);
+    assert!(!prior_events.is_empty());
+    for (id, event) in &prior_events {
+        assert_eq!(
+            resulting_events.get(id),
+            Some(event),
+            "target audit must be preserved"
+        );
+    }
+    for id in procedural_events(&source_snapshot).keys() {
+        assert!(
+            !resulting_events.contains_key(id),
+            "source audit must not be transplanted"
+        );
+    }
+    let prior_roots = namespace_docs(&target_before, "procedural_source_dependents");
+    let resulting_roots = namespace_docs(&after_subject, "procedural_source_dependents");
+    let changed_roots = resulting_roots
+        .iter()
+        .filter(|(key, value)| prior_roots.get(*key) != Some(*value))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<BTreeMap<_, _>>();
+    assert!(
+        !changed_roots.is_empty(),
+        "{backend}/{scenario:?}: real source replacement changes dependency roots"
+    );
+    let added_events = resulting_events
+        .iter()
+        .filter(|(id, _)| !prior_events.contains_key(*id))
+        .map(|(_, event)| event)
+        .collect::<Vec<_>>();
+    assert_eq!(added_events.len(), changed_roots.len());
+    assert_eq!(
+        added_events
+            .iter()
+            .map(|event| event.record_key.clone())
+            .collect::<BTreeSet<_>>(),
+        changed_roots.keys().cloned().collect()
+    );
+    for event in added_events {
+        let root: ProceduralSourceDependentsRootV1 =
+            serde_json::from_value(changed_roots[&event.record_key].clone()).unwrap();
+        root.validate().unwrap();
+        assert_eq!(event.scope.memory_space_id, MEMORY_SPACE_ID);
+        assert_eq!(
+            event.scope.physical_owning_scope,
+            subject_event_scope(SUBJECT_A)
+        );
+        assert_eq!(
+            event.payload.get("operation").map(String::as_str),
+            Some("post_turn.procedural.source_archive_replace")
+        );
+        assert_eq!(
+            event.payload.get("transaction_id"),
+            Some(&root.last_change.transaction_id)
+        );
+        assert!(
+            root.last_change.operation.is_none(),
+            "archive must not invent a MOR"
+        );
+    }
+    assert!(!export_scope(&target, archive_scope_subject(SUBJECT_A))
+        .contains_event_plane("procedural_feedback"));
     assert_eq!(
         runtime_skill_docs(&after_subject, &subject_scope(SUBJECT_A)),
         runtime_skill_docs(&target_before, &subject_scope(SUBJECT_A)),
@@ -580,9 +678,21 @@ fn assert_backend_scoped_archive_restore(backend: &str, root: &Path, scenario: A
         .filter(|event| expected.contains(&event.event_id) && !actual.contains(&event.event_id))
         .map(|event| (&event.plane, event.payload.get("operation")))
         .collect::<Vec<_>>();
+    let unexpected = after_subject
+        .events
+        .iter()
+        .filter(|event| actual.contains(&event.event_id) && !expected.contains(&event.event_id))
+        .map(|event| {
+            (
+                &event.plane,
+                event.payload.get("operation"),
+                &event.record_key,
+            )
+        })
+        .collect::<Vec<_>>();
     assert!(
         actual == expected,
-        "{backend}: Subject archive events missing safe metadata: {missing:?}"
+        "{backend}: Subject archive events missing: {missing:?}; unexpected: {unexpected:?}"
     );
     assert_eq!(
         scoped_soul_event_ids(&after_subject, &subject_event_scope(SUBJECT_A)),

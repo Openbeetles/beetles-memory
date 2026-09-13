@@ -17,7 +17,7 @@ use bm_core::memory::{
     MemoryLongTermGovernancePolicy, MemoryMutationAuditRecord, MemoryMutationOperationIdentity,
     MemoryMutationReceipt, PostTurnGovernanceBindingRevisionIndexV1,
     PostTurnGovernanceBindingSnapshotV1, PostTurnGovernanceJobV3, PostTurnGovernanceScopeIndexV3,
-    ProceduralFeedbackApplicationLedgerV1, ProceduralFeedbackJobV1, ProceduralFeedbackScopeIndexV1,
+    ProceduralFeedbackApplicationLedgerV2, ProceduralFeedbackJobV2, ProceduralFeedbackScopeIndexV2,
     RelationshipSourceConstitutionV1, RelationshipSourceControlOutcomeV1,
     RelationshipSourceControlReportV1, RelationshipSourceScopeManifestV1,
     SubjectSoulGenerationTombstoneV1, SubjectSoulLifecycleHeadV1, SubjectSoulMutationOutcomeV1,
@@ -40,7 +40,7 @@ use bm_core::memory::{
 use bm_core::platform::MemorySystemKind;
 use bm_core::skills::{
     canonical_runtime_skill_owner_key, runtime_skill_scope_manifest_key,
-    AgentToolExperienceOwnerHeadV2, AgentToolExperienceRevisionMaterialV2,
+    AgentToolExperienceOwnerHeadV3, AgentToolExperienceRevisionMaterialV3,
     AgentToolExperienceScopeManifestV1, RuntimeSkillOwnerRecord, RuntimeSkillOwningScope,
     RuntimeSkillScopeManifest, RUNTIME_SKILL_SCOPE_MANIFEST_SCHEMA_VERSION,
 };
@@ -61,8 +61,8 @@ use crate::store_internal::recall_index::{
     TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE,
 };
 
-pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema_v13";
-pub const STORE_SCHEMA_VERSION: u32 = 13;
+pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema_v14";
+pub const STORE_SCHEMA_VERSION: u32 = 14;
 pub(crate) const LONG_TERM_VERSION_MATERIAL_NAMESPACE: &str = "long_term_version_materials";
 pub(crate) const LONG_TERM_HEAD_MANIFEST_NAMESPACE: &str = "long_term_head_manifests";
 pub(crate) const LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE: &str =
@@ -75,6 +75,12 @@ pub(crate) const AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE: &str = "agent_tool_experi
 pub(crate) const AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE: &str =
     "agent_tool_experience_scope_manifests";
 pub(crate) const PROCEDURAL_FEEDBACK_JOB_NAMESPACE: &str = "procedural_feedback_jobs";
+pub(crate) const PROCEDURAL_PRODUCER_BINDING_NAMESPACE: &str = "procedural_producer_bindings";
+pub(crate) const PROCEDURAL_PRODUCER_HEAD_NAMESPACE: &str = "procedural_producer_heads";
+pub(crate) const PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE: &str = "procedural_subject_validity_roots";
+pub(crate) const PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE: &str =
+    "procedural_subject_initializations";
+pub(crate) const PROCEDURAL_SOURCE_DEPENDENTS_NAMESPACE: &str = "procedural_source_dependents";
 pub(crate) const PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE: &str =
     "procedural_feedback_scope_indexes";
 pub(crate) const PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE: &str =
@@ -258,6 +264,11 @@ pub(crate) enum StoreJsonDecoderKind {
     AgentToolExperienceOwnerHead,
     AgentToolExperienceScopeManifest,
     ProceduralFeedbackJob,
+    ProceduralProducerBinding,
+    ProceduralProducerHead,
+    ProceduralSubjectValidity,
+    ProceduralSubjectInitialization,
+    ProceduralSourceDependents,
     ProceduralFeedbackScopeIndex,
     ProceduralFeedbackApplicationLedger,
     ProceduralSelectionAuthority,
@@ -492,6 +503,26 @@ pub(crate) const STORE_JSON_NAMESPACE_REGISTRY: &[StoreJsonNamespaceContract] = 
     typed_json_namespace(
         PROCEDURAL_FEEDBACK_JOB_NAMESPACE,
         StoreJsonDecoderKind::ProceduralFeedbackJob,
+    ),
+    typed_json_namespace(
+        PROCEDURAL_PRODUCER_BINDING_NAMESPACE,
+        StoreJsonDecoderKind::ProceduralProducerBinding,
+    ),
+    typed_json_namespace(
+        PROCEDURAL_PRODUCER_HEAD_NAMESPACE,
+        StoreJsonDecoderKind::ProceduralProducerHead,
+    ),
+    typed_json_namespace(
+        PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE,
+        StoreJsonDecoderKind::ProceduralSubjectValidity,
+    ),
+    typed_json_namespace(
+        PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE,
+        StoreJsonDecoderKind::ProceduralSubjectInitialization,
+    ),
+    typed_json_namespace(
+        PROCEDURAL_SOURCE_DEPENDENTS_NAMESPACE,
+        StoreJsonDecoderKind::ProceduralSourceDependents,
     ),
     typed_json_namespace(
         super::procedural_selection::NAMESPACE,
@@ -1493,7 +1524,7 @@ fn validate_store_json_value(
             Ok(())
         }
         StoreJsonDecoderKind::AgentToolExperienceRevisionMaterial => {
-            let material = decode_json::<AgentToolExperienceRevisionMaterialV2>(value, invalid)?;
+            let material = decode_json::<AgentToolExperienceRevisionMaterialV3>(value, invalid)?;
             if !material.validate_contract().accepted || material.physical_key != key {
                 return Err(invalid(
                     "Agent Tool experience material contract or physical key mismatch".to_string(),
@@ -1502,7 +1533,7 @@ fn validate_store_json_value(
             Ok(())
         }
         StoreJsonDecoderKind::AgentToolExperienceOwnerHead => {
-            let head = decode_json::<AgentToolExperienceOwnerHeadV2>(value, invalid)?;
+            let head = decode_json::<AgentToolExperienceOwnerHeadV3>(value, invalid)?;
             if !head.validate_contract().accepted || head.physical_key != key {
                 return Err(invalid(
                     "Agent Tool experience head contract or physical key mismatch".to_string(),
@@ -1597,7 +1628,7 @@ fn validate_store_json_value(
             authority.validate(key)
         }
         StoreJsonDecoderKind::ProceduralFeedbackJob => {
-            let job = decode_json::<ProceduralFeedbackJobV1>(value, invalid)?;
+            let job = decode_json::<ProceduralFeedbackJobV2>(value, invalid)?;
             if job.job_id != key || job.validate().is_err() {
                 return Err(invalid(
                     "procedural feedback job contract or physical key mismatch".to_string(),
@@ -1605,8 +1636,63 @@ fn validate_store_json_value(
             }
             Ok(())
         }
+        StoreJsonDecoderKind::ProceduralProducerBinding => {
+            let binding =
+                decode_json::<bm_core::memory::ProceduralProducerBindingV1>(value, invalid)?;
+            if !binding.validate_contract()
+                || !binding
+                    .revision_ref()
+                    .is_ok_and(|reference| reference.material_key() == key)
+            {
+                return Err(invalid(
+                    "producer binding contract or physical key mismatch".to_owned(),
+                ));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::ProceduralProducerHead => {
+            let head = decode_json::<bm_core::memory::ProceduralProducerHeadV1>(value, invalid)?;
+            if !head.validate_contract() || head.binding_key != key {
+                return Err(invalid(
+                    "producer head contract or physical key mismatch".to_owned(),
+                ));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::ProceduralSourceDependents => {
+            let root =
+                decode_json::<bm_core::memory::ProceduralSourceDependentsRootV1>(value, invalid)?;
+            if root.physical_key != key || root.validate().is_err() {
+                return Err(invalid("invalid source dependents root".to_owned()));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::ProceduralSubjectValidity => {
+            let root =
+                decode_json::<bm_core::memory::ProceduralSubjectValidityRootV1>(value, invalid)?;
+            if root.physical_key != key
+                || root
+                    .validate(bm_core::memory::MAX_PROCEDURAL_SUBJECT_SCOPES)
+                    .is_err()
+            {
+                return Err(invalid(
+                    "procedural subject root contract or physical key mismatch".to_owned(),
+                ));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::ProceduralSubjectInitialization => {
+            let material =
+                decode_json::<bm_core::memory::ProceduralSubjectInitializationV1>(value, invalid)?;
+            if material.physical_key != key || material.validate().is_err() {
+                return Err(invalid(
+                    "procedural initialization contract or physical key mismatch".to_owned(),
+                ));
+            }
+            Ok(())
+        }
         StoreJsonDecoderKind::ProceduralFeedbackScopeIndex => {
-            let index = decode_json::<ProceduralFeedbackScopeIndexV1>(value, invalid)?;
+            let index = decode_json::<ProceduralFeedbackScopeIndexV2>(value, invalid)?;
             if index.scope_index_key != key || index.validate().is_err() {
                 return Err(invalid(
                     "procedural feedback scope index contract or physical key mismatch".to_string(),
@@ -1615,7 +1701,7 @@ fn validate_store_json_value(
             Ok(())
         }
         StoreJsonDecoderKind::ProceduralFeedbackApplicationLedger => {
-            let ledger = decode_json::<ProceduralFeedbackApplicationLedgerV1>(value, invalid)?;
+            let ledger = decode_json::<ProceduralFeedbackApplicationLedgerV2>(value, invalid)?;
             if ledger.job_id != key || ledger.validate().is_err() {
                 return Err(invalid(
                     "procedural feedback application ledger contract or physical key mismatch"
@@ -3052,6 +3138,98 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn pfi2_producer_documents_have_typed_store_admission_before_first_turn() {
+        use bm_core::memory::*;
+        let binding = ProceduralProducerBindingV1::build(
+            ProceduralProducerSpecV1 {
+                binding_id: "usage-reporter".into(),
+                scope: ProceduralProducerScopeV1 {
+                    memory_space_id: "space-a".into(),
+                    mounted_subject_id: "agent-a".into(),
+                    channel_id: "sdk.direct".into(),
+                    chat_id: "chat-a".into(),
+                },
+                principal: ProceduralProducerPrincipalV1::LocalCapability {
+                    capability_id: "executor-a".into(),
+                },
+                source_authority: ProceduralProducerSourceAuthorityV1::RuntimeObservation,
+                claims: ProceduralProducerClaimsV1 {
+                    execution_facts: false,
+                    method_declarations: false,
+                    usage_feedback: true,
+                    source_classifications: Vec::new(),
+                },
+                tools: Vec::new(),
+                source_config_ref: "synthetic-host-config".into(),
+            },
+            ProceduralProducerStateV1::Active,
+            MemoryMutationOperationIdentity::new(
+                "grant-usage",
+                "space-a",
+                "agent-a",
+                "governor-a",
+                MemoryMutationOperationKind::ProceduralProducerControl,
+            )
+            .unwrap(),
+            100,
+            None,
+        )
+        .unwrap();
+        let head = ProceduralProducerHeadV1::advance(&binding, None).unwrap();
+        let root = ProceduralSubjectValidityRootV1::initialize(
+            ProceduralSubjectScopeV1 {
+                memory_space_id: binding.spec.scope.memory_space_id.clone(),
+                mounted_subject_id: binding.spec.scope.mounted_subject_id.clone(),
+            },
+            binding.spec.scope.clone(),
+            MAX_PROCEDURAL_SUBJECT_SCOPES,
+        )
+        .unwrap();
+        let initialization =
+            ProceduralSubjectInitializationV1::new(root.scope.clone(), &binding).unwrap();
+        let cases = [
+            (
+                "procedural_producer_bindings",
+                binding.revision_ref().unwrap().material_key(),
+                serde_json::to_value(&binding).unwrap(),
+            ),
+            (
+                "procedural_producer_heads",
+                head.binding_key.clone(),
+                serde_json::to_value(&head).unwrap(),
+            ),
+            (
+                PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE,
+                root.physical_key.clone(),
+                serde_json::to_value(&root).unwrap(),
+            ),
+            (
+                PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE,
+                initialization.physical_key.clone(),
+                serde_json::to_value(&initialization).unwrap(),
+            ),
+        ];
+        for (namespace, key, value) in cases {
+            admit_store_json_document(namespace, &key, &value, "pfi2_typed_admission").expect(
+                "producer registration is a typed Store contract independent of first Transcript",
+            );
+            assert!(admit_store_json_document(
+                namespace,
+                "foreign-key",
+                &value,
+                "pfi2_typed_admission"
+            )
+            .is_err());
+            let mut invalid = value;
+            invalid["content_digest"] = serde_json::json!("sha256:forged");
+            assert!(
+                admit_store_json_document(namespace, &key, &invalid, "pfi2_typed_admission")
+                    .is_err()
+            );
+        }
+    }
+
     fn binding(owner: &str, claim: &str, revision: u64) -> GovernedEvidenceOwnerClaimBinding {
         GovernedEvidenceOwnerClaimBinding::new(
             owner,
@@ -3140,14 +3318,14 @@ mod tests {
     }
 
     #[test]
-    fn store_schema_identity_is_exactly_v13_and_rejects_v12() {
-        assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v13");
-        assert_eq!(STORE_SCHEMA_VERSION, 13);
+    fn store_schema_identity_is_exactly_v14_and_rejects_v13() {
+        assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v14");
+        assert_eq!(STORE_SCHEMA_VERSION, 14);
         assert!(
             validate_store_schema_identity(STORE_SCHEMA_ID, STORE_SCHEMA_VERSION, "test").is_ok()
         );
         assert!(
-            validate_store_schema_identity("beetle_memory_store_schema_v12", 12, "test").is_err()
+            validate_store_schema_identity("beetle_memory_store_schema_v13", 13, "test").is_err()
         );
         assert!(
             validate_store_schema_identity("unknown_memory_store_schema_v999", 999, "test")
@@ -3156,7 +3334,7 @@ mod tests {
     }
 
     #[test]
-    fn store_v13_rejects_v2_governance_job_and_scope_payloads() {
+    fn store_v14_rejects_v2_governance_job_and_scope_payloads() {
         let identity = PostTurnGovernanceIdentityV2::new(
             "space:v2-reject",
             "subject:v2-reject",

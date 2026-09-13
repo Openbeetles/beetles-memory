@@ -3,14 +3,22 @@ name = "bm-example-rust-sdk-embedded"
 version = "0.1.0"
 edition = "2021"
 publish = false
+default-run = "bm-example-rust-sdk-embedded"
 
 [workspace]
 
+[[bin]]
+name = "learning-service"
+path = "src/bin/learning-service.rs"
+required-features = ["learning-service"]
+
 [features]
 default = ["desktop-macos"]
+learning-service = ["dep:bm-entry"]
 desktop-macos = ["bm-sdk/profile-desktop-macos-embedded-sdk"]
 desktop-windows = ["bm-sdk/profile-desktop-windows-embedded-sdk"]
 desktop-linux = ["bm-sdk/profile-desktop-linux-embedded-sdk"]
 
 [dependencies]
 bm-sdk = { path = "../../crates/sdk", default-features = false }
+bm-entry = { path = "../../crates/entry", default-features = false, optional = true }

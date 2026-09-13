@@ -7,9 +7,8 @@ use bm_adapter::{
 use bm_entry::EntryRuntime;
 use bm_sdk::{
     CanonicalTurnDelta, ConversationScope, MaintenanceBudget, MemoryTurnDeliveryStatus,
-    MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, PostTurnLearningInputV1,
-    ProceduralFeedbackAuthorityInputV1, ProceduralSelectionReceiptV1, RuntimeLifecycleModeInput,
-    TranscriptInputMessage,
+    MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, PostTurnLearningInputV2,
+    ProceduralSelectionReceiptV1, RuntimeLifecycleModeInput, TranscriptInputMessage,
 };
 #[cfg(test)]
 use serde_json::json;
@@ -106,15 +105,10 @@ impl GatewayMaintenancePlan {
                     external_content_used: self.external_content_used,
                     candidate_ids: Vec::new(),
                 },
-                learning: PostTurnLearningInputV1 {
+                learning: PostTurnLearningInputV2 {
                     // Model tool-call proposals are passthrough, not executed observations.
-                    tool_call_count: 0,
                     selection_receipt: self.selection_receipt.clone(),
-                    runtime_skill_feedback: Vec::new(),
-                    agent_skill_feedback: Vec::new(),
-                    task_learning_feedback: Vec::new(),
-                    agent_tool_feedback: Vec::new(),
-                    authority: ProceduralFeedbackAuthorityInputV1::HostRuntimeObservation,
+                    ..PostTurnLearningInputV2::empty()
                 },
                 pressure: self.pressure,
                 mode_input: self.mode_input,

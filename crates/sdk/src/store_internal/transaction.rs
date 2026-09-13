@@ -11,17 +11,17 @@ use bm_core::memory::{
     GovernedEvidenceDocument, GovernedEvidenceSourceRef, GovernedMemoryOwnerPlane,
     LongTermMemoryHeadManifest, LongTermMemoryVersionMaterial, LongTermMemoryVersionScopeManifest,
     MemoryFacetIndexDoc, MemoryFacetIndexManifest, MemoryGraphScopeManifest,
-    ProceduralFeedbackApplicationLedgerV1, ProceduralFeedbackIdentityV1, ProceduralFeedbackJobV1,
-    ProceduralFeedbackScopeIndexV1, RelationshipPortfolio, RelationshipTopology,
-    TranscriptConversationAlias, TranscriptSearchNormalizerV1, TranscriptTurnRecord,
-    MAX_TRANSCRIPT_INDEX_TERMS_PER_MESSAGE, MEMORY_FACET_POSTING_NAMESPACE,
+    ProceduralFeedbackApplicationLedgerV2, ProceduralFeedbackJobV2, ProceduralFeedbackScopeIndexV2,
+    RelationshipPortfolio, RelationshipTopology, TranscriptConversationAlias,
+    TranscriptSearchNormalizerV1, TranscriptTurnRecord, MAX_TRANSCRIPT_INDEX_TERMS_PER_MESSAGE,
+    MEMORY_FACET_POSTING_NAMESPACE,
 };
 use bm_core::skills::{
     agent_tool_experience_head_key, agent_tool_experience_material_key,
     agent_tool_experience_scope_manifest_key, canonical_runtime_skill_owner_key,
-    runtime_skill_scope_manifest_key, AgentToolExperienceHeadStateV2,
-    AgentToolExperienceOwnerHeadV2, AgentToolExperienceOwningScopeV1,
-    AgentToolExperienceRevisionMaterialV2, AgentToolExperienceScopeManifestV1,
+    runtime_skill_scope_manifest_key, AgentToolExperienceHeadStateV3,
+    AgentToolExperienceOwnerHeadV3, AgentToolExperienceOwningScopeV1,
+    AgentToolExperienceRevisionMaterialV3, AgentToolExperienceScopeManifestV1,
     RuntimeSkillOwnerRecord, RuntimeSkillScopeManifest,
 };
 use bm_core::{Error, Result};
@@ -159,10 +159,10 @@ impl StoreTransactionAdmission {
             .as_ref()
             .is_some_and(|snapshot| snapshot.stale || snapshot.is_expired(now_secs))
         {
-            return Err(Error::config(
-                "memory_write_transaction_resource_admission",
-                "transaction admission resource snapshot is stale or expired",
-            ));
+            return Err(Error::Other {
+                stage: "memory_write_transaction_resource_admission",
+                source: Box::new(bm_core::RuntimeBudgetReadmissionRequired::StaleOrExpired),
+            });
         }
         if let Some(runtime_budget_authority) = &self.runtime_budget_authority {
             let current = runtime_budget_authority.current_report(now_secs);
@@ -171,10 +171,10 @@ impl StoreTransactionAdmission {
                 || StoreCapacityBudget::from_runtime_budget(current.store_budget)
                     != self.operation_capacity
             {
-                return Err(Error::config(
-                    "memory_write_transaction_resource_admission",
-                    "transaction admission is not the current exact runtime authority report",
-                ));
+                return Err(Error::Other {
+                    stage: "memory_write_transaction_resource_admission",
+                    source: Box::new(bm_core::RuntimeBudgetReadmissionRequired::Superseded),
+                });
             }
         }
         if !engine_capacity.admits_runtime_budget(self.operation_capacity.into_runtime_budget()) {
@@ -414,6 +414,9 @@ pub struct StoreTransactionRequest {
     pub governed_batch: Option<Box<StoreMutationBatch>>,
     graph_repair_authority: Option<GraphRepairAuthority>,
     procedural_authority_initialization: bool,
+    procedural_mutation_authority:
+        Option<super::procedural_feedback::ProceduralMutationAuthorization>,
+    procedural_intake_authority: Option<crate::learning::ProceduralIntakeAuthorization>,
     governed_long_term_retention_limit: Option<usize>,
     governed_runtime_skill_owner_limit: Option<usize>,
     agent_tool_experience_budget:
@@ -437,6 +440,8 @@ impl StoreTransactionRequest {
             governed_batch,
             graph_repair_authority: None,
             procedural_authority_initialization: false,
+            procedural_mutation_authority: None,
+            procedural_intake_authority: None,
             governed_long_term_retention_limit: None,
             governed_runtime_skill_owner_limit: None,
             agent_tool_experience_budget: None,
@@ -446,6 +451,22 @@ impl StoreTransactionRequest {
 
     pub(crate) fn with_procedural_authority_initialization(mut self) -> Self {
         self.procedural_authority_initialization = true;
+        self
+    }
+
+    pub(crate) fn authorize_procedural_mutation(
+        mut self,
+        authority: super::procedural_feedback::ProceduralMutationAuthorization,
+    ) -> Self {
+        self.procedural_mutation_authority = Some(authority);
+        self
+    }
+
+    pub(crate) fn authorize_procedural_intake(
+        mut self,
+        authority: crate::learning::ProceduralIntakeAuthorization,
+    ) -> Self {
+        self.procedural_intake_authority = Some(authority);
         self
     }
 
@@ -1021,6 +1042,109 @@ pub(crate) fn apply_transaction(
         }
     }
 
+    // Lifecycle continuity is an engine invariant, including primitive callers
+    // without optional governed-batch reporting metadata.
+    super::platform::validate_runtime_skill_owner_transitions(current, &next, &changed_json)?;
+    let mut source_fences = super::procedural_feedback::source_dependents::validate_transition(
+        current,
+        &next,
+        &request.transaction_id,
+        &effective.preconditions,
+    )?;
+    source_fences.extend(
+        super::procedural_feedback::runtime_skill_control::validate_transition(
+            current,
+            &next,
+            &request.transaction_id,
+            &effective.preconditions,
+            request.procedural_mutation_authority.as_ref(),
+        )?,
+    );
+    for mutation in &effective.mutations {
+        if let StoreEngineMutation::PutJson {
+            namespace,
+            key,
+            value,
+        } = mutation
+        {
+            if namespace == PROCEDURAL_FEEDBACK_JOB_NAMESPACE {
+                let after_job: ProceduralFeedbackJobV2 = serde_json::from_value(value.clone())
+                    .map_err(|_| {
+                        Error::config(
+                            "procedural_reconciliation_authority",
+                            "invalid durable work",
+                        )
+                    })?;
+                if matches!(
+                    after_job.work,
+                    bm_core::memory::ProceduralLearningWorkV1::Reconcile { .. }
+                ) {
+                    let before_job = current
+                        .json
+                        .get(&(namespace.clone(), key.clone()))
+                        .map(|value| {
+                            serde_json::from_value::<ProceduralFeedbackJobV2>(value.clone())
+                        })
+                        .transpose()
+                        .map_err(|_| {
+                            Error::config(
+                                "procedural_reconciliation_authority",
+                                "invalid previous durable work",
+                            )
+                        })?;
+                    let publishes_progress =
+                        before_job.as_ref().and_then(|job| job.checkpoint.as_ref())
+                            != after_job.checkpoint.as_ref()
+                            || before_job
+                                .as_ref()
+                                .and_then(|job| job.checkpoint_authority.as_ref())
+                                != after_job.checkpoint_authority.as_ref()
+                            || (after_job.status
+                                == bm_core::memory::ProceduralFeedbackJobStatusV1::Succeeded
+                                && before_job.as_ref() != Some(&after_job));
+                    if let Some(before_job) = &before_job {
+                        super::procedural_feedback::validate_reconciliation_checkpoint_in_state(
+                            before_job, current,
+                        )?;
+                    }
+                    super::procedural_feedback::validate_reconciliation_checkpoint_in_state(
+                        &after_job, &next,
+                    )?;
+                    if publishes_progress
+                        && !request.procedural_mutation_authority.as_ref().is_some_and(
+                            |authority| authority.permits_mutation(mutation, &current.json),
+                        )
+                    {
+                        return Err(Error::config(
+                            "procedural_reconciliation_authority",
+                            "checkpoint publication requires its exact governed page transaction",
+                        ));
+                    }
+                }
+            }
+        }
+        if matches!(mutation, StoreEngineMutation::PutJson { namespace, .. } | StoreEngineMutation::DeleteJson { namespace, .. }
+            if matches!(namespace.as_str(), super::schema::PROCEDURAL_PRODUCER_BINDING_NAMESPACE | super::schema::PROCEDURAL_PRODUCER_HEAD_NAMESPACE
+                | super::schema::PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE | super::schema::PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE))
+            && !request
+                .procedural_mutation_authority
+                .as_ref()
+                .is_some_and(|authority| authority.permits_mutation(mutation, &current.json))
+            && !matches!(mutation, StoreEngineMutation::PutJson { namespace, key, .. }
+                if namespace == super::schema::PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE && source_fences.contains(key))
+            && !super::procedural_feedback::permits_reconciliation_root_transition(
+                mutation,
+                current,
+                &next,
+                &effective.preconditions,
+            )?
+        {
+            return Err(Error::config(
+                "procedural_producer_authority",
+                "producer changes require the sealed control transaction",
+            ));
+        }
+    }
     if !request.procedural_authority_initialization
         && effective.mutations.iter().any(|mutation| matches!(mutation,
             StoreEngineMutation::PutJson { namespace, .. } | StoreEngineMutation::DeleteJson { namespace, .. }
@@ -1046,7 +1170,11 @@ pub(crate) fn apply_transaction(
         ));
     }
     super::procedural_selection::validate_store_image(&next.json)?;
-    super::procedural_selection::validate_new_intakes(&current.json, &next.json)?;
+    super::procedural_selection::validate_new_intakes(
+        &current.json,
+        &next.json,
+        request.procedural_intake_authority.as_ref(),
+    )?;
     for (address, value) in &current.json {
         if address.0 == super::schema::PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE
             && next.json.get(address) != Some(value)
@@ -1063,6 +1191,48 @@ pub(crate) fn apply_transaction(
     }) {
         if !request.preconditions.iter().any(|condition| matches!(condition, StoreJsonPrecondition::Absent { namespace, key } if namespace == &address.0 && key == &address.1)) {
             return Err(Error::config("procedural_feedback_application_ledger", "application ledger creation requires absent CAS"));
+        }
+        let ledger: bm_core::memory::ProceduralFeedbackApplicationLedgerV2 =
+            serde_json::from_value(next.json[address].clone()).map_err(|_| {
+                Error::config(
+                    "procedural_feedback_application_ledger",
+                    "invalid application ledger",
+                )
+            })?;
+        let root_key = bm_core::memory::ProceduralSubjectScopeV1 {
+            memory_space_id: ledger.identity.memory_space_id.clone(),
+            mounted_subject_id: ledger.identity.mounted_subject_id.clone(),
+        }
+        .root_key()?;
+        let root_address = (
+            super::schema::PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE.to_owned(),
+            root_key,
+        );
+        let root_value = current.json.get(&root_address).ok_or_else(|| {
+            Error::config(
+                "procedural_feedback_application_ledger",
+                "application validity root is missing",
+            )
+        })?;
+        let root: bm_core::memory::ProceduralSubjectValidityRootV1 =
+            serde_json::from_value(root_value.clone()).map_err(|_| {
+                Error::config(
+                    "procedural_feedback_application_ledger",
+                    "invalid application validity root",
+                )
+            })?;
+        if !root.permits_learning_reads(bm_core::memory::MAX_PROCEDURAL_SUBJECT_SCOPES)?
+            || ledger.validity_epoch != root.validity_epoch
+            || next.json.get(&root_address) != Some(root_value)
+            || !request.preconditions.iter().any(|condition| {
+                matches!(condition, StoreJsonPrecondition::Exact { namespace, key, value }
+                if namespace == &root_address.0 && key == &root_address.1 && value == root_value)
+            })
+        {
+            return Err(Error::conflict(
+                "procedural_feedback_application_ledger",
+                "application requires the exact ready validity epoch",
+            ));
         }
     }
 
@@ -1667,7 +1837,7 @@ pub(crate) fn json_document_matches_scoped_projection(
     let long_term_owner_id = scope.memory_space_id.as_str();
     match namespace {
         AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE => {
-            serde_json::from_value::<AgentToolExperienceRevisionMaterialV2>(value.clone())
+            serde_json::from_value::<AgentToolExperienceRevisionMaterialV3>(value.clone())
                 .is_ok_and(|material| {
                     material.memory_space_id == scope.memory_space_id
                         && material.owning_scope.mounted_subject_id() == mounted_subject_id
@@ -1676,7 +1846,7 @@ pub(crate) fn json_document_matches_scoped_projection(
                 })
         }
         AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE => serde_json::from_value::<
-            AgentToolExperienceOwnerHeadV2,
+            AgentToolExperienceOwnerHeadV3,
         >(value.clone())
         .is_ok_and(|head| {
             head.memory_space_id == scope.memory_space_id
@@ -1696,33 +1866,68 @@ pub(crate) fn json_document_matches_scoped_projection(
                     .is_ok()
         }),
         PROCEDURAL_FEEDBACK_JOB_NAMESPACE => {
-            serde_json::from_value::<ProceduralFeedbackJobV1>(value.clone()).is_ok_and(|job| {
-                job.identity.memory_space_id == scope.memory_space_id
-                    && job.identity.mounted_subject_id == mounted_subject_id
+            serde_json::from_value::<ProceduralFeedbackJobV2>(value.clone()).is_ok_and(|job| {
+                job.work.subject_scope().memory_space_id == scope.memory_space_id
+                    && job.work.subject_scope().mounted_subject_id == mounted_subject_id
                     && job.job_id == key
                     && job.validate().is_ok()
             })
         }
+        super::schema::PROCEDURAL_PRODUCER_BINDING_NAMESPACE => {
+            serde_json::from_value::<bm_core::memory::ProceduralProducerBindingV1>(value.clone())
+                .is_ok_and(|binding| {
+                    binding.validate_contract()
+                        && binding.spec.scope.memory_space_id == scope.memory_space_id
+                        && binding.spec.scope.mounted_subject_id == mounted_subject_id
+                        && binding
+                            .revision_ref()
+                            .is_ok_and(|reference| reference.material_key() == key)
+                })
+        }
+        super::schema::PROCEDURAL_PRODUCER_HEAD_NAMESPACE => {
+            serde_json::from_value::<bm_core::memory::ProceduralProducerHeadV1>(value.clone())
+                .is_ok_and(|head| {
+                    head.validate_contract()
+                        && head.scope.memory_space_id == scope.memory_space_id
+                        && head.scope.mounted_subject_id == mounted_subject_id
+                        && head.binding_key == key
+                })
+        }
+        super::schema::PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE => serde_json::from_value::<
+            bm_core::memory::ProceduralSubjectValidityRootV1,
+        >(value.clone())
+        .is_ok_and(|root| {
+            root.scope.memory_space_id == scope.memory_space_id
+                && root.scope.mounted_subject_id == mounted_subject_id
+                && root.physical_key == key
+                && root
+                    .validate(bm_core::memory::MAX_PROCEDURAL_SUBJECT_SCOPES)
+                    .is_ok()
+        }),
+        super::schema::PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE => serde_json::from_value::<
+            bm_core::memory::ProceduralSubjectInitializationV1,
+        >(value.clone())
+        .is_ok_and(|material| {
+            material.scope.memory_space_id == scope.memory_space_id
+                && material.scope.mounted_subject_id == mounted_subject_id
+                && material.physical_key == key
+                && material.validate().is_ok()
+        }),
         PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE => serde_json::from_value::<
-            ProceduralFeedbackScopeIndexV1,
+            ProceduralFeedbackScopeIndexV2,
         >(value.clone())
         .is_ok_and(|index| {
             index.memory_space_id == scope.memory_space_id
                 && index.mounted_subject_id == mounted_subject_id
                 && index.scope_index_key == key
                 && index.validate().is_ok()
-                && ProceduralFeedbackIdentityV1::new(
-                    &index.memory_space_id,
-                    &index.mounted_subject_id,
-                    &index.channel_id,
-                    &index.chat_id,
-                    "scope-projection",
-                    "scope-projection",
-                )
-                .is_ok_and(|identity| identity.scope_id() == key)
+                && index
+                    .producer_scope()
+                    .scope_index_key()
+                    .is_ok_and(|scope_key| scope_key == key)
         }),
         PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE => {
-            serde_json::from_value::<ProceduralFeedbackApplicationLedgerV1>(value.clone())
+            serde_json::from_value::<ProceduralFeedbackApplicationLedgerV2>(value.clone())
                 .is_ok_and(|ledger| {
                     ledger.identity.memory_space_id == scope.memory_space_id
                         && ledger.identity.mounted_subject_id == mounted_subject_id
@@ -2203,6 +2408,23 @@ fn scoped_procedural_dependency_addresses(
     };
     let mut addresses = BTreeSet::new();
     for ((namespace, key), value) in scoped_json {
+        if matches!(
+            namespace.as_str(),
+            PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE
+                | super::schema::PROCEDURAL_PRODUCER_BINDING_NAMESPACE
+                | super::schema::PROCEDURAL_PRODUCER_HEAD_NAMESPACE
+                | super::schema::PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE
+                | super::schema::PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE
+        ) {
+            if !json_document_matches_scoped_projection(namespace, key, value, scope) {
+                return Err(invalid());
+            }
+            addresses.extend(
+                super::procedural_feedback::producer_dependency_addresses(namespace, value)?
+                    .into_iter()
+                    .filter(|(namespace, _)| namespaces.contains(namespace.as_str())),
+            );
+        }
         match namespace.as_str() {
             AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE => {
                 if !json_document_matches_scoped_projection(namespace, key, value, scope) {
@@ -2235,9 +2457,9 @@ fn scoped_procedural_dependency_addresses(
                 if !json_document_matches_scoped_projection(namespace, key, value, scope) {
                     return Err(invalid());
                 }
-                let head: AgentToolExperienceOwnerHeadV2 =
+                let head: AgentToolExperienceOwnerHeadV3 =
                     serde_json::from_value(value.clone()).map_err(|_| invalid())?;
-                if head.state == AgentToolExperienceHeadStateV2::Active
+                if head.state == AgentToolExperienceHeadStateV3::Active
                     && namespaces.contains(AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE)
                 {
                     for retained in head.retained_revisions {
@@ -2266,26 +2488,22 @@ fn scoped_procedural_dependency_addresses(
                 {
                     return Err(invalid());
                 }
-                // scope_id binds only space, subject, channel, and chat. The remaining
-                // identity fields do not become persisted facts during this known-key read.
-                let identity = ProceduralFeedbackIdentityV1::new(
-                    &alias.memory_space_id,
-                    &alias.mounted_subject_id,
-                    &alias.channel_id,
-                    &alias.chat_id,
-                    &alias.conversation_id,
-                    "scope-projection",
-                )?;
+                let producer_scope = bm_core::memory::ProceduralProducerScopeV1 {
+                    memory_space_id: alias.memory_space_id,
+                    mounted_subject_id: alias.mounted_subject_id,
+                    channel_id: alias.channel_id,
+                    chat_id: alias.chat_id,
+                };
                 addresses.insert((
                     PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE.into(),
-                    identity.scope_id(),
+                    producer_scope.scope_index_key()?,
                 ));
             }
             PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE => {
                 if !json_document_matches_scoped_projection(namespace, key, value, scope) {
                     return Err(invalid());
                 }
-                let index: ProceduralFeedbackScopeIndexV1 =
+                let index: ProceduralFeedbackScopeIndexV2 =
                     serde_json::from_value(value.clone()).map_err(|_| invalid())?;
                 if namespaces.contains(PROCEDURAL_FEEDBACK_JOB_NAMESPACE) {
                     addresses.extend(
@@ -2303,15 +2521,23 @@ fn scoped_procedural_dependency_addresses(
                 if !json_document_matches_scoped_projection(namespace, key, value, scope) {
                     return Err(invalid());
                 }
-                let job: ProceduralFeedbackJobV1 =
+                let job: ProceduralFeedbackJobV2 =
                     serde_json::from_value(value.clone()).map_err(|_| invalid())?;
-                if namespaces.contains(PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE) {
-                    addresses.insert((
-                        PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE.into(),
-                        job.scope_index_key,
-                    ));
+                let anchor_namespace = match &job.work {
+                    bm_core::memory::ProceduralLearningWorkV1::Feedback { .. } => {
+                        PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE
+                    }
+                    bm_core::memory::ProceduralLearningWorkV1::Reconcile { .. } => {
+                        super::schema::PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE
+                    }
+                };
+                if namespaces.contains(anchor_namespace) {
+                    addresses.insert((anchor_namespace.into(), job.discovery_root_key));
                 }
-                if job.receipt.is_some()
+                if matches!(
+                    job.work,
+                    bm_core::memory::ProceduralLearningWorkV1::Feedback { .. }
+                ) && job.receipt.is_some()
                     && namespaces.contains(PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE)
                 {
                     addresses.insert((
@@ -3853,8 +4079,39 @@ where
                 store_budget_error("scoped projection JSON and event byte count overflow")
             })?;
     }
+    if let Some(closure) = &request.source_closure {
+        for doc in closure.derived_documents() {
+            enforce_logical_key_budget(
+                capacity,
+                &doc.namespace,
+                &doc.key,
+                "store_scoped_projection",
+            )?;
+            if !addresses.insert((doc.namespace.as_str(), doc.key.as_str())) {
+                return Err(Error::config(
+                    "store_scoped_projection",
+                    "source closure overlaps replacement JSON",
+                ));
+            }
+            let remaining = capacity.snapshot_max_bytes.saturating_sub(json_event_bytes);
+            json_event_bytes = json_event_bytes
+                .checked_add(bounded_serialized_len(
+                    &doc.value,
+                    remaining,
+                    "scoped projection JSON and event bytes",
+                )?)
+                .ok_or_else(|| {
+                    store_budget_error("scoped projection JSON and event byte count overflow")
+                })?;
+        }
+    }
     let mut event_ids = BTreeSet::new();
-    for event in &request.events {
+    let derived_events = request
+        .source_closure
+        .as_ref()
+        .map(|closure| closure.derived_events())
+        .unwrap_or(&[]);
+    for (index, event) in request.events.iter().chain(derived_events).enumerate() {
         enforce_event_key_budget(capacity, event, "store_scoped_projection")?;
         if !event_ids.insert(event.event_id.as_str()) {
             return Err(Error::config(
@@ -3862,7 +4119,7 @@ where
                 "replacement payload contains duplicate event ids",
             ));
         }
-        if !event_matches_scoped_projection(event, &request.scope) {
+        if index < request.events.len() && !event_matches_scoped_projection(event, &request.scope) {
             return Err(Error::config(
                 "store_scoped_projection",
                 "replacement payload contains an event outside the exact scope",
@@ -4112,7 +4369,7 @@ fn validate_preconditions(
         }
         let observed = json.get(&(namespace.clone(), key.clone()));
         if observed != expected {
-            return Err(Error::config(
+            return Err(Error::conflict(
                 "memory_write_transaction_precondition_failed",
                 format!("json precondition failed for {namespace}/{key}"),
             ));
@@ -4161,7 +4418,7 @@ fn validate_blob_preconditions(
             .get(&(namespace.clone(), key.clone()))
             .map(|value| format!("sha256:{:x}", Sha256::digest(value)));
         if observed.as_ref() != expected_digest {
-            return Err(Error::config(
+            return Err(Error::conflict(
                 "memory_write_transaction_precondition_failed",
                 format!("blob precondition failed for {namespace}/{key}"),
             ));
@@ -4323,7 +4580,7 @@ mod tests {
 
     #[test]
     fn procedural_projection_job_membership_is_exact_and_alias_expands_known_index() {
-        let identity = ProceduralFeedbackIdentityV1::new(
+        let identity = bm_core::memory::ProceduralFeedbackIdentityV1::new(
             "space-1",
             "agent-a",
             "sdk",
@@ -4332,7 +4589,7 @@ mod tests {
             "turn-a",
         )
         .unwrap();
-        let job = ProceduralFeedbackJobV1::pending(
+        let job = ProceduralFeedbackJobV2::pending(
             identity.clone(),
             1,
             format!("sha256:{}", "a".repeat(64)),
@@ -4365,10 +4622,11 @@ mod tests {
             100,
         )
         .unwrap();
-        let mut index = ProceduralFeedbackScopeIndexV1::empty(&identity, 100);
+        let mut index =
+            ProceduralFeedbackScopeIndexV2::empty(&identity.producer_scope(), 100).unwrap();
         index
             .active_jobs
-            .push(bm_core::memory::ProceduralFeedbackJobRefV1::from_job(&job));
+            .push(bm_core::memory::ProceduralFeedbackJobRefV2::from_job(&job));
         let documents = BTreeMap::from([
             (
                 ("conversation_transcript_alias".into(), alias.storage_key()),
@@ -5080,6 +5338,19 @@ mod tests {
         );
         assert_eq!(context.touched.blobs, current.blobs);
         assert!(context.touched.events.is_empty());
+        let safe = crate::ProceduralLearningSdkError::from_owner_error(
+            crate::ProceduralLearningSdkOperation::Reconcile,
+            &error,
+        );
+        assert_eq!(
+            safe.key,
+            crate::ProceduralLearningErrorKeyV1::EvidenceConflict
+        );
+        assert_eq!(
+            safe.disposition,
+            crate::ProceduralLearningSdkErrorDisposition::ExpectedStateConflict
+        );
+        assert!(matches!(error, Error::Conflict { .. }));
     }
 
     #[test]
@@ -5095,5 +5366,13 @@ mod tests {
 
         assert_eq!(error.stage(), "memory_write_transaction_resource_admission");
         assert!(error.to_string().contains("different store authority"));
+        let safe = crate::ProceduralLearningSdkError::from_owner_error(
+            crate::ProceduralLearningSdkOperation::ProducerControl,
+            &error,
+        );
+        assert_eq!(
+            safe.disposition,
+            crate::ProceduralLearningSdkErrorDisposition::RepairRequired
+        );
     }
 }

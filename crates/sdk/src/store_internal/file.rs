@@ -3203,21 +3203,20 @@ impl StoreEngine for FileStoreEngine {
         };
         let mut deleted = self
             .read_scoped_json_unlocked_exact(&projection_request, admission.operation_capacity())?;
-        if request.preserve_protected_owner_state {
-            let protected = deleted
-                .documents
-                .iter()
-                .filter_map(|(address, value)| {
-                    crate::store_internal::engine::json_document_is_protected_owner(
-                        &address.0, value,
-                    )
-                    .map(|protected| protected.then_some(address.clone()))
-                    .transpose()
-                })
-                .collect::<Result<BTreeSet<_>>>()?;
-            for address in protected {
-                deleted.documents.remove(&address);
-            }
+        let scoped_before = deleted.documents.clone();
+        let protected = deleted
+            .documents
+            .iter()
+            .filter_map(|(address, value)| {
+                crate::store_internal::engine::json_document_is_preserved_by_scoped_projection(
+                    &address.0, value, request,
+                )
+                .map(|protected| protected.then_some(address.clone()))
+                .transpose()
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
+        for address in protected {
+            deleted.documents.remove(&address);
         }
 
         for doc in &request.json_docs {
@@ -3246,6 +3245,18 @@ impl StoreEngine for FileStoreEngine {
         }
 
         let existing_events = self.read_events_unlocked()?;
+        let actual = super::platform::scoped_projection_source::actual_projection(
+            request,
+            admission.operation_capacity(),
+            &scoped_before,
+            &existing_events,
+        )?;
+        let source_closure = super::platform::scoped_projection_source::prepare(
+            request,
+            &actual,
+            admission.operation_capacity(),
+            |namespace, key| self.get_json_value_unlocked(namespace, key),
+        )?;
         let deleted_events = existing_events
             .iter()
             .filter(|event| {
@@ -3264,6 +3275,7 @@ impl StoreEngine for FileStoreEngine {
             .cloned()
             .collect::<Vec<_>>();
         next_events.extend(request.events.iter().cloned());
+        next_events.extend(source_closure.events.iter().cloned());
         let mut event_ids = BTreeSet::new();
         if next_events
             .iter()
@@ -3279,7 +3291,8 @@ impl StoreEngine for FileStoreEngine {
             .json_entry_count()?
             .saturating_add(self.blob_entry_count()?)
             .saturating_sub(deleted.documents.len())
-            .saturating_add(request.json_docs.len());
+            .saturating_add(request.json_docs.len())
+            .saturating_add(source_closure.added_entries());
         validate_scoped_projection_post_image(
             admission,
             request,
@@ -3296,6 +3309,7 @@ impl StoreEngine for FileStoreEngine {
                 .iter()
                 .map(|doc| (doc.namespace.clone(), doc.key.clone())),
         );
+        touched.extend(source_closure.before.keys().cloned());
         let before = FileTransactionImage {
             json: touched
                 .iter()
@@ -3305,7 +3319,14 @@ impl StoreEngine for FileStoreEngine {
                     value: deleted
                         .documents
                         .get(&(namespace.clone(), key.clone()))
-                        .cloned(),
+                        .cloned()
+                        .or_else(|| {
+                            source_closure
+                                .before
+                                .get(&(namespace.clone(), key.clone()))
+                                .cloned()
+                                .flatten()
+                        }),
                 })
                 .collect(),
             blobs: Vec::new(),
@@ -3316,6 +3337,7 @@ impl StoreEngine for FileStoreEngine {
         let replacements = request
             .json_docs
             .iter()
+            .chain(&source_closure.documents)
             .map(|doc| ((doc.namespace.clone(), doc.key.clone()), doc.value.clone()))
             .collect::<BTreeMap<_, _>>();
         let after = FileTransactionImage {
@@ -3332,17 +3354,8 @@ impl StoreEngine for FileStoreEngine {
                 events: next_events,
             },
         };
-        let physical_owner = match &request.scope.physical_owning_scope {
-            crate::StorePhysicalOwningScope::Subject { mounted_subject_id } => {
-                format!("subject_{mounted_subject_id}")
-            }
-            crate::StorePhysicalOwningScope::SharedProgram => "shared_program".to_string(),
-        };
-        let transaction_id = format!(
-            "scoped_projection_{}_{}",
-            request.scope.memory_space_id, physical_owner
-        );
-        let mut journal = FileTransactionJournal::new(transaction_id, before, after)?;
+        let mut journal =
+            FileTransactionJournal::new(source_closure.transaction_id, before, after)?;
         self.write_transaction_journal(&journal)?;
         self.restore_transaction_image(&journal.after)?;
         journal.state = FileTransactionJournalState::Committed;

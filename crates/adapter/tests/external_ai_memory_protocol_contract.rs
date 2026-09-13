@@ -93,7 +93,7 @@ fn turn(turn_id: &str) -> CanonicalTurnDelta {
 fn finalize(turn_id: &str) -> AdapterCommand {
     AdapterCommand::FinalizeTurn(Box::new(MemoryTurnFinalizeRequest {
         turn: turn(turn_id),
-        learning: bm_sdk::PostTurnLearningInputV1::empty(),
+        learning: bm_sdk::PostTurnLearningInputV2::empty(),
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     }))

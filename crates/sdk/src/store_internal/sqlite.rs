@@ -2068,13 +2068,11 @@ impl StoreEngine for SqliteStoreEngine {
             .keys()
             .cloned()
             .collect::<BTreeSet<_>>();
-        if request.preserve_protected_owner_state {
-            for (address, value) in &scoped_json.documents {
-                if crate::store_internal::engine::json_document_is_protected_owner(
-                    &address.0, value,
-                )? {
-                    deleted_addresses.remove(address);
-                }
+        for (address, value) in &scoped_json.documents {
+            if crate::store_internal::engine::json_document_is_preserved_by_scoped_projection(
+                &address.0, value, request,
+            )? {
+                deleted_addresses.remove(address);
             }
         }
         for doc in &request.json_docs {
@@ -2126,23 +2124,6 @@ impl StoreEngine for SqliteStoreEngine {
             }
             deleted_addresses.insert(address);
         }
-        for (namespace, key) in &deleted_addresses {
-            tx.execute(
-                "DELETE FROM bm_kv WHERE namespace = ?1 AND key = ?2",
-                params![namespace, key],
-            )
-            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
-        }
-        let deleted_json = deleted_addresses.len();
-        for doc in &request.json_docs {
-            let raw = serde_json::to_string(&doc.value)
-                .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?;
-            tx.execute(
-                "INSERT INTO bm_kv(namespace, key, value_json) VALUES (?1, ?2, ?3)",
-                params![&doc.namespace, &doc.key, raw],
-            )
-            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
-        }
         let scoped_events = {
             let mut statement = tx
                 .prepare(
@@ -2174,14 +2155,71 @@ impl StoreEngine for SqliteStoreEngine {
             rows.collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(|error| map_transaction_error("store_scoped_projection", error))?
         };
-        let deleted_event_ids = scoped_events
+        let scoped_events = scoped_events
             .into_iter()
             .map(|(event_id, raw)| {
                 let event = serde_json::from_str::<MemoryStoreEvent>(&raw)
                     .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?;
                 Ok((event_id, event))
             })
-            .collect::<Result<Vec<_>>>()?
+            .collect::<Result<Vec<_>>>()?;
+        let events = scoped_events
+            .iter()
+            .map(|(_, event)| event.clone())
+            .collect::<Vec<_>>();
+        let actual = super::platform::scoped_projection_source::actual_projection(
+            request,
+            admission.operation_capacity(),
+            &scoped_json.documents,
+            &events,
+        )?;
+        let source_closure = super::platform::scoped_projection_source::prepare(
+            request,
+            &actual,
+            admission.operation_capacity(),
+            |namespace, key| {
+                tx.query_row(
+                    "SELECT value_json FROM bm_kv WHERE namespace = ?1 AND key = ?2",
+                    params![namespace, key],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|error| map_transaction_error("store_scoped_projection", error))?
+                .map(|raw| {
+                    serde_json::from_str(&raw).map_err(|error| {
+                        Error::config("store_scoped_projection", error.to_string())
+                    })
+                })
+                .transpose()
+            },
+        )?;
+        for (namespace, key) in &deleted_addresses {
+            tx.execute(
+                "DELETE FROM bm_kv WHERE namespace = ?1 AND key = ?2",
+                params![namespace, key],
+            )
+            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+        }
+        let deleted_json = deleted_addresses.len();
+        for doc in &request.json_docs {
+            let raw = serde_json::to_string(&doc.value)
+                .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?;
+            tx.execute(
+                "INSERT INTO bm_kv(namespace, key, value_json) VALUES (?1, ?2, ?3)",
+                params![&doc.namespace, &doc.key, raw],
+            )
+            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+        }
+        for doc in &source_closure.documents {
+            let raw = serde_json::to_string(&doc.value)
+                .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?;
+            tx.execute(
+                "INSERT INTO bm_kv(namespace, key, value_json) VALUES (?1, ?2, ?3) ON CONFLICT(namespace, key) DO UPDATE SET value_json = excluded.value_json",
+                params![&doc.namespace, &doc.key, raw],
+            )
+            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+        }
+        let deleted_event_ids = scoped_events
             .into_iter()
             .filter(|(_, event)| {
                 crate::store_internal::engine::event_is_replaced_by_scoped_projection(
@@ -2198,7 +2236,7 @@ impl StoreEngine for SqliteStoreEngine {
             .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
         }
         let deleted_events = deleted_event_ids.len();
-        for event in &request.events {
+        for event in request.events.iter().chain(&source_closure.events) {
             let raw = serialize_event(event)?;
             tx.execute(
                 "INSERT INTO bm_event_log(event_id, event_json) VALUES (?1, ?2)",

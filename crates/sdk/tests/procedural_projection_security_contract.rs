@@ -4,19 +4,31 @@ mod support;
 
 use std::sync::Arc;
 
-use bm_sdk::{
-    fingerprint_agent_tool_registry, AgentToolDescriptor, AgentToolObservationDigest,
-    AgentToolOutcome, AgentToolRegistryScope, AgentToolRegistrySnapshot, AgentToolUsageFeedbackV2,
-    AuthorizedGovernanceEnvelope, CanonicalTurnDelta, ConversationScope, GovernanceEgressAuthority,
-    GovernanceExecutionOperation, GovernanceExecutionPort, GovernanceExecutionPortFailure,
-    ImmutableGovernanceExecutionBinding, MemoryCapabilityPolicy, MemoryClock, MemoryIdentity,
-    MemoryLearningCycleOutcome, MemoryLearningCycleRequest, MemoryLearningEngine,
-    MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRecallRequest,
-    MemoryRecallTemporalOperation, MemoryRuntime, MemoryScope, MemoryStoreHandle,
-    MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource,
-    NoopMemoryAuditSink, PostTurnLearningInputV1, PressureLevel, ProceduralApplicabilityContextV1,
-    ProceduralExecutionOutcomeV1, RuntimeLifecycleModeInput, TranscriptInputMessage,
-};
+use bm_sdk::*;
+
+struct TestRuntime {
+    memory: Arc<MemoryRuntime>,
+    capability: MemoryProceduralSubmissionCapability,
+}
+impl std::ops::Deref for TestRuntime {
+    type Target = MemoryRuntime;
+    fn deref(&self) -> &MemoryRuntime {
+        &self.memory
+    }
+}
+fn authorized_runtime(memory: MemoryRuntime, store: MemoryStoreHandle) -> Arc<TestRuntime> {
+    let governor = support::procedural::governor(&memory, store);
+    let spec = support::procedural::runtime_observer_spec(&memory, "security-executor");
+    let capability = support::procedural::register_and_issue(
+        &governor,
+        spec,
+        &format!("register-security-executor-{}", memory.scope().chat_id),
+    );
+    Arc::new(TestRuntime {
+        memory: Arc::new(memory),
+        capability,
+    })
+}
 
 const NOW: u64 = 1_800_000_000;
 
@@ -84,13 +96,13 @@ fn runtime(
     chat_id: &str,
     registry: AgentToolRegistrySnapshot,
     context: ProceduralApplicabilityContextV1,
-) -> Arc<MemoryRuntime> {
-    Arc::new(
+) -> Arc<TestRuntime> {
+    authorized_runtime(
         MemoryRuntime::builder()
             .identity(MemoryIdentity::new("agent-main", "owner-default").expect("identity"))
             .subject_id("subject-default")
             .scope(MemoryScope::new("llm.gateway", chat_id).expect("scope"))
-            .store(store)
+            .store(store.clone())
             .clock(Arc::new(FixedClock))
             .capability_policy(MemoryCapabilityPolicy::strict_profile())
             .privacy_policy(MemoryPrivacyPolicy::standard_private_boundary())
@@ -99,50 +111,45 @@ fn runtime(
             .agent_tool_registry(registry)
             .build()
             .expect("runtime"),
+        store,
     )
 }
 
-fn observation(
+fn feedback(
     registry: &AgentToolRegistrySnapshot,
     task: &str,
     marker: &str,
-    suffix: &str,
-) -> AgentToolObservationDigest {
-    AgentToolObservationDigest {
-        observation_id: format!("observation-{task}-{suffix}"),
-        registry_id: registry.registry_id.clone(),
-        tool_id: "archive.unpack".to_string(),
-        schema_fingerprint: "schema-archive-v1".to_string(),
-        call_id: Some(format!("call-{task}-{suffix}")),
-        task_signature: task.to_string(),
-        summary: marker.to_string(),
-        outcome: AgentToolOutcome::Succeeded,
-        error_code: None,
-        external_content: false,
-        private_content_used: false,
-        permission_tags: Vec::new(),
-        risk_tags: Vec::new(),
-        started_at: Some(NOW),
-        completed_at: Some(NOW + 1),
-    }
+) -> AgentToolUsageFeedbackV3 {
+    let facts = ["1", "2"]
+        .into_iter()
+        .map(|suffix| ToolExecutionFactV1 {
+            observation_id: format!("observation-{task}-{suffix}"),
+            call_id: format!("call-{task}-{suffix}"),
+            outcome: ToolExecutionOutcome::Succeeded,
+            source_sensitivity: ProceduralSourceSensitivity::NonPrivate,
+            started_at: Some(NOW),
+            completed_at: Some(NOW),
+        })
+        .collect::<Vec<_>>();
+    AgentToolUsageFeedbackV3 { registry_ref: registry.registry_ref(), tool_id: "archive.unpack".into(),
+        schema_fingerprint: "schema-archive-v1".into(), method_evidence: vec![ToolMethodEvidenceV1 {
+            method_id: format!("method-{task}"), task_signature: task.into(),
+            body: format!("1. Inspect and validate the input for {marker}\n2. Execute the scoped operation\n3. Verify the resulting output"),
+            execution_refs: facts.iter().map(|fact| fact.observation_id.clone()).collect(),
+            source_sensitivity: ProceduralSourceSensitivity::NonPrivate, external_content: false,
+        }], execution_facts: facts }
 }
 
 fn finalize_request(
     runtime: &MemoryRuntime,
     turn_id: &str,
     registry: &AgentToolRegistrySnapshot,
-    observations: Vec<AgentToolObservationDigest>,
+    feedback: AgentToolUsageFeedbackV3,
 ) -> MemoryTurnFinalizeRequest {
-    let tool_call_count = observations.len() as u32;
-    let tool_observations = observations
-        .iter()
-        .map(|observation| bm_sdk::ToolObservationDigest {
-            observation_id: observation.observation_id.clone(),
-            tool_name: observation.tool_id.clone(),
-            summary: observation.summary.clone(),
-            external_content: observation.external_content,
-        })
-        .collect();
+    let tool_call_count = feedback.execution_facts.len() as u32;
+    let tool_observations =
+        support::procedural::canonical_observations(&feedback.tool_id, &feedback.execution_facts);
+    assert_eq!(feedback.registry_ref, registry.registry_ref());
     MemoryTurnFinalizeRequest {
         turn: CanonicalTurnDelta {
             turn_id: turn_id.to_string(),
@@ -171,30 +178,23 @@ fn finalize_request(
             external_content_used: false,
             candidate_ids: Vec::new(),
         },
-        learning: PostTurnLearningInputV1 {
+        learning: PostTurnLearningInputV2 {
             tool_call_count,
             selection_receipt: None,
             runtime_skill_feedback: Vec::new(),
             agent_skill_feedback: Vec::new(),
             task_learning_feedback: Vec::new(),
-            agent_tool_feedback: vec![AgentToolUsageFeedbackV2 {
-                registry_ref: registry.registry_ref(),
-                tool_id: "archive.unpack".to_string(),
-                schema_fingerprint: "schema-archive-v1".to_string(),
-                observations,
-                outcome: ProceduralExecutionOutcomeV1::Succeeded,
-                user_visible_result_summary: None,
-                operator_note: None,
-            }],
-            authority: bm_sdk::ProceduralFeedbackAuthorityInputV1::HostRuntimeObservation,
+            agent_tool_feedback: vec![feedback],
+            human_confirmation_operation_id: None,
         },
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     }
 }
 
-fn finish_procedural_learning(runtime: Arc<MemoryRuntime>, expected_job_id: &str) {
-    let engine = MemoryLearningEngine::attach(runtime).expect("attach learning engine");
+fn finish_procedural_learning(runtime: Arc<TestRuntime>, expected_job_id: &str) {
+    let engine =
+        MemoryLearningEngine::attach(runtime.memory.clone()).expect("attach learning engine");
     let mut port = NoProviderPort::default();
     for attempt in 0..4 {
         let outcome = engine
@@ -216,13 +216,16 @@ fn finish_procedural_learning(runtime: Arc<MemoryRuntime>, expected_job_id: &str
 }
 
 fn learn(
-    runtime: Arc<MemoryRuntime>,
+    runtime: Arc<TestRuntime>,
     registry: &AgentToolRegistrySnapshot,
     turn_id: &str,
-    observations: Vec<AgentToolObservationDigest>,
+    feedback: AgentToolUsageFeedbackV3,
 ) {
     let report = runtime
-        .finalize_turn(finalize_request(&runtime, turn_id, registry, observations))
+        .finalize_turn_with_procedural_evidence(
+            &runtime.capability,
+            finalize_request(&runtime, turn_id, registry, feedback),
+        )
         .expect("production finalize");
     let job_id = report
         .procedural_learning
@@ -266,15 +269,11 @@ fn production_tool_experience_selection_is_task_relevant() {
             "DATABASE_ROTATION_MARKER database snapshot rotation completed",
         ),
     ] {
-        let observations = ["1", "2"]
-            .into_iter()
-            .map(|suffix| observation(&registry, task, marker, suffix))
-            .collect();
         learn(
             Arc::clone(&runtime),
             &registry,
             &format!("turn-{task}"),
-            observations,
+            feedback(&registry, task, marker),
         );
     }
 
@@ -365,17 +364,11 @@ fn scoped_tool_experience_is_exactly_denied_outside_each_applicability() {
             Arc::clone(&admitted),
             &registry,
             &format!("turn-{label}"),
-            ["1", "2"]
-                .into_iter()
-                .map(|suffix| {
-                    observation(
-                        &registry,
-                        &format!("{label}_task"),
-                        &format!("SCOPED_{label}_MARKER authorized scoped execution"),
-                        suffix,
-                    )
-                })
-                .collect(),
+            feedback(
+                &registry,
+                &format!("{label}_task"),
+                &format!("SCOPED_{label}_MARKER authorized scoped execution"),
+            ),
         );
         let positive = projection(
             &admitted,
@@ -422,17 +415,11 @@ fn unknown_registry_fingerprint_is_denied_with_safe_audit_only() {
         Arc::clone(&runtime),
         &registry,
         "turn-fingerprint",
-        ["1", "2"]
-            .into_iter()
-            .map(|suffix| {
-                observation(
-                    &registry,
-                    "fingerprint_task",
-                    "FINGERPRINT_SENTINEL verified archive operation",
-                    suffix,
-                )
-            })
-            .collect(),
+        feedback(
+            &registry,
+            "fingerprint_task",
+            "FINGERPRINT_SENTINEL verified archive operation",
+        ),
     );
     let positive = projection(
         &runtime,

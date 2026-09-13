@@ -93,6 +93,7 @@ fn assert_one_cas_winner(
             .iter()
             .filter(|result| result.as_ref().is_err_and(|error| {
                 error.stage() == "memory_write_transaction_precondition_failed"
+                    && matches!(error, bm_core::Error::Conflict { .. })
             }))
             .count(),
         1

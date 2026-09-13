@@ -313,20 +313,31 @@ pub struct RuntimeBudgetReport {
     pub unavailable_reasons: Vec<String>,
 }
 
+/// A valid resource admission is no longer current. Obtain a new budget and
+/// replan through its owner; this never authorizes reuse of the rejected plan.
+/// Identity corruption and foreign Store authority are deliberately not variants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum RuntimeBudgetReadmissionRequired {
+    #[error("runtime budget report is stale or expired")]
+    StaleOrExpired,
+    #[error("transaction admission is not the current exact runtime authority report")]
+    Superseded,
+}
+
 impl RuntimeBudgetReport {
     pub fn validate_for_admission(&self, now_secs: u64) -> Result<()> {
-        if self.resource_snapshot.stale || self.resource_snapshot.is_expired(now_secs) {
-            return Err(Error::config(
-                "runtime_budget_admission",
-                "runtime budget report is stale or expired",
-            ));
-        }
         let expected = finalize_runtime_budget_report_id(self.clone());
         if expected.report_id != self.report_id {
             return Err(Error::config(
                 "runtime_budget_admission",
                 "runtime budget report identity does not cover its payload",
             ));
+        }
+        if self.resource_snapshot.stale || self.resource_snapshot.is_expired(now_secs) {
+            return Err(Error::Other {
+                stage: "runtime_budget_admission",
+                source: Box::new(RuntimeBudgetReadmissionRequired::StaleOrExpired),
+            });
         }
         Ok(())
     }
@@ -2550,6 +2561,18 @@ mod tests {
         let mut stale = report.clone();
         stale.resource_snapshot = stale.resource_snapshot.mark_stale();
         let stale = finalize_runtime_budget_report_id(stale);
+        for error in [
+            stale.validate_for_admission(10).unwrap_err(),
+            report.validate_for_admission(40).unwrap_err(),
+        ] {
+            let Error::Other { source, .. } = error else {
+                panic!("valid admission expiry needs a typed readmission reason");
+            };
+            assert_eq!(
+                source.downcast_ref::<RuntimeBudgetReadmissionRequired>(),
+                Some(&RuntimeBudgetReadmissionRequired::StaleOrExpired)
+            );
+        }
         assert_eq!(
             stale
                 .validate_for_admission(10)
@@ -2572,6 +2595,11 @@ mod tests {
         assert!(tampered
             .validate_for_admission(10)
             .expect_err("report identity must cover admission capacity")
+            .to_string()
+            .contains("identity does not cover its payload"));
+        assert!(tampered
+            .validate_for_admission(40)
+            .expect_err("expiry cannot disguise payload tampering")
             .to_string()
             .contains("identity does not cover its payload"));
     }

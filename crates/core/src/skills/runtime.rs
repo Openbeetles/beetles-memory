@@ -2806,40 +2806,54 @@ fn inspect_runtime_skill_write_shape(
     source: RuntimeSkillWriteSource,
 ) -> std::result::Result<(), RuntimeSkillWriteItemReport> {
     let topic = write.topic.trim().to_string();
-    let content = write.content.trim();
-    if topic.is_empty() || content.is_empty() {
-        return Err(RuntimeSkillWriteItemReport {
+    inspect_runtime_skill_procedure_shape(&topic, &write.content, !write.summary.trim().is_empty())
+        .map_err(|(reason, detail)| RuntimeSkillWriteItemReport {
             source,
             action: RuntimeSkillWriteAction::Rejected,
-            reason: RuntimeSkillWriteReason::EmptyOrInvalid,
+            reason,
             topic,
-            detail: "runtime skill write requires non-empty topic and procedure content"
-                .to_string(),
-        });
+            detail: detail.into(),
+        })
+}
+
+/// Shared content-only admission for explicitly declared methods. This performs
+/// no write and grants no author, execution, promotion or disclosure authority.
+/// The first non-empty method line supplies the same summary context used by
+/// governed tool promotion; no synthetic RuntimeSkill record is constructed.
+pub fn validate_runtime_skill_method_shape(
+    topic: &str,
+    content: &str,
+) -> std::result::Result<(), RuntimeSkillWriteReason> {
+    inspect_runtime_skill_procedure_shape(topic, content, !content.trim().is_empty())
+        .map_err(|(reason, _)| reason)
+}
+
+fn inspect_runtime_skill_procedure_shape(
+    topic: &str,
+    content: &str,
+    has_summary: bool,
+) -> std::result::Result<(), (RuntimeSkillWriteReason, &'static str)> {
+    let content = content.trim();
+    if topic.trim().is_empty() || content.is_empty() {
+        return Err((
+            RuntimeSkillWriteReason::EmptyOrInvalid,
+            "runtime skill write requires non-empty topic and procedure content",
+        ));
     }
     if looks_like_raw_payload_text(content) {
-        return Err(RuntimeSkillWriteItemReport {
-            source,
-            action: RuntimeSkillWriteAction::Rejected,
-            reason: RuntimeSkillWriteReason::RawPayloadOrLog,
-            topic,
-            detail: "runtime skill write rejected raw payload / log shaped content".to_string(),
-        });
+        return Err((
+            RuntimeSkillWriteReason::RawPayloadOrLog,
+            "runtime skill write rejected raw payload / log shaped content",
+        ));
     }
     let signal = procedural_text_signal_count(content);
     let non_empty_lines = content
         .lines()
         .filter(|line| !line.trim().is_empty())
         .count();
-    let has_summary = !write.summary.trim().is_empty();
     if signal < 2 && !(signal >= 1 && non_empty_lines >= 2 && has_summary) {
-        return Err(RuntimeSkillWriteItemReport {
-            source,
-            action: RuntimeSkillWriteAction::Rejected,
-            reason: RuntimeSkillWriteReason::WeakProcedure,
-            topic,
-            detail: "runtime skill write requires reusable procedure structure, not a bare factual sentence".to_string(),
-        });
+        return Err((RuntimeSkillWriteReason::WeakProcedure,
+            "runtime skill write requires reusable procedure structure, not a bare factual sentence"));
     }
     Ok(())
 }

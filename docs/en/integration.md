@@ -30,7 +30,7 @@ After the crates are published:
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.7.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.8.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 Use exactly one profile feature for a build. Linux desktop, Linux device, and Linux server are distinct deployment targets; do not substitute one for another.
@@ -125,9 +125,58 @@ let preview_block = projection.provider_payload().system_memory_block();
 turn, choose a stable turn id once at request ingress, project with
 `ProceduralProjectionBindingV1::Turn { turn_id }`, and use that projected block in
 model-context assembly. Pass the complete returned `selection_receipt` unchanged in
-`PostTurnLearningInputV1` when finalizing the same canonical turn. A retry of that
+`PostTurnLearningInputV2` when finalizing the same canonical turn. A retry of that
 turn reuses its id and receipt; a separate turn gets a new id even when the input
 text is identical. Never reconstruct a receipt from selected ids or digests.
+
+In 0.8.0, feedback additionally requires an explicitly issued
+`MemoryProceduralSubmissionCapability` and `finalize_turn_with_procedural_evidence`.
+Ordinary turns with no feedback still use `finalize_turn` without a producer grant.
+Follow [procedural evidence authority](api.md#procedural-evidence-authority)
+for trusted setup, partial acceptance, revocation and capacity recovery. This contract
+is not compatible with the published 0.7.0 feedback input.
+
+After reopening, discover current reconciliation state through
+`MemoryRuntime::procedural_reconciliation_status` or the attached official service's
+`status().procedural_reconciliation`. A capacity block exposes a scope-bound job/revision
+reference; only the existing SystemGovernor control can resume it after capacity is restored.
+Do not persist a second recovery-job directory, reuse an old report as current authority,
+or expect wake/reopen to unblock the job.
+
+### Compilable official learning-service example
+
+The existing Rust embedded project includes a [learning-service entry](../../examples/rust-sdk-embedded/src/bin/learning-service.rs).
+It demonstrates two subject runtimes sharing one Store and SubjectRegistry, per-mounted-scope
+SystemGovernor controls, official service attachment, explicit one-time producer provisioning,
+typed execution/method submission, an ordinary no-feedback turn and bounded shutdown.
+Each subject uses its own `chat_id` and `conversation_id`; sharing a Store/MemorySpace does not share a subject-owned conversation.
+It uses no test-only harness and introduces no host-owned worker, grant table or learning policy.
+
+From the repository root, check without starting the service:
+
+```sh
+cargo check --manifest-path examples/rust-sdk-embedded/Cargo.toml --features learning-service --all-targets
+cargo clippy --manifest-path examples/rust-sdk-embedded/Cargo.toml --features learning-service --all-targets -- -D warnings
+```
+
+For the Linux/Windows configurations, replace the feature argument with
+`--no-default-features --features desktop-linux,learning-service` or
+`--no-default-features --features desktop-windows,learning-service`.
+Checking these features on macOS does not prove execution on Linux/Windows.
+Set `CARGO_TARGET_DIR` to an external work directory when local disk space is limited.
+
+To run the synthetic demonstration yourself, use `cargo run --manifest-path examples/rust-sdk-embedded/Cargo.toml --features learning-service --bin learning-service`.
+It creates only an in-process InMemory Store and official worker thread and counts words in fixed
+synthetic text. It opens no real data, creates no network listener, reads no keys and calls no Provider.
+Without a model binding, successful submission is not completed semantic learning; one execution
+witness does not establish an active method or promote a Runtime Skill.
+The example neither verifies persistent reopen nor waits for all background work to finish.
+
+Its `expected_revision: None` is only for this fresh ephemeral Store. Persistent hosts must retain/query
+existing binding references and manage revisions explicitly, never automatically regrant on each
+startup or turn. Adapt `GovernanceBindingSource` and `GovernanceCredentialResolver` to the product's
+one configuration owner for real model execution; they are deliberately unconfigured here.
+See the [0.8.0 source release notes](release-notes-0.8.0.md) for changes and release boundaries.
 
 The host remains responsible for final ordering of system, developer, user, and
 tool messages.
@@ -202,8 +251,8 @@ Hosts must not claim jobs, run governance transitions, assemble memory
 mutations, or implement a second queue/worker/retry policy. Operator and
 attachment status reads must use the SDK-minted typed inspection authority;
 unauthorized or cross-subject requests fail before job identity or reason detail
-is returned. Store v12 and earlier schemas are rejected. Owners may explicitly
-recreate disposable development stores; v0.7.0 neither deletes real data nor
+is returned. Store v13 and earlier schemas are rejected. Owners may explicitly
+recreate disposable development stores; v0.8.0 neither deletes real data nor
 provides automatic migration or a compatibility reader.
 
 `project()` returns `MemoryProjectionReport.audit` as the projection diagnostic
@@ -289,7 +338,7 @@ A complete SDK host turn uses one public path:
 
 1. Open a `MemoryStoreHandle` and pass it through `MemoryRuntime::builder().store(...)`; persistence engines, raw transactions, and writable store traits are not public runtime paths.
 2. Build `MemoryIdentity` and `MemoryScope` from stable host owner, agent, channel, and conversation ids.
-3. Submit `MemoryWriteRequest::Candidates` for factual candidates. Caller-authored procedures and procedural retargeting are rejected; submit actual execution evidence through `finalize_turn` for governed procedural learning.
+3. Submit `MemoryWriteRequest::Candidates` for factual candidates. Caller-authored procedures and procedural retargeting are rejected; submit actual execution evidence through the explicitly authorized `finalize_turn_with_procedural_evidence` path for governed procedural learning.
 4. Finalize the turn through canonical turn semantics when transcript governance is required.
 5. Use `recall` and `project` to build model context; do not assemble memory planes in the host.
 6. Use `inspect` for operator visibility and safe recovery context.

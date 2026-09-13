@@ -9,11 +9,10 @@ use bm_core::memory::{
     MEMORY_MUTATION_RECEIPT_NAMESPACE,
 };
 use bm_core::skills::{
-    AgentToolExperienceConfidence, AgentToolExperienceHeadBindingV1,
-    AgentToolExperienceOwnerHeadV2, AgentToolExperienceOwningScopeV1,
-    AgentToolExperienceRetainedRevisionDigestV2, AgentToolExperienceRevisionMaterialV2,
-    AgentToolExperienceScopeManifestV1, AgentToolExperienceStatus, AgentToolOutcome,
-    AgentToolRegistryScope,
+    AgentToolExperienceBodyV1, AgentToolExperienceHeadBindingV1, AgentToolExperienceOwnerHeadV3,
+    AgentToolExperienceOwningScopeV1, AgentToolExperienceRetainedRevisionDigestV3,
+    AgentToolExperienceRevisionMaterialV3, AgentToolExperienceScopeManifestV1,
+    AgentToolExperienceStatus, AgentToolMethodSourceRefV1, AgentToolRegistryScope,
 };
 use bm_sdk::nonproduction_replay_harness::{
     AgentToolExperienceStoreMutationOutcomeV1, AgentToolExperienceStoreMutationPlanV1,
@@ -27,8 +26,8 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone)]
 struct ExperienceRevisionFixture {
     plan: AgentToolExperienceStoreMutationPlanV1,
-    material: AgentToolExperienceRevisionMaterialV2,
-    head: AgentToolExperienceOwnerHeadV2,
+    material: AgentToolExperienceRevisionMaterialV3,
+    head: AgentToolExperienceOwnerHeadV3,
     manifest: AgentToolExperienceScopeManifestV1,
 }
 
@@ -61,16 +60,40 @@ fn revision_fixture(
     operation_id: &str,
     task_signature: &str,
     revision: u64,
-    previous_material: Option<&AgentToolExperienceRevisionMaterialV2>,
-    previous_head: Option<&AgentToolExperienceOwnerHeadV2>,
+    previous_material: Option<&AgentToolExperienceRevisionMaterialV3>,
+    previous_head: Option<&AgentToolExperienceOwnerHeadV3>,
     previous_manifest: Option<&AgentToolExperienceScopeManifestV1>,
     evidence_refs: Vec<String>,
 ) -> ExperienceRevisionFixture {
     let predecessor = previous_material
-        .map(AgentToolExperienceRetainedRevisionDigestV2::from_material)
+        .map(AgentToolExperienceRetainedRevisionDigestV3::from_material)
         .transpose()
         .expect("canonical predecessor");
-    let material = AgentToolExperienceRevisionMaterialV2::build(
+    // These fixtures exercise Store structure, not successful execution or
+    // promotion. Retain typed method references without fabricated counters.
+    let mut body = AgentToolExperienceBodyV1::Method {
+        task_signature: task_signature.into(),
+        procedure: format!(
+            "1. Inspect the release artifact.\n2. Extract and verify revision {revision}."
+        ),
+        constraints: vec!["filesystem.read".into()],
+        sources: Vec::new(),
+    };
+    let method_digest = body.method_content_digest().unwrap().unwrap();
+    let AgentToolExperienceBodyV1::Method { sources, .. } = &mut body else {
+        unreachable!()
+    };
+    *sources = evidence_refs
+        .into_iter()
+        .map(|source_job_id| AgentToolMethodSourceRefV1 {
+            source_job_id,
+            method_id: "synthetic-method".into(),
+            method_digest: method_digest.clone(),
+            execution_refs: Vec::new(),
+        })
+        .collect();
+    sources.sort_by_cached_key(|source| serde_json::to_vec(source).unwrap());
+    let material = AgentToolExperienceRevisionMaterialV3::build(
         "space:test",
         owning_scope(subject),
         "host-tools",
@@ -79,18 +102,9 @@ fn revision_fixture(
         },
         "pdf.extract",
         "schema-pdf-v1",
-        task_signature,
         revision,
-        "PDF release-note extraction",
-        &format!("Use governed extraction revision {revision}."),
-        vec!["filesystem.read".to_string()],
-        u32::try_from(evidence_refs.len()).expect("evidence count"),
-        u32::try_from(evidence_refs.len()).expect("success count"),
-        0,
-        AgentToolOutcome::Succeeded,
-        AgentToolExperienceConfidence::High,
-        AgentToolExperienceStatus::Active,
-        evidence_refs,
+        body,
+        AgentToolExperienceStatus::Candidate,
         MemoryPrivacyClass::SharedWithSubject,
         100,
         100 + revision,
@@ -101,10 +115,10 @@ fn revision_fixture(
         .map(|head| head.retained_revisions.clone())
         .unwrap_or_default();
     retained.push(
-        AgentToolExperienceRetainedRevisionDigestV2::from_material(&material)
+        AgentToolExperienceRetainedRevisionDigestV3::from_material(&material)
             .expect("retained material"),
     );
-    let head = AgentToolExperienceOwnerHeadV2::build(
+    let head = AgentToolExperienceOwnerHeadV3::build(
         "space:test",
         owning_scope(subject),
         material.owner_ref.clone(),
@@ -196,9 +210,9 @@ fn json_projection(platform: &StorePlatform) -> Vec<(String, String, serde_json:
 }
 
 #[test]
-fn store_schema_v13_is_the_only_current_schema() {
-    assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v13");
-    assert_eq!(STORE_SCHEMA_VERSION, 13);
+fn store_schema_v14_is_the_only_current_schema() {
+    assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v14");
+    assert_eq!(STORE_SCHEMA_VERSION, 14);
 }
 
 #[test]
@@ -446,7 +460,11 @@ fn evidence_capacity_rejection_is_exact_zero_change() {
     let error = platform
         .commit_agent_tool_experience_for_nonproduction_harness(oversized.plan)
         .expect_err("evidence footprint must exceed the governed profile");
-    assert!(error.to_string().contains("material"));
+    let cause = std::error::Error::source(&error)
+        .and_then(|source| source.downcast_ref::<bm_core::Error>())
+        .expect("transaction retains the typed material admission cause");
+    assert_eq!(cause.stage(), "agent_tool_experience_store_post_image");
+    assert!(cause.to_string().contains("material"));
     assert_eq!(
         platform.export_store_snapshot().expect("after overflow"),
         before
@@ -507,7 +525,13 @@ fn snapshot_import_rejects_tampered_material_digest() {
         .iter_mut()
         .find(|doc| doc.namespace == AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE)
         .expect("persisted material");
-    material.value["usage_guidance"] = serde_json::json!("tampered guidance");
+    material.value["status"] = serde_json::json!("active");
+    let forged: AgentToolExperienceRevisionMaterialV3 =
+        serde_json::from_value(material.value.clone()).expect("attack is a typed material");
+    assert_ne!(
+        forged.content_digest,
+        forged.canonical_content_digest().unwrap()
+    );
     let target = in_memory_store();
     let before = target.export_store_snapshot().expect("target before");
     let error = target

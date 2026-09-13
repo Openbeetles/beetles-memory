@@ -94,8 +94,8 @@ fn runtime_lists_runtime_skills_with_summary_counts() {
         })
         .expect("list");
 
-    assert_eq!(report.total, 1);
-    assert_eq!(report.runtime_skills, 1);
+    assert_eq!(report.total, Some(1));
+    assert_eq!(report.runtime_skills, Some(1));
     assert_eq!(report.skills[0].title, "Release guard");
     assert_eq!(report.skills[0].locator.owner_revision(), 1);
 }
@@ -111,7 +111,10 @@ fn runtime_gets_runtime_skill_detail_without_executing_it() {
 
     assert_eq!(detail.summary.locator.owner_revision(), 1);
     assert!(detail.procedure_text.contains("run gates"));
-    assert!(detail.raw_content.contains("\"schema_version\": 1"));
+    let content: serde_json::Value =
+        serde_json::from_str(&detail.raw_content).expect("canonical method JSON");
+    assert_eq!(content["procedure"], detail.procedure_text);
+    assert!(content.get("intrinsic_contract").is_none());
 }
 
 #[test]

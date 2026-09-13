@@ -1,6 +1,9 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[path = "../../../../crates/sdk/tests/support/procedural.rs"]
+mod procedural;
+
 use bm_desktop::{
     DesktopConsoleRequest, DesktopConsoleState, DesktopMemoryAuthority, DesktopRuntimeConfig,
 };
@@ -9,19 +12,20 @@ use bm_entry::{
     EntryScope, EntryTransportConfig,
 };
 use bm_sdk::{
-    AgentToolDescriptor, AgentToolObservationDigest, AgentToolOutcome, AgentToolRegistrySnapshot,
-    AgentToolUsageFeedbackV2, AuthorizedGovernanceEnvelope, CanonicalTurnDelta, ConversationScope,
-    GovernanceEgressAuthority, GovernanceExecutionOperation, GovernanceExecutionPort,
-    GovernanceExecutionPortFailure, ImmutableGovernanceExecutionBinding, IngressKind,
-    LongTermMemoryDraft, LongTermMemoryKind, LongTermMemoryProvenance, MemoryCapabilityPolicy,
-    MemoryEvidenceAuthority, MemoryIdentity, MemoryLearningCycleOutcome,
-    MemoryLearningCycleRequest, MemoryLearningEngine, MemoryPrivacyClass, MemoryPrivacyPolicy,
-    MemoryProjectionRequest, MemoryRuntime, MemoryScope, MemoryStoreHandle,
-    MemorySubjectVisibilityPolicy, MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest,
-    MemoryTurnProtocol, MemoryTurnSource, MemoryWriteRequest, ParsedLongTermMemoryExtraction,
-    PostTurnLearningInputV1, PressureLevel, ProceduralExecutionOutcomeV1,
-    ProceduralProjectionBindingV1, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillListRequest,
-    RuntimeSkillOwningScope, StoreBackendConfig, ToolObservationDigest, TranscriptInputMessage,
+    AgentToolDescriptor, AgentToolRegistrySnapshot, AgentToolUsageFeedbackV3,
+    AuthorizedGovernanceEnvelope, CanonicalTurnDelta, ConversationScope, GovernanceEgressAuthority,
+    GovernanceExecutionOperation, GovernanceExecutionPort, GovernanceExecutionPortFailure,
+    ImmutableGovernanceExecutionBinding, IngressKind, LongTermMemoryDraft, LongTermMemoryKind,
+    LongTermMemoryProvenance, MemoryCapabilityPolicy, MemoryEvidenceAuthority, MemoryIdentity,
+    MemoryLearningCycleOutcome, MemoryLearningCycleRequest, MemoryLearningEngine,
+    MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRuntime, MemoryScope,
+    MemoryStoreHandle, MemorySubjectVisibilityPolicy, MemoryTurnDeliveryStatus,
+    MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteRequest,
+    ParsedLongTermMemoryExtraction, PostTurnLearningInputV2, PressureLevel,
+    ProceduralProjectionBindingV1, ProceduralSourceSensitivity, ProfileId,
+    RuntimeLifecycleModeInput, RuntimeSkillListRequest, RuntimeSkillOwningScope,
+    StoreBackendConfig, ToolExecutionFactV1, ToolExecutionOutcome, ToolMethodEvidenceV1,
+    TranscriptInputMessage,
 };
 use serde_json::Value;
 
@@ -67,7 +71,7 @@ fn desktop_console_serves_ollama_transparent_status_without_404() {
 #[test]
 fn desktop_console_mutates_skills_through_entry_runtime() {
     let data_dir = test_store_dir("skills-mutation");
-    learn_runtime_skill(data_dir.join("store"));
+    let learning_runtime = learn_runtime_skill(data_dir.join("store"));
     let state = DesktopConsoleState::open(desktop_config(data_dir)).expect("desktop state");
 
     let create_forbidden = state
@@ -137,6 +141,7 @@ fn desktop_console_mutates_skills_through_entry_runtime() {
     assert_eq!(disabled.status_code, 200, "{}", disabled.body);
     let disabled_body: Value = serde_json::from_str(&disabled.body).expect("disable mutation json");
     let disabled_locator = disabled_body["mutation"]["currentLocator"].clone();
+    finish_procedural_reconciliation(&learning_runtime);
 
     let retired = state
         .handle_console_request(DesktopConsoleRequest::post_json(
@@ -147,6 +152,7 @@ fn desktop_console_mutates_skills_through_entry_runtime() {
     assert_eq!(retired.status_code, 200, "{}", retired.body);
     let retired_body: Value = serde_json::from_str(&retired.body).expect("retire mutation json");
     let retired_locator = retired_body["mutation"]["currentLocator"].clone();
+    finish_procedural_reconciliation(&learning_runtime);
 
     let retired_detail = state
         .handle_console_request(DesktopConsoleRequest::post_json(
@@ -367,7 +373,7 @@ impl GovernanceExecutionPort for NoProvider {
     }
 }
 
-fn learn_runtime_skill(path: std::path::PathBuf) {
+fn learn_runtime_skill(path: std::path::PathBuf) -> Arc<MemoryRuntime> {
     let registry = AgentToolRegistrySnapshot::compact(
         "desktop-tools",
         "host",
@@ -381,21 +387,26 @@ fn learn_runtime_skill(path: std::path::PathBuf) {
             .unwrap()
             .as_secs(),
     );
+    let store = MemoryStoreHandle::open(
+        StoreBackendConfig::file(path, ProfileId::DesktopMacosStandaloneMemory)
+            .unwrap()
+            .with_fsync(false),
+    )
+    .unwrap();
     let memory = Arc::new(
         MemoryRuntime::builder()
             .identity(MemoryIdentity::new("bm-desktop", "local-owner").unwrap())
             .scope(MemoryScope::new("desktop", "local-desktop").unwrap())
-            .store(
-                MemoryStoreHandle::open(
-                    StoreBackendConfig::file(path, ProfileId::DesktopMacosStandaloneMemory)
-                        .unwrap()
-                        .with_fsync(false),
-                )
-                .unwrap(),
-            )
+            .store(store.clone())
             .agent_tool_registry(registry.clone())
             .build()
             .unwrap(),
+    );
+    let governor = procedural::governor(&memory, store);
+    let capability = procedural::register_and_issue(
+        &governor,
+        procedural::runtime_observer_spec(&memory, "desktop-contract-observer"),
+        "register-desktop-contract-observer",
     );
     let list_request = RuntimeSkillListRequest {
         owning_scope: RuntimeSkillOwningScope::Subject {
@@ -415,71 +426,78 @@ fn learn_runtime_skill(path: std::path::PathBuf) {
         .into_iter()
         .enumerate()
     {
-        let observations: Vec<_> = ["first", "second"].into_iter().map(|call| AgentToolObservationDigest {
-            observation_id: format!("{turn_id}-{call}-observation"),
-            registry_id: registry.registry_id.clone(), tool_id: "desktop.inspect".into(),
-            schema_fingerprint: "desktop-v1".into(), call_id: Some(format!("{turn_id}-{call}")),
-            task_signature: "desktop_console".into(),
-            summary: "1. open the desktop app\n2. call the shared console API\n3. verify the returned report".into(),
-            outcome: AgentToolOutcome::Succeeded, error_code: None,
-            external_content: false, private_content_used: false,
-            permission_tags: Vec::new(), risk_tags: Vec::new(), started_at: None, completed_at: None,
-        }).collect();
-        let finalized = memory
-            .finalize_turn(MemoryTurnFinalizeRequest {
-                turn: CanonicalTurnDelta {
-                    turn_id: turn_id.into(),
-                    conversation: ConversationScope {
-                        channel: "desktop".into(),
-                        chat_id: "local-desktop".into(),
-                        conversation_id: Some("local-desktop".into()),
-                    },
-                    subject: memory.subject_id().into(),
-                    delivery_status: MemoryTurnDeliveryStatus::Delivered,
-                    source: MemoryTurnSource {
-                        ingress: IngressKind::User,
-                        channel: "desktop".into(),
-                        provider: None,
-                        protocol: MemoryTurnProtocol::Native,
-                        endpoint: None,
-                        model_alias: None,
-                        model_resolved: None,
-                        request_id: None,
-                        client_conversation_hint: None,
-                    },
-                    actor: None,
-                    input_messages: vec![TranscriptInputMessage::user("Inspect desktop console")],
-                    assistant_message: Some(TranscriptInputMessage::assistant(
-                        "Desktop console verified",
-                    )),
-                    tool_observations: observations
-                        .iter()
-                        .map(|observation| ToolObservationDigest {
-                            observation_id: observation.observation_id.clone(),
-                            tool_name: observation.tool_id.clone(),
-                            summary: observation.summary.clone(),
-                            external_content: false,
-                        })
-                        .collect(),
-                    external_content_used: false,
-                    candidate_ids: Vec::new(),
-                },
-                learning: PostTurnLearningInputV1 {
-                    tool_call_count: 2,
-                    agent_tool_feedback: vec![AgentToolUsageFeedbackV2 {
-                        registry_ref: registry.registry_ref(),
-                        tool_id: "desktop.inspect".into(),
-                        schema_fingerprint: "desktop-v1".into(),
-                        observations,
-                        outcome: ProceduralExecutionOutcomeV1::Succeeded,
-                        user_visible_result_summary: Some("Desktop console verified".into()),
-                        operator_note: None,
-                    }],
-                    ..PostTurnLearningInputV1::empty()
-                },
-                pressure: PressureLevel::Normal,
-                mode_input: RuntimeLifecycleModeInput::default(),
+        let facts: Vec<_> = ["first", "second"]
+            .into_iter()
+            .map(|call| ToolExecutionFactV1 {
+                observation_id: format!("{turn_id}-{call}-observation"),
+                call_id: format!("{turn_id}-{call}"),
+                outcome: ToolExecutionOutcome::Succeeded,
+                source_sensitivity: ProceduralSourceSensitivity::NonPrivate,
+                started_at: None,
+                completed_at: None,
             })
+            .collect();
+        let method = ToolMethodEvidenceV1 {
+            method_id: format!("{turn_id}-method"),
+            task_signature: "desktop_console".into(),
+            body: "1. open the desktop app\n2. call the shared console API\n3. verify the returned report".into(),
+            execution_refs: facts.iter().map(|fact| fact.observation_id.clone()).collect(),
+            source_sensitivity: ProceduralSourceSensitivity::NonPrivate,
+            external_content: false,
+        };
+        let finalized = memory
+            .finalize_turn_with_procedural_evidence(
+                &capability,
+                MemoryTurnFinalizeRequest {
+                    turn: CanonicalTurnDelta {
+                        turn_id: turn_id.into(),
+                        conversation: ConversationScope {
+                            channel: "desktop".into(),
+                            chat_id: "local-desktop".into(),
+                            conversation_id: Some("local-desktop".into()),
+                        },
+                        subject: memory.subject_id().into(),
+                        delivery_status: MemoryTurnDeliveryStatus::Delivered,
+                        source: MemoryTurnSource {
+                            ingress: IngressKind::User,
+                            channel: "desktop".into(),
+                            provider: None,
+                            protocol: MemoryTurnProtocol::Native,
+                            endpoint: None,
+                            model_alias: None,
+                            model_resolved: None,
+                            request_id: None,
+                            client_conversation_hint: None,
+                        },
+                        actor: None,
+                        input_messages: vec![TranscriptInputMessage::user(
+                            "Inspect desktop console",
+                        )],
+                        assistant_message: Some(TranscriptInputMessage::assistant(
+                            "Desktop console verified",
+                        )),
+                        tool_observations: procedural::canonical_observations(
+                            "desktop.inspect",
+                            &facts,
+                        ),
+                        external_content_used: false,
+                        candidate_ids: Vec::new(),
+                    },
+                    learning: PostTurnLearningInputV2 {
+                        tool_call_count: 2,
+                        agent_tool_feedback: vec![AgentToolUsageFeedbackV3 {
+                            registry_ref: registry.registry_ref(),
+                            tool_id: "desktop.inspect".into(),
+                            schema_fingerprint: "desktop-v1".into(),
+                            execution_facts: facts,
+                            method_evidence: vec![method],
+                        }],
+                        ..PostTurnLearningInputV2::empty()
+                    },
+                    pressure: PressureLevel::Normal,
+                    mode_input: RuntimeLifecycleModeInput::default(),
+                },
+            )
             .unwrap();
         let outcome = MemoryLearningEngine::attach(memory.clone())
             .unwrap()
@@ -512,5 +530,38 @@ fn learn_runtime_skill(path: std::path::PathBuf) {
         if let Some(skill) = skills.first() {
             assert_eq!(skill.locator.owner_revision(), 1);
         }
+    }
+    memory
+}
+
+fn finish_procedural_reconciliation(memory: &Arc<MemoryRuntime>) {
+    // DesktopConsoleState owns EntryRuntime's official background service.
+    // Observe its committed result instead of racing it with a second worker.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let report = memory
+            .list_runtime_skills(RuntimeSkillListRequest {
+                owning_scope: RuntimeSkillOwningScope::Subject {
+                    mounted_subject_id: memory.subject_id().into(),
+                },
+                query: None,
+                include_disabled: true,
+                include_retired: true,
+                limit: 8,
+            })
+            .unwrap();
+        if report.read_availability.is_ready() {
+            assert!(
+                !report.skills.is_empty(),
+                "completed learning owner stays inspectable"
+            );
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "official desktop reconciliation did not become readable: {:?}",
+            report.read_availability
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }

@@ -39,12 +39,14 @@ impl GovernedMemoryOwnerPlane {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
 pub struct GovernedMemoryOwnerRef {
     pub owner_plane: GovernedMemoryOwnerPlane,
     pub owner_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
 pub struct GovernedOwnerRevisionRef {
     pub owner_ref: GovernedMemoryOwnerRef,
     pub owner_revision: u64,

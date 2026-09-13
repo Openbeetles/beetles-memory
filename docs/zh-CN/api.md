@@ -62,9 +62,33 @@ service.credential_changed("product.primary-key", 2, "credential-op-2")?;
 
 Status read 与 recovery control 必须携带 SDK 铸造的 opaque capability。`MemoryRuntime::learning_service_status_authority` 和 `MemoryRuntime::learning_service_control_authorities` 要求 Runtime actor 本身就是 exact active governing `SystemGovernor`；其中每个 recovery authority 绑定 exact Store、registry、MemorySpace、mounted subject、scope 与 recovery kind。`MemoryRuntime::learning_attachment_status_authority` 要求 exact active mounted-subject actor。跨主体、跨 operation 或 foreign Store/registry authority 必须在返回 job identity、reason detail 或执行 mutation 前失败。
 
+## 程序性证据声明权
+
+0.8.0 源码使用 `PostTurnLearningInputV2`，不能与已发布 0.7.0 API 混用。普通回合使用 `PostTurnLearningInputV2::empty()` 或 `with_tool_call_count(n)`，通过 `finalize_turn` 提交；不要求注册 producer，空反馈不创建 procedural job。Selection receipt 证明的是精确投影，不是执行事实声明权。
+
+有反馈时，受信初始化代码使用同 Store、SubjectRegistry、MemorySpace 和 mounted scope 的 active governing `SystemGovernor` runtime：
+
+1. 调用 `control_procedural_producer(MemoryProceduralProducerControlRequest)`，显式提供 operation id、精确 `ProceduralProducerSpecV1`、`Active` 状态与预期前驱 revision。首次注册为 `expected_revision: None`，更新和撤销必须带已有精确 revision。Spec 声明真实 principal、provenance、允许的声明种类、来源分类及精确工具引用，不包含凭证。
+2. 用返回的 binding revision 调用 `procedural_submission_capability`，签发不可序列化的 `MemoryProceduralSubmissionCapability`；持久 binding 或 JSON 字段不能自行铸造能力。
+3. 只把该受限能力交给指定的进程内 producer，由其调用 `finalize_turn_with_procedural_evidence(&capability, request)`。SDK 在原子准入前重新校验 Store incarnation、registry、scope、当前 producer 权能、来源可见性及 canonical turn/call 绑定。
+
+`EntryRuntime` 提供相同的受信进程初始化控制和签发方法。受信入口可以把能力放入 `AdapterRuntimeServices::procedural_submission`，调用 `EntryRuntime::handle_with_services`；Entry 还会匹配已认证 principal 与 owner。普通 HTTP/MCP/WSS/A2A payload 不能携带该能力。Bearer 认证和 `FinalizeTurn` 操作权限本身不授予证据声明权；没有受信带外配置时，反馈必须被拒绝，不能自动当作可信。宿主不得另存一份 grant 表，也不得每次请求或重开都注册／恢复权限。
+
+执行事实只有 typed outcome 和有界调用引用，没有任意结果正文、错误文本或摘要插槽；显式方法证据另有 canonical 内容及来源引用。`Private`／`Unknown` 方法不能靠 hash、sanitized 标签或 Human 确认变公开。方法被拒绝时，合法准入的执行事实仍可接受；消费治理反馈回执中的 `partially_accepted_count` 和 `method_dispositions`，不能把部分接受显示为全部成功。accepted、partially accepted、deferred、rejected 四种计数划分原始提交组，不代表变动 owner 数。传输重试复用精确 canonical payload，真实额外执行使用独立 call identity。
+
+Producer 收窄／撤权及受治理来源撤回，会立即阻断受影响的 current 与 as-of 读取。既有 `MemoryLearningEngine`／`MemoryLearningService` 在同一持久 job 通道执行有界重算，宿主不得再造 worker 或重算计数。`RuntimeSkillListReport.read_availability` 区分 `Ready`、`Reconciling`、`Blocked`、`SubjectUnavailable`、`ProfileUnavailable` 与 `NotMaterialized`；不可用时可选总数为 `None`，不是伪造的零，也不能继续展示旧方法正文或统计。投影仍受原 backend/profile 支持矩阵约束。
+
+容量不足会持久阻断重算。真实资源问题解决后，必须由 governing runtime 调用 `resume_procedural_reconciliation`，提供 operation id、job id 和精确 expected state revision；wake／reopen 不能自行清除阻断。暂时 Store 争用、预期状态冲突、权限拒绝和闭包损坏，在 `ProceduralLearningSdkError` 中是不同 typed outcome；不能解析私密错误文本决定恢复。永久 producer 撤权或 owner 删除不能被重试、archive restore 或重算逆转；已退役 Runtime Skill 即使重算保留的使用贡献，也仍然退役。
+
+合法预算准入自然过期或被新报告替换时，必须通过原 Runtime 重新准入和规划。Core 返回 `RuntimeBudgetReadmissionRequired`；procedural 公共面返回 `StoreUnavailable/StoreCommitRejected`，由官方 worker 使用已有的有界重试策略处理，不能当作持久数据损坏。payload 篡改、跨 Store authority 和容量拒绝不是重新准入信号；不得复用被拒 admission 或绕过 CAS。
+
+完整重开后，通过 `procedural_reconciliation_status(MemoryProceduralReconciliationStatusRequest { authority: runtime.learning_attachment_status_authority()? })` 发现容量阻断。报告包含 `read_availability`、typed `block_reason` 和可选 `recovery`（`job_id`、`expected_state_revision`）。Capability 绑定实际 mounted Runtime，调用者不能指定其他主体或任意 job key；结果来自同一个不可变 Store 快照，不返回 raw job、来源证据或记忆正文。`MemoryLearningAttachment::status` 的 `procedural_reconciliation` 字段实时消费同一报告，worker 的 Idle 不会掩盖持久阻断。真实容量问题解决后，才把精确 recovery target 交给另行获权的 governing Runtime 恢复；旧引用由 CAS 拒绝，恢复引用本身不是写入授权。
+
+只有 `RuntimeObservation` 和 `HumanUser` 来源可以声明执行事实或 usage feedback。`GovernedSource` 与 `ModelInferred` 可以提供经准入的方法声明，不能证明执行成功或不匹配；新声明也不能继承已撤权或撤回来源的执行贡献。Owner 引用数／revision 容量超限返回 typed capacity error，不代表 Store 损坏。
+
 ## Subject Soul Provisioning
 
-`bm-sdk` 0.7.0 提供宿主无关的 Subject Soul 建档与生命周期公共合同。宿主只能提交 typed intent；Soul revision、generation、material、manifest、ledger、审计、事件和 durable operation receipt 由 Core、SDK 与 Store 在同一事务中拥有。Adapter、HTTP、MCP、Console 或宿主数据库不得维护第二套 Soul 状态，也不得先写默认人格再覆盖。
+`bm-sdk` 0.8.0 提供宿主无关的 Subject Soul 建档与生命周期公共合同。宿主只能提交 typed intent；Soul revision、generation、material、manifest、ledger、审计、事件和 durable operation receipt 由 Core、SDK 与 Store 在同一事务中拥有。Adapter、HTTP、MCP、Console 或宿主数据库不得维护第二套 Soul 状态，也不得先写默认人格再覆盖。
 
 | 操作 | SDK surface | 合同 |
 | --- | --- | --- |
@@ -113,11 +137,11 @@ CTQ1 query surface 统一使用 Store-owned `TranscriptQueryCursor`。调用方�
 
 `HostUi` 只是 **host-presentable redacted disclosure view**。它不是聊天窗口 API、分页方向、宿主产品名、transcript index owner 或 authorization token。Catalog、timeline、search、activity 只返回 Runtime hydration 后仍能通过请求 view 脱敏规则的结果。Search hit 携带受治理的 Unicode-safe excerpt 和 durable `TranscriptAnchor`；宿主应把 anchor 交给 `TranscriptTimelineAnchor::Around`，不得在 UI 内扫描或二次匹配 transcript 正文。
 
-0.7.0 源码 只接受 Store v13，不提供 public Store migration API、compatibility reader、双写或 automatic migration。旧代、partial 与 foreign schema payload 都会 fail closed。旧代开发数据只能由其 owner 明确删除并重建；archive export/import 不是 schema migration。
+0.8.0 只接受 Store v14；0.7.0 使用 Store v13。不提供 public Store migration API、compatibility reader、双写或 automatic migration。旧代、partial 与 foreign schema payload 都会 fail closed。旧代开发数据只能由其 owner 明确删除并重建；archive export/import 不是 schema migration。
 
 Timeline 支持 latest、before、after、around-anchor、around-sequence、around-time 与 first-visible-in-range；页内 turn 始终按 sequence 正序，report 可返回 opaque older/newer cursor。日历换算归宿主：按用户 IANA timezone 把本地日期转换为 canonical UTC `[start_inclusive, end_exclusive)` 后再调用 Memory。不得假设每天都是 86400 秒，DST 当天可以是 23 或 25 小时；Beetle Memory 不保存也不猜宿主时区。
 
-当前 source candidate 保留 CTQ1 public query shape，使用 capability snapshot v5 暴露受治理 procedural-learning 矩阵，并把 Store 升到 v13 承载 PFI1 owner closure。InMemory/File/SQLite 合同覆盖 query/learning persistence、reopen、repair/archive closure 与 privacy exact-zero。该工程结论不等于真实数据、Provider、GUI/UAT、crates.io 或托管 Release 回执。
+当前工作源码保留 CTQ1 public query shape 与 capability snapshot v5。Store v14 加强程序性证据声明权和贡献／重算闭包，不新增第二套 Transcript 查询模型。本地自动化合同不能充当真实数据、Provider、GUI/UAT、crates.io 或托管 Release 证据。
 
 Transcript attrs 是 Memory-owned transcript metadata，不是宿主业务对象库。每条 attr 都必须有 `TranscriptAttrTarget`、命名空间化 key、`TranscriptAttrValueKind`、JSON value、`HostRefVisibility`、`TranscriptAttrSource`、`TranscriptAttrGovernance` 和可选 `TranscriptAttrLink`。`HostUi` replay 只返回 HostUi-visible attrs，`ModelContext` 只返回 model-context attrs，`OperatorAudit` 返回审计可见 attrs，`Export` 只返回 export-visible 且 `export_allowed=true` 的 attrs；`RawOwnerOnly` 仍是内部视图。Repair report 会把 target turn/message 缺失、attr source key 不匹配、非法 key、超限 value、corrupt attr record 作为 fail-closed issue。`DeleteRaw` 默认隐藏 attrs；`OperatorAuditOnlyAfterMask` 最多保留脱敏后的审计 metadata，raw deletion 后绝不返回原始 attr value。
 
@@ -165,7 +189,7 @@ Transcript attrs 是 Memory-owned transcript metadata，不是宿主业务对象
 | `MemoryWriteRequest::GovernedEvidenceDocuments` | `mutations` | 在同一事务中创建、修订或删除 governed evidence owner、source claim 和派生索引。`Upsert` 携带有界 `GovernedEvidenceDocumentDraft`；`Delete` 必须携带 expected owner revision。 |
 | `MemoryRecallRequest` | `temporal_operation`, `query`, `limit`, `structured_query_facets`, `tool_registry_refs` | 返回运行时 Skill hits、标准 Agent Skill hits、working recall inspection 和经验型 `agent_tool_hints`；structured facets 是 typed query constraint，无治理经验时 `agent_tool_hints=[]`。 |
 | `MemoryProjectionRequest` | `binding`, `temporal_operation`, `user_query`, `system_max_len`, `recent_messages_limit`, `pressure`, `mode_input`, `structured_query_facets`, `tool_registry_refs` | `Preview` 只读投影；`Turn { turn_id }` 把 current execution projection 及其签名 selection receipt 绑定到之后交给 `finalize_turn` 的 exact turn。 |
-| `MemoryTurnFinalizeRequest` | `turn`, `learning`, `pressure`, `mode_input` | 原子提交 canonical turn 与 durable post-turn intent。`learning` 携带 optional signed selection receipt、typed execution feedback、tool-call count 和 authority；caller 不能直接写 procedural owner。 |
+| `MemoryTurnFinalizeRequest` | `turn`, `learning`, `pressure`, `mode_input` | 原子提交 canonical turn 与 durable post-turn intent。`learning: PostTurnLearningInputV2` 携带 optional signed selection receipt 和 typed feedback；声明权是独立的非 wire capability，caller 不能直接写 procedural owner。 |
 | `MemoryEvidenceDocumentReadRequest` | `memory_space_id`, `document_ids` | 通过 `MemoryRuntime::read_governed_evidence_documents(request)` 精确、有界地读取 governed evidence documents。runtime 会拒绝 memory-space 不一致、空/重复 document id 和超过当前 profile read budget 的请求；结果经过 privacy filter，并携带 typed owner identity、revision、canonical evidence binding、安全 source metadata 与有界 body/chunks。 |
 | `MemoryInspectionRequest` | `query`, `system_max_len`, `pressure`, `mode_input` | 返回 capability、lifecycle、operator inspection 数据、Agent Skill 目录扫描报告和 Agent Tool registry 报告。 |
 | `RuntimeSkillListRequest` | `owning_scope`, `query`, `include_disabled`, `include_retired`, `limit` | 只列出显式 Subject 或 SharedProgram scope manifest 中的 exact typed owners。 |
@@ -248,9 +272,10 @@ SDK / HTTP 的共同语义：
 | `/agent-tool-registries/{id}` | `DELETE` | 删除 registry snapshot；不会删除已沉淀的历史经验，但后续 projection 会因 registry 缺失或 fingerprint mismatch 拒绝旧经验。 |
 
 真实 turn 的 `/memory/project` 使用 `binding: {"kind":"turn","turn_id":"..."}`。
-宿主执行工具后，通过 `/memory/finalize-turn` 提交同一个 canonical turn id、投影返回的
-签名 `selection_receipt` 和 typed bounded feedback。`/memory/write` 不接受工具反馈或
-procedural owner 创建。执行摘要不得包含完整原始结果、secret 或完整 schema。
+宿主执行工具后，提交同一个 canonical turn id 和投影返回的签名 `selection_receipt`。
+通过 `/memory/finalize-turn` 提交反馈还要求受信入口提供匹配的非 wire producer capability；
+通用路由不会自行授予。`/memory/write` 不接受工具反馈或 procedural owner 创建。
+Typed 执行事实没有自由文本 summary/result 插槽；方法证据单独接受来源与隐私准入。
 
 ## Console API
 

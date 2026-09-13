@@ -1,4 +1,11 @@
 mod support;
+fn transaction_cause_stage(error: &bm_core::Error) -> &'static str {
+    std::error::Error::source(error)
+        .and_then(|source| source.downcast_ref::<bm_core::Error>())
+        .expect("transaction failure must preserve its typed owner cause")
+        .stage()
+}
+
 use bm_core::budget::StoreRuntimeBudget;
 use bm_core::feature_gate::ProfileId;
 use bm_core::memory::{
@@ -1106,11 +1113,9 @@ fn ordinary_store_batch_cannot_forge_confirmation_and_is_zero_mutation() {
         "memory_write_transaction_commit_failed",
         "{error}"
     );
-    assert!(
-        error
-            .to_string()
-            .contains("memory_write_transaction_confirmation_evidence_invalid"),
-        "{error}"
+    assert_eq!(
+        transaction_cause_stage(&error),
+        "memory_write_transaction_confirmation_evidence_invalid"
     );
     assert_eq!(
         platform.export_store_snapshot().expect("snapshot after"),
@@ -1630,9 +1635,10 @@ fn typed_graph_transaction_rejects_a_same_scope_noop_document_delete_atomically(
         .expect_err("same-scope no-op delete is not part of the exact graph effects");
 
     assert_eq!(error.stage(), "memory_write_transaction_commit_failed");
-    assert!(error
-        .to_string()
-        .contains("memory_write_transaction_graph_post_image_invalid"));
+    assert_eq!(
+        transaction_cause_stage(&error),
+        "memory_write_transaction_graph_post_image_invalid"
+    );
     assert_eq!(platform.export_store_snapshot().unwrap(), before);
 }
 
@@ -1703,9 +1709,10 @@ fn typed_graph_transaction_rejects_deleting_a_preexisting_orphan_as_an_extra_eff
         .expect_err("orphan delete is not part of the manifest exact effects");
 
     assert_eq!(error.stage(), "memory_write_transaction_commit_failed");
-    assert!(error
-        .to_string()
-        .contains("memory_write_transaction_graph_post_image_invalid"));
+    assert_eq!(
+        transaction_cause_stage(&error),
+        "memory_write_transaction_graph_post_image_invalid"
+    );
     assert_eq!(raw_graph_docs(&platform), before);
 }
 
@@ -1810,9 +1817,10 @@ fn typed_graph_delete_rejects_a_noncanonical_before_dependency_closure() {
         .expect_err("noncanonical before dependency closure must fail closed");
 
     assert_eq!(error.stage(), "memory_write_transaction_commit_failed");
-    assert!(error
-        .to_string()
-        .contains("memory_write_transaction_graph_post_image_invalid"));
+    assert_eq!(
+        transaction_cause_stage(&error),
+        "memory_write_transaction_graph_post_image_invalid"
+    );
     assert_eq!(raw_graph_docs(&platform), before);
 }
 
@@ -1887,7 +1895,12 @@ fn raw_graph_batch_cannot_forge_integrity_repair_authority_with_operation_text()
         .expect_err("operation text cannot grant graph repair authority");
 
     assert_eq!(error.stage(), "memory_write_transaction_commit_failed");
-    assert!(error
+    assert_eq!(
+        transaction_cause_stage(&error),
+        "memory_write_transaction_graph_post_image_invalid"
+    );
+    assert!(std::error::Error::source(&error)
+        .unwrap()
         .to_string()
         .contains("memory_graph_before_image_invalid"));
     assert_eq!(raw_graph_docs(&platform), before);
@@ -2009,9 +2022,10 @@ fn assert_scoped_graph_orphan_rejected(config: StoreBackendConfig, backend: &str
         "memory_write_transaction_commit_failed",
         "backend={backend}"
     );
-    assert!(error
-        .to_string()
-        .contains("memory_write_transaction_graph_post_image_invalid"));
+    assert_eq!(
+        transaction_cause_stage(&error),
+        "memory_write_transaction_graph_post_image_invalid"
+    );
     assert_eq!(raw_graph_docs(&platform), before, "backend={backend}");
     assert!(
         before

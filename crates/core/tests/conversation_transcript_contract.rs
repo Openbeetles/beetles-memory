@@ -58,6 +58,7 @@ fn delivered_delta(turn_id: &str) -> CanonicalTurnDelta {
         ),
         tool_observations: vec![ToolObservationDigest {
             observation_id: "tool-1".to_string(),
+            call_id: "call-1".to_string(),
             tool_name: "host.lookup".to_string(),
             summary: "host returned opaque ref".to_string(),
             external_content: true,
@@ -1429,6 +1430,32 @@ fn transcript_canonical_intake_digest_is_required_and_survives_raw_deletion() {
 }
 
 #[test]
+fn pfi2_transcript_raw_deletion_is_a_permanent_lifecycle_terminal() {
+    use bm_core::memory::TranscriptLifecycleTransition as Transition;
+    let delta = delivered_delta("permanent-deletion");
+    let key = ConversationKey::from_delta("space-a", &delta).unwrap();
+    let mut record = TranscriptTurnRecord::from_delta(&key, 1, &delta, Vec::new(), 10).unwrap();
+    assert!(!record.input_messages[0].content.is_empty());
+    record.apply_lifecycle_transition(Transition::DeleteRaw, 11);
+    let deleted = record.clone();
+    for transition in [
+        Transition::Mask,
+        Transition::Archive,
+        Transition::Restore,
+        Transition::DeleteRaw,
+    ] {
+        let mut after = deleted.clone();
+        after.apply_lifecycle_transition(transition, 12);
+        assert_eq!(
+            after, deleted,
+            "a terminal raw deletion must not be downgraded by {transition:?}"
+        );
+        assert!(!after.is_searchable_for_presentation());
+        assert!(!after.permits_post_turn_learning());
+    }
+}
+
+#[test]
 fn distinct_turns_preserve_repeated_user_text_and_message_identity() {
     for same_reply in [false, true] {
         let session_store = TranscriptSessionStore::default();
@@ -1844,6 +1871,7 @@ fn canonical_turn_delta_is_idempotent_and_does_not_recommit_full_history() {
         )),
         tool_observations: vec![ToolObservationDigest {
             observation_id: "tool-1".to_string(),
+            call_id: "call-1".to_string(),
             tool_name: "web_fetch".to_string(),
             summary: "external page was consulted".to_string(),
             external_content: true,

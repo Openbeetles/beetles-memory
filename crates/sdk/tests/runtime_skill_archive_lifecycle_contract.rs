@@ -296,6 +296,14 @@ fn old_public_archive_cannot_reactivate_a_withdrawn_runtime_skill() {
             .build()
             .unwrap(),
     );
+    let capability = {
+        let governor = support::procedural::governor(&runtime, store.clone());
+        support::procedural::register_and_issue(
+            &governor,
+            support::procedural::runtime_observer_spec(&runtime, "archive-usage-producer"),
+            "archive-usage-producer-register",
+        )
+    };
     seed(&runtime);
     clock.0.fetch_add(2, Ordering::SeqCst);
     let positive = project(&runtime, "usage-source");
@@ -307,49 +315,52 @@ fn old_public_archive_cannot_reactivate_a_withdrawn_runtime_skill() {
     );
     let selected = selection.runtime_skills[0].clone();
     let finalized = runtime
-        .finalize_turn(MemoryTurnFinalizeRequest {
-            turn: CanonicalTurnDelta {
-                turn_id: "usage-source".into(),
-                conversation: ConversationScope {
-                    channel: "sdk.direct".into(),
-                    chat_id: "archive-chat".into(),
-                    conversation_id: Some("archive-chat".into()),
+        .finalize_turn_with_procedural_evidence(
+            &capability,
+            MemoryTurnFinalizeRequest {
+                turn: CanonicalTurnDelta {
+                    turn_id: "usage-source".into(),
+                    conversation: ConversationScope {
+                        channel: "sdk.direct".into(),
+                        chat_id: "archive-chat".into(),
+                        conversation_id: Some("archive-chat".into()),
+                    },
+                    subject: runtime.subject_id().into(),
+                    delivery_status: MemoryTurnDeliveryStatus::Delivered,
+                    source: MemoryTurnSource {
+                        ingress: IngressKind::User,
+                        channel: "sdk.direct".into(),
+                        provider: None,
+                        protocol: MemoryTurnProtocol::Native,
+                        endpoint: None,
+                        model_alias: None,
+                        model_resolved: None,
+                        request_id: None,
+                        client_conversation_hint: None,
+                    },
+                    actor: None,
+                    input_messages: vec![TranscriptInputMessage::user("unpack archive")],
+                    assistant_message: Some(TranscriptInputMessage::assistant(
+                        "archive unpack completed",
+                    )),
+                    tool_observations: Vec::new(),
+                    external_content_used: false,
+                    candidate_ids: Vec::new(),
                 },
-                subject: runtime.subject_id().into(),
-                delivery_status: MemoryTurnDeliveryStatus::Delivered,
-                source: MemoryTurnSource {
-                    ingress: IngressKind::User,
-                    channel: "sdk.direct".into(),
-                    provider: None,
-                    protocol: MemoryTurnProtocol::Native,
-                    endpoint: None,
-                    model_alias: None,
-                    model_resolved: None,
-                    request_id: None,
-                    client_conversation_hint: None,
+                learning: PostTurnLearningInputV2 {
+                    selection_receipt: Some(selection),
+                    runtime_skill_feedback: vec![RuntimeSkillUsageFeedbackV1 {
+                        locator: selected.locator,
+                        selected_content_digest: selected.content_digest,
+                        outcome: ProceduralExecutionOutcomeV1::Succeeded,
+                        observation_ref: "synthetic-actual-usage".into(),
+                    }],
+                    ..PostTurnLearningInputV2::empty()
                 },
-                actor: None,
-                input_messages: vec![TranscriptInputMessage::user("unpack archive")],
-                assistant_message: Some(TranscriptInputMessage::assistant(
-                    "archive unpack completed",
-                )),
-                tool_observations: Vec::new(),
-                external_content_used: false,
-                candidate_ids: Vec::new(),
+                pressure: PressureLevel::Normal,
+                mode_input: RuntimeLifecycleModeInput::default(),
             },
-            learning: PostTurnLearningInputV1 {
-                selection_receipt: Some(selection),
-                runtime_skill_feedback: vec![RuntimeSkillUsageFeedbackV1 {
-                    locator: selected.locator,
-                    selected_content_digest: selected.content_digest,
-                    outcome: ProceduralExecutionOutcomeV1::Succeeded,
-                    observation_ref: "synthetic-actual-usage".into(),
-                }],
-                ..PostTurnLearningInputV1::empty()
-            },
-            pressure: PressureLevel::Normal,
-            mode_input: RuntimeLifecycleModeInput::default(),
-        })
+        )
         .unwrap();
     let engine = MemoryLearningEngine::attach(runtime.clone()).unwrap();
     let outcome = engine
@@ -391,21 +402,77 @@ fn old_public_archive_cannot_reactivate_a_withdrawn_runtime_skill() {
             reason: "synthetic evidence withdrawal".into(),
         })
         .unwrap();
-    let retired = current(&runtime);
-    assert!(!retired.enabled);
+    let pending = runtime
+        .list_runtime_skills(RuntimeSkillListRequest {
+            owning_scope: RuntimeSkillOwningScope::Subject {
+                mounted_subject_id: runtime.subject_id().into(),
+            },
+            query: None,
+            include_disabled: true,
+            include_retired: true,
+            limit: 10,
+        })
+        .unwrap();
+    assert_eq!(
+        pending.read_availability,
+        ProceduralLearningReadAvailabilityV1::Reconciling
+    );
+    assert_eq!(pending.total, None);
+    assert!(
+        pending.skills.is_empty(),
+        "withdrawal immediately fences old body and usage"
+    );
     assert!(project(&runtime, "after-withdrawal")
         .report()
         .selection_receipt()
         .unwrap()
         .runtime_skills
         .is_empty());
-    runtime
+    let mut reconciled = false;
+    for _ in 0..64 {
+        let outcome = engine
+            .run_due_cycle(
+                MemoryLearningCycleRequest {
+                    lease_owner: "archive-worker".into(),
+                    lease_duration_secs: 60,
+                },
+                &mut NoProvider,
+            )
+            .unwrap();
+        let MemoryLearningCycleOutcome::ProceduralReconciliation(page) = outcome else {
+            panic!("official reconciliation must progress: {outcome:?}")
+        };
+        if page.completed {
+            reconciled = true;
+            break;
+        }
+    }
+    assert!(
+        reconciled,
+        "bounded official worker must publish reconciliation"
+    );
+    let retired = current(&runtime);
+    assert!(!retired.enabled);
+    assert_eq!(
+        retired.validated_success_count, 0,
+        "withdrawn usage is removed, not just hidden"
+    );
+    let before_restore = store.export_replay_snapshot().unwrap();
+    let error = runtime
         .import_memory_space(MemorySpaceImportRequest {
             scope,
             expected_private_material_policy: MemorySpacePrivateMaterialPolicy::IncludePrivate,
             archive,
         })
-        .unwrap();
+        .expect_err("old archive cannot reverse the source's RawDeleted privacy state");
+    let Error::Other { source, .. } = error else {
+        panic!("expected typed immutable transcript conflict: {error:?}")
+    };
+    assert_eq!(
+        source.downcast_ref::<MemorySpaceImportConflict>(),
+        Some(&MemorySpaceImportConflict::ExistingTranscriptDiffers)
+    );
+    assert_eq!(store.export_replay_snapshot().unwrap(), before_restore);
     let restored = current(&runtime);
     assert_eq!(
         restored.locator.owner_revision(),

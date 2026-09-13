@@ -22,24 +22,23 @@ use bm_core::task_execution::{
     TaskRunRecord, TaskRunStatus,
 };
 use bm_sdk::{
-    default_agent_subject_id, AgentToolDescriptor, AgentToolObservationDigest, AgentToolOutcome,
-    AgentToolRegistrySnapshot, AgentToolUsageFeedbackV2, CanonicalTurnDelta, ConversationScope,
-    EvidenceBacklink, IngressKind, LongTermMemoryDraft, LongTermMemoryKind,
-    LongTermMemoryProvenance, LongTermMemoryQuery, LongTermMemorySourceScope,
-    MemoryCandidateContent, MemoryCandidateSemanticDecision, MemoryCandidateSemanticJudgment,
-    MemoryCandidateTarget, MemoryClock, MemoryEvidenceAuthority, MemoryGovernancePolicyMutation,
-    MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration, MemoryGraphEdge,
-    MemoryGraphEdgeKind, MemoryGraphNode, MemoryGraphNodeKind, MemoryIdentity,
+    default_agent_subject_id, AgentToolDescriptor, AgentToolRegistrySnapshot,
+    AgentToolUsageFeedbackV3, CanonicalTurnDelta, ConversationScope, EvidenceBacklink, IngressKind,
+    LongTermMemoryDraft, LongTermMemoryKind, LongTermMemoryProvenance, LongTermMemoryQuery,
+    LongTermMemorySourceScope, MemoryCandidateContent, MemoryCandidateSemanticDecision,
+    MemoryCandidateSemanticJudgment, MemoryCandidateTarget, MemoryClock, MemoryEvidenceAuthority,
+    MemoryGovernancePolicyMutation, MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration,
+    MemoryGraphEdge, MemoryGraphEdgeKind, MemoryGraphNode, MemoryGraphNodeKind, MemoryIdentity,
     MemoryLongTermControlView, MemoryLongTermListRequest, MemoryLongTermMutation,
     MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryLongTermTarget,
     MemoryMaintenanceRequest, MemoryMutationExecution, MemoryPrivacyClass, MemoryProjectionRequest,
     MemoryRecallRequest, MemoryScope, MemorySemanticJudgmentSource, MemoryStoreHandle,
     MemorySubjectVisibilityPolicy, MemoryTranscriptLifecycleRequest, MemoryTurnDeliveryStatus,
     MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteCandidate,
-    MemoryWriteRequest, ParsedLongTermMemoryExtraction, PostTurnLearningInputV1, PressureLevel,
-    ProceduralExecutionOutcomeV1, RuntimeLifecycleModeInput, RuntimeSkillWrite, StoreBackendConfig,
-    StoreRuntimeBudget, SubjectDescriptor, SubjectRegistry, TemporalMemoryGraphNodeOwnerRef,
-    TemporalMemoryGraphWriteRequest, TemporalValidity, ToolObservationDigest,
+    MemoryWriteRequest, ParsedLongTermMemoryExtraction, PostTurnLearningInputV2, PressureLevel,
+    RuntimeLifecycleModeInput, RuntimeSkillWrite, StoreBackendConfig, StoreRuntimeBudget,
+    SubjectDescriptor, SubjectRegistry, TemporalMemoryGraphNodeOwnerRef,
+    TemporalMemoryGraphWriteRequest, TemporalValidity, ToolExecutionFactV1, ToolExecutionOutcome,
     TranscriptInputMessage, TranscriptLifecycleTransition,
 };
 
@@ -521,56 +520,40 @@ fn graph_edge(id: &str, from: &str, to: &str, evidence_ref: &str) -> MemoryGraph
     }
 }
 
-fn observation(observation_id: &str) -> AgentToolObservationDigest {
-    AgentToolObservationDigest {
+fn observation(observation_id: &str) -> ToolExecutionFactV1 {
+    ToolExecutionFactV1 {
         observation_id: observation_id.to_string(),
-        registry_id: "host-tools".to_string(),
-        tool_id: "pdf.extract".to_string(),
-        schema_fingerprint: "schema-pdf-v1".to_string(),
-        call_id: Some(format!("call-{observation_id}")),
-        task_signature: "extract_pdf_text_for_release_notes".to_string(),
-        summary: "PDF extraction produced usable release note text.".to_string(),
-        outcome: AgentToolOutcome::Succeeded,
-        error_code: None,
-        external_content: true,
-        private_content_used: false,
-        permission_tags: vec!["filesystem.read".to_string()],
-        risk_tags: vec!["external_content".to_string()],
+        call_id: format!("call-{observation_id}"),
+        outcome: ToolExecutionOutcome::Succeeded,
+        source_sensitivity: bm_sdk::ProceduralSourceSensitivity::NonPrivate,
         started_at: Some(1_800_000_010),
         completed_at: Some(1_800_000_011),
     }
 }
 
-fn feedback(registry: &AgentToolRegistrySnapshot) -> AgentToolUsageFeedbackV2 {
-    AgentToolUsageFeedbackV2 {
+fn feedback(registry: &AgentToolRegistrySnapshot) -> AgentToolUsageFeedbackV3 {
+    AgentToolUsageFeedbackV3 {
         registry_ref: registry.registry_ref(),
         tool_id: "pdf.extract".to_string(),
         schema_fingerprint: "schema-pdf-v1".to_string(),
-        observations: vec![observation("obs-1"), observation("obs-2")],
-        user_visible_result_summary: Some(
-            "PDF extraction helped produce release notes from a local artifact.".to_string(),
-        ),
-        outcome: ProceduralExecutionOutcomeV1::Succeeded,
-        operator_note: None,
+        execution_facts: vec![observation("obs-1"), observation("obs-2")],
+        method_evidence: vec![bm_sdk::ToolMethodEvidenceV1 {
+            method_id: "release-pdf-method".into(), task_signature: "extract_pdf_text_for_release_notes".into(),
+            body: "1. Inspect the PDF document\n2. Extract the document text\n3. Verify the release notes against the text".into(),
+            execution_refs: vec!["obs-1".into(), "obs-2".into()],
+            source_sensitivity: bm_sdk::ProceduralSourceSensitivity::NonPrivate, external_content: false,
+        }],
     }
 }
 
 fn feedback_finalize_request(
     runtime: &bm_sdk::MemoryRuntime,
     turn_id: &str,
-    feedback: AgentToolUsageFeedbackV2,
+    feedback: AgentToolUsageFeedbackV3,
 ) -> MemoryTurnFinalizeRequest {
-    let tool_call_count = feedback.observations.len() as u32;
-    let tool_observations = feedback
-        .observations
-        .iter()
-        .map(|observation| ToolObservationDigest {
-            observation_id: observation.observation_id.clone(),
-            tool_name: observation.tool_id.clone(),
-            summary: observation.summary.clone(),
-            external_content: observation.external_content,
-        })
-        .collect();
+    let tool_call_count = feedback.execution_facts.len() as u32;
+    let tool_observations =
+        support::procedural::canonical_observations(&feedback.tool_id, &feedback.execution_facts);
     MemoryTurnFinalizeRequest {
         turn: CanonicalTurnDelta {
             turn_id: turn_id.to_string(),
@@ -599,14 +582,14 @@ fn feedback_finalize_request(
             external_content_used: true,
             candidate_ids: Vec::new(),
         },
-        learning: PostTurnLearningInputV1 {
+        learning: PostTurnLearningInputV2 {
             tool_call_count,
             selection_receipt: None,
             runtime_skill_feedback: Vec::new(),
             agent_skill_feedback: Vec::new(),
             task_learning_feedback: Vec::new(),
             agent_tool_feedback: vec![feedback],
-            authority: bm_sdk::ProceduralFeedbackAuthorityInputV1::HostRuntimeObservation,
+            human_confirmation_operation_id: None,
         },
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
@@ -1903,24 +1886,72 @@ fn transcript_mask_fails_closed_when_facet_source_ref_would_be_redacted() {
 
 #[test]
 fn finalize_feedback_event_budget_rejects_without_partial_turn_or_job() {
+    use bm_sdk::nonproduction_replay_harness::{
+        MemoryStoreEvent, MemoryStoreEventKind, StoreEventLog, StoreEventScope,
+    };
     let registry = registry();
-    let (platform, runtime) = runtime_with_registry_and_event_budget(registry.clone(), 2);
+    let capacity = 32;
+    let (platform, runtime) = runtime_with_registry_event_budget_and_clock(
+        registry.clone(),
+        capacity,
+        support::fixed_clock(1_800_000_100),
+    );
+    let governor = support::procedural::governor(&runtime, platform.clone());
+    let capability = support::procedural::register_and_issue(
+        &governor,
+        support::procedural::runtime_observer_spec(&runtime, "transaction-executor"),
+        "register-transaction-executor",
+    );
+    let occupied = platform.replay_harness().read_events().unwrap().len();
+    assert!(
+        occupied < capacity - 2,
+        "producer setup must complete before the budget test"
+    );
+    for index in occupied..capacity - 2 {
+        platform
+            .replay_harness()
+            .append_event(MemoryStoreEvent::new(
+                format!("synthetic-budget-{index}"),
+                MemoryStoreEventKind::OperatorAction,
+                StoreEventScope::system("synthetic-budget-fill"),
+                1_800_000_100,
+            ))
+            .unwrap();
+    }
     let before_events = platform
         .replay_harness()
         .read_events()
         .expect("events before");
     let before = store_fingerprints(&platform);
 
-    let err = match runtime.finalize_turn(feedback_finalize_request(
-        &runtime,
-        "feedback-budget-reject",
-        feedback(&registry),
-    )) {
+    assert_eq!(before_events.len(), capacity - 2);
+    let err = match runtime.finalize_turn_with_procedural_evidence(
+        &capability,
+        feedback_finalize_request(&runtime, "feedback-budget-reject", feedback(&registry)),
+    ) {
         Ok(_) => panic!("event budget should reject turn and procedural job together"),
         Err(error) => error,
     };
 
-    assert_eq!(err.stage(), "memory_write_transaction_preflight_failed");
+    let bm_core::Error::Other { source, .. } = &err else {
+        panic!("procedural finalize must return its safe typed failure");
+    };
+    let typed = source
+        .downcast_ref::<bm_sdk::ProceduralLearningSdkError>()
+        .expect("public procedural error");
+    assert_eq!(
+        typed.operation,
+        bm_sdk::ProceduralLearningSdkOperation::FinalizeTurn
+    );
+    assert_eq!(
+        typed.key,
+        bm_sdk::ProceduralLearningErrorKeyV1::BudgetExceeded
+    );
+    assert_eq!(
+        typed.disposition,
+        bm_sdk::ProceduralLearningSdkErrorDisposition::CapacityRejected
+    );
+    assert!(std::error::Error::source(typed).is_none());
     assert_eq!(store_fingerprints(&platform), before);
     assert_eq!(
         platform.replay_harness().read_events().unwrap(),
@@ -1931,14 +1962,23 @@ fn finalize_feedback_event_budget_rejects_without_partial_turn_or_job() {
 #[test]
 fn finalize_feedback_success_commits_turn_and_durable_job() {
     let registry = registry();
-    let (platform, runtime) = runtime_with_registry_and_event_budget(registry.clone(), 128);
+    let (platform, runtime) = runtime_with_registry_event_budget_and_clock(
+        registry.clone(),
+        128,
+        support::fixed_clock(1_800_000_100),
+    );
+    let governor = support::procedural::governor(&runtime, platform.clone());
+    let capability = support::procedural::register_and_issue(
+        &governor,
+        support::procedural::runtime_observer_spec(&runtime, "transaction-executor"),
+        "register-transaction-executor",
+    );
 
     let report = runtime
-        .finalize_turn(feedback_finalize_request(
-            &runtime,
-            "feedback-success",
-            feedback(&registry),
-        ))
+        .finalize_turn_with_procedural_evidence(
+            &capability,
+            feedback_finalize_request(&runtime, "feedback-success", feedback(&registry)),
+        )
         .expect("finalize tool feedback");
 
     assert!(report.session_commit.committed);

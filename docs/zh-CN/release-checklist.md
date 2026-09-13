@@ -45,21 +45,12 @@ cargo doc --locked --no-deps --no-default-features \
 cargo test --locked -p bm-store-contract-tests
 # PL2 feature-gated 发布矩阵；workspace 默认得到的 0-test 结果不是证据。
 cargo test --locked -p bm-core --test post_turn_memory_governance_contract
-cargo test --locked -p bm-sdk --no-default-features \
-  --features nonproduction-replay-harness,sqlite-store \
-  --test procedural_selection_receipt_contract \
-  --test production_runtime_skill_promotion_contract \
-  --test procedural_projection_security_contract \
-  --test runtime_skill_archive_lifecycle_contract \
-  --test public_procedural_write_authority_contract \
-  --test public_transcript_actor_authority_contract \
-  --test public_candidate_decision_binding_contract \
-  --test public_memory_write_wire_contract \
-  --test conversation_transcript_runtime_contract
-cargo test --locked -p bm-sdk --test post_turn_deferred_governance_contract \
-  --no-default-features --features nonproduction-replay-harness,sqlite-store
+cargo test --locked -p bm-core --test post_turn_learning_contract \
+  --test agent_tool_experience_owner_contract
+cargo test --locked -p bm-sdk --lib --tests --no-default-features \
+  --features nonproduction-replay-harness,sqlite-store
 cargo test --locked -p bm-entry --no-default-features \
-  --features governance-model-client-std,nonproduction-replay-harness
+  --features governance-model-client-std,nonproduction-replay-harness,bm-sdk/sqlite-store
 cargo test --locked -p bm-entry --no-default-features \
   --test post_turn_learning_capability_contract
 cargo test --locked -p bm-store-contract-tests --no-default-features \
@@ -68,7 +59,7 @@ cargo clippy --locked -p bm-core --all-targets -- -D warnings
 cargo clippy --locked -p bm-sdk --all-targets --no-default-features \
   --features nonproduction-replay-harness,sqlite-store -- -D warnings
 cargo clippy --locked -p bm-entry --all-targets --no-default-features \
-  --features governance-model-client-std,nonproduction-replay-harness -- -D warnings
+  --features governance-model-client-std,nonproduction-replay-harness,bm-sdk/sqlite-store -- -D warnings
 bash scripts/check_platform_compile_gates.sh
 bash scripts/check_deployment_runtime_contract.sh
 bash scripts/check_next_gen_memory_plan.sh

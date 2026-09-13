@@ -67,7 +67,7 @@ fn finalize_request(user: &str, assistant: &str) -> MemoryTurnFinalizeRequest {
             external_content_used: false,
             candidate_ids: Vec::new(),
         },
-        learning: bm_sdk::PostTurnLearningInputV1::empty(),
+        learning: bm_sdk::PostTurnLearningInputV2::empty(),
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     }
@@ -80,6 +80,31 @@ fn indexed_transcript_turn(index: usize) -> CanonicalTurnDelta {
     );
     request.turn.turn_id = format!("history-turn-{index:03}");
     request.turn
+}
+
+fn commit_repeated_turn_with_readmission(
+    runtime: &bm_sdk::MemoryRuntime,
+    store: &bm_sdk::MemoryStoreHandle,
+    request: MemoryTranscriptCommitRequest,
+) {
+    let before = store.export_replay_snapshot().unwrap();
+    if let Err(error) = runtime.commit_transcript(request.clone()) {
+        let expired = std::iter::successors(
+            Some(&error as &(dyn std::error::Error + 'static)),
+            |source| source.source(),
+        )
+        .any(|source| {
+            source.downcast_ref::<bm_sdk::RuntimeBudgetReadmissionRequired>()
+                == Some(&bm_sdk::RuntimeBudgetReadmissionRequired::StaleOrExpired)
+        });
+        assert!(expired, "unexpected transcript commit rejection: {error}");
+        // A post-commit lifecycle error must never be mistaken for a zero-write rejection.
+        assert_eq!(store.export_replay_snapshot().unwrap(), before);
+        runtime.refresh_runtime_resource_snapshot().unwrap();
+        // Exactly one new public call replans the same intent under fresh real resources.
+        // No stale plan/admission, second retry, TTL override, or arbitrary-error fallback.
+        runtime.commit_transcript(request).unwrap();
+    }
 }
 
 fn repeated_turns_reopen_contract(mut open: impl FnMut() -> bm_sdk::MemoryStoreHandle) {
@@ -107,12 +132,14 @@ fn repeated_turns_reopen_contract(mut open: impl FnMut() -> bm_sdk::MemoryStoreH
                 runtime.finalize_turn(request.clone()).unwrap();
                 assert_eq!(platform.export_replay_snapshot().unwrap(), before);
             } else {
-                runtime
-                    .commit_transcript(MemoryTranscriptCommitRequest {
+                commit_repeated_turn_with_readmission(
+                    &runtime,
+                    &platform,
+                    MemoryTranscriptCommitRequest {
                         turn: request.turn.clone(),
                         host_refs: vec![],
-                    })
-                    .unwrap();
+                    },
+                );
             }
             let key =
                 ConversationKey::from_delta(runtime.memory_space_id(), &request.turn).unwrap();

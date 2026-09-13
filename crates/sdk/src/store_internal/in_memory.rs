@@ -346,6 +346,18 @@ impl StoreEngine for InMemoryStoreEngine {
     ) -> Result<crate::StoreScopedProjectionReplaceReport> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         admission.validate_inside_engine_fence(self.capacity, &self.admission_authority)?;
+        let actual = super::platform::scoped_projection_source::actual_projection(
+            request,
+            admission.operation_capacity(),
+            &state.json,
+            &state.events,
+        )?;
+        let source_closure = super::platform::scoped_projection_source::prepare(
+            request,
+            &actual,
+            admission.operation_capacity(),
+            |namespace, key| Ok(state.json.get(&(namespace.into(), key.into())).cloned()),
+        )?;
         let deleted_json = crate::store_internal::transaction::scoped_projection_json_addresses(
             &request.json_namespaces,
             &state.json,
@@ -359,13 +371,13 @@ impl StoreEngine for InMemoryStoreEngine {
                     .json
                     .get(&address)
                     .map(|value| {
-                        crate::store_internal::engine::json_document_is_protected_owner(
-                            &address.0, value,
+                        crate::store_internal::engine::json_document_is_preserved_by_scoped_projection(
+                            &address.0, value, request,
                         )
                     })
                     .transpose()
                     .map(|protected| {
-                        (!(request.preserve_protected_owner_state && protected.unwrap_or(false)))
+                        (!protected.unwrap_or(false))
                             .then_some(address)
                     })
                     .transpose()
@@ -385,12 +397,14 @@ impl StoreEngine for InMemoryStoreEngine {
             .len()
             .saturating_add(state.blobs.len())
             .saturating_sub(deleted_json.len())
-            .saturating_add(request.json_docs.len());
+            .saturating_add(request.json_docs.len())
+            .saturating_add(source_closure.added_entries());
         let next_events = state
             .events
             .len()
             .saturating_sub(deleted_events)
-            .saturating_add(request.events.len());
+            .saturating_add(request.events.len())
+            .saturating_add(source_closure.events.len());
         for doc in &request.json_docs {
             let address = (doc.namespace.clone(), doc.key.clone());
             if state.json.contains_key(&address) && !deleted_json.contains(&address) {
@@ -416,6 +430,7 @@ impl StoreEngine for InMemoryStoreEngine {
         if request
             .events
             .iter()
+            .chain(&source_closure.events)
             .any(|event| retained_event_ids.contains(event.event_id.as_str()))
         {
             return Err(Error::config(
@@ -437,12 +452,13 @@ impl StoreEngine for InMemoryStoreEngine {
         state.events.retain(|event| {
             !crate::store_internal::engine::event_is_replaced_by_scoped_projection(event, request)
         });
-        for doc in &request.json_docs {
+        for doc in request.json_docs.iter().chain(&source_closure.documents) {
             state
                 .json
                 .insert((doc.namespace.clone(), doc.key.clone()), doc.value.clone());
         }
         state.events.extend(request.events.iter().cloned());
+        state.events.extend(source_closure.events);
         state.event_ids = state
             .events
             .iter()

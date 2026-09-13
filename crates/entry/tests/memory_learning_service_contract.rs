@@ -230,7 +230,7 @@ fn finalize_request() -> MemoryTurnFinalizeRequest {
             external_content_used: false,
             candidate_ids: Vec::new(),
         },
-        learning: bm_sdk::PostTurnLearningInputV1::empty(),
+        learning: bm_sdk::PostTurnLearningInputV2::empty(),
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     }
@@ -284,6 +284,25 @@ fn embedded_service_attaches_existing_multi_subject_runtimes_with_one_store_auth
     let attachment_b = service
         .attach_runtime(Arc::clone(&runtime_b), control_authorities_b.clone())
         .expect("same Store and registry attachment");
+    let durable = attachment_a
+        .status(MemoryLearningAttachmentStatusRequest {
+            authority: attachment_a_authority.clone(),
+        })
+        .unwrap()
+        .procedural_reconciliation;
+    assert_eq!(
+        durable.read_availability,
+        bm_sdk::ProceduralLearningReadAvailabilityV1::Ready
+    );
+    assert!(durable.recovery.is_none());
+    assert!(
+        runtime_a
+            .procedural_reconciliation_status(bm_sdk::MemoryProceduralReconciliationStatusRequest {
+                authority: attachment_b_authority.clone(),
+            })
+            .is_err(),
+        "a foreign subject cannot inspect the durable recovery reference"
+    );
     assert_eq!(
         service
             .status(MemoryLearningServiceStatusRequest {
@@ -385,6 +404,303 @@ fn embedded_service_attaches_existing_multi_subject_runtimes_with_one_store_auth
     service
         .shutdown(Instant::now() + Duration::from_secs(2))
         .expect("bounded shutdown");
+}
+
+#[test]
+#[cfg(feature = "nonproduction-replay-harness")]
+fn reopened_service_discovers_durable_capacity_without_an_old_job_report() {
+    use bm_sdk::*;
+    struct NoExecution;
+    impl GovernanceExecutionPort for NoExecution {
+        fn execute(
+            &mut self,
+            _: &AuthorizedGovernanceEnvelope,
+            _: &ImmutableGovernanceExecutionBinding,
+            _: &GovernanceEgressAuthority,
+            _: &mut dyn GovernanceExecutionOperation,
+        ) -> std::result::Result<(), GovernanceExecutionPortFailure> {
+            panic!("synthetic recovery never calls a Provider")
+        }
+    }
+    let root = std::env::temp_dir().join(format!(
+        "bm-entry-capacity-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    for backend in ["file", "sqlite"] {
+        let profile = ProfileId::native_dev_full().unwrap();
+        let config = if backend == "file" {
+            StoreBackendConfig::file(root.join("file"), profile).unwrap()
+        } else {
+            StoreBackendConfig::sqlite(root.join("source.db"), profile).unwrap()
+        };
+        let tools = AgentToolRegistrySnapshot::compact(
+            "recovery-tools",
+            "host",
+            vec![AgentToolDescriptor::compact(
+                "validate",
+                "Validate",
+                "schema-one",
+            )],
+            1,
+        );
+        let store = MemoryStoreHandle::open(config.clone()).unwrap();
+        let runtime = runtime_for_subject(store.clone(), two_agent_registry(), "agent-a");
+        runtime.upsert_agent_tool_registry(tools.clone()).unwrap();
+        let governor = runtime_for_subject_and_actor(
+            store.clone(),
+            two_agent_registry(),
+            "agent-a",
+            &system_governor_subject_id("owner-shared"),
+        );
+        governor.upsert_agent_tool_registry(tools.clone()).unwrap();
+        let spec = ProceduralProducerSpecV1 {
+            binding_id: "method-author".into(),
+            scope: ProceduralProducerScopeV1 {
+                memory_space_id: runtime.memory_space_id().into(),
+                mounted_subject_id: runtime.subject_id().into(),
+                channel_id: runtime.scope().channel.clone(),
+                chat_id: runtime.scope().chat_id.clone(),
+            },
+            principal: ProceduralProducerPrincipalV1::LocalCapability {
+                capability_id: "synthetic-methods".into(),
+            },
+            source_authority: ProceduralProducerSourceAuthorityV1::RuntimeObservation,
+            claims: ProceduralProducerClaimsV1 {
+                execution_facts: false,
+                method_declarations: true,
+                usage_feedback: false,
+                source_classifications: vec![ProceduralSourceSensitivity::NonPrivate],
+            },
+            tools: vec![ProceduralProducerToolV1 {
+                registry_ref: tools.registry_ref(),
+                tool_id: "validate".into(),
+                schema_fingerprint: "schema-one".into(),
+            }],
+            source_config_ref: "synthetic-host".into(),
+        };
+        let registered = governor
+            .control_procedural_producer(MemoryProceduralProducerControlRequest {
+                operation_id: "register-capacity-methods".into(),
+                spec: spec.clone(),
+                expected_revision: None,
+                state: ProceduralProducerStateV1::Active,
+            })
+            .unwrap();
+        let capability = governor
+            .procedural_submission_capability(&registered.binding.revision_ref().unwrap())
+            .unwrap();
+        let engine = MemoryLearningEngine::attach(runtime.clone()).unwrap();
+        let mut filled = false;
+        for ordinal in 0..runtime
+            .runtime_budget()
+            .governed_state_budget
+            .max_agent_tool_experience_owners_per_subject
+        {
+            runtime.refresh_runtime_resource_snapshot().unwrap();
+            let mut input = finalize_request();
+            input.turn.turn_id = format!("capacity-{ordinal}");
+            input.turn.subject = runtime.subject_id().into();
+            input.learning = PostTurnLearningInputV2 {
+                agent_tool_feedback: vec![AgentToolUsageFeedbackV3 {
+                    registry_ref: tools.registry_ref(),
+                    tool_id: "validate".into(),
+                    schema_fingerprint: "schema-one".into(),
+                    execution_facts: vec![],
+                    method_evidence: vec![ToolMethodEvidenceV1 {
+                        method_id: format!("method-{ordinal}"),
+                        task_signature: format!("validate-{ordinal}"),
+                        body: "1. Inspect synthetic input.\n2. Verify synthetic output.".into(),
+                        execution_refs: vec![],
+                        source_sensitivity: ProceduralSourceSensitivity::NonPrivate,
+                        external_content: false,
+                    }],
+                }],
+                ..PostTurnLearningInputV2::empty()
+            };
+            let submitted = runtime
+                .finalize_turn_with_procedural_evidence(&capability, input)
+                .unwrap();
+            let mut completed = false;
+            for _ in 0..4 {
+                let outcome = engine
+                    .run_due_cycle(
+                        MemoryLearningCycleRequest {
+                            lease_owner: "seed-methods".into(),
+                            lease_duration_secs: 60,
+                        },
+                        &mut NoExecution,
+                    )
+                    .unwrap();
+                match outcome {
+                    MemoryLearningCycleOutcome::ProceduralCompleted(report) => {
+                        assert_eq!(
+                            Some(report.job.job_id),
+                            submitted.procedural_learning.job_id
+                        );
+                        completed = true;
+                        break;
+                    }
+                    MemoryLearningCycleOutcome::Blocked(report) => {
+                        assert_eq!(report.reason, "governance_execution_binding_unavailable")
+                    }
+                    other => panic!("real positive method: {other:?}"),
+                }
+            }
+            assert!(completed);
+            let snapshot = store.export_replay_snapshot().unwrap();
+            let mut capacity = runtime.runtime_budget().store_budget;
+            capacity.kv_max_entries = snapshot.json_docs.len() + snapshot.blobs.len();
+            if config
+                .clone()
+                .try_with_nonproduction_store_budget_limit(capacity)
+                .is_ok()
+            {
+                filled = true;
+                break;
+            }
+        }
+        assert!(
+            filled,
+            "real documents reach a valid constrained Store budget"
+        );
+        governor
+            .control_procedural_producer(MemoryProceduralProducerControlRequest {
+                operation_id: "withdraw-capacity-methods".into(),
+                spec,
+                expected_revision: Some(registered.binding.revision_ref().unwrap()),
+                state: ProceduralProducerStateV1::Revoked,
+            })
+            .unwrap();
+        let snapshot = store.export_replay_snapshot().unwrap();
+        let mut capacity = runtime.runtime_budget().store_budget;
+        capacity.kv_max_entries = snapshot.json_docs.len() + snapshot.blobs.len();
+        let limited_config = config
+            .clone()
+            .try_with_nonproduction_store_budget_limit(capacity)
+            .unwrap();
+        drop((
+            snapshot, capability, registered, engine, governor, runtime, store,
+        ));
+        let store = MemoryStoreHandle::open(limited_config).unwrap();
+        let runtime = runtime_for_subject(store.clone(), two_agent_registry(), "agent-a");
+        runtime.upsert_agent_tool_registry(tools.clone()).unwrap();
+        let engine = MemoryLearningEngine::attach(runtime.clone()).unwrap();
+        let mut blocked = false;
+        for _ in 0..32 {
+            match engine
+                .run_due_cycle(
+                    MemoryLearningCycleRequest {
+                        lease_owner: "fill-capacity".into(),
+                        lease_duration_secs: 60,
+                    },
+                    &mut NoExecution,
+                )
+                .unwrap()
+            {
+                MemoryLearningCycleOutcome::ProceduralBlocked(_) => {
+                    blocked = true;
+                    break;
+                }
+                MemoryLearningCycleOutcome::Blocked(_) => {}
+                other => panic!("expected actual capacity block: {other:?}"),
+            }
+        }
+        assert!(blocked);
+        drop((engine, runtime, store));
+        // No old job identity, revision or report survives this boundary.
+        let store = MemoryStoreHandle::open(config).unwrap();
+        let runtime = runtime_for_subject(store.clone(), two_agent_registry(), "agent-a");
+        runtime.upsert_agent_tool_registry(tools).unwrap();
+        let governor = runtime_for_subject_and_actor(
+            store.clone(),
+            two_agent_registry(),
+            "agent-a",
+            &system_governor_subject_id("owner-shared"),
+        );
+        let authority = runtime.learning_attachment_status_authority().unwrap();
+        let discovered = runtime
+            .procedural_reconciliation_status(MemoryProceduralReconciliationStatusRequest {
+                authority: authority.clone(),
+            })
+            .unwrap();
+        let recovery = discovered
+            .recovery
+            .clone()
+            .expect("public recovery discovery after reopen");
+        let before = store.export_replay_snapshot().unwrap();
+        assert!(runtime
+            .resume_procedural_reconciliation(MemoryProceduralReconciliationResumeRequest {
+                operation_id: "agent-cannot-resume".into(),
+                job_id: recovery.job_id.clone(),
+                expected_state_revision: recovery.expected_state_revision,
+            })
+            .is_err());
+        assert_eq!(store.export_replay_snapshot().unwrap(), before);
+        let (service, attachment) = MemoryLearningService::builder(runtime.clone())
+            .control_authorities(governor.learning_service_control_authorities().unwrap())
+            .binding_source(Arc::new(NoBindingSource))
+            .credential_resolver(Arc::new(UnusedCredentialResolver))
+            .start()
+            .unwrap();
+        for _ in 0..3 {
+            attachment.wake().unwrap();
+            let status = attachment
+                .status(MemoryLearningAttachmentStatusRequest {
+                    authority: authority.clone(),
+                })
+                .unwrap();
+            assert_eq!(status.state, "blocked_capacity");
+            assert_eq!(status.procedural_reconciliation, discovered);
+        }
+        governor
+            .resume_procedural_reconciliation(MemoryProceduralReconciliationResumeRequest {
+                operation_id: "host-explicit-capacity-resume".into(),
+                job_id: recovery.job_id.clone(),
+                expected_state_revision: recovery.expected_state_revision,
+            })
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            attachment.wake().unwrap();
+            let status = attachment
+                .status(MemoryLearningAttachmentStatusRequest {
+                    authority: authority.clone(),
+                })
+                .unwrap();
+            assert_ne!(
+                status.state, "blocked_capacity",
+                "durable resume overrides old progress immediately"
+            );
+            assert!(status.procedural_reconciliation.recovery.is_none());
+            if status.procedural_reconciliation.read_availability
+                == ProceduralLearningReadAvailabilityV1::Ready
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "official worker must finish real recovery"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        service
+            .shutdown(Instant::now() + Duration::from_secs(2))
+            .unwrap();
+        let before = store.export_replay_snapshot().unwrap();
+        assert!(governor
+            .resume_procedural_reconciliation(MemoryProceduralReconciliationResumeRequest {
+                operation_id: "stale-capacity-resume".into(),
+                job_id: recovery.job_id,
+                expected_state_revision: recovery.expected_state_revision,
+            })
+            .is_err());
+        assert_eq!(store.export_replay_snapshot().unwrap(), before);
+    }
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[cfg(feature = "nonproduction-replay-harness")]

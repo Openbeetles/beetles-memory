@@ -45,7 +45,8 @@ fn console_skill_facade_edits_disables_and_retires_runtime_skills_only() {
         .console_skills(Some("release".to_string()))
         .expect("list");
     assert_eq!(listed.skills.len(), 1);
-    assert_eq!(listed.runtime_learned, 1);
+    assert!(listed.read_availability.is_ready());
+    assert_eq!(listed.runtime_learned, Some(1));
     let locator = listed.skills[0].locator.clone();
 
     let stale_locator = bm_sdk::RuntimeSkillOwnerLocator::try_new(

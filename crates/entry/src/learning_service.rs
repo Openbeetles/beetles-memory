@@ -337,6 +337,17 @@ pub struct MemoryLearningAttachmentReport {
     pub state: String,
     pub last_job_id: Option<String>,
     pub reason: String,
+    pub procedural_reconciliation: bm_sdk::MemoryProceduralReconciliationStatusReport,
+}
+
+/// Volatile worker progress, not the persisted subject's availability truth.
+#[derive(Clone)]
+struct AttachmentProgress {
+    mounted_subject_id: String,
+    state: String,
+    last_job_id: Option<String>,
+    reason: String,
+    reconciliation: bool,
 }
 
 pub struct MemoryLearningServiceStatusRequest {
@@ -352,7 +363,7 @@ struct AttachedRuntime {
     engine: MemoryLearningEngine,
     identity: MemoryLearningAttachmentIdentity,
     control_authorities: bm_sdk::MemoryLearningServiceControlAuthorities,
-    report: Arc<Mutex<MemoryLearningAttachmentReport>>,
+    report: Arc<Mutex<AttachmentProgress>>,
     active: Arc<AtomicBool>,
 }
 
@@ -467,11 +478,12 @@ impl MemoryLearningServiceBuilder {
         let identity = engine.attachment_identity()?;
         validate_control_authorities(&identity, &control_authorities)?;
         let binding_ready = install_current_binding(&self.first_runtime, binding_source.as_ref())?;
-        let attachment_report = Arc::new(Mutex::new(MemoryLearningAttachmentReport {
+        let attachment_report = Arc::new(Mutex::new(AttachmentProgress {
             mounted_subject_id: identity.mounted_subject_id().to_string(),
             state: "idle".to_string(),
             last_job_id: None,
             reason: "service_started".to_string(),
+            reconciliation: false,
         }));
         let attachment_active = Arc::new(AtomicBool::new(true));
         let wake = Arc::new(WakeState::new());
@@ -604,11 +616,12 @@ impl MemoryLearningService {
             ));
         }
         let _ = install_current_binding(&runtime, self.inner.binding_source.as_ref())?;
-        let report = Arc::new(Mutex::new(MemoryLearningAttachmentReport {
+        let report = Arc::new(Mutex::new(AttachmentProgress {
             mounted_subject_id: identity.mounted_subject_id().to_string(),
             state: "idle".to_string(),
             last_job_id: None,
             reason: "runtime_attached".to_string(),
+            reconciliation: false,
         }));
         let active = Arc::new(AtomicBool::new(true));
         runtime.register_learning_wake_sink(
@@ -910,7 +923,7 @@ impl Drop for MemoryLearningService {
 
 pub struct MemoryLearningAttachment {
     inner: Weak<ServiceInner>,
-    report: Arc<Mutex<MemoryLearningAttachmentReport>>,
+    report: Arc<Mutex<AttachmentProgress>>,
     identity: MemoryLearningAttachmentIdentity,
     active: Arc<AtomicBool>,
 }
@@ -940,11 +953,65 @@ impl MemoryLearningAttachment {
                 "mounted Runtime inspection authority differs from the attachment",
             ));
         }
-        Ok(self
+        let unavailable = || {
+            bm_sdk::Error::conflict(
+                "memory_learning_attachment_status",
+                "attachment is unavailable",
+            )
+        };
+        let inner = self.inner.upgrade().ok_or_else(unavailable)?;
+        if !self.active.load(Ordering::Acquire) || inner.stop.load(Ordering::Acquire) {
+            return Err(unavailable());
+        }
+        let runtime = {
+            let attachments = inner.attachments.lock().expect("learning attachments lock");
+            attachments
+                .iter()
+                .find(|attached| {
+                    attached.identity == self.identity
+                        && Arc::ptr_eq(&attached.report, &self.report)
+                })
+                .map(|attached| Arc::clone(attached.engine.runtime()))
+                .ok_or_else(unavailable)?
+        };
+        // No service/report lock crosses the SDK's immutable Store read.
+        let procedural_reconciliation = runtime.procedural_reconciliation_status(
+            bm_sdk::MemoryProceduralReconciliationStatusRequest {
+                authority: request.authority,
+            },
+        )?;
+        let progress = self
             .report
             .lock()
             .expect("learning attachment report lock")
-            .clone())
+            .clone();
+        let mut report = MemoryLearningAttachmentReport {
+            mounted_subject_id: progress.mounted_subject_id,
+            state: progress.state,
+            last_job_id: progress.last_job_id,
+            reason: progress.reason,
+            procedural_reconciliation,
+        };
+        if report.procedural_reconciliation.read_availability
+            == bm_sdk::ProceduralLearningReadAvailabilityV1::Blocked
+        {
+            report.state = "blocked".into();
+            report.reason = "procedural_reconciliation_blocked".into();
+            if let Some(recovery) = &report.procedural_reconciliation.recovery {
+                report.state = "blocked_capacity".into();
+                report.reason = "procedural_reconciliation_capacity".into();
+                report.last_job_id = Some(recovery.job_id.clone());
+            }
+        } else if report.procedural_reconciliation.read_availability
+            == bm_sdk::ProceduralLearningReadAvailabilityV1::Reconciling
+        {
+            report.state = "reconciling".into();
+            report.reason = "procedural_reconciliation_pending".into();
+        } else if progress.reconciliation {
+            report.state = "idle".into();
+            report.reason = "procedural_reconciliation_ready".into();
+        }
+        Ok(report)
     }
 
     pub fn detach(&self) -> bm_sdk::Result<()> {
@@ -1050,6 +1117,18 @@ fn run_attachment_cycle(inner: &Arc<ServiceInner>, attachment: &AttachedRuntime)
         .report
         .lock()
         .expect("learning attachment report lock");
+    attachment_report.reconciliation = match &outcome {
+        Ok(MemoryLearningCycleOutcome::ProceduralReconciliation(_)) => true,
+        Ok(
+            MemoryLearningCycleOutcome::ProceduralBlocked(report)
+            | MemoryLearningCycleOutcome::ProceduralRetrying(report)
+            | MemoryLearningCycleOutcome::ProceduralFailed(report),
+        ) => matches!(
+            report.job.work,
+            bm_sdk::ProceduralLearningWorkV1::Reconcile { .. }
+        ),
+        _ => false,
+    };
     match outcome {
         Ok(MemoryLearningCycleOutcome::Idle { reason }) => {
             attachment_report.state = "idle".to_string();
@@ -1108,6 +1187,24 @@ fn run_attachment_cycle(inner: &Arc<ServiceInner>, attachment: &AttachedRuntime)
             attachment_report.reason = "procedural_feedback_job_succeeded".to_string();
             true
         }
+        Ok(MemoryLearningCycleOutcome::ProceduralReconciliation(report)) => {
+            let reason = if report.completed {
+                service_report.completed_jobs = service_report.completed_jobs.saturating_add(1);
+                "procedural_reconciliation_succeeded"
+            } else {
+                "procedural_reconciliation_page_committed"
+            };
+            service_report.reason = reason.to_string();
+            attachment_report.state = if report.completed {
+                "idle"
+            } else {
+                "reconciling"
+            }
+            .to_string();
+            attachment_report.last_job_id = Some(report.job.job_id);
+            attachment_report.reason = reason.to_string();
+            true
+        }
         Ok(MemoryLearningCycleOutcome::ProceduralRetrying(report)) => {
             service_report.retrying_jobs = service_report.retrying_jobs.saturating_add(1);
             service_report.reason = report.reason.clone();
@@ -1115,6 +1212,18 @@ fn run_attachment_cycle(inner: &Arc<ServiceInner>, attachment: &AttachedRuntime)
             attachment_report.last_job_id = Some(report.job.job_id);
             attachment_report.reason = report.reason;
             true
+        }
+        Ok(MemoryLearningCycleOutcome::ProceduralBlocked(report)) => {
+            if attachment_report.state != "blocked_capacity"
+                || attachment_report.last_job_id.as_deref() != Some(&report.job.job_id)
+            {
+                service_report.blocked_jobs = service_report.blocked_jobs.saturating_add(1);
+            }
+            service_report.reason = report.reason.clone();
+            attachment_report.state = "blocked_capacity".to_string();
+            attachment_report.last_job_id = Some(report.job.job_id);
+            attachment_report.reason = report.reason;
+            false
         }
         Ok(MemoryLearningCycleOutcome::ProceduralFailed(report)) => {
             service_report.failed_jobs = service_report.failed_jobs.saturating_add(1);

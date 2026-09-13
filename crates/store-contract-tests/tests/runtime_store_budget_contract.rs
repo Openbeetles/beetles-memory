@@ -97,6 +97,7 @@ fn typed_restore_request() -> StoreScopedProjectionReplaceRequest {
         json_docs: vec![typed_restore_document(2)],
         events: vec![typed_restore_event("typed-restore:new", "replacement")],
         preserve_protected_owner_state: false,
+        source_closure: None,
     }
 }
 

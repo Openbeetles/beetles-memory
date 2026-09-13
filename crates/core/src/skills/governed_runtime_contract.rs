@@ -12,7 +12,7 @@ use crate::memory::{
 };
 
 pub const RUNTIME_SKILL_GOVERNED_CONTRACT_SCHEMA_VERSION: u32 = 1;
-pub const RUNTIME_SKILL_OWNER_RECORD_SCHEMA_VERSION: u32 = 1;
+pub const RUNTIME_SKILL_OWNER_RECORD_SCHEMA_VERSION: u32 = 2;
 pub const RUNTIME_SKILL_SCOPE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const RUNTIME_SKILL_OWNER_ID_DOMAIN: &str = "runtime_skill_owner_id_v1";
 const RUNTIME_SKILL_OWNER_KEY_DOMAIN: &str = "runtime_skill_physical_owner_key_v1";
@@ -519,10 +519,41 @@ pub struct RuntimeSkillUsageOutcomeSummary {
     pub mismatch_count: u32,
     pub last_outcome: Option<RuntimeSkillUsageOutcome>,
     pub last_outcome_at: Option<u64>,
+    pub contributions: Vec<crate::memory::ProceduralContributionRefV1>,
+    /// Exact applied provenance survives temporary withdrawal; never a grant
+    /// to include its contents or outcome in the current summary.
+    pub retained_contributions: Vec<crate::memory::ProceduralContributionRefV1>,
 }
 
 impl RuntimeSkillUsageOutcomeSummary {
     fn validate_between(&self, observed_at: u64, updated_at: u64) -> bool {
+        if self.contributions.len() != self.observation_count as usize
+            || !self
+                .contributions
+                .iter()
+                .all(|reference| reference.validate_contract())
+            || !self
+                .contributions
+                .windows(2)
+                .all(|pair| pair[0].contribution_id < pair[1].contribution_id)
+        {
+            return false;
+        }
+        if !self
+            .retained_contributions
+            .iter()
+            .all(|reference| reference.validate_contract())
+            || !self
+                .retained_contributions
+                .windows(2)
+                .all(|pair| pair[0].contribution_id < pair[1].contribution_id)
+            || self
+                .contributions
+                .iter()
+                .any(|reference| !self.retained_contributions.contains(reference))
+        {
+            return false;
+        }
         let Some(classified_count) = self.succeeded_count.checked_add(self.mismatch_count) else {
             return false;
         };
@@ -730,6 +761,59 @@ pub struct RuntimeSkillOwnerRecord {
 }
 
 impl RuntimeSkillOwnerRecord {
+    /// Validate the actual persisted transition, not just a self-consistent
+    /// post-image. Store invokes this again under its commit lock.
+    pub fn validate_successor(&self, next: &Self) -> crate::error::Result<()> {
+        let invalid = || {
+            crate::error::Error::invalid_input(
+                "runtime_skill_owner_transition",
+                "runtime skill successor violates immutable identity or lifecycle continuity",
+            )
+        };
+        if !self.validate_contract().accepted
+            || !next.validate_contract().accepted
+            || self.memory_space_id != next.memory_space_id
+            || self.owning_scope != next.owning_scope
+            || self.owner_ref != next.owner_ref
+            || self.physical_key != next.physical_key
+            || self.creation_ref != next.creation_ref
+            || self.intrinsic_contract != next.intrinsic_contract
+            || self.privacy_class != next.privacy_class
+            || self.lifecycle.observed_at != next.lifecycle.observed_at
+            || self.owner_revision.checked_add(1) != Some(next.owner_revision)
+            || self.lifecycle.updated_at >= next.lifecycle.updated_at
+            || next.lifecycle.lineage.predecessor.as_ref()
+                != Some(&RuntimeSkillOwnerBinding::from_record(self)?)
+            || self
+                .lifecycle
+                .usage_outcome
+                .retained_contributions
+                .iter()
+                .any(|reference| {
+                    !next
+                        .lifecycle
+                        .usage_outcome
+                        .retained_contributions
+                        .contains(reference)
+                })
+        {
+            return Err(invalid());
+        }
+        if matches!(
+            self.lifecycle.state,
+            RuntimeSkillLifecycleState::Retired | RuntimeSkillLifecycleState::Superseded
+        ) && (next.lifecycle.state != self.lifecycle.state
+            || next.lifecycle.availability != self.lifecycle.availability
+            || next.procedural_content != self.procedural_content
+            || next.lifecycle.lineage.successor != self.lifecycle.lineage.successor
+            || next.lifecycle.usage_outcome.retained_contributions
+                != self.lifecycle.usage_outcome.retained_contributions)
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn build(
         memory_space_id: &str,
@@ -836,59 +920,122 @@ impl RuntimeSkillOwnerRecord {
         )
     }
 
-    /// Reduce actual usage into the existing owner; feedback never edits skill content or policy.
-    pub fn apply_usage_feedback(
+    /// Rebuild usage from the exact authorized immutable contributions. This is
+    /// shared by intake and reconciliation; neither reauthors skill content.
+    pub fn apply_usage_contributions(
         &self,
-        outcomes: &[crate::memory::ProceduralExecutionOutcomeV1],
-        observed_at: u64,
+        contributions: &[crate::memory::RuntimeSkillUsageContributionV1],
+        max_contributions: usize,
+        updated_at: u64,
     ) -> crate::error::Result<Self> {
-        use crate::memory::ProceduralExecutionOutcomeV1 as Outcome;
-        if !self.validate_contract().accepted || observed_at < self.lifecycle.observed_at {
+        if !self.validate_contract().accepted
+            // Owner revisions advance a logical timestamp even when several
+            // transitions share one wall-clock second. Validate observations
+            // against the real clock, not that logical revision timestamp.
+            || updated_at < self.lifecycle.observed_at
+            || contributions.iter().any(|value| {
+                value.observed_at < self.lifecycle.observed_at || value.observed_at > updated_at
+            })
+        {
             return Err(crate::error::Error::invalid_input(
                 "runtime_skill_usage",
                 "invalid owner or observation timestamp",
             ));
         }
-        let actual = outcomes
+        let RuntimeSkillOwningScope::Subject { mounted_subject_id } = &self.owning_scope else {
+            return Err(crate::error::Error::invalid_input(
+                "runtime_skill_usage",
+                "usage contributions require an exact subject owner",
+            ));
+        };
+        let terminal = matches!(
+            self.lifecycle.state,
+            RuntimeSkillLifecycleState::Retired | RuntimeSkillLifecycleState::Superseded
+        );
+        if terminal
+            && contributions.iter().any(|contribution| {
+                !contribution.reference().is_ok_and(|reference| {
+                    self.lifecycle
+                        .usage_outcome
+                        .retained_contributions
+                        .contains(&reference)
+                })
+            })
+        {
+            return Err(crate::error::Error::invalid_input(
+                "runtime_skill_usage",
+                "terminal owners cannot acquire new usage sources",
+            ));
+        }
+        let mut usage = crate::memory::reduce_runtime_skill_usage_contributions(
+            &self.memory_space_id,
+            mounted_subject_id,
+            &self.owner_ref.owner_id,
+            contributions,
+            max_contributions,
+        )
+        .map_err(|_| {
+            crate::error::Error::invalid_input(
+                "runtime_skill_usage",
+                "usage contribution closure is invalid",
+            )
+        })?;
+        let mut retained = self
+            .lifecycle
+            .usage_outcome
+            .retained_contributions
             .iter()
-            .filter(|value| **value != Outcome::NotExecuted)
-            .collect::<Vec<_>>();
-        if actual.is_empty() {
+            .map(|reference| (reference.contribution_id.clone(), reference.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for reference in &usage.retained_contributions {
+            if retained
+                .insert(reference.contribution_id.clone(), reference.clone())
+                .is_some_and(|before| before != *reference)
+            {
+                return Err(crate::error::Error::invalid_input(
+                    "runtime_skill_usage",
+                    "retained contribution identity conflicts",
+                ));
+            }
+        }
+        if retained.len() > max_contributions {
+            return Err(crate::error::Error::invalid_input(
+                "runtime_skill_usage",
+                "retained contribution capacity exhausted",
+            ));
+        }
+        usage.retained_contributions = retained.into_values().collect();
+        if usage == self.lifecycle.usage_outcome {
             return Ok(self.clone());
         }
-        let mut next = self.advance(
-            self.procedural_content.clone(),
-            self.lifecycle.availability,
-            self.lifecycle.state,
-            observed_at,
-        )?;
-        let usage = &mut next.lifecycle.usage_outcome;
-        for outcome in actual {
-            let increment = |value: u32| {
-                value.checked_add(1).ok_or_else(|| {
+        let mut next = if terminal {
+            // Source withdrawal/restoration maintains retained statistics; it
+            // does not edit, enable, retire again, or replace the successor.
+            let mut next = self.clone();
+            next.owner_revision = self.owner_revision.checked_add(1).ok_or_else(|| {
+                crate::error::Error::invalid_input(
+                    "runtime_skill_usage",
+                    "owner revision exhausted",
+                )
+            })?;
+            next.lifecycle.updated_at =
+                updated_at.max(self.lifecycle.updated_at.checked_add(1).ok_or_else(|| {
                     crate::error::Error::invalid_input(
                         "runtime_skill_usage",
-                        "usage count exhausted",
+                        "owner timestamp exhausted",
                     )
-                })
-            };
-            usage.observation_count = increment(usage.observation_count)?;
-            usage.last_outcome = Some(match outcome {
-                Outcome::Succeeded => {
-                    usage.succeeded_count = increment(usage.succeeded_count)?;
-                    RuntimeSkillUsageOutcome::Succeeded
-                }
-                Outcome::Mismatch => {
-                    usage.mismatch_count = increment(usage.mismatch_count)?;
-                    RuntimeSkillUsageOutcome::Mismatch
-                }
-                Outcome::Failed | Outcome::Partial | Outcome::Cancelled => {
-                    RuntimeSkillUsageOutcome::Neutral
-                }
-                Outcome::NotExecuted => unreachable!("filtered above"),
-            });
-            usage.last_outcome_at = Some(next.lifecycle.updated_at);
-        }
+                })?);
+            next.lifecycle.lineage.predecessor = Some(RuntimeSkillOwnerBinding::from_record(self)?);
+            next
+        } else {
+            self.advance(
+                self.procedural_content.clone(),
+                self.lifecycle.availability,
+                self.lifecycle.state,
+                updated_at,
+            )?
+        };
+        next.lifecycle.usage_outcome = usage;
         next.content_digest = next.canonical_content_digest()?;
         if !next.validate_contract().accepted {
             return Err(crate::error::Error::invalid_input(

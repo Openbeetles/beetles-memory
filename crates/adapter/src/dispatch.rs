@@ -12,6 +12,8 @@ use crate::{
 pub struct AdapterRuntimeServices<'a> {
     pub http: Option<&'a mut dyn LlmHttpClient>,
     pub llm: Option<&'a (dyn LlmClient + Send + Sync)>,
+    /// Trusted invocation context; never reconstructed from the wire envelope.
+    pub procedural_submission: Option<&'a bm_sdk::MemoryProceduralSubmissionCapability>,
 }
 
 impl<'a> AdapterRuntimeServices<'a> {
@@ -19,6 +21,7 @@ impl<'a> AdapterRuntimeServices<'a> {
         Self {
             http: None,
             llm: None,
+            procedural_submission: None,
         }
     }
 }
@@ -122,7 +125,11 @@ fn dispatch_adapter_command_with_services_in_lease(
     let request_id = envelope.request_id;
     let audit_id = envelope.audit_id;
     let mutation_operation_id = envelope.mutation_operation_id;
-    let AdapterRuntimeServices { http, llm } = services;
+    let AdapterRuntimeServices {
+        http,
+        llm,
+        procedural_submission,
+    } = services;
     let mut committed_receipt = None;
     let report = match envelope.payload {
         AdapterCommand::Write(request) => {
@@ -170,7 +177,12 @@ fn dispatch_adapter_command_with_services_in_lease(
         }
         AdapterCommand::FinalizeTurn(request) => {
             let turn_id = request.turn.turn_id.clone();
-            let report = runtime.finalize_turn(*request)?;
+            let report = match procedural_submission.filter(|_| request.learning.has_feedback()) {
+                Some(capability) => {
+                    runtime.finalize_turn_with_procedural_evidence(capability, *request)?
+                }
+                None => runtime.finalize_turn(*request)?,
+            };
             AdapterSdkReport::FinalizeTurn(Box::new(AdapterTurnFinalizeReport::from_sdk(
                 turn_id, report,
             )))

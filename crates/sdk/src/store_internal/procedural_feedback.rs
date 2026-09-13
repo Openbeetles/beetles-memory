@@ -1,18 +1,24 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+pub(crate) mod source_dependents;
+
+pub(crate) const EVENT_PLANE: &str = "procedural_feedback";
+
 use bm_core::memory::{
     GovernedMemoryOwnerPlane, MemoryMutationAuditRecord, MemoryMutationEffect,
     MemoryMutationOperationIdentity, MemoryMutationOperationKind, MemoryMutationReceipt,
     PostTurnGovernanceJobRefV2, PostTurnGovernanceJobV3, PostTurnGovernanceScopeIndexV3,
-    ProceduralAppliedOwnerBindingV1, ProceduralFeedbackApplicationLedgerV1,
-    ProceduralFeedbackErrorClassV1, ProceduralFeedbackJobRefV1, ProceduralFeedbackJobStatusV1,
-    ProceduralFeedbackJobV1, ProceduralFeedbackReceiptV1, ProceduralFeedbackReconciliationCursorV1,
-    ProceduralFeedbackScopeIndexV1, MAX_PROCEDURAL_FEEDBACK_ACTIVE_JOBS,
-    MAX_PROCEDURAL_FEEDBACK_RECENT_TERMINAL_JOBS, PROCEDURAL_FEEDBACK_RECEIPT_SCHEMA_VERSION,
+    ProceduralAppliedOwnerBindingV1, ProceduralFeedbackApplicationLedgerV2,
+    ProceduralFeedbackErrorClassV1, ProceduralFeedbackJobRefV2, ProceduralFeedbackJobStatusV1,
+    ProceduralFeedbackJobV2, ProceduralFeedbackReceiptV2, ProceduralFeedbackReconciliationCursorV1,
+    ProceduralFeedbackScopeIndexV2, ProceduralSubjectInitializationV1, ProceduralSubjectScopeV1,
+    ProceduralSubjectValidityRootV1, MAX_PROCEDURAL_FEEDBACK_ACTIVE_JOBS,
+    MAX_PROCEDURAL_FEEDBACK_RECENT_TERMINAL_JOBS, MAX_PROCEDURAL_SUBJECT_SCOPES,
+    PROCEDURAL_FEEDBACK_RECEIPT_SCHEMA_VERSION,
 };
 use bm_core::skills::{
-    AgentToolExperienceOwnerHeadV2, AgentToolExperienceRetainedRevisionDigestV2,
-    AgentToolExperienceRevisionMaterialV2,
+    AgentToolExperienceOwnerHeadV3, AgentToolExperienceRetainedRevisionDigestV3,
+    AgentToolExperienceRevisionMaterialV3,
 };
 use bm_core::{Error, Result};
 use serde::Serialize;
@@ -29,7 +35,8 @@ use super::post_turn_governance::{
 use super::schema::{
     AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE, AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE,
     PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE, PROCEDURAL_FEEDBACK_JOB_NAMESPACE,
-    PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE,
+    PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE, PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE,
+    PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE,
 };
 use super::transaction::BackendTransactionState;
 use super::{StoreMutationOperationOutcome, StoreMutationOperationPlan, StorePlatform};
@@ -40,6 +47,1338 @@ use bm_core::memory::{
 
 const PROCEDURAL_RETRY_BASE_SECS: u64 = 5;
 const PROCEDURAL_RETRY_MAX_SECS: u64 = 300;
+
+mod reconciliation;
+pub(crate) mod runtime_skill_control;
+pub(crate) use reconciliation::{
+    commit_reconciliation_page, replay_reconciliation_page, resume_reconciliation_capacity,
+    ProceduralReconciliationAuthorization, ProceduralReconciliationCommit,
+    ProceduralReconciliationPageAction, ProceduralReconciliationPageInput,
+};
+
+/// Ephemeral proof carried only by the existing governed transaction. Neither
+/// variant is deserializable or a second durable permission registry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ProceduralMutationAuthorization {
+    ProducerControl(Box<ProceduralProducerControlAuthorization>),
+    Reconciliation(Box<reconciliation::ProceduralReconciliationAuthorization>),
+}
+
+impl ProceduralMutationAuthorization {
+    pub(super) fn runtime_preimages(&self) -> Result<Vec<((String, String), serde_json::Value)>> {
+        match self {
+            Self::Reconciliation(authority) => authority.runtime_preimages(),
+            Self::ProducerControl(_) => Ok(Vec::new()),
+        }
+    }
+
+    pub(super) fn owns_runtime_change(
+        &self,
+        change: &bm_core::memory::ProceduralRuntimeSkillTransitionV1,
+        current: &BTreeMap<(String, String), serde_json::Value>,
+    ) -> bool {
+        matches!(self, Self::Reconciliation(authority) if authority.owns_runtime_change(change, current))
+    }
+
+    pub(crate) fn permits_mutation(
+        &self,
+        mutation: &super::StoreEngineMutation,
+        current: &BTreeMap<(String, String), serde_json::Value>,
+    ) -> bool {
+        match self {
+            Self::ProducerControl(authority) => authority.permits_mutation(mutation, current),
+            Self::Reconciliation(authority) => authority.permits_mutation(mutation, current),
+        }
+    }
+}
+
+pub(crate) struct VerifiedProceduralProducer {
+    pub(crate) head: bm_core::memory::ProceduralProducerHeadV1,
+    pub(crate) historical: bm_core::memory::ProceduralProducerBindingV1,
+    pub(crate) current: bm_core::memory::ProceduralProducerBindingV1,
+}
+
+/// Bounded, known-key authority read. The resulting head must still be fenced
+/// at transaction admission; a successful read is not a grant to write later.
+pub(crate) fn read_verified_procedural_producer(
+    platform: &StorePlatform,
+    reference: &bm_core::memory::ProceduralProducerRevisionRefV1,
+) -> Result<VerifiedProceduralProducer> {
+    use super::schema::{
+        PROCEDURAL_PRODUCER_BINDING_NAMESPACE as MATERIAL,
+        PROCEDURAL_PRODUCER_HEAD_NAMESPACE as HEAD,
+    };
+    let stage = "procedural_producer_read";
+    if !reference.validate_contract() {
+        return Err(Error::invalid_input(stage, "invalid producer reference"));
+    }
+    let read = |namespace: &str, key: &str| -> Result<serde_json::Value> {
+        platform
+            .read_json_docs_by_keys(namespace, &[key.to_owned()])?
+            .pop()
+            .map(|doc| doc.value)
+            .ok_or_else(|| Error::config(stage, "required producer authority root is missing"))
+    };
+    let head: bm_core::memory::ProceduralProducerHeadV1 =
+        decode(read(HEAD, &reference.binding_key)?, stage)?;
+    if !head.validate_contract() || !head.retained_revisions.contains(reference) {
+        return Err(Error::config(
+            stage,
+            "producer reference is not retained by its current head",
+        ));
+    }
+    let materials = head
+        .retained_revisions
+        .iter()
+        .map(|revision| {
+            decode::<bm_core::memory::ProceduralProducerBindingV1>(
+                read(MATERIAL, &revision.material_key())?,
+                stage,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if !head.validates_materials(&materials) {
+        return Err(Error::config(stage, "producer history does not close"));
+    }
+    let root: ProceduralFeedbackScopeIndexV2 = decode(
+        read(
+            PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE,
+            &head.scope.scope_index_key()?,
+        )?,
+        stage,
+    )?;
+    if root.validate().is_err() || !root.producer_heads.contains(&head.current) {
+        return Err(Error::config(
+            stage,
+            "producer scope root does not bind its current head",
+        ));
+    }
+    let subject_key = ProceduralSubjectScopeV1 {
+        memory_space_id: head.scope.memory_space_id.clone(),
+        mounted_subject_id: head.scope.mounted_subject_id.clone(),
+    }
+    .root_key()?;
+    let subject_root: ProceduralSubjectValidityRootV1 = decode(
+        read(PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE, &subject_key)?,
+        stage,
+    )?;
+    subject_root.validate(MAX_PROCEDURAL_SUBJECT_SCOPES)?;
+    if subject_root.physical_key != subject_key
+        || !subject_root.producer_scopes.contains(&head.scope)
+    {
+        return Err(Error::config(
+            stage,
+            "producer subject root does not bind its exact scope",
+        ));
+    }
+    let initialization: ProceduralSubjectInitializationV1 = decode(
+        read(
+            PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE,
+            &ProceduralSubjectInitializationV1::key(&subject_root.scope)?,
+        )?,
+        stage,
+    )?;
+    if initialization.scope != subject_root.scope {
+        return Err(Error::config(stage, "subject initialization scope differs"));
+    }
+    let first: bm_core::memory::ProceduralProducerBindingV1 = decode(
+        read(MATERIAL, &initialization.first_producer.material_key())?,
+        stage,
+    )?;
+    initialization.validate_producer(&first)?;
+    if !subject_root.producer_scopes.contains(&first.spec.scope) {
+        return Err(Error::config(
+            stage,
+            "subject root lost its initialization scope",
+        ));
+    }
+    let first_receipt_key = first.operation_identity.storage_key();
+    validate_producer_operation_proof(
+        &first,
+        &decode(
+            read(
+                bm_core::memory::MEMORY_MUTATION_RECEIPT_NAMESPACE,
+                &first_receipt_key,
+            )?,
+            stage,
+        )?,
+        &decode(
+            read(
+                bm_core::memory::MEMORY_MUTATION_AUDIT_NAMESPACE,
+                &first_receipt_key,
+            )?,
+            stage,
+        )?,
+    )?;
+    for binding in &materials {
+        let key = binding.operation_identity.storage_key();
+        let receipt: MemoryMutationReceipt = decode(
+            read(bm_core::memory::MEMORY_MUTATION_RECEIPT_NAMESPACE, &key)?,
+            stage,
+        )?;
+        let audit: MemoryMutationAuditRecord = decode(
+            read(bm_core::memory::MEMORY_MUTATION_AUDIT_NAMESPACE, &key)?,
+            stage,
+        )?;
+        validate_producer_operation_proof(binding, &receipt, &audit)?;
+    }
+    let historical = materials
+        .iter()
+        .find(|binding| binding.revision == reference.revision)
+        .cloned()
+        .ok_or_else(|| Error::config(stage, "producer historical material is missing"))?;
+    let current = materials
+        .last()
+        .cloned()
+        .ok_or_else(|| Error::config(stage, "producer current material is missing"))?;
+    Ok(VerifiedProceduralProducer {
+        head,
+        historical,
+        current,
+    })
+}
+
+fn validate_producer_operation_proof(
+    binding: &bm_core::memory::ProceduralProducerBindingV1,
+    receipt: &MemoryMutationReceipt,
+    audit: &MemoryMutationAuditRecord,
+) -> Result<()> {
+    validate_learning_mutation_proof(receipt, audit, "procedural_producer_operation")?;
+    if receipt.identity != binding.operation_identity
+        || receipt.intent_digest != binding.control_intent_digest()?
+        || receipt.effect != MemoryMutationEffect::Changed
+        || receipt.committed_at_unix_secs != binding.updated_at
+    {
+        return Err(Error::config(
+            "procedural_producer_operation",
+            "producer revision and authoritative operation proof diverged",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_learning_mutation_proof(
+    receipt: &MemoryMutationReceipt,
+    audit: &MemoryMutationAuditRecord,
+    stage: &'static str,
+) -> Result<()> {
+    receipt.validate_contract()?;
+    audit.validate_contract()?;
+    if audit.identity != receipt.identity
+        || audit.intent_digest != receipt.intent_digest
+        || audit.effect_plan_digest != receipt.effect_plan_digest
+        || audit.effect != receipt.effect
+        || audit.transaction_id != receipt.transaction_id
+        || audit.changed_count != receipt.changed_count
+        || audit.audit_record_id != receipt.audit_record_id
+        || audit.actor_subject_id != receipt.identity.actor_subject_id()
+        || audit.committed_at_unix_secs != receipt.committed_at_unix_secs
+    {
+        return Err(Error::config(
+            stage,
+            "learning mutation receipt and authoritative audit diverged",
+        ));
+    }
+    Ok(())
+}
+
+fn reconciliation_block_reason(
+    job: &ProceduralFeedbackJobV2,
+) -> bm_core::memory::ProceduralReconciliationBlockV1 {
+    use bm_core::memory::ProceduralReconciliationBlockV1 as Block;
+    match job.last_error_class {
+        Some(ProceduralFeedbackErrorClassV1::BudgetExceeded) => Block::Capacity,
+        Some(
+            ProceduralFeedbackErrorClassV1::EvidenceUnavailable
+            | ProceduralFeedbackErrorClassV1::RegistryUnavailable,
+        ) => Block::SourceUnavailable,
+        _ => Block::RepairRequired,
+    }
+}
+
+/// One exact current root/job closure for Store admission and immutable status
+/// reads. Discovering a job never grants permission to resume it.
+pub(crate) fn validate_subject_reconciliation_job(
+    root: &bm_core::memory::ProceduralSubjectValidityRootV1,
+    job: &ProceduralFeedbackJobV2,
+) -> Result<()> {
+    use bm_core::memory::{ProceduralLearningWorkV1, ProceduralSubjectValidityStateV1 as State};
+    let stage = "procedural_reconciliation_status";
+    let invalid = || Error::config(stage, "subject validity and exact durable job differ");
+    job.validate()?;
+    let ProceduralLearningWorkV1::Reconcile { source } = &job.work else {
+        return Err(invalid());
+    };
+    let reference = source.reference()?;
+    if source.scope != root.scope
+        || job.discovery_root_key != root.physical_key
+        || reference.target_epoch != root.validity_epoch
+        || !root.retained_work.contains(&reference)
+    {
+        return Err(invalid());
+    }
+    let closes = match (&root.state, &job.receipt) {
+        (
+            State::Ready {
+                completion: Some(completion),
+            },
+            Some(bm_core::memory::ProceduralLearningReceiptV1::Reconcile { receipt }),
+        ) => {
+            job.status == ProceduralFeedbackJobStatusV1::Succeeded
+                && completion.work == reference
+                && completion.receipt_digest == receipt.canonical_digest()?
+        }
+        (State::Reconciling { work }, None) => work == &reference && job.status.is_active(),
+        (State::Blocked { work, reason }, None) => {
+            work == &reference
+                && matches!(
+                    job.status,
+                    ProceduralFeedbackJobStatusV1::RepairRequired
+                        | ProceduralFeedbackJobStatusV1::DeadLetter
+                        | ProceduralFeedbackJobStatusV1::BlockedCapacity
+                )
+                && *reason == reconciliation_block_reason(job)
+        }
+        _ => false,
+    };
+    if !closes {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_reconciliation_checkpoint_commitment(
+    job: &ProceduralFeedbackJobV2,
+    receipt: &MemoryMutationReceipt,
+) -> Result<()> {
+    let stage = "procedural_reconciliation_checkpoint_proof";
+    job.validate()?;
+    let (Some(checkpoint), Some(authority)) = (&job.checkpoint, &job.checkpoint_authority) else {
+        return Err(Error::config(
+            stage,
+            "persisted page has no exact authority",
+        ));
+    };
+    receipt.validate_contract()?;
+    if receipt.identity != authority.operation
+        || receipt.intent_digest != authority.intent_digest(checkpoint)?
+        || receipt.effect != MemoryMutationEffect::Changed
+        || receipt.committed_at_unix_secs != checkpoint.updated_at
+    {
+        return Err(Error::config(
+            stage,
+            "checkpoint differs from its immutable page commitment",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_reconciliation_checkpoint_in_state(
+    job: &ProceduralFeedbackJobV2,
+    state: &BackendTransactionState,
+) -> Result<()> {
+    let stage = "procedural_reconciliation_checkpoint_proof";
+    job.validate()?;
+    let Some(authority) = &job.checkpoint_authority else {
+        return Ok(());
+    };
+    let key = authority.operation.storage_key();
+    let receipt: MemoryMutationReceipt = state
+        .json
+        .get(&(
+            bm_core::memory::MEMORY_MUTATION_RECEIPT_NAMESPACE.into(),
+            key.clone(),
+        ))
+        .ok_or_else(|| Error::config(stage, "checkpoint mutation receipt is missing"))
+        .and_then(|value| decode(value.clone(), stage))?;
+    let audit: MemoryMutationAuditRecord = state
+        .json
+        .get(&(bm_core::memory::MEMORY_MUTATION_AUDIT_NAMESPACE.into(), key))
+        .ok_or_else(|| Error::config(stage, "checkpoint authoritative audit is missing"))
+        .and_then(|value| decode(value.clone(), stage))?;
+    validate_learning_mutation_proof(&receipt, &audit, stage)?;
+    validate_reconciliation_checkpoint_commitment(job, &receipt)
+}
+
+/// Validate retained completion, not only the root's most recent epoch. The
+/// immutable checkpoint describes its own commit; later live manifests may grow.
+pub(crate) fn validate_reconciliation_completion(
+    job: &ProceduralFeedbackJobV2,
+    mutation: &MemoryMutationReceipt,
+    audit: &MemoryMutationAuditRecord,
+) -> Result<()> {
+    use bm_core::memory::{ProceduralLearningReceiptV1, ProceduralLearningWorkV1};
+    let stage = "procedural_reconciliation_completion";
+    job.validate()?;
+    validate_learning_mutation_proof(mutation, audit, stage)?;
+    let (
+        ProceduralLearningWorkV1::Reconcile { source },
+        Some(ProceduralLearningReceiptV1::Reconcile { receipt }),
+        Some(checkpoint),
+    ) = (&job.work, &job.receipt, &job.checkpoint)
+    else {
+        return Err(Error::config(
+            stage,
+            "reconciliation completion lacks exact durable proof",
+        ));
+    };
+    let identity = MemoryMutationOperationIdentity::new(
+        &receipt.operation_id,
+        &source.scope.memory_space_id,
+        &source.scope.mounted_subject_id,
+        mutation.identity.actor_subject_id(),
+        MemoryMutationOperationKind::ProceduralLearning,
+    )?;
+    if job.status != ProceduralFeedbackJobStatusV1::Succeeded
+        || mutation.identity != identity
+        || mutation.identity.storage_key() != receipt.mutation_receipt_key
+        || mutation.intent_digest != receipt.plan_digest
+        || mutation.transaction_id != receipt.transaction_id
+        || mutation.effect != MemoryMutationEffect::Changed
+        || mutation.committed_at_unix_secs != receipt.completed_at
+        || job.terminal_at != Some(receipt.completed_at)
+        || checkpoint.content_digest != receipt.checkpoint_digest
+        || checkpoint.canonical_digest()? != receipt.checkpoint_digest
+        || receipt.work != source.reference()?
+        || receipt.post_image_digest
+            != digest_serialized(
+                "procedural_reconciliation_post_image_v1",
+                &(&checkpoint.content_digest, &checkpoint.current_manifests),
+                stage,
+            )?
+    {
+        return Err(Error::config(
+            stage,
+            "reconciliation checkpoint differs from its authoritative mutation",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_feedback_application_completion(
+    job: &ProceduralFeedbackJobV2,
+    ledger: &ProceduralFeedbackApplicationLedgerV2,
+    mutation: &MemoryMutationReceipt,
+    audit: &MemoryMutationAuditRecord,
+) -> Result<()> {
+    let stage = "procedural_feedback_application_completion";
+    job.validate()?;
+    ledger.validate()?;
+    validate_learning_mutation_proof(mutation, audit, stage)?;
+    let source = job.feedback_source()?;
+    let receipt = job
+        .receipt
+        .as_ref()
+        .ok_or_else(|| Error::config(stage, "feedback receipt is missing"))?
+        .feedback()?;
+    let identity = MemoryMutationOperationIdentity::new(
+        &receipt.operation_id,
+        &ledger.identity.memory_space_id,
+        &ledger.identity.mounted_subject_id,
+        mutation.identity.actor_subject_id(),
+        MemoryMutationOperationKind::ProceduralLearning,
+    )?;
+    if job.status != ProceduralFeedbackJobStatusV1::Succeeded
+        || ledger.job_id != job.job_id
+        || ledger.identity != source.identity
+        || ledger.learning_evidence_digest != source.learning_evidence_digest
+        || mutation.identity != identity
+        || mutation.identity.storage_key() != receipt.mutation_receipt_key
+        || mutation.intent_digest != receipt.plan_digest
+        || mutation.transaction_id != receipt.transaction_id
+        || mutation.committed_at_unix_secs != receipt.completed_at
+        || ledger.completed_at != receipt.completed_at
+        || usize::try_from(receipt.changed_count).ok() != Some(ledger.applied_owner_bindings.len())
+        || receipt.post_image_digest
+            != digest_serialized(
+                "procedural_feedback_post_image_digest_v1",
+                &(
+                    &ledger.application_digest,
+                    &receipt.plan_digest,
+                    ProceduralFeedbackJobStatusV1::Succeeded,
+                ),
+                stage,
+            )?
+    {
+        return Err(Error::config(
+            stage,
+            "feedback application differs from its authoritative mutation",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn read_authorized_procedural_evidence(
+    platform: &StorePlatform,
+    evidence: &bm_core::memory::PostTurnLearningEvidenceV2,
+    scope: &bm_core::memory::ProceduralProducerScopeV1,
+) -> Result<VerifiedProceduralProducer> {
+    let bm_core::memory::ProceduralFeedbackAuthorityV2::Producer {
+        producer_revision, ..
+    } = &evidence.authority
+    else {
+        return Err(Error::invalid_input(
+            "procedural_producer_authority",
+            "procedural application requires producer authority",
+        ));
+    };
+    let verified = read_verified_procedural_producer(platform, producer_revision)?;
+    verified
+        .historical
+        .authorize_evidence_with_current(&verified.current, scope, evidence)
+        .map_err(|_| {
+            Error::conflict(
+                "procedural_producer_authority",
+                "current producer authority does not permit this evidence",
+            )
+        })?;
+    Ok(verified)
+}
+
+/// Not a wire authority. Only this owner can construct the exact revision proof
+/// after preparing an operation-aware producer-control transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProceduralProducerControlAuthorization {
+    binding: bm_core::memory::ProceduralProducerBindingV1,
+    subject_root: ProceduralSubjectValidityRootV1,
+    initialization: Option<ProceduralSubjectInitializationV1>,
+}
+
+impl ProceduralProducerControlAuthorization {
+    pub(crate) fn permits_mutation(
+        &self,
+        mutation: &super::StoreEngineMutation,
+        current: &BTreeMap<(String, String), serde_json::Value>,
+    ) -> bool {
+        use super::schema::{
+            PROCEDURAL_PRODUCER_BINDING_NAMESPACE as MATERIAL,
+            PROCEDURAL_PRODUCER_HEAD_NAMESPACE as HEAD,
+        };
+        let super::StoreEngineMutation::PutJson {
+            namespace,
+            key,
+            value,
+        } = mutation
+        else {
+            return false;
+        };
+        let Ok(reference) = self.binding.revision_ref() else {
+            return false;
+        };
+        match namespace.as_str() {
+            MATERIAL => {
+                key == &reference.material_key()
+                    && !current.contains_key(&(namespace.clone(), key.clone()))
+                    && serde_json::from_value::<bm_core::memory::ProceduralProducerBindingV1>(
+                        value.clone(),
+                    )
+                    .is_ok_and(|binding| binding == self.binding)
+            }
+            HEAD => {
+                key == &reference.binding_key
+                    && serde_json::from_value::<bm_core::memory::ProceduralProducerHeadV1>(
+                        value.clone(),
+                    )
+                    .is_ok_and(|head| {
+                        head.validate_contract()
+                            && head.current == reference
+                            && head.scope == self.binding.spec.scope
+                    })
+            }
+            PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE => {
+                key == &self.subject_root.physical_key
+                    && serde_json::from_value::<ProceduralSubjectValidityRootV1>(value.clone())
+                        .is_ok_and(|root| root == self.subject_root)
+            }
+            PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE => {
+                !current.contains_key(&(namespace.clone(), key.clone()))
+                    && self.initialization.as_ref().is_some_and(|material| {
+                        key == &material.physical_key
+                            && serde_json::from_value::<ProceduralSubjectInitializationV1>(
+                                value.clone(),
+                            )
+                            .is_ok_and(|value| value == *material)
+                    })
+            }
+            _ => false,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn control_procedural_producer(
+    platform: &StorePlatform,
+    scope: StoreEventScope,
+    runtime_budget: &RuntimeBudgetReport,
+    operation_identity: MemoryMutationOperationIdentity,
+    spec: bm_core::memory::ProceduralProducerSpecV1,
+    state: bm_core::memory::ProceduralProducerStateV1,
+    expected: Option<bm_core::memory::ProceduralProducerRevisionRefV1>,
+    now: u64,
+    source_preconditions: &[StoreJsonPrecondition],
+) -> Result<(
+    bm_core::memory::ProceduralProducerBindingV1,
+    MemoryMutationReceipt,
+)> {
+    use super::schema::{
+        PROCEDURAL_PRODUCER_BINDING_NAMESPACE as MATERIAL,
+        PROCEDURAL_PRODUCER_HEAD_NAMESPACE as HEAD,
+    };
+    use bm_core::memory::{
+        ProceduralProducerBindingV1 as Binding, ProceduralProducerHeadV1 as Head,
+    };
+    let stage = "procedural_producer_control";
+    if scope.memory_space_id != spec.scope.memory_space_id
+        || scope.subject_id != spec.scope.mounted_subject_id
+        || scope.channel != spec.scope.channel_id
+        || scope.chat_id != spec.scope.chat_id
+    {
+        return Err(Error::invalid_input(
+            stage,
+            "producer control scope differs from the mounted scope",
+        ));
+    }
+    let intent = bm_core::memory::procedural_producer_control_intent_digest(
+        &spec,
+        state,
+        expected.as_ref(),
+    )?;
+    let binding_key = spec.binding_key()?;
+    let revision = expected
+        .as_ref()
+        .map_or(Some(1), |reference| reference.revision.checked_add(1))
+        .ok_or_else(|| Error::invalid_input(stage, "producer revision capacity is exhausted"))?;
+    let material_key = format!("{binding_key}:{revision}");
+    let read_committed =
+        |receipt: MemoryMutationReceipt| -> Result<(Binding, MemoryMutationReceipt)> {
+            let doc = platform
+                .read_json_docs_by_keys(MATERIAL, std::slice::from_ref(&material_key))?
+                .pop()
+                .ok_or_else(|| {
+                    Error::config(stage, "producer receipt is missing its exact material")
+                })?;
+            let binding: Binding = decode(doc.value, stage)?;
+            if binding.operation_identity != operation_identity
+                || binding.control_intent_digest()? != intent
+                || binding.updated_at != receipt.committed_at_unix_secs
+            {
+                return Err(Error::config(
+                    stage,
+                    "producer operation replay differs from its retained material",
+                ));
+            }
+            read_verified_procedural_producer(platform, &binding.revision_ref()?)?;
+            Ok((binding, receipt))
+        };
+    if let Some(receipt) = platform.preflight_memory_mutation_operation(
+        &super::StoreMutationOperationPreflight::new(operation_identity.clone(), intent.clone())?,
+    )? {
+        return read_committed(receipt);
+    }
+    let previous_head: Option<Head> = platform
+        .read_json_docs_by_keys(HEAD, std::slice::from_ref(&binding_key))?
+        .pop()
+        .map(|doc| decode(doc.value, stage))
+        .transpose()?;
+    if previous_head.as_ref().map(|head| &head.current) != expected.as_ref() {
+        return Err(Error::conflict(
+            stage,
+            "producer expected revision is not current",
+        ));
+    }
+    let previous: Option<Binding> = expected
+        .as_ref()
+        .map(|reference| {
+            platform
+                .read_json_docs_by_keys(MATERIAL, &[reference.material_key()])?
+                .pop()
+                .ok_or_else(|| {
+                    Error::config(stage, "producer head is missing its current material")
+                })
+                .and_then(|doc| decode(doc.value, stage))
+        })
+        .transpose()?;
+    let binding = Binding::build(
+        spec,
+        state,
+        operation_identity.clone(),
+        now,
+        previous.as_ref(),
+    )
+    .map_err(|reason| {
+        Error::invalid_input(stage, format!("producer transition rejected: {reason:?}"))
+    })?;
+    let head = Head::advance(&binding, previous_head.as_ref()).map_err(|reason| {
+        Error::invalid_input(stage, format!("producer head rejected: {reason:?}"))
+    })?;
+    let scope_key = binding.spec.scope.scope_index_key()?;
+    let previous_index = read_scope_index(platform, &scope_key)?;
+    if previous_head.is_some() && previous_index.is_none() {
+        return Err(Error::config(stage, "producer scope root is missing"));
+    }
+    let mut index = match previous_index.clone() {
+        Some(index) => index,
+        None => ProceduralFeedbackScopeIndexV2::empty(&binding.spec.scope, now)?,
+    };
+    index.bind_producer_head(&head, now)?;
+    let subject_scope = ProceduralSubjectScopeV1 {
+        memory_space_id: binding.spec.scope.memory_space_id.clone(),
+        mounted_subject_id: binding.spec.scope.mounted_subject_id.clone(),
+    };
+    let subject_key = subject_scope.root_key()?;
+    let previous_root: Option<ProceduralSubjectValidityRootV1> = platform
+        .read_json_docs_by_keys(
+            PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE,
+            std::slice::from_ref(&subject_key),
+        )?
+        .pop()
+        .map(|doc| decode(doc.value, stage))
+        .transpose()?;
+    let initialization_key = ProceduralSubjectInitializationV1::key(&subject_scope)?;
+    let previous_initialization: Option<ProceduralSubjectInitializationV1> = platform
+        .read_json_docs_by_keys(
+            PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE,
+            std::slice::from_ref(&initialization_key),
+        )?
+        .pop()
+        .map(|doc| decode(doc.value, stage))
+        .transpose()?;
+    if previous_root.is_some() != previous_initialization.is_some() {
+        return Err(Error::config(
+            stage,
+            "subject root and initialization proof must both exist or both be absent",
+        ));
+    }
+    if previous_index
+        .as_ref()
+        .is_some_and(|index| !index.producer_heads.is_empty())
+        && previous_root.is_none()
+    {
+        return Err(Error::config(
+            stage,
+            "producer subject validity root is missing",
+        ));
+    }
+    let mut subject_root = match &previous_root {
+        Some(root) => root.bind_scope(binding.spec.scope.clone(), MAX_PROCEDURAL_SUBJECT_SCOPES)?,
+        None => ProceduralSubjectValidityRootV1::initialize(
+            subject_scope,
+            binding.spec.scope.clone(),
+            MAX_PROCEDURAL_SUBJECT_SCOPES,
+        )?,
+    };
+    let initialization = if previous_initialization.is_none() {
+        Some(ProceduralSubjectInitializationV1::new(
+            subject_root.scope.clone(),
+            &binding,
+        )?)
+    } else {
+        None
+    };
+    let mut mutations = vec![
+        put_json(MATERIAL, &material_key, encode(&binding, stage)?),
+        put_json(HEAD, &binding_key, encode(&head, stage)?),
+        put_json(
+            PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE,
+            &scope_key,
+            encode(&index, stage)?,
+        ),
+    ];
+    let mut reconciliation_preconditions = Vec::new();
+    if let Some(previous) = &previous {
+        let (root, jobs, dependencies) = plan_subject_reconciliation(
+            platform,
+            &subject_root,
+            bm_core::memory::ProceduralReconciliationTriggerV1::ProducerControl {
+                operation: operation_identity.clone(),
+                before: previous.revision_ref()?,
+                after: binding.revision_ref()?,
+            },
+            now,
+        )?;
+        subject_root = root;
+        mutations.extend(jobs);
+        reconciliation_preconditions = dependencies;
+    }
+    mutations.push(put_json(
+        PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE,
+        &subject_key,
+        encode(&subject_root, stage)?,
+    ));
+    if let Some(material) = &initialization {
+        mutations.push(put_json(
+            PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE,
+            &initialization_key,
+            encode(material, stage)?,
+        ));
+    }
+    let mut preconditions = vec![StoreJsonPrecondition::Absent {
+        namespace: MATERIAL.into(),
+        key: material_key.clone(),
+    }];
+    preconditions.extend(reconciliation_preconditions);
+    preconditions.extend_from_slice(source_preconditions);
+    for (namespace, key, value) in [
+        (
+            HEAD,
+            &binding_key,
+            previous_head
+                .as_ref()
+                .map(|head| encode(head, stage))
+                .transpose()?,
+        ),
+        (
+            PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE,
+            &initialization_key,
+            previous_initialization
+                .as_ref()
+                .map(|material| encode(material, stage))
+                .transpose()?,
+        ),
+        (
+            PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE,
+            &subject_key,
+            previous_root
+                .as_ref()
+                .map(|root| encode(root, stage))
+                .transpose()?,
+        ),
+        (
+            PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE,
+            &scope_key,
+            previous_index
+                .as_ref()
+                .map(|index| encode(index, stage))
+                .transpose()?,
+        ),
+    ] {
+        preconditions.push(match value {
+            Some(value) => StoreJsonPrecondition::Exact {
+                namespace: namespace.into(),
+                key: key.clone(),
+                value,
+            },
+            None => StoreJsonPrecondition::Absent {
+                namespace: namespace.into(),
+                key: key.clone(),
+            },
+        });
+    }
+    let operation = StoreMutationOperationPlan::new(
+        operation_identity.clone(),
+        intent.clone(),
+        MemoryMutationEffect::Changed,
+        mutations.len(),
+        operation_identity.actor_subject_id(),
+        now,
+    )?
+    .authorize_procedural_producer(ProceduralProducerControlAuthorization {
+        binding: binding.clone(),
+        subject_root,
+        initialization,
+    });
+    let batch = StoreMutationBatch {
+        transaction_id: operation.transaction_id().to_owned(),
+        operation: "post_turn.producer.control".into(),
+        scope,
+        mutations,
+    };
+    match platform.commit_memory_mutation_operation_with_runtime_budget(
+        batch,
+        &preconditions,
+        operation,
+        runtime_budget,
+    )? {
+        StoreMutationOperationOutcome::Committed { receipt, .. } => Ok((binding, receipt)),
+        StoreMutationOperationOutcome::Replayed { receipt } => read_committed(receipt),
+    }
+}
+
+/// Plans the single lane's new causal work and supersedes its previous lease.
+/// The caller MUST include the returned root with its own source mutation and
+/// exact root CAS; this function performs no writes or asynchronous side effect.
+pub(super) fn plan_subject_reconciliation(
+    platform: &StorePlatform,
+    before: &ProceduralSubjectValidityRootV1,
+    trigger: bm_core::memory::ProceduralReconciliationTriggerV1,
+    now: u64,
+) -> Result<(
+    ProceduralSubjectValidityRootV1,
+    Vec<StoreMutation>,
+    Vec<StoreJsonPrecondition>,
+)> {
+    use bm_core::memory::{ProceduralLearningWorkV1, ProceduralReconciliationWorkV1};
+    let stage = "procedural_reconciliation_intent";
+    before.validate(MAX_PROCEDURAL_SUBJECT_SCOPES)?;
+    if before.retained_work.len() >= MAX_PROCEDURAL_FEEDBACK_RECENT_TERMINAL_JOBS {
+        return Err(super::store_budget_error(
+            "procedural reconciliation proof retention is exhausted",
+        ));
+    }
+    let work = ProceduralReconciliationWorkV1 {
+        scope: before.scope.clone(),
+        target_epoch: checked_increment(before.validity_epoch, stage, "validity epoch overflow")?,
+        trigger,
+    };
+    let job = ProceduralFeedbackJobV2::pending_work(
+        ProceduralLearningWorkV1::Reconcile {
+            source: work.clone(),
+        },
+        5,
+        now,
+    )?;
+    let after = before.begin(&work, MAX_PROCEDURAL_SUBJECT_SCOPES)?;
+    let mut mutations = vec![put_json(
+        PROCEDURAL_FEEDBACK_JOB_NAMESPACE,
+        &job.job_id,
+        encode(&job, stage)?,
+    )];
+    let mut preconditions = vec![StoreJsonPrecondition::Absent {
+        namespace: PROCEDURAL_FEEDBACK_JOB_NAMESPACE.into(),
+        key: job.job_id.clone(),
+    }];
+    if let Some(previous) = before.retained_work.last() {
+        let previous_job = read_job(platform, &previous.job_id)?
+            .ok_or_else(|| Error::config(stage, "previous reconciliation job is missing"))?;
+        if previous_job.work.identity()? != (previous.job_id.clone(), before.physical_key.clone()) {
+            return Err(Error::config(
+                stage,
+                "previous reconciliation job differs from its retained identity",
+            ));
+        }
+        preconditions.push(exact(
+            PROCEDURAL_FEEDBACK_JOB_NAMESPACE,
+            &previous.job_id,
+            &previous_job,
+            stage,
+        )?);
+        if !previous_job.status.is_terminal() {
+            let mut cancelled = previous_job.clone();
+            cancelled.status = ProceduralFeedbackJobStatusV1::Cancelled;
+            cancelled.state_revision =
+                checked_increment(cancelled.state_revision, stage, "job revision overflow")?;
+            cancelled.next_attempt_at = None;
+            cancelled.lease_owner = None;
+            cancelled.lease_until = None;
+            cancelled.last_error_class = None;
+            cancelled.updated_at = now;
+            cancelled.terminal_at = Some(now);
+            cancelled.validate()?;
+            mutations.push(put_json(
+                PROCEDURAL_FEEDBACK_JOB_NAMESPACE,
+                &cancelled.job_id,
+                encode(&cancelled, stage)?,
+            ));
+        }
+    }
+    Ok((after, mutations, preconditions))
+}
+
+/// One known-key dependency owner for mutation admission and scoped reads.
+pub(crate) struct ProceduralDependencyNode {
+    pub(crate) subject_scope: Option<ProceduralSubjectScopeV1>,
+    pub(crate) addresses: Vec<(String, String)>,
+}
+
+/// Pure typed edges shared by actual-source discovery and transaction planning.
+/// This routine performs no reads and cannot treat a proposed image as authority.
+pub(crate) fn procedural_dependency_node(
+    namespace: &str,
+    value: &serde_json::Value,
+    expand_source_dependents: bool,
+) -> Result<ProceduralDependencyNode> {
+    use super::schema::{
+        AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE, RUNTIME_SKILL_RECORD_NAMESPACE,
+    };
+    use bm_core::skills::{
+        agent_tool_experience_head_key, agent_tool_experience_scope_manifest_key,
+        AgentToolExperienceOwningScopeV1, AgentToolExperienceScopeManifestV1,
+    };
+    let stage = "procedural_transaction_dependency_read_set";
+    let mut addresses = producer_dependency_addresses(namespace, value)?;
+    addresses.extend(source_dependents::dependencies(
+        namespace,
+        value,
+        expand_source_dependents,
+    )?);
+    let mut subject_scope = None;
+    match namespace {
+        PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE => {
+            let root: ProceduralSubjectValidityRootV1 = decode(value.clone(), stage)?;
+            subject_scope = Some(root.scope);
+        }
+        PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE => {
+            let initialization: ProceduralSubjectInitializationV1 = decode(value.clone(), stage)?;
+            subject_scope = Some(initialization.scope);
+        }
+        super::schema::PROCEDURAL_PRODUCER_HEAD_NAMESPACE => {
+            let head: bm_core::memory::ProceduralProducerHeadV1 = decode(value.clone(), stage)?;
+            subject_scope = Some(ProceduralSubjectScopeV1 {
+                memory_space_id: head.scope.memory_space_id,
+                mounted_subject_id: head.scope.mounted_subject_id,
+            });
+        }
+        super::schema::PROCEDURAL_PRODUCER_BINDING_NAMESPACE => {
+            let producer: bm_core::memory::ProceduralProducerBindingV1 =
+                decode(value.clone(), stage)?;
+            subject_scope = Some(ProceduralSubjectScopeV1 {
+                memory_space_id: producer.spec.scope.memory_space_id,
+                mounted_subject_id: producer.spec.scope.mounted_subject_id,
+            });
+        }
+        RUNTIME_SKILL_RECORD_NAMESPACE => {
+            let owner: bm_core::skills::RuntimeSkillOwnerRecord = decode(value.clone(), stage)?;
+            if let bm_core::skills::RuntimeSkillOwningScope::Subject { mounted_subject_id } =
+                &owner.owning_scope
+            {
+                subject_scope = Some(ProceduralSubjectScopeV1 {
+                    memory_space_id: owner.memory_space_id.clone(),
+                    mounted_subject_id: mounted_subject_id.clone(),
+                });
+            }
+            if matches!(
+                owner.creation_ref,
+                bm_core::skills::RuntimeSkillCreationRef::AgentToolExperiencePromotion { .. }
+            ) {
+                for source in &owner.intrinsic_contract.evidence_bindings {
+                    if source.kind
+                        == bm_core::skills::RuntimeSkillEvidenceKind::ProceduralFeedbackSource
+                    {
+                        addresses.push((
+                            PROCEDURAL_FEEDBACK_JOB_NAMESPACE.into(),
+                            source.safe_ref.clone(),
+                        ));
+                        addresses.push((
+                            PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE.into(),
+                            source.safe_ref.clone(),
+                        ));
+                    }
+                }
+            }
+        }
+        "conversation_transcript" => {
+            let record: bm_core::memory::TranscriptTurnRecord = decode(value.clone(), stage)?;
+            subject_scope = Some(ProceduralSubjectScopeV1 {
+                memory_space_id: record.key.memory_space_id.clone(),
+                mounted_subject_id: record.subject.clone(),
+            });
+            if record
+                .learning_evidence
+                .as_ref()
+                .and_then(|evidence| evidence.selection_receipt.as_ref())
+                .is_some()
+            {
+                addresses.push((
+                    super::procedural_selection::NAMESPACE.into(),
+                    super::procedural_selection::authority_key(&record.key.memory_space_id),
+                ));
+            }
+            addresses.extend(super::procedural_selection::intake_dependencies(&record)?);
+        }
+        PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE => {
+            let index: ProceduralFeedbackScopeIndexV2 = decode(value.clone(), stage)?;
+            subject_scope = Some(ProceduralSubjectScopeV1 {
+                memory_space_id: index.memory_space_id.clone(),
+                mounted_subject_id: index.mounted_subject_id.clone(),
+            });
+            addresses.extend(
+                index
+                    .active_jobs
+                    .iter()
+                    .chain(&index.recent_terminal_jobs)
+                    .map(|job| (PROCEDURAL_FEEDBACK_JOB_NAMESPACE.into(), job.job_id.clone())),
+            );
+        }
+        PROCEDURAL_FEEDBACK_JOB_NAMESPACE => {
+            let job: ProceduralFeedbackJobV2 = decode(value.clone(), stage)?;
+            if let Some(authority) = &job.checkpoint_authority {
+                let key = authority.operation.storage_key();
+                addresses.push((
+                    bm_core::memory::MEMORY_MUTATION_RECEIPT_NAMESPACE.into(),
+                    key.clone(),
+                ));
+                addresses.push((bm_core::memory::MEMORY_MUTATION_AUDIT_NAMESPACE.into(), key));
+            }
+            subject_scope = Some(job.work.subject_scope());
+            let anchor_namespace = match &job.work {
+                bm_core::memory::ProceduralLearningWorkV1::Feedback { source } => {
+                    let key = bm_core::memory::ConversationKey::new(
+                        &source.identity.memory_space_id,
+                        &source.identity.channel_id,
+                        &source.identity.conversation_id,
+                    )?;
+                    addresses.push((
+                        "conversation_transcript".into(),
+                        super::transcript_turn_storage_key(
+                            &key,
+                            &source.identity.mounted_subject_id,
+                            &source.identity.turn_id,
+                        ),
+                    ));
+                    PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE
+                }
+                bm_core::memory::ProceduralLearningWorkV1::Reconcile { .. } => {
+                    PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE
+                }
+            };
+            addresses.push((anchor_namespace.into(), job.discovery_root_key));
+            if let Some(receipt) = job.receipt {
+                if matches!(
+                    receipt,
+                    bm_core::memory::ProceduralLearningReceiptV1::Feedback { .. }
+                ) {
+                    addresses.push((
+                        PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE.into(),
+                        job.job_id,
+                    ));
+                }
+                addresses.push((
+                    bm_core::memory::MEMORY_MUTATION_RECEIPT_NAMESPACE.into(),
+                    receipt.mutation_receipt_key().into(),
+                ));
+                addresses.push((
+                    bm_core::memory::MEMORY_MUTATION_AUDIT_NAMESPACE.into(),
+                    receipt.mutation_receipt_key().into(),
+                ));
+            }
+        }
+        PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE => {
+            let ledger: ProceduralFeedbackApplicationLedgerV2 = decode(value.clone(), stage)?;
+            subject_scope = Some(ProceduralSubjectScopeV1 {
+                memory_space_id: ledger.identity.memory_space_id.clone(),
+                mounted_subject_id: ledger.identity.mounted_subject_id.clone(),
+            });
+            let scope = AgentToolExperienceOwningScopeV1::Subject {
+                mounted_subject_id: ledger.identity.mounted_subject_id.clone(),
+            };
+            addresses.push((PROCEDURAL_FEEDBACK_JOB_NAMESPACE.into(), ledger.job_id));
+            for applied in ledger.applied_owner_bindings {
+                match applied {
+                    ProceduralAppliedOwnerBindingV1::AgentToolExperience {
+                        owner_revision, ..
+                    } => addresses.push((
+                        AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE.into(),
+                        agent_tool_experience_head_key(
+                            &ledger.identity.memory_space_id,
+                            &scope,
+                            &owner_revision.owner_ref,
+                        )?,
+                    )),
+                    ProceduralAppliedOwnerBindingV1::RuntimeSkill { binding } => addresses.push((
+                        RUNTIME_SKILL_RECORD_NAMESPACE.into(),
+                        binding.owner_physical_key,
+                    )),
+                }
+            }
+        }
+        AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE => {
+            let manifest: AgentToolExperienceScopeManifestV1 = decode(value.clone(), stage)?;
+            let AgentToolExperienceOwningScopeV1::Subject { mounted_subject_id } =
+                &manifest.owning_scope;
+            subject_scope = Some(ProceduralSubjectScopeV1 {
+                memory_space_id: manifest.memory_space_id.clone(),
+                mounted_subject_id: mounted_subject_id.clone(),
+            });
+            for binding in &manifest.bindings {
+                let key = agent_tool_experience_head_key(
+                    &manifest.memory_space_id,
+                    &manifest.owning_scope,
+                    &binding.owner_ref,
+                )?;
+                if key != binding.head_key {
+                    return Err(Error::config(
+                        stage,
+                        "experience binding redirects canonical head address",
+                    ));
+                }
+                addresses.push((AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE.into(), key));
+            }
+        }
+        AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE => {
+            let head: AgentToolExperienceOwnerHeadV3 = decode(value.clone(), stage)?;
+            let AgentToolExperienceOwningScopeV1::Subject { mounted_subject_id } =
+                &head.owning_scope;
+            subject_scope = Some(ProceduralSubjectScopeV1 {
+                memory_space_id: head.memory_space_id.clone(),
+                mounted_subject_id: mounted_subject_id.clone(),
+            });
+            addresses.push((
+                AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE.into(),
+                agent_tool_experience_scope_manifest_key(
+                    &head.memory_space_id,
+                    &head.owning_scope,
+                )?,
+            ));
+            if head.state == bm_core::skills::AgentToolExperienceHeadStateV3::Active {
+                addresses.extend(head.retained_revisions.into_iter().map(|revision| {
+                    (
+                        AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE.into(),
+                        revision.material_key,
+                    )
+                }));
+            }
+        }
+        AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE => {
+            let material: AgentToolExperienceRevisionMaterialV3 = decode(value.clone(), stage)?;
+            let AgentToolExperienceOwningScopeV1::Subject { mounted_subject_id } =
+                &material.owning_scope;
+            subject_scope = Some(ProceduralSubjectScopeV1 {
+                memory_space_id: material.memory_space_id.clone(),
+                mounted_subject_id: mounted_subject_id.clone(),
+            });
+            addresses.push((
+                AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE.into(),
+                agent_tool_experience_head_key(
+                    &material.memory_space_id,
+                    &material.owning_scope,
+                    &material.owner_ref,
+                )?,
+            ));
+        }
+        bm_core::memory::MEMORY_MUTATION_RECEIPT_NAMESPACE => {
+            let receipt: MemoryMutationReceipt = decode(value.clone(), stage)?;
+            subject_scope = Some(ProceduralSubjectScopeV1 {
+                memory_space_id: receipt.identity.memory_space_id().into(),
+                mounted_subject_id: receipt.identity.mounted_subject_id().into(),
+            });
+        }
+        bm_core::memory::MEMORY_MUTATION_AUDIT_NAMESPACE => {
+            let audit: MemoryMutationAuditRecord = decode(value.clone(), stage)?;
+            subject_scope = Some(ProceduralSubjectScopeV1 {
+                memory_space_id: audit.identity.memory_space_id().into(),
+                mounted_subject_id: audit.identity.mounted_subject_id().into(),
+            });
+        }
+        _ => {}
+    }
+    Ok(ProceduralDependencyNode {
+        subject_scope,
+        addresses,
+    })
+}
+
+/// Producer/root edges also serve the immutable, bounded recall owner.
+pub(crate) fn producer_dependency_addresses(
+    namespace: &str,
+    value: &serde_json::Value,
+) -> Result<Vec<(String, String)>> {
+    use super::schema::{
+        PROCEDURAL_PRODUCER_BINDING_NAMESPACE as MATERIAL,
+        PROCEDURAL_PRODUCER_HEAD_NAMESPACE as HEAD,
+    };
+    let stage = "procedural_producer_dependencies";
+    let mut addresses = Vec::new();
+    match namespace {
+        super::schema::RUNTIME_SKILL_RECORD_NAMESPACE => {
+            let owner: bm_core::skills::RuntimeSkillOwnerRecord = decode(value.clone(), stage)?;
+            if !owner.validate_contract().accepted {
+                return Err(Error::config(stage, "invalid runtime usage owner"));
+            }
+            for reference in &owner.lifecycle.usage_outcome.retained_contributions {
+                addresses.push((
+                    PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE.to_owned(),
+                    reference.source_job_id.clone(),
+                ));
+                addresses.push((
+                    PROCEDURAL_FEEDBACK_JOB_NAMESPACE.to_owned(),
+                    reference.source_job_id.clone(),
+                ));
+            }
+        }
+        PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE => {
+            let material: ProceduralSubjectInitializationV1 = decode(value.clone(), stage)?;
+            material.validate()?;
+            addresses.push((
+                PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE.to_owned(),
+                material.scope.root_key()?,
+            ));
+            addresses.push((MATERIAL.to_owned(), material.first_producer.material_key()));
+        }
+        PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE => {
+            let root: ProceduralSubjectValidityRootV1 = decode(value.clone(), stage)?;
+            root.validate(MAX_PROCEDURAL_SUBJECT_SCOPES)?;
+            addresses.push((
+                PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE.to_owned(),
+                ProceduralSubjectInitializationV1::key(&root.scope)?,
+            ));
+            addresses.extend(root.retained_work.iter().map(|work| {
+                (
+                    PROCEDURAL_FEEDBACK_JOB_NAMESPACE.to_owned(),
+                    work.job_id.clone(),
+                )
+            }));
+            addresses.extend(
+                root.producer_scopes
+                    .iter()
+                    .map(|scope| {
+                        Ok((
+                            PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE.to_owned(),
+                            scope.scope_index_key()?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            );
+        }
+        PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE => {
+            let index: ProceduralFeedbackScopeIndexV2 = decode(value.clone(), stage)?;
+            index.validate()?;
+            if !index.producer_heads.is_empty() {
+                addresses.push((
+                    PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE.to_owned(),
+                    ProceduralSubjectScopeV1 {
+                        memory_space_id: index.memory_space_id.clone(),
+                        mounted_subject_id: index.mounted_subject_id.clone(),
+                    }
+                    .root_key()?,
+                ));
+            }
+            addresses.extend(
+                index
+                    .producer_heads
+                    .iter()
+                    .map(|head| (HEAD.to_owned(), head.binding_key.clone())),
+            );
+        }
+        HEAD => {
+            let head: bm_core::memory::ProceduralProducerHeadV1 = decode(value.clone(), stage)?;
+            if !head.validate_contract() {
+                return Err(Error::config(stage, "invalid producer head"));
+            }
+            addresses.push((
+                PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE.to_owned(),
+                head.scope.scope_index_key()?,
+            ));
+            addresses.extend(
+                head.retained_revisions
+                    .iter()
+                    .map(|reference| (MATERIAL.to_owned(), reference.material_key())),
+            );
+        }
+        MATERIAL => {
+            let binding: bm_core::memory::ProceduralProducerBindingV1 =
+                decode(value.clone(), stage)?;
+            if !binding.validate_contract() {
+                return Err(Error::config(stage, "invalid producer material"));
+            }
+            addresses.push((HEAD.to_owned(), binding.spec.binding_key()?));
+            addresses.push((
+                PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE.to_owned(),
+                binding.spec.scope.scope_index_key()?,
+            ));
+            let receipt_key = binding.operation_identity.storage_key();
+            addresses.push((
+                bm_core::memory::MEMORY_MUTATION_RECEIPT_NAMESPACE.to_owned(),
+                receipt_key.clone(),
+            ));
+            addresses.push((
+                bm_core::memory::MEMORY_MUTATION_AUDIT_NAMESPACE.to_owned(),
+                receipt_key,
+            ));
+        }
+        _ => {}
+    }
+    Ok(addresses)
+}
 
 struct TranscriptLearningSource<'a> {
     key: bm_core::memory::ConversationKey,
@@ -58,18 +1397,18 @@ pub(crate) fn semantic_learning_transcript_precondition(
 }
 
 impl<'a> TranscriptLearningSource<'a> {
-    fn procedural(job: &'a ProceduralFeedbackJobV1) -> Result<Self> {
+    fn procedural(job: &'a ProceduralFeedbackJobV2) -> Result<Self> {
         Ok(Self {
             key: bm_core::memory::ConversationKey::new(
-                &job.identity.memory_space_id,
-                &job.identity.channel_id,
-                &job.identity.conversation_id,
+                &job.feedback_source()?.identity.memory_space_id,
+                &job.feedback_source()?.identity.channel_id,
+                &job.feedback_source()?.identity.conversation_id,
             )?,
-            subject_id: &job.identity.mounted_subject_id,
-            turn_id: &job.identity.turn_id,
-            sequence: job.transcript_sequence,
-            transcript_digest: &job.transcript_digest,
-            learning_evidence_digest: Some(&job.learning_evidence_digest),
+            subject_id: &job.feedback_source()?.identity.mounted_subject_id,
+            turn_id: &job.feedback_source()?.identity.turn_id,
+            sequence: job.feedback_source()?.transcript_sequence,
+            transcript_digest: &job.feedback_source()?.transcript_digest,
+            learning_evidence_digest: Some(&job.feedback_source()?.learning_evidence_digest),
         })
     }
 
@@ -178,7 +1517,7 @@ pub(crate) fn plan_transcript_learning_lifecycle(
     use bm_core::memory::{PostTurnGovernanceJobStatusV2, TranscriptLifecycleTransition};
     use bm_core::skills::{
         agent_tool_experience_scope_manifest_key, AgentToolExperienceHeadBindingV1,
-        AgentToolExperienceHeadStateV2, AgentToolExperienceOwningScopeV1,
+        AgentToolExperienceHeadStateV3, AgentToolExperienceOwningScopeV1,
         AgentToolExperienceScopeManifestV1,
     };
 
@@ -288,7 +1627,7 @@ pub(crate) fn plan_transcript_learning_lifecycle(
     let mut affected_owners = BTreeSet::new();
     let mut withdrawn_sources = BTreeMap::new();
     for document in platform.read_json_namespace(PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE)? {
-        let before: ProceduralFeedbackScopeIndexV1 = decode(document.value, stage)?;
+        let before: ProceduralFeedbackScopeIndexV2 = decode(document.value, stage)?;
         if before.memory_space_id != scope.memory_space_id
             || before.mounted_subject_id != scope.subject_id
         {
@@ -303,11 +1642,11 @@ pub(crate) fn plan_transcript_learning_lifecycle(
             let job = read_job(platform, &reference.job_id)?
                 .ok_or_else(|| Error::config(stage, "procedural scope references a missing job"))?;
             if !targets.contains(&(
-                job.identity.memory_space_id.as_str(),
-                job.identity.mounted_subject_id.as_str(),
-                job.identity.channel_id.as_str(),
-                job.identity.conversation_id.as_str(),
-                job.identity.turn_id.as_str(),
+                job.feedback_source()?.identity.memory_space_id.as_str(),
+                job.feedback_source()?.identity.mounted_subject_id.as_str(),
+                job.feedback_source()?.identity.channel_id.as_str(),
+                job.feedback_source()?.identity.conversation_id.as_str(),
+                job.feedback_source()?.identity.turn_id.as_str(),
             )) {
                 continue;
             }
@@ -352,12 +1691,59 @@ pub(crate) fn plan_transcript_learning_lifecycle(
         }
     }
     // Historical application authority is the durable ledger, not the bounded
-    // scheduling index. Lifecycle must still find old completed derivations.
+    // scheduling index. Derive exact identities before the lifecycle clears
+    // evidence; never read other subjects' ledgers and filter them afterwards.
+    let mut source_jobs = BTreeSet::new();
+    for (record, _) in records {
+        let Some(evidence) = &record.learning_evidence else {
+            continue;
+        };
+        let bm_core::memory::ProceduralFeedbackAuthorityV2::Producer {
+            producer_revision, ..
+        } = &evidence.authority
+        else {
+            continue;
+        };
+        let producer = read_verified_procedural_producer(platform, producer_revision)?;
+        let producer_scope = &producer.historical.spec.scope;
+        if producer_scope.memory_space_id != record.key.memory_space_id
+            || producer_scope.mounted_subject_id != record.subject
+            || producer_scope.channel_id != record.key.channel_id
+            || producer_scope.memory_space_id != scope.memory_space_id
+            || producer_scope.mounted_subject_id != scope.subject_id
+        {
+            return Err(Error::config(stage, "transcript producer scope differs"));
+        }
+        let identity = bm_core::memory::ProceduralFeedbackIdentityV1::new(
+            &record.key.memory_space_id,
+            &record.subject,
+            &record.key.channel_id,
+            &producer_scope.chat_id,
+            &record.key.conversation_id,
+            &record.turn_id,
+        )?;
+        let job_id = identity.job_id(&evidence.learning_evidence_digest)?;
+        if let Some(job) = read_job(platform, &job_id)? {
+            if job.feedback_source()?.identity != identity {
+                return Err(Error::config(stage, "exact source job identity differs"));
+            }
+            if job.status == ProceduralFeedbackJobStatusV1::Succeeded {
+                source_jobs.insert(job_id);
+            }
+        }
+    }
     let lifecycle_budget = platform.current_runtime_budget(super::platform::current_unix_secs());
-    for document in
-        platform.read_procedural_application_ledgers_with_runtime_budget(&lifecycle_budget)?
-    {
-        let ledger: ProceduralFeedbackApplicationLedgerV1 = decode(document.value, stage)?;
+    let source_jobs = source_jobs.into_iter().collect::<Vec<_>>();
+    let source_ledgers = platform
+        .read_procedural_application_ledgers_with_runtime_budget(&lifecycle_budget, &source_jobs)?;
+    if source_ledgers.len() != source_jobs.len() {
+        return Err(Error::config(
+            stage,
+            "succeeded source application ledger is missing",
+        ));
+    }
+    for document in source_ledgers {
+        let ledger: ProceduralFeedbackApplicationLedgerV2 = decode(document.value, stage)?;
         if !targets.contains(&(
             ledger.identity.memory_space_id.as_str(),
             ledger.identity.mounted_subject_id.as_str(),
@@ -371,8 +1757,8 @@ pub(crate) fn plan_transcript_learning_lifecycle(
         let job = read_job(platform, &ledger.job_id)?
             .ok_or_else(|| Error::config(stage, "application ledger job is missing"))?;
         if job.status != ProceduralFeedbackJobStatusV1::Succeeded
-            || ledger.identity != job.identity
-            || ledger.learning_evidence_digest != job.learning_evidence_digest
+            || ledger.identity != job.feedback_source()?.identity
+            || ledger.learning_evidence_digest != job.feedback_source()?.learning_evidence_digest
         {
             return Err(Error::config(
                 stage,
@@ -445,7 +1831,7 @@ pub(crate) fn plan_transcript_learning_lifecycle(
             .into_iter()
             .next()
             .ok_or_else(|| Error::config(stage, "derived experience head is missing"))?;
-        let head: AgentToolExperienceOwnerHeadV2 = decode(doc.value, stage)?;
+        let head: AgentToolExperienceOwnerHeadV3 = decode(doc.value, stage)?;
         if head.memory_space_id != scope.memory_space_id
             || head.owning_scope != owning_scope
             || *binding != AgentToolExperienceHeadBindingV1::from_head(&head)?
@@ -455,7 +1841,7 @@ pub(crate) fn plan_transcript_learning_lifecycle(
                 "derived experience head differs from exact scope binding",
             ));
         }
-        if head.state == AgentToolExperienceHeadStateV2::Tombstoned {
+        if head.state == AgentToolExperienceHeadStateV3::Tombstoned {
             continue;
         }
         let tombstone = head.tombstone()?;
@@ -479,9 +1865,9 @@ pub(crate) fn plan_transcript_learning_lifecycle(
                 .into_iter()
                 .next()
                 .ok_or_else(|| Error::config(stage, "retained experience material is missing"))?;
-            let typed_material: AgentToolExperienceRevisionMaterialV2 =
+            let typed_material: AgentToolExperienceRevisionMaterialV3 =
                 decode(material.value.clone(), stage)?;
-            if AgentToolExperienceRetainedRevisionDigestV2::from_material(&typed_material)?
+            if AgentToolExperienceRetainedRevisionDigestV3::from_material(&typed_material)?
                 != *retained
                 || typed_material.memory_space_id != scope.memory_space_id
                 || typed_material.owning_scope != owning_scope
@@ -548,7 +1934,7 @@ pub(crate) fn ensure_post_turn_learning_intents(
     scope: StoreEventScope,
     runtime_budget: &RuntimeBudgetReport,
     semantic_job: &PostTurnGovernanceJobV3,
-    procedural_job: Option<&ProceduralFeedbackJobV1>,
+    procedural_job: Option<&ProceduralFeedbackJobV2>,
     now_secs: u64,
 ) -> Result<(
     GovernanceIntentEnsureOutcome,
@@ -558,14 +1944,16 @@ pub(crate) fn ensure_post_turn_learning_intents(
     if let Some(job) = procedural_job {
         job.validate()?;
         validate_scope(&scope, job, "post_turn_learning_intents")?;
-        if job.identity.memory_space_id != semantic_job.identity.memory_space_id
-            || job.identity.mounted_subject_id != semantic_job.identity.mounted_subject_id
-            || job.identity.channel_id != semantic_job.identity.channel_id
-            || job.identity.chat_id != semantic_job.identity.chat_id
-            || job.identity.conversation_id != semantic_job.identity.conversation_id
-            || job.identity.turn_id != semantic_job.identity.turn_id
-            || job.transcript_sequence != semantic_job.transcript_sequence
-            || job.transcript_digest != semantic_job.transcript_digest
+        if job.feedback_source()?.identity.memory_space_id != semantic_job.identity.memory_space_id
+            || job.feedback_source()?.identity.mounted_subject_id
+                != semantic_job.identity.mounted_subject_id
+            || job.feedback_source()?.identity.channel_id != semantic_job.identity.channel_id
+            || job.feedback_source()?.identity.chat_id != semantic_job.identity.chat_id
+            || job.feedback_source()?.identity.conversation_id
+                != semantic_job.identity.conversation_id
+            || job.feedback_source()?.identity.turn_id != semantic_job.identity.turn_id
+            || job.feedback_source()?.transcript_sequence != semantic_job.transcript_sequence
+            || job.feedback_source()?.transcript_digest != semantic_job.transcript_digest
         {
             return Err(Error::invalid_input(
                 "post_turn_learning_intents",
@@ -684,10 +2072,14 @@ pub(crate) fn ensure_post_turn_learning_intents(
         )?;
     }
     if let Some(job) = procedural_job.filter(|_| procedural_existing.is_none()) {
-        let before_index = read_scope_index(platform, &job.scope_index_key)?;
-        let mut after_index = before_index
-            .clone()
-            .unwrap_or_else(|| ProceduralFeedbackScopeIndexV1::empty(&job.identity, now_secs));
+        let before_index = read_scope_index(platform, &job.discovery_root_key)?;
+        let mut after_index = match before_index.clone() {
+            Some(index) => index,
+            None => ProceduralFeedbackScopeIndexV2::empty(
+                &job.feedback_source()?.identity.producer_scope(),
+                now_secs,
+            )?,
+        };
         if after_index.active_jobs.len() >= MAX_PROCEDURAL_FEEDBACK_ACTIVE_JOBS
             || after_index.recent_terminal_jobs.len()
                 >= MAX_PROCEDURAL_FEEDBACK_RECENT_TERMINAL_JOBS
@@ -699,7 +2091,7 @@ pub(crate) fn ensure_post_turn_learning_intents(
         }
         after_index
             .active_jobs
-            .push(ProceduralFeedbackJobRefV1::from_job(job));
+            .push(ProceduralFeedbackJobRefV2::from_job(job));
         sort_job_refs(&mut after_index.active_jobs);
         if before_index.is_some() {
             after_index.index_revision = checked_increment(
@@ -717,7 +2109,7 @@ pub(crate) fn ensure_post_turn_learning_intents(
             },
             exact_or_absent(
                 PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE,
-                &job.scope_index_key,
+                &job.discovery_root_key,
                 before_index.as_ref(),
                 "post_turn_learning_intents",
             )?,
@@ -730,7 +2122,7 @@ pub(crate) fn ensure_post_turn_learning_intents(
             ),
             put_json(
                 PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE,
-                &job.scope_index_key,
+                &job.discovery_root_key,
                 encode(&after_index, "post_turn_learning_intents")?,
             ),
         ]);
@@ -785,6 +2177,8 @@ pub(crate) struct ProceduralFeedbackCompletionInput {
     pub(crate) experience_preconditions: Vec<StoreJsonPrecondition>,
     pub(crate) applied_owner_bindings: Vec<ProceduralAppliedOwnerBindingV1>,
     pub(crate) accepted_count: u32,
+    pub(crate) partially_accepted_count: u32,
+    pub(crate) method_dispositions: Vec<bm_core::memory::ProceduralFeedbackMethodDispositionV1>,
     pub(crate) deferred_count: u32,
     pub(crate) rejected_count: u32,
     pub(crate) changed_count: u32,
@@ -795,12 +2189,12 @@ pub(crate) struct ProceduralFeedbackCompletionInput {
 #[derive(Clone, Debug)]
 pub(crate) enum ProceduralFeedbackCompletionOutcome {
     Committed {
-        job: ProceduralFeedbackJobV1,
-        receipt: ProceduralFeedbackReceiptV1,
+        job: ProceduralFeedbackJobV2,
+        receipt: ProceduralFeedbackReceiptV2,
     },
     Replayed {
-        job: ProceduralFeedbackJobV1,
-        receipt: ProceduralFeedbackReceiptV1,
+        job: ProceduralFeedbackJobV2,
+        receipt: ProceduralFeedbackReceiptV2,
     },
 }
 
@@ -810,7 +2204,7 @@ pub(crate) fn reconcile_procedural_feedback_intents(
     scope: StoreEventScope,
     runtime_budget: &RuntimeBudgetReport,
     identity: &bm_core::memory::ProceduralFeedbackIdentityV1,
-    jobs: &[ProceduralFeedbackJobV1],
+    jobs: &[ProceduralFeedbackJobV2],
     cursor_sequence: u64,
     cursor_turn_id: &str,
     now_secs: u64,
@@ -831,9 +2225,10 @@ pub(crate) fn reconcile_procedural_feedback_intents(
     }
     let scope_index_key = identity.scope_id();
     let before_index = read_scope_index(platform, &scope_index_key)?;
-    let mut after_index = before_index
-        .clone()
-        .unwrap_or_else(|| ProceduralFeedbackScopeIndexV1::empty(identity, now_secs));
+    let mut after_index = match before_index.clone() {
+        Some(index) => index,
+        None => ProceduralFeedbackScopeIndexV2::empty(&identity.producer_scope(), now_secs)?,
+    };
     if after_index
         .reconciliation_cursor(&identity.conversation_id)
         .is_some_and(|cursor| cursor_sequence <= cursor.sequence)
@@ -854,9 +2249,9 @@ pub(crate) fn reconcile_procedural_feedback_intents(
     for job in jobs {
         job.validate()?;
         validate_scope(&scope, job, "procedural_feedback_reconcile")?;
-        if job.scope_index_key != scope_index_key
-            || job.identity.conversation_id != identity.conversation_id
-            || job.transcript_sequence > cursor_sequence
+        if job.discovery_root_key != scope_index_key
+            || job.feedback_source()?.identity.conversation_id != identity.conversation_id
+            || job.feedback_source()?.transcript_sequence > cursor_sequence
         {
             return Err(Error::invalid_input(
                 "procedural_feedback_reconcile",
@@ -898,7 +2293,7 @@ pub(crate) fn reconcile_procedural_feedback_intents(
                 ));
                 after_index
                     .active_jobs
-                    .push(ProceduralFeedbackJobRefV1::from_job(job));
+                    .push(ProceduralFeedbackJobRefV2::from_job(job));
                 created = created.saturating_add(1);
             }
         }
@@ -944,21 +2339,20 @@ pub(crate) fn reconcile_procedural_feedback_intents(
 pub(crate) fn list_due_procedural_feedback_jobs(
     platform: &StorePlatform,
     scope_index_key: &str,
+    subject: &ProceduralSubjectScopeV1,
     now_secs: u64,
     limit: usize,
-) -> Result<Vec<ProceduralFeedbackJobV1>> {
+) -> Result<Vec<ProceduralFeedbackJobV2>> {
     if limit == 0 || limit > MAX_PROCEDURAL_FEEDBACK_ACTIVE_JOBS {
         return Err(Error::invalid_input(
             "procedural_feedback_discover",
             "discovery limit must be positive and bounded",
         ));
     }
-    let Some(index) = read_scope_index(platform, scope_index_key)? else {
-        return Ok(Vec::new());
-    };
-    let keys = index
-        .active_jobs
+    let index = read_scope_index(platform, scope_index_key)?;
+    let mut keys = index
         .iter()
+        .flat_map(|index| &index.active_jobs)
         .filter(|reference| {
             matches!(
                 reference.status,
@@ -969,13 +2363,38 @@ pub(crate) fn list_due_procedural_feedback_jobs(
         })
         .map(|reference| reference.job_id.clone())
         .collect::<Vec<_>>();
+    let subject_key = subject.root_key()?;
+    let root_doc = platform
+        .read_json_docs_by_keys(
+            PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE,
+            std::slice::from_ref(&subject_key),
+        )?
+        .pop();
+    if let Some(doc) = root_doc {
+        let root: ProceduralSubjectValidityRootV1 =
+            decode(doc.value, "procedural_feedback_discover")?;
+        root.validate(MAX_PROCEDURAL_SUBJECT_SCOPES)?;
+        if root.scope != *subject {
+            return Err(Error::config(
+                "procedural_feedback_discover",
+                "subject reconciliation scope differs",
+            ));
+        }
+        if let bm_core::memory::ProceduralSubjectValidityStateV1::Reconciling { work } = root.state
+        {
+            keys.push(work.job_id);
+        }
+    }
     let mut jobs = platform
         .read_json_docs_by_keys(PROCEDURAL_FEEDBACK_JOB_NAMESPACE, &keys)?
         .into_iter()
         .map(|doc| decode(doc.value, "procedural_feedback_discover"))
-        .collect::<Result<Vec<ProceduralFeedbackJobV1>>>()?;
+        .collect::<Result<Vec<ProceduralFeedbackJobV2>>>()?;
     jobs.retain(|job| match job.status {
-        ProceduralFeedbackJobStatusV1::Pending => true,
+        ProceduralFeedbackJobStatusV1::Pending | ProceduralFeedbackJobStatusV1::ReadyToContinue => {
+            job.next_attempt_at
+                .is_some_and(|eligible| eligible <= now_secs)
+        }
         ProceduralFeedbackJobStatusV1::RetryWaiting => job
             .next_attempt_at
             .is_some_and(|eligible| eligible <= now_secs),
@@ -1002,7 +2421,7 @@ pub(crate) fn claim_procedural_feedback_job(
     lease_owner: &str,
     lease_until: u64,
     now_secs: u64,
-) -> Result<ProceduralFeedbackJobV1> {
+) -> Result<ProceduralFeedbackJobV2> {
     if lease_owner.trim().is_empty() || lease_owner.trim() != lease_owner || lease_until <= now_secs
     {
         return Err(Error::invalid_input(
@@ -1017,71 +2436,16 @@ pub(crate) fn claim_procedural_feedback_job(
         )
     })?;
     validate_scope(&scope, &before_job, "procedural_feedback_claim")?;
-    if before_job.status.is_terminal()
-        || before_job.attempt_count >= before_job.max_attempts
-        || (before_job.status == ProceduralFeedbackJobStatusV1::Leased
-            && before_job
-                .lease_until
-                .is_some_and(|deadline| deadline > now_secs))
-        || (before_job.status == ProceduralFeedbackJobStatusV1::RetryWaiting
-            && before_job
-                .next_attempt_at
-                .is_some_and(|eligible| eligible > now_secs))
-    {
-        return Err(Error::conflict(
-            "procedural_feedback_claim",
-            "procedural feedback job is not claimable",
-        ));
-    }
-    let before_index = required_index(platform, &before_job, "procedural_feedback_claim")?;
-    let mut after_job = before_job.clone();
-    after_job.status = ProceduralFeedbackJobStatusV1::Leased;
-    after_job.state_revision = checked_increment(
-        after_job.state_revision,
-        "procedural_feedback_claim",
-        "job state revision overflow",
-    )?;
-    after_job.attempt_count = after_job
-        .attempt_count
-        .checked_add(1)
-        .ok_or_else(|| Error::config("procedural_feedback_claim", "job attempt count overflow"))?;
-    after_job.lease_epoch = checked_increment(
-        after_job.lease_epoch,
-        "procedural_feedback_claim",
-        "job lease epoch overflow",
-    )?;
-    after_job.next_attempt_at = None;
-    after_job.lease_owner = Some(lease_owner.to_string());
-    after_job.lease_until = Some(lease_until);
-    after_job.last_error_class = None;
-    after_job.updated_at = now_secs;
-    after_job.validate()?;
-    let after_index = updated_active_index(
-        &before_index,
-        &before_job,
-        &after_job,
-        now_secs,
-        "procedural_feedback_claim",
-    )?;
-    if let Err(error) = commit_job_and_index(
+    let after_job = before_job.claim(lease_owner, lease_until, now_secs)?;
+    commit_job_state_transition(
         platform,
         scope,
         runtime_budget,
         "post_turn.procedural.claim",
         &before_job,
         &after_job,
-        &before_index,
-        &after_index,
         now_secs,
-    ) {
-        if error.stage() == "memory_write_transaction_precondition_failed" {
-            return Err(Error::conflict(
-                "procedural_feedback_claim",
-                "procedural feedback claim lost its Store compare-and-swap",
-            ));
-        }
-        return Err(error);
-    }
+    )?;
     Ok(after_job)
 }
 
@@ -1095,7 +2459,7 @@ pub(crate) fn retry_procedural_feedback_job(
     lease_epoch: u64,
     error_class: ProceduralFeedbackErrorClassV1,
     now_secs: u64,
-) -> Result<ProceduralFeedbackJobV1> {
+) -> Result<ProceduralFeedbackJobV2> {
     if !error_class.retryable() {
         return Err(Error::invalid_input(
             "procedural_feedback_retry",
@@ -1116,7 +2480,6 @@ pub(crate) fn retry_procedural_feedback_job(
         "procedural_feedback_retry",
     )?;
     validate_scope(&scope, &before_job, "procedural_feedback_retry")?;
-    let before_index = required_index(platform, &before_job, "procedural_feedback_retry")?;
     let mut after_job = before_job.clone();
     after_job.state_revision = checked_increment(
         after_job.state_revision,
@@ -1128,7 +2491,16 @@ pub(crate) fn retry_procedural_feedback_job(
     after_job.last_error_class = Some(error_class);
     after_job.updated_at = now_secs;
     let exhausted = after_job.attempt_count >= after_job.max_attempts;
-    if exhausted {
+    if error_class == ProceduralFeedbackErrorClassV1::BudgetExceeded
+        && matches!(
+            before_job.work,
+            bm_core::memory::ProceduralLearningWorkV1::Reconcile { .. }
+        )
+    {
+        after_job.status = ProceduralFeedbackJobStatusV1::BlockedCapacity;
+        after_job.next_attempt_at = None;
+        after_job.terminal_at = None;
+    } else if exhausted {
         after_job.status = ProceduralFeedbackJobStatusV1::DeadLetter;
         after_job.next_attempt_at = None;
         after_job.terminal_at = Some(now_secs);
@@ -1142,39 +2514,20 @@ pub(crate) fn retry_procedural_feedback_job(
         after_job.terminal_at = None;
     }
     after_job.validate()?;
-    let after_index = if exhausted {
-        moved_to_terminal_index(
-            &before_index,
-            &before_job,
-            &after_job,
-            now_secs,
-            "procedural_feedback_retry",
-        )?
-    } else {
-        updated_active_index(
-            &before_index,
-            &before_job,
-            &after_job,
-            now_secs,
-            "procedural_feedback_retry",
-        )?
-    };
-    commit_job_and_index(
+    commit_job_state_transition(
         platform,
         scope,
         runtime_budget,
         "post_turn.procedural.retry",
         &before_job,
         &after_job,
-        &before_index,
-        &after_index,
         now_secs,
     )?;
     Ok(after_job)
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn repair_required_procedural_feedback_job(
+pub(crate) fn terminate_procedural_feedback_job(
     platform: &StorePlatform,
     scope: StoreEventScope,
     runtime_budget: &RuntimeBudgetReport,
@@ -1183,7 +2536,7 @@ pub(crate) fn repair_required_procedural_feedback_job(
     lease_epoch: u64,
     error_class: ProceduralFeedbackErrorClassV1,
     now_secs: u64,
-) -> Result<ProceduralFeedbackJobV1> {
+) -> Result<ProceduralFeedbackJobV2> {
     let before_job = read_job(platform, job_id)?.ok_or_else(|| {
         Error::not_found(
             "procedural_feedback_repair_required",
@@ -1198,10 +2551,16 @@ pub(crate) fn repair_required_procedural_feedback_job(
         "procedural_feedback_repair_required",
     )?;
     validate_scope(&scope, &before_job, "procedural_feedback_repair_required")?;
-    let before_index =
-        required_index(platform, &before_job, "procedural_feedback_repair_required")?;
     let mut after_job = before_job.clone();
-    after_job.status = ProceduralFeedbackJobStatusV1::RepairRequired;
+    after_job.status = if error_class == ProceduralFeedbackErrorClassV1::AuthorityDenied
+        && matches!(
+            before_job.work,
+            bm_core::memory::ProceduralLearningWorkV1::Feedback { .. }
+        ) {
+        ProceduralFeedbackJobStatusV1::Cancelled
+    } else {
+        ProceduralFeedbackJobStatusV1::RepairRequired
+    };
     after_job.state_revision = checked_increment(
         after_job.state_revision,
         "procedural_feedback_repair_required",
@@ -1214,22 +2573,17 @@ pub(crate) fn repair_required_procedural_feedback_job(
     after_job.updated_at = now_secs;
     after_job.terminal_at = Some(now_secs);
     after_job.validate()?;
-    let after_index = moved_to_terminal_index(
-        &before_index,
-        &before_job,
-        &after_job,
-        now_secs,
-        "procedural_feedback_repair_required",
-    )?;
-    commit_job_and_index(
+    commit_job_state_transition(
         platform,
         scope,
         runtime_budget,
-        "post_turn.procedural.repair_required",
+        if after_job.status == ProceduralFeedbackJobStatusV1::Cancelled {
+            "post_turn.procedural.authority_denied"
+        } else {
+            "post_turn.procedural.repair_required"
+        },
         &before_job,
         &after_job,
-        &before_index,
-        &after_index,
         now_secs,
     )?;
     Ok(after_job)
@@ -1264,6 +2618,7 @@ pub(crate) fn complete_procedural_feedback_job(
                 "succeeded procedural job is missing its receipt",
             )
         })?;
+        let receipt = receipt.feedback()?.clone();
         let completed_lease_revision =
             before_job.state_revision.checked_sub(1).ok_or_else(|| {
                 Error::config(
@@ -1284,6 +2639,8 @@ pub(crate) fn complete_procedural_feedback_job(
             &input.experience_preconditions,
             &input.applied_owner_bindings,
             input.accepted_count,
+            input.partially_accepted_count,
+            &input.method_dispositions,
             input.deferred_count,
             input.rejected_count,
             input.changed_count,
@@ -1306,6 +2663,8 @@ pub(crate) fn complete_procedural_feedback_job(
             || receipt.transaction_id != generic_receipt.transaction_id
             || receipt.plan_digest != replay_plan_digest
             || receipt.accepted_count != input.accepted_count
+            || receipt.partially_accepted_count != input.partially_accepted_count
+            || receipt.method_dispositions != input.method_dispositions
             || receipt.deferred_count != input.deferred_count
             || receipt.rejected_count != input.rejected_count
             || receipt.changed_count != input.changed_count
@@ -1331,9 +2690,10 @@ pub(crate) fn complete_procedural_feedback_job(
     )?;
     let accounted = input
         .accepted_count
-        .checked_add(input.deferred_count)
+        .checked_add(input.partially_accepted_count)
+        .and_then(|value| value.checked_add(input.deferred_count))
         .and_then(|value| value.checked_add(input.rejected_count));
-    if accounted != Some(before_job.submitted_count)
+    if accounted != Some(before_job.feedback_source()?.submitted_count)
         || usize::try_from(input.changed_count).ok() != Some(input.applied_owner_bindings.len())
         || input
             .applied_owner_bindings
@@ -1357,6 +2717,8 @@ pub(crate) fn complete_procedural_feedback_job(
         &input.experience_preconditions,
         &input.applied_owner_bindings,
         input.accepted_count,
+        input.partially_accepted_count,
+        &input.method_dispositions,
         input.deferred_count,
         input.rejected_count,
         input.changed_count,
@@ -1366,9 +2728,73 @@ pub(crate) fn complete_procedural_feedback_job(
         &input.experience_mutations,
         &input.experience_preconditions,
     )?;
-    let ledger = ProceduralFeedbackApplicationLedgerV1::build(
+    // Derive durable contributions from the exact canonical source already in
+    // the commit read-set, never from caller-supplied aggregate counters.
+    let source_key = TranscriptLearningSource::procedural(&before_job)?.storage_key();
+    let source_value = input
+        .experience_preconditions
+        .iter()
+        .find_map(|condition| match condition {
+            StoreJsonPrecondition::Exact {
+                namespace,
+                key,
+                value,
+            } if namespace == "conversation_transcript" && key == &source_key => Some(value),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            Error::conflict(
+                "procedural_feedback_complete",
+                "exact source precondition is missing",
+            )
+        })?;
+    let source: bm_core::memory::TranscriptTurnRecord =
+        decode(source_value.clone(), "procedural_feedback_complete")?;
+    let evidence = source.learning_evidence.as_ref().ok_or_else(|| {
+        Error::conflict("procedural_feedback_complete", "source evidence is missing")
+    })?;
+    let producer = read_authorized_procedural_evidence(
+        platform,
+        evidence,
+        &bm_core::memory::ProceduralProducerScopeV1 {
+            memory_space_id: before_job
+                .feedback_source()?
+                .identity
+                .memory_space_id
+                .clone(),
+            mounted_subject_id: before_job
+                .feedback_source()?
+                .identity
+                .mounted_subject_id
+                .clone(),
+            channel_id: before_job.feedback_source()?.identity.channel_id.clone(),
+            chat_id: before_job.feedback_source()?.identity.chat_id.clone(),
+        },
+    )?;
+    let head_value = encode(&producer.head, "procedural_feedback_complete")?;
+    if !input.experience_preconditions.iter().any(|condition| matches!(condition,
+        StoreJsonPrecondition::Exact { namespace, key, value } if namespace == super::schema::PROCEDURAL_PRODUCER_HEAD_NAMESPACE
+            && key == &producer.head.binding_key && value == &head_value)) {
+        return Err(Error::conflict("procedural_feedback_complete", "current producer head requires an exact commit fence"));
+    }
+    let contributions = evidence.execution_contributions_for_job(&before_job)?;
+    let validity = required_subject_root(
+        platform,
+        &before_job.work.subject_scope().root_key()?,
+        "procedural_feedback_complete",
+    )?;
+    if !validity.permits_learning_reads(MAX_PROCEDURAL_SUBJECT_SCOPES)? {
+        return Err(Error::conflict(
+            "procedural_feedback_complete",
+            "subject learning reconciliation must finish before feedback publication",
+        ));
+    }
+    let ledger = ProceduralFeedbackApplicationLedgerV2::build(
         &before_job,
         input.applied_owner_bindings,
+        contributions,
+        evidence.runtime_skill_contributions_for_job(&before_job, source.created_at)?,
+        validity.validity_epoch,
         input.completed_at,
     )?;
     validate_new_applied_post_images(&ledger, &input.experience_mutations)?;
@@ -1381,18 +2807,23 @@ pub(crate) fn complete_procedural_feedback_job(
         ),
         "procedural_feedback_complete",
     )?;
-    let mut receipt = ProceduralFeedbackReceiptV1 {
+    let mut receipt = ProceduralFeedbackReceiptV2 {
         mutation_receipt_key: identity.storage_key(),
         schema_version: PROCEDURAL_FEEDBACK_RECEIPT_SCHEMA_VERSION,
         job_id: before_job.job_id.clone(),
         operation_id: input.operation_id,
         transaction_id: String::new(),
-        transcript_digest: before_job.transcript_digest.clone(),
-        learning_evidence_digest: before_job.learning_evidence_digest.clone(),
+        transcript_digest: before_job.feedback_source()?.transcript_digest.clone(),
+        learning_evidence_digest: before_job
+            .feedback_source()?
+            .learning_evidence_digest
+            .clone(),
         plan_digest: plan_digest.clone(),
         post_image_digest,
-        submitted_count: before_job.submitted_count,
+        submitted_count: before_job.feedback_source()?.submitted_count,
         accepted_count: input.accepted_count,
+        partially_accepted_count: input.partially_accepted_count,
+        method_dispositions: input.method_dispositions,
         deferred_count: input.deferred_count,
         rejected_count: input.rejected_count,
         changed_count: input.changed_count,
@@ -1408,7 +2839,11 @@ pub(crate) fn complete_procedural_feedback_job(
         input.completed_at,
     )?;
     receipt.transaction_id = operation.transaction_id().to_string();
-    if !receipt.validate_contract() {
+    if !source
+        .learning_evidence
+        .as_ref()
+        .is_some_and(|evidence| receipt.validates_evidence(evidence))
+    {
         return Err(Error::config(
             "procedural_feedback_complete",
             "procedural feedback receipt failed canonical validation",
@@ -1425,7 +2860,9 @@ pub(crate) fn complete_procedural_feedback_job(
     after_job.lease_owner = None;
     after_job.lease_until = None;
     after_job.last_error_class = None;
-    after_job.receipt = Some(receipt.clone());
+    after_job.receipt = Some(bm_core::memory::ProceduralLearningReceiptV1::Feedback {
+        receipt: receipt.clone(),
+    });
     after_job.updated_at = input.completed_at;
     after_job.terminal_at = Some(input.completed_at);
     after_job.validate()?;
@@ -1445,7 +2882,7 @@ pub(crate) fn complete_procedural_feedback_job(
         ),
         put_json(
             PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE,
-            &after_job.scope_index_key,
+            &after_job.discovery_root_key,
             encode(&after_index, "procedural_feedback_complete")?,
         ),
         put_json(
@@ -1455,6 +2892,12 @@ pub(crate) fn complete_procedural_feedback_job(
         ),
     ]);
     let mut preconditions = input.experience_preconditions;
+    preconditions.push(exact(
+        PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE,
+        &validity.physical_key,
+        &validity,
+        "procedural_feedback_complete",
+    )?);
     preconditions.extend([
         exact(
             PROCEDURAL_FEEDBACK_JOB_NAMESPACE,
@@ -1464,7 +2907,7 @@ pub(crate) fn complete_procedural_feedback_job(
         )?,
         exact(
             PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE,
-            &before_job.scope_index_key,
+            &before_job.discovery_root_key,
             &before_index,
             "procedural_feedback_complete",
         )?,
@@ -1506,7 +2949,7 @@ pub(crate) fn complete_procedural_feedback_job(
             })?;
             Ok(ProceduralFeedbackCompletionOutcome::Replayed {
                 job: replayed,
-                receipt: replayed_receipt,
+                receipt: replayed_receipt.feedback()?.clone(),
             })
         }
     }
@@ -1515,18 +2958,41 @@ pub(crate) fn complete_procedural_feedback_job(
 pub(crate) fn read_job(
     platform: &StorePlatform,
     job_id: &str,
-) -> Result<Option<ProceduralFeedbackJobV1>> {
+) -> Result<Option<ProceduralFeedbackJobV2>> {
     let mut docs = platform
         .read_json_docs_by_keys(PROCEDURAL_FEEDBACK_JOB_NAMESPACE, &[job_id.to_string()])?;
     docs.pop()
-        .map(|doc| decode(doc.value, "procedural_feedback_job_read"))
+        .map(|doc| {
+            let job: ProceduralFeedbackJobV2 = decode(doc.value, "procedural_feedback_job_read")?;
+            validate_persisted_reconciliation_checkpoint(platform, &job)?;
+            Ok(job)
+        })
         .transpose()
+}
+
+pub(crate) fn validate_persisted_reconciliation_checkpoint(
+    platform: &StorePlatform,
+    job: &ProceduralFeedbackJobV2,
+) -> Result<()> {
+    job.validate()?;
+    if let Some(authority) = &job.checkpoint_authority {
+        let receipt = platform
+            .read_reconciliation_page_operation(authority)?
+            .ok_or_else(|| {
+                Error::config(
+                    "procedural_reconciliation_checkpoint_proof",
+                    "checkpoint mutation proof is missing",
+                )
+            })?;
+        validate_reconciliation_checkpoint_commitment(job, &receipt)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn read_scope_index(
     platform: &StorePlatform,
     key: &str,
-) -> Result<Option<ProceduralFeedbackScopeIndexV1>> {
+) -> Result<Option<ProceduralFeedbackScopeIndexV2>> {
     let mut docs = platform.read_json_docs_by_keys(
         PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE,
         &[key.to_string()],
@@ -1673,7 +3139,7 @@ fn plan_runtime_skill_source_withdrawal(
 }
 
 fn validate_runtime_skill_promotion_sources(
-    current_job: &ProceduralFeedbackJobV1,
+    current_job: &ProceduralFeedbackJobV2,
     mutations: &[StoreMutation],
     preconditions: &[StoreJsonPrecondition],
 ) -> Result<()> {
@@ -1729,7 +3195,7 @@ fn validate_runtime_skill_promotion_sources(
                 StoreMutation::PutJson {
                     namespace, value, ..
                 } if namespace == AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE => {
-                    serde_json::from_value::<AgentToolExperienceRevisionMaterialV2>(value.clone())
+                    serde_json::from_value::<AgentToolExperienceRevisionMaterialV3>(value.clone())
                         .ok()
                         .filter(|material| &material.owner_ref == experience_owner_ref)
                 }
@@ -1741,8 +3207,18 @@ fn validate_runtime_skill_promotion_sources(
                     "promotion requires its exact accepted experience post-image",
                 )
             })?;
-        let expected_constraints = material
-            .constraints
+        let bm_core::skills::AgentToolExperienceBodyV1::Method {
+            procedure,
+            constraints,
+            ..
+        } = &material.body
+        else {
+            return Err(Error::conflict(
+                stage,
+                "execution statistics cannot create a RuntimeSkill",
+            ));
+        };
+        let expected_constraints = constraints
             .iter()
             .map(|tag| bm_core::skills::RuntimeSkillConstraint {
                 kind: bm_core::skills::RuntimeSkillConstraintKind::ObservedToolBoundary,
@@ -1755,7 +3231,7 @@ fn validate_runtime_skill_promotion_sources(
                     &material.registry_scope,
                 )?
             || owner.lifecycle.observed_at < material.updated_at
-            || owner.procedural_content.procedure != material.usage_guidance.trim()
+            || owner.procedural_content.procedure != *procedure
             || owner.privacy_class != material.privacy_class
         {
             return Err(Error::conflict(
@@ -1777,7 +3253,7 @@ fn validate_runtime_skill_promotion_sources(
                     "promotion source kind is not authoritative",
                 ));
             }
-            let source: ProceduralFeedbackJobV1 = if binding.safe_ref == current_job.job_id {
+            let source: ProceduralFeedbackJobV2 = if binding.safe_ref == current_job.job_id {
                 current_job.clone()
             } else {
                 decode(
@@ -1787,9 +3263,11 @@ fn validate_runtime_skill_promotion_sources(
             };
             source.validate()?;
             if source.job_id != binding.safe_ref
-                || source.learning_evidence_digest != binding.source_digest
-                || source.identity.memory_space_id != current_job.identity.memory_space_id
-                || source.identity.mounted_subject_id != current_job.identity.mounted_subject_id
+                || source.feedback_source()?.learning_evidence_digest != binding.source_digest
+                || source.feedback_source()?.identity.memory_space_id
+                    != current_job.feedback_source()?.identity.memory_space_id
+                || source.feedback_source()?.identity.mounted_subject_id
+                    != current_job.feedback_source()?.identity.mounted_subject_id
             {
                 return Err(Error::conflict(stage, "promotion source identity differs"));
             }
@@ -1800,7 +3278,7 @@ fn validate_runtime_skill_promotion_sources(
                         "historical promotion source was not accepted",
                     ));
                 }
-                let ledger: ProceduralFeedbackApplicationLedgerV1 = decode(
+                let ledger: ProceduralFeedbackApplicationLedgerV2 = decode(
                     exact_value(
                         PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE,
                         &source.job_id,
@@ -1808,8 +3286,9 @@ fn validate_runtime_skill_promotion_sources(
                     stage,
                 )?;
                 ledger.validate()?;
-                if ledger.identity != source.identity
-                    || ledger.learning_evidence_digest != source.learning_evidence_digest
+                if ledger.identity != source.feedback_source()?.identity
+                    || ledger.learning_evidence_digest
+                        != source.feedback_source()?.learning_evidence_digest
                 {
                     return Err(Error::conflict(
                         stage,
@@ -1834,7 +3313,7 @@ fn validate_runtime_skill_promotion_sources(
                         experience_owner_ref,
                         owner_revision.owner_revision,
                     )?;
-                    let retained: AgentToolExperienceRevisionMaterialV2 = decode(
+                    let retained: AgentToolExperienceRevisionMaterialV3 = decode(
                         exact_value(AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE, &key)?,
                         stage,
                     )?;
@@ -1878,8 +3357,7 @@ fn validate_runtime_skill_promotion_sources(
                 ));
             }
             if !evidence.validate_contract()
-                || evidence.authority
-                    == bm_core::memory::ProceduralFeedbackAuthorityV1::ModelInferred
+                || evidence.authority.is_model_inferred()
                 || turn.external_content_used
             {
                 return Err(Error::conflict(
@@ -1888,22 +3366,9 @@ fn validate_runtime_skill_promotion_sources(
                 ));
             }
             let matching_method = evidence.agent_tool_feedback.iter().any(|feedback| {
-                feedback.registry_ref.registry_id == material.registry_id
-                    && feedback.registry_ref.scope == material.registry_scope
-                    && feedback.tool_id == material.tool_id
-                    && feedback.schema_fingerprint == material.schema_fingerprint
-                    && feedback.observations.iter().any(|observation| {
-                        observation.task_signature == material.task_signature
-                            && observation.outcome == bm_core::skills::AgentToolOutcome::Succeeded
-                            && !observation.private_content_used
-                            && !observation.external_content
-                            && observation.summary.trim() == owner.procedural_content.procedure
-                            && material.evidence_refs.contains(&observation.observation_id)
-                            && bm_core::skills::agent_tool_observation_matches_transcript(
-                                observation,
-                                &turn,
-                            )
-                    })
+                bm_core::skills::agent_tool_method_execution_matches_source(
+                    &material, &source, &turn, feedback,
+                ) == Ok(true)
             });
             if !matching_method {
                 return Err(Error::conflict(
@@ -1929,7 +3394,7 @@ fn validate_runtime_skill_promotion_sources(
 }
 
 fn validate_new_applied_post_images(
-    ledger: &ProceduralFeedbackApplicationLedgerV1,
+    ledger: &ProceduralFeedbackApplicationLedgerV2,
     mutations: &[StoreMutation],
 ) -> Result<()> {
     let stage = "procedural_feedback_applied_post_image";
@@ -1959,7 +3424,7 @@ fn validate_new_applied_post_images(
                     owner_revision,
                     content_digest,
                 } if namespace == AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE => {
-                    let material: AgentToolExperienceRevisionMaterialV2 =
+                    let material: AgentToolExperienceRevisionMaterialV3 =
                         decode(value.clone(), stage)?;
                     if material.owner_ref == owner_revision.owner_ref
                         && material.owner_revision == owner_revision.owner_revision
@@ -2008,9 +3473,14 @@ pub(crate) fn validate_procedural_feedback_store_image(
     state: &BackendTransactionState,
     stage: &'static str,
 ) -> Result<()> {
-    let mut jobs = BTreeMap::<String, ProceduralFeedbackJobV1>::new();
-    let mut indexes = BTreeMap::<String, ProceduralFeedbackScopeIndexV1>::new();
-    let mut ledgers = BTreeMap::<String, ProceduralFeedbackApplicationLedgerV1>::new();
+    let mut jobs = BTreeMap::<String, ProceduralFeedbackJobV2>::new();
+    let mut indexes = BTreeMap::<String, ProceduralFeedbackScopeIndexV2>::new();
+    let mut subject_roots = BTreeMap::<String, ProceduralSubjectValidityRootV1>::new();
+    let mut initializations = BTreeMap::<String, ProceduralSubjectInitializationV1>::new();
+    let mut producer_heads = BTreeMap::<String, bm_core::memory::ProceduralProducerHeadV1>::new();
+    let mut producer_materials =
+        BTreeMap::<String, bm_core::memory::ProceduralProducerBindingV1>::new();
+    let mut ledgers = BTreeMap::<String, ProceduralFeedbackApplicationLedgerV2>::new();
     let mut experience_heads = BTreeMap::new();
     let mut experience_materials = BTreeMap::new();
     let mut runtime_owners = Vec::new();
@@ -2018,15 +3488,52 @@ pub(crate) fn validate_procedural_feedback_store_image(
     let mut mutation_audits = BTreeMap::new();
     for ((namespace, key), value) in &state.json {
         match namespace.as_str() {
+            PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE => {
+                let material: ProceduralSubjectInitializationV1 = decode(value.clone(), stage)?;
+                material.validate()?;
+                if material.physical_key != *key {
+                    return Err(Error::config(
+                        stage,
+                        "subject initialization physical key differs",
+                    ));
+                }
+                initializations.insert(key.clone(), material);
+            }
+            PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE => {
+                let root: ProceduralSubjectValidityRootV1 = decode(value.clone(), stage)?;
+                root.validate(MAX_PROCEDURAL_SUBJECT_SCOPES)?;
+                if root.physical_key != *key {
+                    return Err(Error::config(
+                        stage,
+                        "subject validity physical key differs",
+                    ));
+                }
+                subject_roots.insert(key.clone(), root);
+            }
+            super::schema::PROCEDURAL_PRODUCER_BINDING_NAMESPACE => {
+                let binding: bm_core::memory::ProceduralProducerBindingV1 =
+                    decode(value.clone(), stage)?;
+                if !binding.validate_contract() || binding.revision_ref()?.material_key() != *key {
+                    return Err(Error::config(stage, "invalid producer revision material"));
+                }
+                producer_materials.insert(key.clone(), binding);
+            }
+            super::schema::PROCEDURAL_PRODUCER_HEAD_NAMESPACE => {
+                let head: bm_core::memory::ProceduralProducerHeadV1 = decode(value.clone(), stage)?;
+                if !head.validate_contract() || head.binding_key != *key {
+                    return Err(Error::config(stage, "invalid producer head"));
+                }
+                producer_heads.insert(key.clone(), head);
+            }
             PROCEDURAL_FEEDBACK_JOB_NAMESPACE => {
-                let job: ProceduralFeedbackJobV1 = decode(value.clone(), stage)?;
+                let job: ProceduralFeedbackJobV2 = decode(value.clone(), stage)?;
                 if job.job_id != *key || job.validate().is_err() {
                     return Err(Error::config(stage, "invalid procedural feedback job"));
                 }
                 jobs.insert(key.clone(), job);
             }
             PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE => {
-                let index: ProceduralFeedbackScopeIndexV1 = decode(value.clone(), stage)?;
+                let index: ProceduralFeedbackScopeIndexV2 = decode(value.clone(), stage)?;
                 if index.scope_index_key != *key || index.validate().is_err() {
                     return Err(Error::config(
                         stage,
@@ -2036,7 +3543,7 @@ pub(crate) fn validate_procedural_feedback_store_image(
                 indexes.insert(key.clone(), index);
             }
             PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE => {
-                let ledger: ProceduralFeedbackApplicationLedgerV1 = decode(value.clone(), stage)?;
+                let ledger: ProceduralFeedbackApplicationLedgerV2 = decode(value.clone(), stage)?;
                 if ledger.job_id != *key || ledger.validate().is_err() {
                     return Err(Error::config(
                         stage,
@@ -2046,11 +3553,11 @@ pub(crate) fn validate_procedural_feedback_store_image(
                 ledgers.insert(key.clone(), ledger);
             }
             AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE => {
-                let head: AgentToolExperienceOwnerHeadV2 = decode(value.clone(), stage)?;
+                let head: AgentToolExperienceOwnerHeadV3 = decode(value.clone(), stage)?;
                 experience_heads.insert(key.clone(), head);
             }
             AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE => {
-                let material: AgentToolExperienceRevisionMaterialV2 = decode(value.clone(), stage)?;
+                let material: AgentToolExperienceRevisionMaterialV3 = decode(value.clone(), stage)?;
                 experience_materials.insert(key.clone(), material);
             }
             super::schema::RUNTIME_SKILL_RECORD_NAMESPACE => {
@@ -2076,8 +3583,146 @@ pub(crate) fn validate_procedural_feedback_store_image(
             _ => {}
         }
     }
+    for binding in producer_materials.values() {
+        let receipt_key = binding.operation_identity.storage_key();
+        let receipt = mutation_receipts
+            .iter()
+            .find(|(key, _)| key == &receipt_key)
+            .map(|(_, receipt)| receipt)
+            .ok_or_else(|| Error::config(stage, "producer operation receipt is missing"))?;
+        let audit = mutation_audits
+            .get(&receipt_key)
+            .ok_or_else(|| Error::config(stage, "producer authoritative audit is missing"))?;
+        validate_producer_operation_proof(binding, receipt, audit)?;
+    }
     let mut referenced = BTreeSet::new();
+    let mut referenced_producers = BTreeSet::new();
+    let mut referenced_producer_materials = BTreeSet::new();
+    for root in subject_roots.values() {
+        let initialization = initializations
+            .get(&ProceduralSubjectInitializationV1::key(&root.scope)?)
+            .ok_or_else(|| {
+                Error::config(
+                    stage,
+                    "subject root is missing its immutable initialization proof",
+                )
+            })?;
+        let first = producer_materials
+            .get(&initialization.first_producer.material_key())
+            .ok_or_else(|| {
+                Error::config(stage, "subject initialization producer material is missing")
+            })?;
+        initialization.validate_producer(first)?;
+        if root.scope != initialization.scope || !root.producer_scopes.contains(&first.spec.scope) {
+            return Err(Error::config(
+                stage,
+                "subject initialization does not bind its original producer scope",
+            ));
+        }
+        for scope in &root.producer_scopes {
+            let index = indexes.get(&scope.scope_index_key()?).ok_or_else(|| {
+                Error::config(stage, "subject validity root has a dangling producer scope")
+            })?;
+            if index.producer_scope() != *scope || index.producer_heads.is_empty() {
+                return Err(Error::config(
+                    stage,
+                    "subject validity root cannot bind an unrelated or producerless scope",
+                ));
+            }
+        }
+        for reference in &root.retained_work {
+            let job = jobs.get(&reference.job_id).ok_or_else(|| {
+                Error::config(
+                    stage,
+                    "subject validity root has a dangling reconciliation job",
+                )
+            })?;
+            let bm_core::memory::ProceduralLearningWorkV1::Reconcile { source } = &job.work else {
+                return Err(Error::config(
+                    stage,
+                    "subject reconciliation reference points to turn feedback",
+                ));
+            };
+            if !referenced.insert(job.job_id.clone())
+                || source.reference()? != *reference
+                || job.discovery_root_key != root.physical_key
+            {
+                return Err(Error::config(
+                    stage,
+                    "reconciliation job and subject retention root differ",
+                ));
+            }
+            if reference.target_epoch < root.validity_epoch {
+                if !job.status.is_terminal() {
+                    return Err(Error::config(
+                        stage,
+                        "superseded reconciliation retains an active lease or schedule",
+                    ));
+                }
+                continue;
+            }
+            validate_subject_reconciliation_job(root, job)?;
+        }
+    }
+    for material in initializations.values() {
+        if !subject_roots.contains_key(&material.scope.root_key()?) {
+            return Err(Error::config(
+                stage,
+                "subject initialization proof has a missing root",
+            ));
+        }
+    }
     for index in indexes.values() {
+        if !index.producer_heads.is_empty() {
+            let key = ProceduralSubjectScopeV1 {
+                memory_space_id: index.memory_space_id.clone(),
+                mounted_subject_id: index.mounted_subject_id.clone(),
+            }
+            .root_key()?;
+            if !subject_roots
+                .get(&key)
+                .is_some_and(|root| root.producer_scopes.contains(&index.producer_scope()))
+            {
+                return Err(Error::config(
+                    stage,
+                    "producer scope is missing its exact subject validity root",
+                ));
+            }
+        }
+        for reference in &index.producer_heads {
+            let head = producer_heads
+                .get(&reference.binding_key)
+                .ok_or_else(|| Error::config(stage, "producer scope root has a dangling head"))?;
+            if !referenced_producers.insert(head.binding_key.clone())
+                || head.scope != index.producer_scope()
+                || head.current != *reference
+            {
+                return Err(Error::config(
+                    stage,
+                    "producer scope and current head diverged",
+                ));
+            }
+            let materials = head
+                .retained_revisions
+                .iter()
+                .map(|revision| {
+                    let key = revision.material_key();
+                    if !referenced_producer_materials.insert(key.clone()) {
+                        return Err(Error::config(stage, "producer revision has multiple roots"));
+                    }
+                    producer_materials
+                        .get(&key)
+                        .cloned()
+                        .ok_or_else(|| Error::config(stage, "producer revision is missing"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if !head.validates_materials(&materials) {
+                return Err(Error::config(
+                    stage,
+                    "producer immutable history does not close",
+                ));
+            }
+        }
         for reference in index
             .active_jobs
             .iter()
@@ -2087,12 +3732,12 @@ pub(crate) fn validate_procedural_feedback_store_image(
                 Error::config(stage, "procedural scope index has a dangling job reference")
             })?;
             if !referenced.insert(reference.job_id.clone())
-                || job.scope_index_key != index.scope_index_key
-                || job.identity.memory_space_id != index.memory_space_id
-                || job.identity.mounted_subject_id != index.mounted_subject_id
-                || job.identity.channel_id != index.channel_id
-                || job.identity.chat_id != index.chat_id
-                || ProceduralFeedbackJobRefV1::from_job(job) != *reference
+                || job.discovery_root_key != index.scope_index_key
+                || job.feedback_source()?.identity.memory_space_id != index.memory_space_id
+                || job.feedback_source()?.identity.mounted_subject_id != index.mounted_subject_id
+                || job.feedback_source()?.identity.channel_id != index.channel_id
+                || job.feedback_source()?.identity.chat_id != index.chat_id
+                || ProceduralFeedbackJobRefV2::from_job(job) != *reference
             {
                 return Err(Error::config(
                     stage,
@@ -2101,6 +3746,14 @@ pub(crate) fn validate_procedural_feedback_store_image(
             }
         }
     }
+    if referenced_producers.len() != producer_heads.len()
+        || referenced_producer_materials.len() != producer_materials.len()
+    {
+        return Err(Error::config(
+            stage,
+            "procedural producer contains an orphan head or material",
+        ));
+    }
     if referenced.len() != jobs.len() {
         return Err(Error::config(
             stage,
@@ -2108,11 +3761,43 @@ pub(crate) fn validate_procedural_feedback_store_image(
         ));
     }
     for job in jobs.values() {
+        validate_reconciliation_checkpoint_in_state(job, state)?;
         let ledger = ledgers.get(&job.job_id);
+        if matches!(
+            job.work,
+            bm_core::memory::ProceduralLearningWorkV1::Reconcile { .. }
+        ) {
+            if ledger.is_some() {
+                return Err(Error::config(
+                    stage,
+                    "reconciliation cannot fabricate a feedback application ledger",
+                ));
+            }
+            if job.status == ProceduralFeedbackJobStatusV1::Succeeded {
+                let key = job
+                    .receipt
+                    .as_ref()
+                    .ok_or_else(|| Error::config(stage, "completion receipt is missing"))?
+                    .mutation_receipt_key();
+                let receipt = mutation_receipts
+                    .iter()
+                    .find(|(candidate, _)| candidate == key)
+                    .map(|(_, value)| value)
+                    .ok_or_else(|| {
+                        Error::config(stage, "reconciliation mutation receipt is missing")
+                    })?;
+                let audit = mutation_audits.get(key).ok_or_else(|| {
+                    Error::config(stage, "reconciliation authoritative audit is missing")
+                })?;
+                validate_reconciliation_completion(job, receipt, audit)?;
+            }
+            continue;
+        }
         match (job.status, ledger) {
             (ProceduralFeedbackJobStatusV1::Succeeded, Some(ledger))
-                if ledger.identity == job.identity
-                    && ledger.learning_evidence_digest == job.learning_evidence_digest => {}
+                if ledger.identity == job.feedback_source()?.identity
+                    && ledger.learning_evidence_digest
+                        == job.feedback_source()?.learning_evidence_digest => {}
             (ProceduralFeedbackJobStatusV1::Succeeded, _) => {
                 return Err(Error::config(
                     stage,
@@ -2131,7 +3816,13 @@ pub(crate) fn validate_procedural_feedback_store_image(
     if ledgers.len()
         != jobs
             .values()
-            .filter(|job| job.status == ProceduralFeedbackJobStatusV1::Succeeded)
+            .filter(|job| {
+                job.status == ProceduralFeedbackJobStatusV1::Succeeded
+                    && matches!(
+                        job.work,
+                        bm_core::memory::ProceduralLearningWorkV1::Feedback { .. }
+                    )
+            })
             .count()
     {
         return Err(Error::config(
@@ -2146,7 +3837,8 @@ pub(crate) fn validate_procedural_feedback_store_image(
         let procedural_receipt = job
             .receipt
             .as_ref()
-            .expect("succeeded job receipt validated by canonical job contract");
+            .expect("succeeded job receipt validated by canonical job contract")
+            .feedback()?;
         if usize::try_from(procedural_receipt.changed_count).ok()
             != Some(ledger.applied_owner_bindings.len())
             || ledger
@@ -2181,56 +3873,7 @@ pub(crate) fn validate_procedural_feedback_store_image(
                     "procedural completion lacks its exact mutation audit",
                 )
             })?;
-        if mutation_audit.identity != mutation_receipt.identity
-            || mutation_audit.intent_digest != mutation_receipt.intent_digest
-            || mutation_audit.effect_plan_digest != mutation_receipt.effect_plan_digest
-            || mutation_audit.transaction_id != mutation_receipt.transaction_id
-            || mutation_audit.effect != mutation_receipt.effect
-            || mutation_audit.changed_count != mutation_receipt.changed_count
-            || mutation_audit.audit_record_id != mutation_receipt.audit_record_id
-            || mutation_audit.committed_at_unix_secs != mutation_receipt.committed_at_unix_secs
-        {
-            return Err(Error::config(
-                stage,
-                "procedural mutation receipt and audit diverged",
-            ));
-        }
-        let expected_identity = MemoryMutationOperationIdentity::new(
-            &procedural_receipt.operation_id,
-            &ledger.identity.memory_space_id,
-            &ledger.identity.mounted_subject_id,
-            mutation_receipt.identity.actor_subject_id(),
-            MemoryMutationOperationKind::ProceduralLearning,
-        )?;
-        if mutation_receipt.intent_digest != procedural_receipt.plan_digest
-            || mutation_receipt.transaction_id != procedural_receipt.transaction_id
-            || mutation_receipt.identity.storage_key() != procedural_receipt.mutation_receipt_key
-            || mutation_receipt.identity != expected_identity
-            || mutation_receipt.identity.operation_kind()
-                != MemoryMutationOperationKind::ProceduralLearning
-            || mutation_receipt.identity.memory_space_id() != ledger.identity.memory_space_id
-            || mutation_receipt.identity.mounted_subject_id() != ledger.identity.mounted_subject_id
-        {
-            return Err(Error::config(
-                stage,
-                "procedural feedback receipt differs from its authoritative mutation receipt",
-            ));
-        }
-        let expected_post_image = digest_serialized(
-            "procedural_feedback_post_image_digest_v1",
-            &(
-                &ledger.application_digest,
-                &procedural_receipt.plan_digest,
-                ProceduralFeedbackJobStatusV1::Succeeded,
-            ),
-            stage,
-        )?;
-        if procedural_receipt.post_image_digest != expected_post_image {
-            return Err(Error::config(
-                stage,
-                "procedural application differs from its committed post-image proof",
-            ));
-        }
+        validate_feedback_application_completion(job, ledger, mutation_receipt, mutation_audit)?;
         for applied_binding in &ledger.applied_owner_bindings {
             let ProceduralAppliedOwnerBindingV1::AgentToolExperience {
                 owner_revision: applied,
@@ -2271,7 +3914,7 @@ pub(crate) fn validate_procedural_feedback_store_image(
                     "applied experience digest differs from retained revision",
                 ));
             }
-            if head.state == bm_core::skills::AgentToolExperienceHeadStateV2::Tombstoned {
+            if head.state == bm_core::skills::AgentToolExperienceHeadStateV3::Tombstoned {
                 if experience_materials.values().any(|material| {
                     material.memory_space_id == head.memory_space_id
                         && material.owning_scope == head.owning_scope
@@ -2303,7 +3946,112 @@ pub(crate) fn validate_procedural_feedback_store_image(
         }
     }
     for owner in &runtime_owners {
+        validate_runtime_usage_store_sources(owner, &jobs, &ledgers, stage)?;
         validate_runtime_promotion_store_sources(owner, state, &jobs, &ledgers, stage)?;
+    }
+    Ok(())
+}
+
+/// Persisted summary is a projection of exact immutable usage contributions,
+/// not an independently writable counter. This applies to every RuntimeSkill
+/// creation source, including task skills that later receive usage feedback.
+fn validate_runtime_usage_store_sources(
+    owner: &bm_core::skills::RuntimeSkillOwnerRecord,
+    jobs: &BTreeMap<String, ProceduralFeedbackJobV2>,
+    ledgers: &BTreeMap<String, ProceduralFeedbackApplicationLedgerV2>,
+    stage: &'static str,
+) -> Result<()> {
+    let summary = &owner.lifecycle.usage_outcome;
+    if !owner.validate_contract().accepted {
+        return Err(Error::config(stage, "invalid runtime usage owner"));
+    }
+    let bm_core::skills::RuntimeSkillOwningScope::Subject { mounted_subject_id } =
+        &owner.owning_scope
+    else {
+        return if *summary == bm_core::skills::RuntimeSkillUsageOutcomeSummary::default() {
+            Ok(())
+        } else {
+            Err(Error::config(
+                stage,
+                "subject feedback cannot grant shared-program usage authority",
+            ))
+        };
+    };
+    let mut contributions = Vec::with_capacity(summary.contributions.len());
+    for reference in &summary.retained_contributions {
+        let ledger = ledgers
+            .get(&reference.source_job_id)
+            .ok_or_else(|| Error::config(stage, "runtime usage application proof is missing"))?;
+        let job = jobs
+            .get(&reference.source_job_id)
+            .ok_or_else(|| Error::config(stage, "runtime usage source job is missing"))?;
+        let contribution = ledger
+            .runtime_skill_contributions
+            .iter()
+            .find(|value| {
+                value
+                    .reference()
+                    .is_ok_and(|candidate| candidate == *reference)
+            })
+            .ok_or_else(|| {
+                Error::config(
+                    stage,
+                    "runtime usage commitment differs from its application",
+                )
+            })?;
+        if job.status != ProceduralFeedbackJobStatusV1::Succeeded
+            || ledger.identity != job.feedback_source()?.identity
+            || ledger.learning_evidence_digest != job.feedback_source()?.learning_evidence_digest
+            || contribution.source != ledger.identity
+            || contribution.locator.owner_revision() >= owner.owner_revision
+            || contribution.observed_at < owner.lifecycle.observed_at
+            || contribution.observed_at > owner.lifecycle.updated_at
+        {
+            return Err(Error::config(
+                stage,
+                "runtime usage source revision, time or authority differs",
+            ));
+        }
+        if !ledger.applied_owner_bindings.iter().any(|binding| matches!(binding,
+            ProceduralAppliedOwnerBindingV1::RuntimeSkill { binding }
+                if binding.owner_ref == owner.owner_ref && binding.owner_revision <= owner.owner_revision)) {
+            return Err(Error::config(stage, "runtime usage was not applied to this exact owner"));
+        }
+        if summary.contributions.contains(reference) {
+            contributions.push(contribution.clone());
+        }
+    }
+    // The reverse edge prevents a resealed owner from erasing its source
+    // directory. Store-open has the full image; mutation closure also reads the
+    // exact retained sources from the owner pre-image, not just its proposal.
+    for ledger in ledgers.values().filter(|ledger| ledger.identity.memory_space_id == owner.memory_space_id
+        && ledger.identity.mounted_subject_id == *mounted_subject_id
+        && ledger.applied_owner_bindings.iter().any(|binding| matches!(binding,
+            ProceduralAppliedOwnerBindingV1::RuntimeSkill { binding }
+                if binding.owner_ref == owner.owner_ref && binding.owner_revision <= owner.owner_revision))) {
+        for contribution in ledger.runtime_skill_contributions.iter().filter(|contribution|
+            contribution.locator.owner_id() == owner.owner_ref.owner_id
+                && contribution.outcome != bm_core::memory::ProceduralExecutionOutcomeV1::NotExecuted) {
+            let reference = contribution.reference().map_err(|_| Error::config(stage, "invalid applied usage reference"))?;
+            if !summary.retained_contributions.contains(&reference) {
+                return Err(Error::config(stage, "runtime usage lost an applied source reference"));
+            }
+        }
+    }
+    let mut expected = bm_core::memory::reduce_runtime_skill_usage_contributions(
+        &owner.memory_space_id,
+        mounted_subject_id,
+        &owner.owner_ref.owner_id,
+        &contributions,
+        summary.contributions.len(),
+    )
+    .map_err(|_| Error::config(stage, "runtime usage contribution closure is invalid"))?;
+    expected.retained_contributions = summary.retained_contributions.clone();
+    if expected != *summary {
+        return Err(Error::config(
+            stage,
+            "runtime usage summary differs from immutable contributions",
+        ));
     }
     Ok(())
 }
@@ -2311,8 +4059,8 @@ pub(crate) fn validate_procedural_feedback_store_image(
 fn validate_runtime_promotion_store_sources(
     owner: &bm_core::skills::RuntimeSkillOwnerRecord,
     state: &BackendTransactionState,
-    jobs: &BTreeMap<String, ProceduralFeedbackJobV1>,
-    ledgers: &BTreeMap<String, ProceduralFeedbackApplicationLedgerV1>,
+    jobs: &BTreeMap<String, ProceduralFeedbackJobV2>,
+    ledgers: &BTreeMap<String, ProceduralFeedbackApplicationLedgerV2>,
     stage: &'static str,
 ) -> Result<()> {
     use bm_core::skills::{
@@ -2360,11 +4108,11 @@ fn validate_runtime_promotion_store_sources(
             )
         })?;
         if job.status != ProceduralFeedbackJobStatusV1::Succeeded
-            || job.learning_evidence_digest != source_ref.source_digest
-            || job.identity.memory_space_id != owner.memory_space_id
-            || job.identity.mounted_subject_id != *mounted_subject_id
-            || ledger.identity != job.identity
-            || ledger.learning_evidence_digest != job.learning_evidence_digest
+            || job.feedback_source()?.learning_evidence_digest != source_ref.source_digest
+            || job.feedback_source()?.identity.memory_space_id != owner.memory_space_id
+            || job.feedback_source()?.identity.mounted_subject_id != *mounted_subject_id
+            || ledger.identity != job.feedback_source()?.identity
+            || ledger.learning_evidence_digest != job.feedback_source()?.learning_evidence_digest
         {
             return Err(Error::config(
                 stage,
@@ -2390,9 +4138,9 @@ fn validate_runtime_promotion_store_sources(
                 )
             })?;
         source_turns.insert((
-            job.identity.channel_id.clone(),
-            job.identity.conversation_id.clone(),
-            job.identity.turn_id.clone(),
+            job.feedback_source()?.identity.channel_id.clone(),
+            job.feedback_source()?.identity.conversation_id.clone(),
+            job.feedback_source()?.identity.turn_id.clone(),
         ));
         for applied in &ledger.applied_owner_bindings {
             if let ProceduralAppliedOwnerBindingV1::RuntimeSkill { binding } = applied {
@@ -2430,7 +4178,7 @@ fn validate_runtime_promotion_store_sources(
             .as_ref()
             .ok_or_else(|| Error::config(stage, "runtime source evidence is missing"))?;
         if !evidence.validate_contract()
-            || evidence.authority == bm_core::memory::ProceduralFeedbackAuthorityV1::ModelInferred
+            || evidence.authority.is_model_inferred()
             || turn.external_content_used
         {
             return Err(Error::config(
@@ -2447,7 +4195,7 @@ fn validate_runtime_promotion_store_sources(
             experience_owner_ref,
             accepted.0.owner_revision,
         )?;
-        let material: AgentToolExperienceRevisionMaterialV2 = decode(
+        let material: AgentToolExperienceRevisionMaterialV3 = decode(
             state
                 .json
                 .get(&(
@@ -2467,23 +4215,13 @@ fn validate_runtime_promotion_store_sources(
             ));
         }
         let actual_execution = evidence.agent_tool_feedback.iter().any(|feedback| {
-            feedback.registry_ref.registry_id == material.registry_id
-                && feedback.registry_ref.scope == material.registry_scope
-                && feedback.tool_id == material.tool_id
-                && feedback.schema_fingerprint == material.schema_fingerprint
-                && feedback.observations.iter().any(|observation| {
-                    observation.task_signature == material.task_signature
-                        && observation.outcome == bm_core::skills::AgentToolOutcome::Succeeded
-                        && !observation.private_content_used
-                        && !observation.external_content
-                        && material.evidence_refs.contains(&observation.observation_id)
-                        && bm_core::skills::agent_tool_observation_matches_transcript(
-                            observation,
-                            &turn,
-                        )
-                        && (owner.owner_revision != 1
-                            || observation.summary.trim() == owner.procedural_content.procedure)
-                })
+            bm_core::skills::agent_tool_method_execution_matches_source(
+                &material, job, &turn, feedback,
+            ) == Ok(true)
+                && (owner.owner_revision != 1
+                    || matches!(&material.body,
+                    bm_core::skills::AgentToolExperienceBodyV1::Method { procedure, .. }
+                        if procedure == &owner.procedural_content.procedure))
         });
         if !actual_execution {
             return Err(Error::config(
@@ -2503,10 +4241,10 @@ fn validate_runtime_promotion_store_sources(
 
 fn required_index(
     platform: &StorePlatform,
-    job: &ProceduralFeedbackJobV1,
+    job: &ProceduralFeedbackJobV2,
     stage: &'static str,
-) -> Result<ProceduralFeedbackScopeIndexV1> {
-    read_scope_index(platform, &job.scope_index_key)?.ok_or_else(|| {
+) -> Result<ProceduralFeedbackScopeIndexV2> {
+    read_scope_index(platform, &job.discovery_root_key)?.ok_or_else(|| {
         Error::config(
             stage,
             "procedural feedback job is missing its exact scope index",
@@ -2515,12 +4253,12 @@ fn required_index(
 }
 
 fn updated_active_index(
-    before: &ProceduralFeedbackScopeIndexV1,
-    before_job: &ProceduralFeedbackJobV1,
-    after_job: &ProceduralFeedbackJobV1,
+    before: &ProceduralFeedbackScopeIndexV2,
+    before_job: &ProceduralFeedbackJobV2,
+    after_job: &ProceduralFeedbackJobV2,
     now_secs: u64,
     stage: &'static str,
-) -> Result<ProceduralFeedbackScopeIndexV1> {
+) -> Result<ProceduralFeedbackScopeIndexV2> {
     let mut after = before.clone();
     let reference = after
         .active_jobs
@@ -2533,7 +4271,7 @@ fn updated_active_index(
             "scope index job revision differs from job authority",
         ));
     }
-    *reference = ProceduralFeedbackJobRefV1::from_job(after_job);
+    *reference = ProceduralFeedbackJobRefV2::from_job(after_job);
     sort_job_refs(&mut after.active_jobs);
     after.index_revision =
         checked_increment(after.index_revision, stage, "scope index revision overflow")?;
@@ -2543,12 +4281,12 @@ fn updated_active_index(
 }
 
 fn moved_to_terminal_index(
-    before: &ProceduralFeedbackScopeIndexV1,
-    before_job: &ProceduralFeedbackJobV1,
-    after_job: &ProceduralFeedbackJobV1,
+    before: &ProceduralFeedbackScopeIndexV2,
+    before_job: &ProceduralFeedbackJobV2,
+    after_job: &ProceduralFeedbackJobV2,
     now_secs: u64,
     stage: &'static str,
-) -> Result<ProceduralFeedbackScopeIndexV1> {
+) -> Result<ProceduralFeedbackScopeIndexV2> {
     if before.recent_terminal_jobs.len() >= MAX_PROCEDURAL_FEEDBACK_RECENT_TERMINAL_JOBS {
         return Err(Error::config(
             stage,
@@ -2572,7 +4310,7 @@ fn moved_to_terminal_index(
         .retain(|reference| reference.job_id != before_job.job_id);
     after
         .recent_terminal_jobs
-        .push(ProceduralFeedbackJobRefV1::from_job(after_job));
+        .push(ProceduralFeedbackJobRefV2::from_job(after_job));
     sort_job_refs(&mut after.recent_terminal_jobs);
     after.index_revision =
         checked_increment(after.index_revision, stage, "scope index revision overflow")?;
@@ -2582,15 +4320,206 @@ fn moved_to_terminal_index(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn commit_job_state_transition(
+    platform: &StorePlatform,
+    scope: StoreEventScope,
+    runtime_budget: &RuntimeBudgetReport,
+    operation: &str,
+    before_job: &ProceduralFeedbackJobV2,
+    after_job: &ProceduralFeedbackJobV2,
+    now_secs: u64,
+) -> Result<()> {
+    use bm_core::memory::ProceduralLearningWorkV1;
+    let stage = "procedural_feedback_transition";
+    match &before_job.work {
+        ProceduralLearningWorkV1::Feedback { .. } => {
+            let before_index = required_index(platform, before_job, stage)?;
+            let after_index = if after_job.status.is_terminal() {
+                moved_to_terminal_index(&before_index, before_job, after_job, now_secs, stage)?
+            } else {
+                updated_active_index(&before_index, before_job, after_job, now_secs, stage)?
+            };
+            commit_job_and_index(
+                platform,
+                scope,
+                runtime_budget,
+                operation,
+                before_job,
+                after_job,
+                &before_index,
+                &after_index,
+                now_secs,
+            )
+        }
+        ProceduralLearningWorkV1::Reconcile { source } => {
+            let before_root =
+                required_subject_root(platform, &before_job.discovery_root_key, stage)?;
+            if before_root.retained_work.last() != Some(&source.reference()?) {
+                return Err(Error::conflict(
+                    stage,
+                    "reconciliation was superseded by a newer epoch",
+                ));
+            }
+            let mut mutations = vec![put_json(
+                PROCEDURAL_FEEDBACK_JOB_NAMESPACE,
+                &after_job.job_id,
+                encode(after_job, stage)?,
+            )];
+            if after_job.status.is_terminal()
+                || after_job.status == ProceduralFeedbackJobStatusV1::BlockedCapacity
+            {
+                let reason = reconciliation_block_reason(after_job);
+                let after_root =
+                    before_root.block(source, reason, MAX_PROCEDURAL_SUBJECT_SCOPES)?;
+                mutations.push(put_json(
+                    PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE,
+                    &after_root.physical_key,
+                    encode(&after_root, stage)?,
+                ));
+            }
+            let conditions = vec![
+                exact(
+                    PROCEDURAL_FEEDBACK_JOB_NAMESPACE,
+                    &before_job.job_id,
+                    before_job,
+                    stage,
+                )?,
+                exact(
+                    PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE,
+                    &before_root.physical_key,
+                    &before_root,
+                    stage,
+                )?,
+            ];
+            platform.commit_governed_memory_transaction_with_runtime_budget_at(
+                StoreMutationBatch {
+                    transaction_id: format!(
+                        "{}_{}_{}",
+                        operation.replace('.', "_"),
+                        after_job.job_id,
+                        after_job.state_revision
+                    ),
+                    operation: operation.into(),
+                    scope,
+                    mutations,
+                },
+                &conditions,
+                runtime_budget,
+                now_secs,
+            )?;
+            Ok(())
+        }
+    }
+}
+
+fn required_subject_root(
+    platform: &StorePlatform,
+    key: &str,
+    stage: &'static str,
+) -> Result<ProceduralSubjectValidityRootV1> {
+    let doc = platform
+        .read_json_docs_by_keys(PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE, &[key.to_string()])?
+        .pop()
+        .ok_or_else(|| Error::config(stage, "procedural subject validity root is missing"))?;
+    let root: ProceduralSubjectValidityRootV1 = decode(doc.value, stage)?;
+    root.validate(MAX_PROCEDURAL_SUBJECT_SCOPES)?;
+    if root.physical_key != key {
+        return Err(Error::config(
+            stage,
+            "procedural subject validity physical key differs",
+        ));
+    }
+    Ok(root)
+}
+
+/// Store-authoritative state transition, not a caller-provided capability. Only
+/// the exact current reconciliation job may block or complete the same epoch.
+pub(crate) fn permits_reconciliation_root_transition(
+    mutation: &super::StoreEngineMutation,
+    before: &BackendTransactionState,
+    after: &BackendTransactionState,
+    preconditions: &[StoreJsonPrecondition],
+) -> Result<bool> {
+    use bm_core::memory::{ProceduralLearningReceiptV1, ProceduralLearningWorkV1};
+    let stage = "procedural_reconciliation_transition";
+    let super::StoreEngineMutation::PutJson {
+        namespace,
+        key,
+        value,
+    } = mutation
+    else {
+        return Ok(false);
+    };
+    if namespace != PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE {
+        return Ok(false);
+    }
+    let address = (namespace.clone(), key.clone());
+    let Some(before_value) = before.json.get(&address) else {
+        return Ok(false);
+    };
+    let before_root: ProceduralSubjectValidityRootV1 = decode(before_value.clone(), stage)?;
+    let after_root: ProceduralSubjectValidityRootV1 = decode(value.clone(), stage)?;
+    let Some(reference) = before_root.retained_work.last() else {
+        return Ok(false);
+    };
+    let job_address = (
+        PROCEDURAL_FEEDBACK_JOB_NAMESPACE.to_owned(),
+        reference.job_id.clone(),
+    );
+    let Some(before_job_value) = before.json.get(&job_address) else {
+        return Ok(false);
+    };
+    let Some(after_job_value) = after.json.get(&job_address) else {
+        return Ok(false);
+    };
+    let before_job: ProceduralFeedbackJobV2 = decode(before_job_value.clone(), stage)?;
+    let after_job: ProceduralFeedbackJobV2 = decode(after_job_value.clone(), stage)?;
+    let ProceduralLearningWorkV1::Reconcile { source } = &after_job.work else {
+        return Ok(false);
+    };
+    if before_job.work != after_job.work || source.reference()? != *reference
+        || before_job.state_revision.checked_add(1) != Some(after_job.state_revision)
+        || ![(&address, before_value), (&job_address, before_job_value)].into_iter().all(|(address, value)|
+            preconditions.iter().any(|condition| matches!(condition, StoreJsonPrecondition::Exact { namespace, key, value: expected }
+                if namespace == &address.0 && key == &address.1 && expected == value))) {
+        return Ok(false);
+    }
+    after_job.validate()?;
+    let expected = match (&before_job.status, &after_job.status, &after_job.receipt) {
+        (
+            ProceduralFeedbackJobStatusV1::Leased,
+            ProceduralFeedbackJobStatusV1::Succeeded,
+            Some(ProceduralLearningReceiptV1::Reconcile { receipt }),
+        ) => before_root.complete(
+            source,
+            receipt.canonical_digest()?,
+            MAX_PROCEDURAL_SUBJECT_SCOPES,
+        )?,
+        (
+            ProceduralFeedbackJobStatusV1::Leased,
+            ProceduralFeedbackJobStatusV1::DeadLetter
+            | ProceduralFeedbackJobStatusV1::RepairRequired
+            | ProceduralFeedbackJobStatusV1::BlockedCapacity,
+            None,
+        ) => {
+            let reason = reconciliation_block_reason(&after_job);
+            before_root.block(source, reason, MAX_PROCEDURAL_SUBJECT_SCOPES)?
+        }
+        _ => return Ok(false),
+    };
+    Ok(expected == after_root)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn commit_job_and_index(
     platform: &StorePlatform,
     scope: StoreEventScope,
     runtime_budget: &RuntimeBudgetReport,
     operation: &str,
-    before_job: &ProceduralFeedbackJobV1,
-    after_job: &ProceduralFeedbackJobV1,
-    before_index: &ProceduralFeedbackScopeIndexV1,
-    after_index: &ProceduralFeedbackScopeIndexV1,
+    before_job: &ProceduralFeedbackJobV2,
+    after_job: &ProceduralFeedbackJobV2,
+    before_index: &ProceduralFeedbackScopeIndexV2,
+    after_index: &ProceduralFeedbackScopeIndexV2,
     now_secs: u64,
 ) -> Result<()> {
     let preconditions = vec![
@@ -2602,7 +4531,7 @@ fn commit_job_and_index(
         )?,
         exact(
             PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE,
-            &before_job.scope_index_key,
+            &before_job.discovery_root_key,
             before_index,
             "procedural_feedback_transition",
         )?,
@@ -2624,7 +4553,7 @@ fn commit_job_and_index(
             ),
             put_json(
                 PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE,
-                &after_job.scope_index_key,
+                &after_job.discovery_root_key,
                 encode(after_index, "procedural_feedback_transition")?,
             ),
         ],
@@ -2640,13 +4569,14 @@ fn commit_job_and_index(
 
 fn validate_scope(
     scope: &StoreEventScope,
-    job: &ProceduralFeedbackJobV1,
+    job: &ProceduralFeedbackJobV2,
     stage: &'static str,
 ) -> Result<()> {
-    if scope.memory_space_id != job.identity.memory_space_id
-        || scope.subject_id != job.identity.mounted_subject_id
-        || scope.channel != job.identity.channel_id
-        || scope.chat_id != job.identity.chat_id
+    let subject = job.work.subject_scope();
+    if scope.memory_space_id != subject.memory_space_id
+        || scope.subject_id != subject.mounted_subject_id
+        || matches!(&job.work, bm_core::memory::ProceduralLearningWorkV1::Feedback { source }
+            if scope.channel != source.identity.channel_id || scope.chat_id != source.identity.chat_id)
     {
         return Err(Error::invalid_input(
             stage,
@@ -2657,7 +4587,7 @@ fn validate_scope(
 }
 
 fn validate_active_lease(
-    job: &ProceduralFeedbackJobV1,
+    job: &ProceduralFeedbackJobV2,
     lease_owner: &str,
     lease_epoch: u64,
     now_secs: u64,
@@ -2676,18 +4606,14 @@ fn validate_active_lease(
     Ok(())
 }
 
-fn same_intent(left: &ProceduralFeedbackJobV1, right: &ProceduralFeedbackJobV1) -> bool {
-    left.identity == right.identity
-        && left.transcript_sequence == right.transcript_sequence
-        && left.transcript_digest == right.transcript_digest
-        && left.learning_evidence_digest == right.learning_evidence_digest
-        && left.submitted_count == right.submitted_count
+fn same_intent(left: &ProceduralFeedbackJobV2, right: &ProceduralFeedbackJobV2) -> bool {
+    left.work == right.work
 }
 
-fn sort_job_refs(values: &mut [ProceduralFeedbackJobRefV1]) {
+fn sort_job_refs(values: &mut [ProceduralFeedbackJobRefV2]) {
     values.sort_by(|left, right| {
-        left.transcript_sequence
-            .cmp(&right.transcript_sequence)
+        left.created_at
+            .cmp(&right.created_at)
             .then_with(|| left.job_id.cmp(&right.job_id))
     });
 }
@@ -2732,7 +4658,7 @@ fn put_json(namespace: &str, key: &str, value: serde_json::Value) -> StoreMutati
         key: key.to_string(),
         value,
         event_kind: MemoryStoreEventKind::MemoryWrite,
-        plane: "procedural_feedback".to_string(),
+        plane: EVENT_PLANE.to_string(),
         record_key: key.to_string(),
     }
 }
@@ -2748,7 +4674,11 @@ fn decode<T: serde::de::DeserializeOwned>(
     serde_json::from_value(value).map_err(|error| Error::config(stage, error.to_string()))
 }
 
-fn digest_serialized<T: Serialize>(domain: &str, value: &T, stage: &'static str) -> Result<String> {
+pub(crate) fn digest_serialized<T: Serialize>(
+    domain: &str,
+    value: &T,
+    stage: &'static str,
+) -> Result<String> {
     let bytes =
         serde_json::to_vec(value).map_err(|error| Error::config(stage, error.to_string()))?;
     let mut hasher = Sha256::new();
@@ -2767,12 +4697,14 @@ fn procedural_feedback_plan_digest(
     experience_preconditions: &[StoreJsonPrecondition],
     applied_owner_bindings: &[ProceduralAppliedOwnerBindingV1],
     accepted_count: u32,
+    partially_accepted_count: u32,
+    method_dispositions: &[bm_core::memory::ProceduralFeedbackMethodDispositionV1],
     deferred_count: u32,
     rejected_count: u32,
     changed_count: u32,
 ) -> Result<String> {
     digest_serialized(
-        "procedural_feedback_plan_digest_v1",
+        "procedural_feedback_plan_digest_v2",
         &(
             job_id,
             leased_state_revision,
@@ -2780,6 +4712,8 @@ fn procedural_feedback_plan_digest(
             experience_preconditions,
             applied_owner_bindings,
             accepted_count,
+            partially_accepted_count,
+            method_dispositions,
             deferred_count,
             rejected_count,
             changed_count,
@@ -2800,8 +4734,12 @@ mod tests {
     use crate::ProfileId;
     use bm_core::memory::ConversationTranscriptStore;
     use bm_core::memory::ProceduralFeedbackIdentityV1;
+    use bm_core::Platform;
 
-    fn source_record(now_secs: u64) -> bm_core::memory::TranscriptTurnRecord {
+    fn source_record(
+        platform: &StorePlatform,
+        now_secs: u64,
+    ) -> bm_core::memory::TranscriptTurnRecord {
         use bm_core::memory::*;
         let delta = CanonicalTurnDelta {
             turn_id: "turn:test".to_string(),
@@ -2828,6 +4766,7 @@ mod tests {
             assistant_message: Some(TranscriptInputMessage::assistant("synthetic result")),
             tool_observations: vec![ToolObservationDigest {
                 observation_id: "observation:test".into(),
+                call_id: "call:test".into(),
                 tool_name: "tool:test".into(),
                 summary: "synthetic completed operation".into(),
                 external_content: false,
@@ -2835,7 +4774,60 @@ mod tests {
             external_content_used: false,
             candidate_ids: vec![],
         };
-        let mut evidence = PostTurnLearningEvidenceV1 {
+        let producer_scope = ProceduralProducerScopeV1 {
+            memory_space_id: "space:test".into(),
+            mounted_subject_id: "subject:test".into(),
+            channel_id: "channel:test".into(),
+            chat_id: "chat:test".into(),
+        };
+        let tool = ProceduralProducerToolV1 {
+            registry_ref: bm_core::skills::AgentToolRegistryRef {
+                registry_id: "registry:test".into(),
+                fingerprint: "registry-fingerprint:test".into(),
+                scope: bm_core::skills::AgentToolRegistryScope::Global,
+            },
+            tool_id: "tool:test".into(),
+            schema_fingerprint: "schema:test".into(),
+        };
+        let budget = platform.current_runtime_budget(now_secs);
+        platform
+            .prepare_procedural_selection_authority("space:test", now_secs, &budget)
+            .unwrap();
+        let (binding, _) = control_procedural_producer(
+            platform,
+            scope(),
+            &budget,
+            MemoryMutationOperationIdentity::new(
+                "register:test",
+                "space:test",
+                "subject:test",
+                "governor:test",
+                MemoryMutationOperationKind::ProceduralProducerControl,
+            )
+            .unwrap(),
+            ProceduralProducerSpecV1 {
+                binding_id: "source:test".into(),
+                scope: producer_scope,
+                principal: ProceduralProducerPrincipalV1::LocalCapability {
+                    capability_id: "executor:test".into(),
+                },
+                source_authority: ProceduralProducerSourceAuthorityV1::RuntimeObservation,
+                claims: ProceduralProducerClaimsV1 {
+                    execution_facts: true,
+                    method_declarations: false,
+                    usage_feedback: false,
+                    source_classifications: vec![ProceduralSourceSensitivity::NonPrivate],
+                },
+                tools: vec![tool.clone()],
+                source_config_ref: "synthetic:test".into(),
+            },
+            ProceduralProducerStateV1::Active,
+            None,
+            now_secs,
+            &[],
+        )
+        .unwrap();
+        let mut evidence = PostTurnLearningEvidenceV2 {
             schema_version: POST_TURN_LEARNING_EVIDENCE_SCHEMA_VERSION,
             memory_space_id: "space:test".to_string(),
             mounted_subject_id: delta.subject.clone(),
@@ -2847,48 +4839,63 @@ mod tests {
             runtime_skill_feedback: vec![],
             agent_skill_feedback: vec![],
             task_learning_feedback: vec![],
-            agent_tool_feedback: vec![AgentToolUsageFeedbackV2 {
-                registry_ref: bm_core::skills::AgentToolRegistryRef {
-                    registry_id: "registry:test".into(),
-                    fingerprint: "registry-fingerprint:test".into(),
-                    scope: bm_core::skills::AgentToolRegistryScope::Global,
-                },
+            agent_tool_feedback: vec![AdmittedAgentToolEvidenceV1 {
+                registry_ref: tool.registry_ref,
                 tool_id: "tool:test".into(),
                 schema_fingerprint: "schema:test".into(),
-                observations: vec![bm_core::skills::AgentToolObservationDigest {
+                execution_facts: vec![ToolExecutionFactV1 {
                     observation_id: "observation:test".into(),
-                    registry_id: "registry:test".into(),
-                    tool_id: "tool:test".into(),
-                    schema_fingerprint: "schema:test".into(),
-                    call_id: Some("call:test".into()),
-                    task_signature: "task:test".into(),
-                    summary: "synthetic completed operation".into(),
-                    outcome: bm_core::skills::AgentToolOutcome::Succeeded,
-                    error_code: None,
-                    external_content: false,
-                    private_content_used: false,
-                    permission_tags: vec![],
-                    risk_tags: vec![],
+                    call_id: "call:test".into(),
+                    outcome: ToolExecutionOutcome::Succeeded,
+                    source_sensitivity: ProceduralSourceSensitivity::NonPrivate,
                     started_at: Some(now_secs),
                     completed_at: Some(now_secs),
                 }],
-                outcome: ProceduralExecutionOutcomeV1::Succeeded,
-                user_visible_result_summary: None,
-                operator_note: None,
+                method_evidence: vec![],
+                submitted_method_count: 0,
+                rejected_methods: vec![],
             }],
-            authority: ProceduralFeedbackAuthorityV1::HostRuntimeObservation,
+            authority: ProceduralFeedbackAuthorityV2::Producer {
+                producer_revision: binding.revision_ref().unwrap(),
+                source_authority: binding.spec.source_authority.clone(),
+                confirmation: None,
+            },
             learning_evidence_digest: String::new(),
         };
         evidence.learning_evidence_digest = evidence.canonical_digest().expect("evidence digest");
-        TranscriptTurnRecord::from_delta_with_learning_evidence(
-            &ConversationKey::from_delta("space:test", &delta).expect("key"),
-            1,
+        let head = read_verified_procedural_producer(platform, &binding.revision_ref().unwrap())
+            .unwrap()
+            .head;
+        let proof = crate::learning::ProceduralIntakeAuthorization {
+            store_authority_digest: platform.learning_store_authority_digest(),
+            current_head: head,
+            evidence: evidence.clone(),
+            store_incarnation: platform.procedural_store_incarnation("space:test").unwrap(),
+            source_preconditions: vec![],
+        };
+        plan_canonical_turn_delta_with_transcript(
+            platform.session_store().as_ref(),
+            platform,
+            "space:test",
             &delta,
-            vec![],
-            Some(evidence),
-            now_secs,
+            CanonicalTurnTranscriptCommitOptions {
+                host_refs: vec![],
+                learning_evidence: Some(evidence),
+                conversation_alias: None,
+                now_secs,
+            },
         )
-        .expect("source record")
+        .unwrap()
+        .commit_with(|intent| platform.append_authorized_canonical_turn(intent, &proof))
+        .unwrap();
+        platform
+            .get_turn(
+                &ConversationKey::from_delta("space:test", &delta).unwrap(),
+                "subject:test",
+                &delta.turn_id,
+            )
+            .unwrap()
+            .unwrap()
     }
 
     fn scope() -> StoreEventScope {
@@ -2909,7 +4916,7 @@ mod tests {
             "turn:test",
         )
         .unwrap();
-        let job = ProceduralFeedbackJobV1::pending(
+        let job = ProceduralFeedbackJobV2::pending(
             identity,
             1,
             format!("sha256:{}", "a".repeat(64)),
@@ -2919,9 +4926,11 @@ mod tests {
             100,
         )
         .unwrap();
-        let empty = ProceduralFeedbackApplicationLedgerV1::build(&job, vec![], 101).unwrap();
+        let empty =
+            ProceduralFeedbackApplicationLedgerV2::build(&job, vec![], vec![], vec![], 1, 101)
+                .unwrap();
         assert!(validate_new_applied_post_images(&empty, &[]).is_ok());
-        let claimed = ProceduralFeedbackApplicationLedgerV1::build(
+        let claimed = ProceduralFeedbackApplicationLedgerV2::build(
             &job,
             vec![ProceduralAppliedOwnerBindingV1::AgentToolExperience {
                 owner_revision: bm_core::memory::GovernedOwnerRevisionRef::try_new(
@@ -2934,6 +4943,9 @@ mod tests {
                 .unwrap(),
                 content_digest: format!("sha256:{}", "d".repeat(64)),
             }],
+            vec![],
+            vec![],
+            1,
             101,
         )
         .unwrap();
@@ -2958,8 +4970,7 @@ mod tests {
         )
         .expect("Store");
         let now_secs = super::super::platform::current_unix_secs();
-        let record = source_record(now_secs);
-        platform.append_turn(&record).expect("canonical source");
+        let record = source_record(&platform, now_secs);
         for (offset, transition) in [
             (1, TranscriptLifecycleTransition::Mask),
             (3, TranscriptLifecycleTransition::DeleteRaw),
@@ -3005,8 +5016,7 @@ mod tests {
         .expect("Store");
         let now_secs = super::super::platform::current_unix_secs();
         let budget = platform.current_runtime_budget(now_secs);
-        let record = source_record(now_secs);
-        platform.append_turn(&record).expect("canonical source");
+        let record = source_record(&platform, now_secs);
         let identity = ProceduralFeedbackIdentityV1::new(
             "space:test",
             "subject:test",
@@ -3016,7 +5026,7 @@ mod tests {
             "turn:test",
         )
         .expect("identity");
-        let job = ProceduralFeedbackJobV1::pending(
+        let job = ProceduralFeedbackJobV2::pending(
             identity.clone(),
             record.sequence,
             bm_core::memory::post_turn_governance_transcript_digest(&record).expect("digest"),
@@ -3080,8 +5090,7 @@ mod tests {
         .expect("Store");
         let now_secs = super::super::platform::current_unix_secs();
         let budget = platform.current_runtime_budget(now_secs);
-        let record = source_record(now_secs);
-        platform.append_turn(&record).expect("canonical source");
+        let record = source_record(&platform, now_secs);
         let identity = ProceduralFeedbackIdentityV1::new(
             "space:test",
             "subject:test",
@@ -3091,7 +5100,7 @@ mod tests {
             "turn:test",
         )
         .expect("identity");
-        let job = ProceduralFeedbackJobV1::pending(
+        let job = ProceduralFeedbackJobV2::pending(
             identity.clone(),
             1,
             bm_core::memory::post_turn_governance_transcript_digest(&record)
@@ -3128,7 +5137,7 @@ mod tests {
             now_secs,
         )
         .expect("claim");
-        let input = ProceduralFeedbackCompletionInput {
+        let mut input = ProceduralFeedbackCompletionInput {
             job_id: job.job_id,
             lease_owner: "worker:test".to_string(),
             lease_epoch: claimed.lease_epoch,
@@ -3140,13 +5149,33 @@ mod tests {
                 .read_precondition(&platform)
                 .expect("source fence")],
             applied_owner_bindings: Vec::new(),
-            accepted_count: 0,
-            deferred_count: 1,
+            // The canonical execution fact is accepted in the durable ledger;
+            // it does not invent an applicable method or an owner mutation.
+            accepted_count: 1,
+            partially_accepted_count: 0,
+            method_dispositions: Vec::new(),
+            deferred_count: 0,
             rejected_count: 0,
             changed_count: 0,
             reason_digest: format!("sha256:{}", "c".repeat(64)),
             completed_at: now_secs + 1,
         };
+        let bm_core::memory::ProceduralFeedbackAuthorityV2::Producer {
+            producer_revision, ..
+        } = &record.learning_evidence.as_ref().unwrap().authority
+        else {
+            unreachable!()
+        };
+        let producer = read_verified_procedural_producer(&platform, producer_revision).unwrap();
+        input.experience_preconditions.push(
+            exact(
+                super::super::schema::PROCEDURAL_PRODUCER_HEAD_NAMESPACE,
+                &producer.head.binding_key,
+                &producer.head,
+                "synthetic_completion",
+            )
+            .unwrap(),
+        );
         let mut missing_fence = input.clone();
         missing_fence.experience_preconditions.clear();
         let before_missing_fence = platform

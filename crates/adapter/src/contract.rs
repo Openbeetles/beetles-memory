@@ -807,7 +807,7 @@ impl AdapterCommand {
 #[derive(Serialize)]
 struct AdapterTurnFinalizeFingerprint<'a> {
     turn: &'a bm_sdk::CanonicalTurnDelta,
-    learning: &'a bm_sdk::PostTurnLearningInputV1,
+    learning: &'a bm_sdk::PostTurnLearningInputV2,
     pressure: bm_sdk::PressureLevel,
     mode_input: bm_sdk::RuntimeLifecycleModeInput,
 }

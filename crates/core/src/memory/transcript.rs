@@ -14,7 +14,7 @@ use crate::error::{Error, Result};
 use super::{
     synthesize_session_message_id, CanonicalTurnDelta, CommittedSessionMessage,
     MemoryEvidenceAuthority, MemoryTurnDeliveryStatus, MemoryTurnSource,
-    PostTurnLearningEvidenceV1, SessionMessage, SessionTurnCommitReport, SubjectId,
+    PostTurnLearningEvidenceV2, SessionMessage, SessionTurnCommitReport, SubjectId,
     ToolObservationDigest, TranscriptInputMessage, MAX_SESSION_MESSAGE_LEN,
 };
 use crate::util::{collect_retrieval_terms, is_cjk, normalize_retrieval_text};
@@ -703,7 +703,7 @@ pub struct TranscriptTurnRecord {
     pub tool_observations: Vec<ToolObservationDigest>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub host_refs: Vec<HostOpaqueRef>,
-    pub learning_evidence: Option<PostTurnLearningEvidenceV1>,
+    pub learning_evidence: Option<PostTurnLearningEvidenceV2>,
     pub external_content_used: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidate_ids: Vec<String>,
@@ -716,7 +716,7 @@ pub struct TranscriptTurnRecord {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct TranscriptTurnRecordAttachments {
     pub host_refs: Vec<HostOpaqueRef>,
-    pub learning_evidence: Option<PostTurnLearningEvidenceV1>,
+    pub learning_evidence: Option<PostTurnLearningEvidenceV2>,
 }
 
 impl TranscriptTurnRecord {
@@ -735,7 +735,7 @@ impl TranscriptTurnRecord {
         sequence: u64,
         delta: &CanonicalTurnDelta,
         host_refs: Vec<HostOpaqueRef>,
-        learning_evidence: Option<PostTurnLearningEvidenceV1>,
+        learning_evidence: Option<PostTurnLearningEvidenceV2>,
         now_secs: u64,
     ) -> Result<Self> {
         validate_key_matches_delta(key, delta)?;
@@ -862,6 +862,7 @@ impl TranscriptTurnRecord {
     }
 
     pub fn validate_canonical_intake(&self) -> Result<()> {
+        super::validate_tool_observation_identities(&self.tool_observations)?;
         if !canonical_sha256_digest(&self.canonical_turn_digest)
             || self.learning_evidence.as_ref().is_some_and(|evidence| {
                 evidence.canonical_turn_digest != self.canonical_turn_digest
@@ -880,6 +881,11 @@ impl TranscriptTurnRecord {
         transition: TranscriptLifecycleTransition,
         updated_at: u64,
     ) {
+        // Raw erasure is a terminal privacy decision, not a presentation state
+        // that archive, mask or restore may replace.
+        if self.lifecycle_state == TranscriptLifecycleState::RawDeleted {
+            return;
+        }
         let before = self.clone();
         match transition {
             TranscriptLifecycleTransition::Archive => {
@@ -3503,6 +3509,7 @@ fn collect_redaction_reasons(
 }
 
 fn validate_key_matches_delta(key: &ConversationKey, delta: &CanonicalTurnDelta) -> Result<()> {
+    super::validate_tool_observation_identities(&delta.tool_observations)?;
     if key.channel_id != delta.conversation.channel.trim() {
         return Err(Error::config(
             "transcript_turn_record",

@@ -86,10 +86,11 @@ pub struct RuntimeSkillSummary {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeSkillListReport {
-    pub total: usize,
-    pub active: usize,
-    pub disabled: usize,
-    pub runtime_skills: usize,
+    pub read_availability: bm_core::memory::ProceduralLearningReadAvailabilityV1,
+    pub total: Option<usize>,
+    pub active: Option<usize>,
+    pub disabled: Option<usize>,
+    pub runtime_skills: Option<usize>,
     pub skills: Vec<RuntimeSkillSummary>,
 }
 
@@ -103,6 +104,7 @@ pub struct RuntimeSkillDetailReport {
     pub summary: RuntimeSkillSummary,
     pub summary_text: String,
     pub procedure_text: String,
+    /// JSON for the authorized canonical method content only, never a raw Store record.
     pub raw_content: String,
     pub citations: Vec<String>,
     pub source_chat_id: Option<String>,
@@ -272,12 +274,16 @@ pub type SubjectSoulSdkResult<T> = std::result::Result<T, SubjectSoulSdkError>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProceduralLearningSdkOperation {
+    ProducerControl,
+    IssueSubmissionCapability,
     WriteIntent,
     Project,
     FinalizeTurn,
+    ApplyFeedback,
     ReadExperience,
     MutateExperience,
     Reconcile,
+    ResumeReconciliation,
     Wake,
     Status,
     Archive,
@@ -294,7 +300,11 @@ pub enum ProceduralLearningErrorKeyV1 {
     ReceiptInvalid,
     EvidenceConflict,
     ConfirmationAuthorityInvalid,
+    ProducerAuthorityRequired,
+    ProducerAuthorityDenied,
     TransitionRequiresGovernance,
+    BudgetExceeded,
+    StoreUnavailable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -328,6 +338,131 @@ impl std::fmt::Display for ProceduralLearningSdkError {
 }
 
 impl std::error::Error for ProceduralLearningSdkError {}
+
+impl ProceduralLearningSdkError {
+    /// The procedural public boundary retains classifications, never arbitrary
+    /// owner error text, physical locators, or a private source error chain.
+    pub(crate) fn from_owner_error(
+        operation: ProceduralLearningSdkOperation,
+        error: &bm_core::Error,
+    ) -> Self {
+        use bm_core::Error;
+        use ProceduralLearningErrorKeyV1 as Key;
+        use ProceduralLearningSdkErrorDisposition as Disposition;
+        let classify_nested = |source: &(dyn std::error::Error + Send + Sync + 'static)| {
+            if let Some(typed) = source.downcast_ref::<Self>() {
+                return Some(Self {
+                    operation,
+                    ..typed.clone()
+                });
+            }
+            if let Some(nested) = source.downcast_ref::<Error>() {
+                return Some(Self::from_owner_error(operation, nested));
+            }
+            if source.is::<bm_core::RuntimeBudgetReadmissionRequired>() {
+                return Some(Self {
+                    operation,
+                    key: Key::StoreUnavailable,
+                    disposition: Disposition::StoreCommitRejected,
+                });
+            }
+            if source.is::<serde_json::Error>() {
+                return Some(Self {
+                    operation,
+                    key: Key::RepairRequired,
+                    disposition: Disposition::RepairRequired,
+                });
+            }
+            source.downcast_ref::<std::io::Error>().map(|io| Self {
+                operation,
+                key: if io.kind() == std::io::ErrorKind::InvalidData {
+                    Key::RepairRequired
+                } else {
+                    Key::StoreUnavailable
+                },
+                disposition: if io.kind() == std::io::ErrorKind::InvalidData {
+                    Disposition::RepairRequired
+                } else {
+                    Disposition::StoreCommitRejected
+                },
+            })
+        };
+        let (key, disposition) = match error {
+            Error::Other { source, .. } => {
+                if let Some(typed) = classify_nested(source.as_ref()) {
+                    return typed;
+                }
+                (Key::RepairRequired, Disposition::RepairRequired)
+            }
+            Error::Storage { source, .. } | Error::Nvs { source, .. } => {
+                if let Some(typed) = source
+                    .as_ref()
+                    .and_then(|source| classify_nested(source.as_ref()))
+                {
+                    return typed;
+                }
+                (Key::StoreUnavailable, Disposition::StoreCommitRejected)
+            }
+            Error::Io { source, .. } if source.kind() == std::io::ErrorKind::InvalidData => {
+                (Key::RepairRequired, Disposition::RepairRequired)
+            }
+            Error::Io { .. } | Error::Esp { .. } | Error::Http { .. } => {
+                (Key::StoreUnavailable, Disposition::StoreCommitRejected)
+            }
+            Error::Conflict {
+                stage: "procedural_producer_authority",
+                ..
+            } => (Key::ProducerAuthorityDenied, Disposition::AuthorityRejected),
+            Error::Conflict { stage, .. }
+                if matches!(
+                    *stage,
+                    "procedural_feedback_evidence"
+                        | "procedural_feedback_completion"
+                        | "procedural_feedback_store_closure"
+                        | "agent_tool_experience_store_closure"
+                ) =>
+            {
+                (Key::RepairRequired, Disposition::RepairRequired)
+            }
+            Error::Conflict { .. } => (Key::EvidenceConflict, Disposition::ExpectedStateConflict),
+            Error::Config {
+                stage: "procedural_feedback_registry_unavailable",
+                ..
+            } => (Key::CapabilityUnavailable, Disposition::RegistryRejected),
+            Error::Config {
+                stage: "store_transaction_busy",
+                ..
+            } => (Key::StoreUnavailable, Disposition::StoreCommitRejected),
+            Error::Config { stage, .. }
+                if matches!(
+                    *stage,
+                    "store_budget_exceeded"
+                        | "store_consistent_read_budget_exceeded"
+                        | "memory_write_transaction_budget"
+                        | "agent_tool_experience_store_budget"
+                        | "procedural_feedback_store_budget"
+                ) =>
+            {
+                (Key::BudgetExceeded, Disposition::CapacityRejected)
+            }
+            Error::Config { .. } | Error::InvalidInput { .. } | Error::NotFound { .. } => {
+                (Key::RepairRequired, Disposition::RepairRequired)
+            }
+        };
+        Self {
+            operation,
+            key,
+            disposition,
+        }
+    }
+
+    pub(crate) fn into_core_error(self) -> bm_core::Error {
+        bm_core::Error::Other {
+            stage: "post_turn_learning_evidence",
+            source: Box::new(self),
+        }
+    }
+}
 
 pub type ProceduralLearningSdkResult<T> = std::result::Result<T, ProceduralLearningSdkError>;
 
@@ -1515,7 +1650,7 @@ pub struct MemoryMaintenanceReport {
 #[derive(Clone, Debug)]
 pub struct MemoryTurnFinalizeRequest {
     pub turn: CanonicalTurnDelta,
-    pub learning: bm_core::memory::PostTurnLearningInputV1,
+    pub learning: bm_core::memory::PostTurnLearningInputV2,
     pub pressure: crate::PressureLevel,
     pub mode_input: RuntimeLifecycleModeInput,
 }
@@ -2477,6 +2612,25 @@ pub struct MemorySpaceImportRequest {
     pub expected_private_material_policy: MemorySpacePrivateMaterialPolicy,
     pub archive: MemorySpaceArchive,
 }
+
+/// A disclosed archive cannot replace local learning authority or reverse a
+/// terminal transcript privacy decision. No source identity or body is exposed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemorySpaceImportConflict {
+    ProtectedTranscriptSourceMissing,
+    ExistingTranscriptDiffers,
+}
+
+impl std::fmt::Display for MemorySpaceImportConflict {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::ProtectedTranscriptSourceMissing => "archive omits a retained local transcript source; preserve its current projection",
+            Self::ExistingTranscriptDiffers => "archive differs from an existing transcript; use explicit transcript lifecycle control",
+        })
+    }
+}
+
+impl std::error::Error for MemorySpaceImportConflict {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemorySpaceImportReport {

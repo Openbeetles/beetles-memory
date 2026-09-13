@@ -31,10 +31,11 @@ pub enum MemoryMutationSurface {
     SubjectSoulReseed,
     SubjectSoulDelete,
     RelationshipSourceControl,
+    ProceduralProducerControl,
 }
 
 impl MemoryMutationSurface {
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 29] = [
         Self::WriteWithOperation,
         Self::WriteWithoutOperation,
         Self::LongTermMutateWithOperation,
@@ -63,6 +64,7 @@ impl MemoryMutationSurface {
         Self::SubjectSoulReseed,
         Self::SubjectSoulDelete,
         Self::RelationshipSourceControl,
+        Self::ProceduralProducerControl,
     ];
 
     pub const fn reliability(self) -> MemoryMutationReliability {
@@ -77,7 +79,8 @@ impl MemoryMutationSurface {
             | Self::SubjectSoulReset
             | Self::SubjectSoulReseed
             | Self::SubjectSoulDelete
-            | Self::RelationshipSourceControl => MemoryMutationReliability::DurableStoreReceipt,
+            | Self::RelationshipSourceControl
+            | Self::ProceduralProducerControl => MemoryMutationReliability::DurableStoreReceipt,
             Self::FinalizeTurn | Self::GovernanceJob | Self::TranscriptCommit => {
                 MemoryMutationReliability::DomainOwnedReceipt
             }
@@ -160,8 +163,22 @@ mod tests {
                 .filter(|item| {
                     item.reliability == MemoryMutationReliability::DurableStoreReceipt
                 })
-                .count(),
-            11
+                .map(|item| item.surface)
+                .collect::<HashSet<_>>(),
+            HashSet::from([
+                MemoryMutationSurface::WriteWithOperation,
+                MemoryMutationSurface::LongTermMutateWithOperation,
+                MemoryMutationSurface::SubjectSoulEvidence,
+                MemoryMutationSurface::SubjectSoulProvision,
+                MemoryMutationSurface::SubjectSoulRevision,
+                MemoryMutationSurface::SubjectSoulArchive,
+                MemoryMutationSurface::SubjectSoulRestore,
+                MemoryMutationSurface::SubjectSoulReset,
+                MemoryMutationSurface::SubjectSoulReseed,
+                MemoryMutationSurface::SubjectSoulDelete,
+                MemoryMutationSurface::RelationshipSourceControl,
+                MemoryMutationSurface::ProceduralProducerControl,
+            ])
         );
         assert!(catalog.operations.iter().any(|item| {
             item.surface == MemoryMutationSurface::WriteWithoutOperation

@@ -68,7 +68,7 @@ fn public_turn_intake_rejects_forged_actor_and_mount_before_any_write() {
                 runtime
                     .finalize_turn(MemoryTurnFinalizeRequest {
                         turn: delta,
-                        learning: PostTurnLearningInputV1::empty(),
+                        learning: PostTurnLearningInputV2::empty(),
                         pressure: PressureLevel::Normal,
                         mode_input: RuntimeLifecycleModeInput::default(),
                     })
@@ -101,7 +101,7 @@ fn an_unpinned_scope_accepts_an_explicit_conversation_without_forging_a_receipt(
     delta.conversation.conversation_id = Some("explicit-window".into());
     let result = runtime.finalize_turn(MemoryTurnFinalizeRequest {
         turn: delta,
-        learning: PostTurnLearningInputV1::empty(),
+        learning: PostTurnLearningInputV2::empty(),
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     });

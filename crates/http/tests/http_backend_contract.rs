@@ -86,15 +86,7 @@ fn real_http_socket_finalize_queues_then_reports_durable_configuration_block() {
             },
             "external_content_used": false
         },
-        "learning": {
-            "tool_call_count": 0,
-            "selection_receipt": null,
-            "runtime_skill_feedback": [],
-            "agent_skill_feedback": [],
-            "task_learning_feedback": [],
-            "agent_tool_feedback": [],
-            "authority": {"kind": "host_runtime_observation"}
-        }
+        "learning": bm_sdk::PostTurnLearningInputV2::empty()
     })
     .to_string();
     let response = serve_memory_request(
@@ -149,8 +141,16 @@ fn real_http_socket_finalize_queues_then_reports_durable_configuration_block() {
 fn remote_runtime(
     capabilities: impl IntoIterator<Item = EntryOperationCapability>,
 ) -> EntryRuntime {
+    remote_runtime_with_maintenance(capabilities, true)
+}
+
+fn remote_runtime_with_maintenance(
+    capabilities: impl IntoIterator<Item = EntryOperationCapability>,
+    maintenance: bool,
+) -> EntryRuntime {
     let mut capability = MemoryCapabilityPolicy::strict_profile();
     capability.communication_adapter_enabled = true;
+    capability.maintenance_enabled = maintenance;
     EntryRuntime::open(EntryRuntimeConfig {
         identity: EntryIdentity {
             agent_id: "http-backend-agent".to_string(),
@@ -174,6 +174,221 @@ fn remote_runtime(
         capability,
     })
     .expect("entry runtime")
+}
+
+#[cfg(feature = "nonproduction-replay-harness")]
+fn pfi2_finalize_body(runtime: &EntryRuntime, id: &str, feedback: bool) -> serde_json::Value {
+    use bm_sdk::*;
+    let memory = runtime.runtime();
+    let mut learning = PostTurnLearningInputV2::empty();
+    let mut observations = Vec::new();
+    if feedback {
+        let now = memory.config().clock.now_secs();
+        observations.push(ToolObservationDigest {
+            observation_id: format!("obs-{id}"),
+            call_id: format!("call-{id}"),
+            tool_name: "inspect".into(),
+            summary: "Synthetic HTTP execution result".into(),
+            external_content: false,
+        });
+        learning.tool_call_count = 1;
+        learning.agent_tool_feedback.push(AgentToolUsageFeedbackV3 {
+            registry_ref: memory.agent_tool_registries()[0].registry_ref(),
+            tool_id: "inspect".into(),
+            schema_fingerprint: "schema-1".into(),
+            execution_facts: vec![ToolExecutionFactV1 {
+                observation_id: format!("obs-{id}"),
+                call_id: format!("call-{id}"),
+                outcome: ToolExecutionOutcome::Failed,
+                source_sensitivity: ProceduralSourceSensitivity::Private,
+                started_at: Some(now),
+                completed_at: Some(now),
+            }],
+            method_evidence: vec![ToolMethodEvidenceV1 {
+                method_id: format!("method-{id}"),
+                task_signature: "private-http-input".into(),
+                body: "PRIVATE_HTTP_METHOD_MUST_NOT_PERSIST".into(),
+                execution_refs: vec![format!("obs-{id}")],
+                source_sensitivity: ProceduralSourceSensitivity::Private,
+                external_content: false,
+            }],
+        });
+    }
+    let turn = CanonicalTurnDelta {
+        turn_id: id.into(),
+        conversation: ConversationScope {
+            channel: memory.scope().channel.clone(),
+            chat_id: memory.scope().chat_id.clone(),
+            conversation_id: Some(memory.scope().conversation_id_or_chat_id().into()),
+        },
+        subject: memory.subject_id().into(),
+        delivery_status: MemoryTurnDeliveryStatus::Delivered,
+        source: MemoryTurnSource {
+            ingress: IngressKind::User,
+            channel: memory.scope().channel.clone(),
+            provider: None,
+            protocol: MemoryTurnProtocol::Native,
+            endpoint: Some("/memory/finalize-turn".into()),
+            model_alias: None,
+            model_resolved: None,
+            request_id: Some(format!("request-{id}")),
+            client_conversation_hint: None,
+        },
+        actor: None,
+        input_messages: vec![TranscriptInputMessage::user(
+            "Synthetic authorized HTTP turn",
+        )],
+        assistant_message: Some(TranscriptInputMessage::assistant(
+            "Synthetic response delivered",
+        )),
+        tool_observations: observations,
+        external_content_used: false,
+        candidate_ids: Vec::new(),
+    };
+    serde_json::json!({ "turn": turn, "learning": learning })
+}
+
+#[test]
+#[cfg(feature = "nonproduction-replay-harness")]
+fn pfi2_real_http_body_and_bearer_cannot_mint_procedural_submission_authority() {
+    use bm_sdk::*;
+    // No background worker can race the exact Store snapshot assertions.
+    let runtime = remote_runtime_with_maintenance([EntryOperationCapability::FinalizeTurn], false);
+    let tools = AgentToolRegistrySnapshot::compact(
+        "http-authority-tools",
+        "host",
+        vec![AgentToolDescriptor::compact(
+            "inspect", "Inspect", "schema-1",
+        )],
+        runtime.runtime().config().clock.now_secs(),
+    );
+    runtime
+        .runtime()
+        .upsert_agent_tool_registry(tools.clone())
+        .unwrap();
+    let registered = runtime
+        .control_procedural_producer(MemoryProceduralProducerControlRequest {
+            operation_id: "http-explicit-producer".into(),
+            expected_revision: None,
+            state: ProceduralProducerStateV1::Active,
+            spec: ProceduralProducerSpecV1 {
+                binding_id: "http-executor".into(),
+                scope: ProceduralProducerScopeV1 {
+                    memory_space_id: runtime.runtime().memory_space_id().into(),
+                    mounted_subject_id: runtime.runtime().subject_id().into(),
+                    channel_id: "http-backend".into(),
+                    chat_id: "chat-remote".into(),
+                },
+                principal: ProceduralProducerPrincipalV1::EntryPrincipal {
+                    principal_id: "http-wire-principal".into(),
+                    owner_id: "owner-default".into(),
+                },
+                source_authority: ProceduralProducerSourceAuthorityV1::RuntimeObservation,
+                claims: ProceduralProducerClaimsV1 {
+                    execution_facts: true,
+                    method_declarations: true,
+                    usage_feedback: false,
+                    source_classifications: vec![
+                        ProceduralSourceSensitivity::NonPrivate,
+                        ProceduralSourceSensitivity::Private,
+                    ],
+                },
+                tools: vec![ProceduralProducerToolV1 {
+                    registry_ref: tools.registry_ref(),
+                    tool_id: "inspect".into(),
+                    schema_fingerprint: "schema-1".into(),
+                }],
+                source_config_ref: "synthetic-http-executor".into(),
+            },
+        })
+        .unwrap();
+    let _not_passed_to_http = runtime
+        .procedural_submission_capability(&registered.binding.revision_ref().unwrap())
+        .unwrap();
+    let wire = |id: &str, body: &serde_json::Value| {
+        let body = body.to_string();
+        format!("POST /memory/finalize-turn HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nAuthorization: Bearer secret-token\r\nx-idempotency-key: {id}\r\nContent-Length: {}\r\n\r\n{body}", body.len())
+    };
+    let response = serve_memory_request(
+        &runtime,
+        wire(
+            "pfi2-http-ordinary",
+            &pfi2_finalize_body(&runtime, "pfi2-http-ordinary", false),
+        ),
+    );
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    let before = runtime
+        .runtime()
+        .replay_harness()
+        .export_store_snapshot()
+        .unwrap();
+    assert!(before
+        .json_docs
+        .iter()
+        .any(|doc| doc.namespace == "conversation_transcript"
+            && doc.value["turn_id"] == "pfi2-http-ordinary"));
+    for field in ["authority", "producer", "procedural_submission"] {
+        let mut body = pfi2_finalize_body(&runtime, field, true);
+        if field == "procedural_submission" {
+            body[field] = serde_json::json!({"binding_id": "http-executor"});
+        } else {
+            body["learning"][field] = serde_json::json!({"kind": "host_runtime_observation"});
+        }
+        let (result, response) = serve_memory_request_result(&runtime, wire(field, &body));
+        let error = result.expect_err("real HTTP decoder must reject authority smuggling");
+        assert_eq!(error.stage(), "adapter_json_command");
+        assert!(!response.starts_with("HTTP/1.1 200"));
+        assert!(!response.contains("PRIVATE_HTTP_METHOD_MUST_NOT_PERSIST"));
+        assert!(!error
+            .to_string()
+            .contains("PRIVATE_HTTP_METHOD_MUST_NOT_PERSIST"));
+        assert_eq!(
+            runtime
+                .runtime()
+                .replay_harness()
+                .export_store_snapshot()
+                .unwrap(),
+            before
+        );
+    }
+    let body = pfi2_finalize_body(&runtime, "pfi2-http-feedback-no-cap", true);
+    assert!(
+        bm_adapter::decode_json_adapter_command(
+            bm_adapter::AdapterOperation::FinalizeTurn,
+            &body.to_string()
+        )
+        .is_ok(),
+        "the producer negative must reach Entry through a valid typed body"
+    );
+    let (result, response) =
+        serve_memory_request_result(&runtime, wire("pfi2-http-feedback-no-cap", &body));
+    let error = result.expect_err(
+        "durable producer metadata and bearer alone cannot replace out-of-band capability",
+    );
+    assert_eq!(error.stage(), "post_turn_learning_evidence");
+    let Error::Other { source, .. } = &error else {
+        panic!("expected the typed procedural error")
+    };
+    assert_eq!(
+        source
+            .downcast_ref::<ProceduralLearningSdkError>()
+            .unwrap()
+            .key,
+        ProceduralLearningErrorKeyV1::ProducerAuthorityRequired
+    );
+    assert!(!response.starts_with("HTTP/1.1 200"));
+    assert!(!response.contains("PRIVATE_HTTP_METHOD_MUST_NOT_PERSIST"));
+    assert!(!error
+        .to_string()
+        .contains("PRIVATE_HTTP_METHOD_MUST_NOT_PERSIST"));
+    assert_eq!(
+        runtime
+            .runtime()
+            .replay_harness()
+            .export_store_snapshot()
+            .unwrap(),
+        before
+    );
 }
 
 fn serve_memory_request(runtime: &EntryRuntime, request: String) -> String {

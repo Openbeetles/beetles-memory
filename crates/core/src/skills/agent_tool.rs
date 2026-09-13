@@ -9,7 +9,7 @@ pub const AGENT_TOOL_REGISTRY_FINGERPRINT_MISMATCH: &str =
     "agent_tool_registry_fingerprint_mismatch";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentToolRegistryScope {
     #[default]
     Global,
@@ -39,7 +39,10 @@ impl AgentToolRegistryScope {
 }
 
 fn canonical_registry_identifier(value: &str) -> bool {
-    !value.is_empty() && value == value.trim() && !value.chars().any(char::is_control)
+    !value.is_empty()
+        && value.len() <= 256
+        && value == value.trim()
+        && !value.chars().any(char::is_control)
 }
 
 #[derive(
@@ -54,6 +57,7 @@ pub enum AgentToolRegistryOwner {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentToolRegistryRef {
     pub registry_id: String,
     pub fingerprint: String,
@@ -148,8 +152,9 @@ pub struct AgentToolRegistryReport {
     pub registries: usize,
     pub tools: usize,
     pub disabled_tools: usize,
-    pub governed_experiences: usize,
-    pub stale_experiences: usize,
+    pub read_availability: crate::memory::ProceduralLearningReadAvailabilityV1,
+    pub governed_experiences: Option<usize>,
+    pub stale_experiences: Option<usize>,
     pub forbidden_by_profile: bool,
     pub warnings: Vec<String>,
 }
@@ -189,17 +194,10 @@ pub struct AgentToolExperienceRecord {
     pub tool_id: String,
     pub schema_fingerprint: String,
     pub task_signature: String,
-    pub trigger_summary: String,
     pub usage_guidance: String,
     pub constraints: Vec<String>,
-    pub evidence_count: u32,
-    pub success_count: u32,
-    pub failure_count: u32,
-    pub last_outcome: AgentToolOutcome,
-    pub confidence: AgentToolExperienceConfidence,
     pub status: AgentToolExperienceStatus,
-    pub evidence_refs: Vec<String>,
-    pub private_content_used: bool,
+    pub privacy_class: crate::memory::MemoryPrivacyClass,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -219,17 +217,10 @@ impl AgentToolExperienceRecord {
             tool_id: tool_id.into(),
             schema_fingerprint: schema_fingerprint.into(),
             task_signature: String::new(),
-            trigger_summary: String::new(),
             usage_guidance: usage_guidance.into(),
             constraints: Vec::new(),
-            evidence_count: 2,
-            success_count: 2,
-            failure_count: 0,
-            last_outcome: AgentToolOutcome::Succeeded,
-            confidence: AgentToolExperienceConfidence::High,
             status: AgentToolExperienceStatus::Active,
-            evidence_refs: Vec::new(),
-            private_content_used: false,
+            privacy_class: crate::memory::MemoryPrivacyClass::SharedWithSubject,
             created_at: updated_at,
             updated_at,
         }
@@ -243,7 +234,6 @@ pub struct AgentToolHint {
     pub schema_fingerprint: String,
     pub experience_id: String,
     pub reason: String,
-    pub confidence: AgentToolExperienceConfidence,
     pub permission_tags: Vec<String>,
     pub risk_tags: Vec<String>,
     pub constraints: Vec<String>,
@@ -285,7 +275,8 @@ pub struct AgentToolExperienceStatusReport {
     pub host_fallback_required: bool,
     pub cold_start_selection_used: bool,
     pub registry_refs_checked: usize,
-    pub governed_experience_candidates: usize,
+    pub read_availability: crate::memory::ProceduralLearningReadAvailabilityV1,
+    pub governed_experience_candidates: Option<usize>,
 }
 
 impl AgentToolExperienceStatusReport {
@@ -296,7 +287,8 @@ impl AgentToolExperienceStatusReport {
             host_fallback_required: true,
             cold_start_selection_used: false,
             registry_refs_checked,
-            governed_experience_candidates: candidates,
+            read_availability: crate::memory::ProceduralLearningReadAvailabilityV1::Ready,
+            governed_experience_candidates: Some(candidates),
         }
     }
 
@@ -307,7 +299,8 @@ impl AgentToolExperienceStatusReport {
             host_fallback_required: false,
             cold_start_selection_used: false,
             registry_refs_checked,
-            governed_experience_candidates: candidates,
+            read_availability: crate::memory::ProceduralLearningReadAvailabilityV1::Ready,
+            governed_experience_candidates: Some(candidates),
         }
     }
 }
@@ -321,6 +314,26 @@ pub struct AgentToolSelectionReport {
 }
 
 impl AgentToolSelectionReport {
+    pub fn unavailable(
+        registry_refs_checked: usize,
+        availability: crate::memory::ProceduralLearningReadAvailabilityV1,
+    ) -> Self {
+        Self {
+            tool_hints: Vec::new(),
+            selection_bindings: Vec::new(),
+            tool_experience_status: AgentToolExperienceStatusReport {
+                available: false,
+                reason: availability.reason().into(),
+                host_fallback_required: true,
+                cold_start_selection_used: false,
+                registry_refs_checked,
+                read_availability: availability,
+                governed_experience_candidates: None,
+            },
+            audit: AgentToolProjectionAudit::default(),
+        }
+    }
+
     pub fn empty(registry_refs_checked: usize, candidates: usize) -> Self {
         Self {
             tool_hints: Vec::new(),
@@ -332,25 +345,6 @@ impl AgentToolSelectionReport {
             audit: AgentToolProjectionAudit::default(),
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct AgentToolObservationDigest {
-    pub observation_id: String,
-    pub registry_id: String,
-    pub tool_id: String,
-    pub schema_fingerprint: String,
-    pub call_id: Option<String>,
-    pub task_signature: String,
-    pub summary: String,
-    pub outcome: AgentToolOutcome,
-    pub error_code: Option<String>,
-    pub external_content: bool,
-    pub private_content_used: bool,
-    pub permission_tags: Vec<String>,
-    pub risk_tags: Vec<String>,
-    pub started_at: Option<u64>,
-    pub completed_at: Option<u64>,
 }
 
 pub fn agent_tool_registries_forbidden_by_profile(profile: ProfileId) -> bool {
@@ -446,8 +440,15 @@ pub fn build_agent_tool_registry_report(
         registries: registries.len(),
         tools,
         disabled_tools,
-        governed_experiences: experiences.len(),
-        stale_experiences,
+        read_availability: if agent_tool_registries_forbidden_by_profile(profile) {
+            crate::memory::ProceduralLearningReadAvailabilityV1::ProfileUnavailable
+        } else {
+            crate::memory::ProceduralLearningReadAvailabilityV1::Ready
+        },
+        governed_experiences: (!agent_tool_registries_forbidden_by_profile(profile))
+            .then_some(experiences.len()),
+        stale_experiences: (!agent_tool_registries_forbidden_by_profile(profile))
+            .then_some(stale_experiences),
         forbidden_by_profile: agent_tool_registries_forbidden_by_profile(profile),
         warnings: Vec::new(),
     }
@@ -474,16 +475,13 @@ fn select_agent_tool_hints(
     let mut candidates = experiences
         .iter()
         .filter_map(|experience| {
-            if !matches!(
-                experience.status,
-                AgentToolExperienceStatus::Active | AgentToolExperienceStatus::Candidate
-            ) {
+            if experience.status != AgentToolExperienceStatus::Active {
                 rejected.push(AgentToolProjectionRejection::safe(
                     "agent_tool_experience_status_ineligible",
                 ));
                 return None;
             }
-            if experience.private_content_used {
+            if !experience.privacy_class.projection_content_allowed() {
                 rejected.push(AgentToolProjectionRejection::safe(
                     "agent_tool_experience_privacy_blocked",
                 ));
@@ -561,15 +559,7 @@ fn select_agent_tool_hints(
                 });
                 return None;
             }
-            let reason = if experience.trigger_summary.trim().is_empty() {
-                experience.usage_guidance.clone()
-            } else {
-                format!(
-                    "{}; {}",
-                    experience.trigger_summary.trim(),
-                    experience.usage_guidance.trim()
-                )
-            };
+            let reason = experience.usage_guidance.clone();
             Some((
                 experience,
                 AgentToolHint {
@@ -578,7 +568,6 @@ fn select_agent_tool_hints(
                     schema_fingerprint: experience.schema_fingerprint.clone(),
                     experience_id: experience.experience_id.clone(),
                     reason,
-                    confidence: experience.confidence,
                     permission_tags: tool.permission_tags.clone(),
                     risk_tags: tool.risk_tags.clone(),
                     constraints: experience.constraints.clone(),
@@ -590,10 +579,8 @@ fn select_agent_tool_hints(
     let governed_candidates = candidates.len();
     candidates.sort_by(|(left_exp, _), (right_exp, _)| {
         right_exp
-            .confidence
-            .cmp(&left_exp.confidence)
-            .then_with(|| right_exp.success_count.cmp(&left_exp.success_count))
-            .then_with(|| right_exp.updated_at.cmp(&left_exp.updated_at))
+            .updated_at
+            .cmp(&left_exp.updated_at)
             .then_with(|| left_exp.tool_id.cmp(&right_exp.tool_id))
     });
     let budget_limited = candidates.len() > max_hints;
@@ -635,8 +622,7 @@ pub struct AgentToolExperienceSelectionInput<'a> {
     pub query: &'a str,
     pub memory_space_id: &'a str,
     pub owning_scope: &'a super::AgentToolExperienceOwningScopeV1,
-    pub heads: &'a [super::AgentToolExperienceOwnerHeadV2],
-    pub materials: &'a [super::AgentToolExperienceRevisionMaterialV2],
+    pub owners: &'a [super::AgentToolExperienceReadProjectionV1],
     pub registries: &'a [AgentToolRegistrySnapshot],
     pub registry_refs: &'a [AgentToolRegistryRef],
     pub applicability: &'a crate::memory::ProceduralApplicabilityContextV1,
@@ -656,54 +642,26 @@ pub fn select_subject_agent_tool_hints(
     let mut selected = Vec::new();
     let mut bindings = BTreeMap::new();
     let mut rejected = Vec::new();
-    for head in input.heads {
-        if !head.validate_contract().accepted
-            || head.memory_space_id != input.memory_space_id
-            || &head.owning_scope != input.owning_scope
+    for owner in input.owners {
+        if owner.memory_space_id() != input.memory_space_id
+            || owner.owning_scope() != input.owning_scope
+            || owner.as_of_time() != input.as_of_time
         {
             return Err(Error::config(
                 "agent_tool_experience_selection",
                 "owner does not match exact scope",
             ));
         }
-        if head.state == super::AgentToolExperienceHeadStateV2::Tombstoned {
-            rejected.push(AgentToolProjectionRejection::safe(
-                "agent_tool_experience_source_withdrawn",
-            ));
+        if let Some(reason) = owner.rejection() {
+            rejected.push(AgentToolProjectionRejection::safe(reason));
             continue;
         }
-        let history = input
-            .materials
-            .iter()
-            .filter(|material| material.owner_ref == head.owner_ref)
-            .cloned()
-            .collect::<Vec<_>>();
-        super::validate_agent_tool_experience_owner_history(&history)?;
-        let commitments = history
-            .iter()
-            .map(super::AgentToolExperienceRetainedRevisionDigestV2::from_material)
-            .collect::<Result<Vec<_>>>()?;
-        if commitments != head.retained_revisions
-            || history
-                .last()
-                .is_none_or(|material| material.owner_revision != head.current_revision)
-        {
-            return Err(Error::config(
+        let material = owner.material().ok_or_else(|| {
+            Error::config(
                 "agent_tool_experience_selection",
-                "head and retained materials differ",
-            ));
-        }
-        let material = history.iter().rev().find(|material| {
-            input
-                .as_of_time
-                .is_none_or(|anchor| material.updated_at <= anchor)
-        });
-        let Some(material) = material else {
-            rejected.push(AgentToolProjectionRejection::safe(
-                "agent_tool_experience_no_revision_at_anchor",
-            ));
-            continue;
-        };
+                "allowed projection has no exact material",
+            )
+        })?;
         if material.memory_space_id != input.memory_space_id
             || &material.owning_scope != input.owning_scope
         {
@@ -759,6 +717,16 @@ pub fn select_subject_agent_tool_hints(
             ));
             continue;
         }
+        let super::AgentToolExperienceBodyV1::Method {
+            task_signature,
+            procedure,
+            constraints,
+            ..
+        } = &material.body
+        else {
+            // Statistics do not constitute a governed method or a cold-start hint.
+            continue;
+        };
         bindings.insert(
             material.owner_ref.owner_id.clone(),
             crate::memory::AgentToolExperienceSelectionV1 {
@@ -775,18 +743,11 @@ pub fn select_subject_agent_tool_hints(
             registry_id: material.registry_id.clone(),
             tool_id: material.tool_id.clone(),
             schema_fingerprint: material.schema_fingerprint.clone(),
-            task_signature: material.task_signature.clone(),
-            trigger_summary: material.trigger_summary.clone(),
-            usage_guidance: material.usage_guidance.clone(),
-            constraints: material.constraints.clone(),
-            evidence_count: material.evidence_count,
-            success_count: material.success_count,
-            failure_count: material.failure_count,
-            last_outcome: material.last_outcome,
-            confidence: material.confidence,
+            task_signature: task_signature.clone(),
+            usage_guidance: procedure.clone(),
+            constraints: constraints.clone(),
             status: material.status,
-            evidence_refs: Vec::new(),
-            private_content_used: false,
+            privacy_class: material.privacy_class,
             created_at: material.created_at,
             updated_at: material.updated_at,
         });
@@ -795,12 +756,7 @@ pub fn select_subject_agent_tool_hints(
     // relevance uses only governed experience text and the shared recall scorer.
     let texts = selected
         .iter()
-        .map(|experience| {
-            format!(
-                "{} {}",
-                experience.trigger_summary, experience.usage_guidance
-            )
-        })
+        .map(|experience| experience.usage_guidance.clone())
         .collect::<Vec<_>>();
     let documents = selected
         .iter()
@@ -851,10 +807,9 @@ pub fn select_subject_agent_tool_hints(
     report.audit.selected = report.tool_hints.clone();
     report.audit.rejected.extend(rejected);
     if report.tool_hints.is_empty() {
-        report.tool_experience_status = AgentToolExperienceStatusReport::no_experience(
-            report.tool_experience_status.registry_refs_checked,
-            report.tool_experience_status.governed_experience_candidates,
-        );
+        report.tool_experience_status.available = false;
+        report.tool_experience_status.reason = AGENT_TOOL_NO_EXPERIENCE_REASON.into();
+        report.tool_experience_status.host_fallback_required = true;
     }
     Ok(report)
 }

@@ -50,7 +50,7 @@ fn finalize_request(user: &str, assistant: Option<&str>) -> MemoryTurnFinalizeRe
             external_content_used: false,
             candidate_ids: Vec::new(),
         },
-        learning: bm_sdk::PostTurnLearningInputV1::empty(),
+        learning: bm_sdk::PostTurnLearningInputV2::empty(),
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     }
@@ -67,6 +67,7 @@ fn finalize_request_with_tools(
     request.turn.tool_observations = (0..tool_calls)
         .map(|index| ToolObservationDigest {
             observation_id: format!("synthetic-tool-observation-{index}"),
+            call_id: format!("synthetic-tool-call-{index}"),
             tool_name: "synthetic.tool".to_string(),
             summary: "Synthetic tool execution completed.".to_string(),
             external_content: external_content_used,

@@ -902,7 +902,7 @@ pub(crate) fn run_p8_gate_contract() -> Result<(), String> {
                     external_content_used: false,
                     candidate_ids: Vec::new(),
                 },
-                learning: bm_sdk::PostTurnLearningInputV1::empty(),
+                learning: bm_sdk::PostTurnLearningInputV2::empty(),
                 pressure: PressureLevel::Normal,
                 mode_input: RuntimeLifecycleModeInput::default(),
             },

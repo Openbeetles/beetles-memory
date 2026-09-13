@@ -13,22 +13,261 @@ use crate::memory::{
     GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef, GovernedOwnerRevisionRef, MemoryPrivacyClass,
 };
 
-use super::{
-    AgentToolExperienceConfidence, AgentToolExperienceStatus, AgentToolOutcome,
-    AgentToolRegistryScope,
-};
+use super::{AgentToolExperienceStatus, AgentToolRegistryScope};
 
-pub const AGENT_TOOL_EXPERIENCE_MATERIAL_SCHEMA_VERSION: u32 = 2;
-pub const AGENT_TOOL_EXPERIENCE_HEAD_SCHEMA_VERSION: u32 = 2;
+pub const AGENT_TOOL_EXPERIENCE_MATERIAL_SCHEMA_VERSION: u32 = 3;
+pub const AGENT_TOOL_EXPERIENCE_HEAD_SCHEMA_VERSION: u32 = 3;
 pub const AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
-const OWNER_ID_DOMAIN: &str = "agent_tool_experience_owner_id_v2";
-const MATERIAL_KEY_DOMAIN: &str = "agent_tool_experience_material_key_v2";
-const HEAD_KEY_DOMAIN: &str = "agent_tool_experience_head_key_v2";
+/// Non-wire projection of one fully verified history under current authority.
+/// Denied histories leave only a fixed reason here, never their private bodies.
+#[derive(Clone, Debug)]
+pub struct AgentToolExperienceReadProjectionV1 {
+    memory_space_id: String,
+    owning_scope: AgentToolExperienceOwningScopeV1,
+    as_of_time: Option<u64>,
+    selected: Option<AgentToolExperienceRevisionMaterialV3>,
+    rejection: Option<&'static str>,
+}
+
+impl AgentToolExperienceReadProjectionV1 {
+    pub fn try_new(
+        head: &AgentToolExperienceOwnerHeadV3,
+        history: &[AgentToolExperienceRevisionMaterialV3],
+        authority: &crate::memory::ProceduralReadAuthorityV1<'_>,
+        as_of_time: Option<u64>,
+    ) -> Result<Self> {
+        let invalid = || {
+            Error::config(
+                "agent_tool_experience_read_projection",
+                "exact owner history or read authority is invalid",
+            )
+        };
+        if !head.validate_contract().accepted
+            || head.memory_space_id != authority.scope().memory_space_id
+            || head.owning_scope.mounted_subject_id() != authority.scope().mounted_subject_id
+        {
+            return Err(invalid());
+        }
+        let mut projection = Self {
+            memory_space_id: head.memory_space_id.clone(),
+            owning_scope: head.owning_scope.clone(),
+            as_of_time,
+            selected: None,
+            rejection: None,
+        };
+        if head.state == AgentToolExperienceHeadStateV3::Tombstoned {
+            if !history.is_empty() {
+                return Err(invalid());
+            }
+            projection.rejection = Some("agent_tool_experience_source_withdrawn");
+            return Ok(projection);
+        }
+        validate_agent_tool_experience_owner_history(history)?;
+        let retained = history
+            .iter()
+            .map(AgentToolExperienceRetainedRevisionDigestV3::from_material)
+            .collect::<Result<Vec<_>>>()?;
+        if retained != head.retained_revisions
+            || history.last().is_none_or(|material| {
+                material.owner_revision != head.current_revision
+                    || material.memory_space_id != head.memory_space_id
+                    || material.owning_scope != head.owning_scope
+            })
+        {
+            return Err(invalid());
+        }
+        let current = history.last().ok_or_else(invalid)?;
+        let binding = |material: &AgentToolExperienceRevisionMaterialV3| {
+            crate::memory::ProceduralAppliedOwnerBindingV1::AgentToolExperience {
+                owner_revision: material.owner_revision_ref(),
+                content_digest: material.content_digest.clone(),
+            }
+        };
+        if !authority.permits_exact(&binding(current))? {
+            projection.rejection = Some("agent_tool_experience_authority_withdrawn");
+        } else if current.status != AgentToolExperienceStatus::Active {
+            projection.rejection = Some("agent_tool_experience_status_ineligible");
+        } else if let Some(selected) = history
+            .iter()
+            .rev()
+            .find(|material| as_of_time.is_none_or(|time| material.updated_at <= time))
+        {
+            // Select first, authorize second. Never fall back to older allowed
+            // content when the exact revision at this anchor has been withdrawn.
+            if authority.permits_exact(&binding(selected))? {
+                projection.selected = Some(selected.clone());
+            } else {
+                projection.rejection = Some("agent_tool_experience_authority_withdrawn");
+            }
+        } else {
+            projection.rejection = Some("agent_tool_experience_no_revision_at_anchor");
+        }
+        Ok(projection)
+    }
+
+    pub fn memory_space_id(&self) -> &str {
+        &self.memory_space_id
+    }
+    pub fn owning_scope(&self) -> &AgentToolExperienceOwningScopeV1 {
+        &self.owning_scope
+    }
+    pub fn as_of_time(&self) -> Option<u64> {
+        self.as_of_time
+    }
+    pub fn material(&self) -> Option<&AgentToolExperienceRevisionMaterialV3> {
+        self.selected.as_ref()
+    }
+    pub fn rejection(&self) -> Option<&'static str> {
+        self.rejection
+    }
+}
+
+const OWNER_ID_DOMAIN: &str = "agent_tool_experience_owner_id_v3";
+const MATERIAL_KEY_DOMAIN: &str = "agent_tool_experience_material_key_v3";
+const HEAD_KEY_DOMAIN: &str = "agent_tool_experience_head_key_v3";
 const MANIFEST_KEY_DOMAIN: &str = "agent_tool_experience_scope_manifest_key_v1";
-const MATERIAL_DIGEST_DOMAIN: &str = "agent_tool_experience_material_digest_v2";
-const HEAD_DIGEST_DOMAIN: &str = "agent_tool_experience_head_digest_v2";
+const MATERIAL_DIGEST_DOMAIN: &str = "agent_tool_experience_material_digest_v3";
+const HEAD_DIGEST_DOMAIN: &str = "agent_tool_experience_head_digest_v3";
 const MANIFEST_DIGEST_DOMAIN: &str = "agent_tool_experience_manifest_digest_v1";
+
+/// A view derived from the single material body, never a second persisted tag.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentToolExperienceFocusV1<'a> {
+    Execution,
+    Method { task_signature: &'a str },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentToolMethodSourceRefV1 {
+    pub source_job_id: String,
+    pub method_id: String,
+    pub method_digest: String,
+    pub execution_refs: Vec<crate::memory::ProceduralContributionRefV1>,
+}
+
+impl AgentToolMethodSourceRefV1 {
+    pub fn validate_contract(&self) -> bool {
+        bounded_identifier(&self.source_job_id)
+            && bounded_identifier(&self.method_id)
+            && is_digest(&self.method_digest)
+            && canonical_contribution_refs(&self.execution_refs)
+            && self
+                .execution_refs
+                .iter()
+                .all(|reference| reference.source_job_id == self.source_job_id)
+    }
+}
+
+/// Execution metadata has no path to become procedure text. Method confidence
+/// and execution success rate are not duplicated into each other's branch.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentToolExperienceBodyV1 {
+    Execution {
+        counts: crate::memory::ToolExecutionCountsV1,
+        contributions: Vec<crate::memory::ProceduralContributionRefV1>,
+    },
+    Method {
+        task_signature: String,
+        procedure: String,
+        constraints: Vec<String>,
+        sources: Vec<AgentToolMethodSourceRefV1>,
+    },
+}
+
+impl AgentToolExperienceBodyV1 {
+    pub fn focus(&self) -> AgentToolExperienceFocusV1<'_> {
+        match self {
+            Self::Execution { .. } => AgentToolExperienceFocusV1::Execution,
+            Self::Method { task_signature, .. } => {
+                AgentToolExperienceFocusV1::Method { task_signature }
+            }
+        }
+    }
+
+    pub fn method_content_digest(&self) -> Result<Option<String>> {
+        match self {
+            Self::Execution { .. } => Ok(None),
+            Self::Method {
+                task_signature,
+                procedure,
+                ..
+            } => {
+                let encoded = serde_json::to_vec(&(task_signature, procedure)).map_err(|_| {
+                    Error::config("agent_tool_method_digest", "method digest encoding failed")
+                })?;
+                Ok(Some(domain_digest(
+                    "agent_tool_method_content_digest_v1",
+                    &[&encoded],
+                )))
+            }
+        }
+    }
+
+    pub fn contribution_count(&self) -> usize {
+        match self {
+            Self::Execution { contributions, .. } => contributions.len(),
+            Self::Method { sources, .. } => sources
+                .iter()
+                .map(|source| source.execution_refs.len().saturating_add(1))
+                .fold(0, usize::saturating_add),
+        }
+    }
+
+    pub fn validate_contract(&self) -> bool {
+        match self {
+            Self::Execution {
+                counts,
+                contributions,
+            } => {
+                canonical_contribution_refs(contributions)
+                    && counts.total_count() == u64::try_from(contributions.len()).ok()
+            }
+            Self::Method {
+                task_signature,
+                procedure,
+                constraints,
+                sources,
+            } => {
+                bounded_identifier(task_signature)
+                    && procedure.len() <= crate::memory::MAX_PROCEDURAL_METHOD_BYTES
+                    && is_canonical_text(procedure)
+                    && super::validate_runtime_skill_method_shape(task_signature, procedure).is_ok()
+                    && constraints.iter().all(|value| bounded_identifier(value))
+                    && canonical_unique(constraints)
+                    && !sources.is_empty()
+                    && sources
+                        .iter()
+                        .all(AgentToolMethodSourceRefV1::validate_contract)
+                    && sources.windows(2).all(|pair| {
+                        (&pair[0].source_job_id, &pair[0].method_id)
+                            < (&pair[1].source_job_id, &pair[1].method_id)
+                    })
+                    && self.method_content_digest().is_ok_and(|digest| {
+                        sources
+                            .iter()
+                            .all(|source| Some(&source.method_digest) == digest.as_ref())
+                    })
+            }
+        }
+    }
+}
+
+fn bounded_identifier(value: &str) -> bool {
+    value.len() <= 256 && is_canonical(value)
+}
+
+fn canonical_contribution_refs(references: &[crate::memory::ProceduralContributionRefV1]) -> bool {
+    references
+        .iter()
+        .all(crate::memory::ProceduralContributionRefV1::validate_contract)
+        && references
+            .windows(2)
+            .all(|pair| pair[0].contribution_id < pair[1].contribution_id)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -49,13 +288,13 @@ impl AgentToolExperienceOwningScopeV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AgentToolExperienceOwnerLocatorV2 {
+pub struct AgentToolExperienceOwnerLocatorV3 {
     memory_space_id: String,
     owning_scope: AgentToolExperienceOwningScopeV1,
     owner_revision_ref: GovernedOwnerRevisionRef,
 }
 
-impl AgentToolExperienceOwnerLocatorV2 {
+impl AgentToolExperienceOwnerLocatorV3 {
     pub fn try_new(
         memory_space_id: impl Into<String>,
         owning_scope: AgentToolExperienceOwningScopeV1,
@@ -86,7 +325,7 @@ impl AgentToolExperienceOwnerLocatorV2 {
         })
     }
 
-    pub fn from_material(material: &AgentToolExperienceRevisionMaterialV2) -> Self {
+    pub fn from_material(material: &AgentToolExperienceRevisionMaterialV3) -> Self {
         Self {
             memory_space_id: material.memory_space_id.clone(),
             owning_scope: material.owning_scope.clone(),
@@ -111,12 +350,12 @@ impl AgentToolExperienceOwnerLocatorV2 {
     }
 }
 
-impl Serialize for AgentToolExperienceOwnerLocatorV2 {
+impl Serialize for AgentToolExperienceOwnerLocatorV3 {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct("AgentToolExperienceOwnerLocatorV2", 4)?;
+        let mut state = serializer.serialize_struct("AgentToolExperienceOwnerLocatorV3", 4)?;
         state.serialize_field("memory_space_id", self.memory_space_id())?;
         state.serialize_field("owning_scope", self.owning_scope())?;
         state.serialize_field("owner_id", self.owner_id())?;
@@ -125,7 +364,7 @@ impl Serialize for AgentToolExperienceOwnerLocatorV2 {
     }
 }
 
-impl<'de> Deserialize<'de> for AgentToolExperienceOwnerLocatorV2 {
+impl<'de> Deserialize<'de> for AgentToolExperienceOwnerLocatorV3 {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -151,15 +390,15 @@ impl<'de> Deserialize<'de> for AgentToolExperienceOwnerLocatorV2 {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AgentToolExperienceRetainedRevisionDigestV2 {
+pub struct AgentToolExperienceRetainedRevisionDigestV3 {
     pub owner_ref: GovernedMemoryOwnerRef,
     pub owner_revision: u64,
     pub material_key: String,
     pub content_digest: String,
 }
 
-impl AgentToolExperienceRetainedRevisionDigestV2 {
-    pub fn from_material(material: &AgentToolExperienceRevisionMaterialV2) -> Result<Self> {
+impl AgentToolExperienceRetainedRevisionDigestV3 {
+    pub fn from_material(material: &AgentToolExperienceRevisionMaterialV3) -> Result<Self> {
         if !material.validate_contract().accepted {
             return Err(Error::config(
                 "agent_tool_experience_retained_revision",
@@ -195,7 +434,7 @@ impl AgentToolExperienceRetainedRevisionDigestV2 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AgentToolExperienceRevisionMaterialV2 {
+pub struct AgentToolExperienceRevisionMaterialV3 {
     pub schema_version: u32,
     pub physical_key: String,
     pub memory_space_id: String,
@@ -206,25 +445,16 @@ pub struct AgentToolExperienceRevisionMaterialV2 {
     pub registry_scope: AgentToolRegistryScope,
     pub tool_id: String,
     pub schema_fingerprint: String,
-    pub task_signature: String,
-    pub trigger_summary: String,
-    pub usage_guidance: String,
-    pub constraints: Vec<String>,
-    pub evidence_count: u32,
-    pub success_count: u32,
-    pub failure_count: u32,
-    pub last_outcome: AgentToolOutcome,
-    pub confidence: AgentToolExperienceConfidence,
+    pub body: AgentToolExperienceBodyV1,
     pub status: AgentToolExperienceStatus,
-    pub evidence_refs: Vec<String>,
     pub privacy_class: MemoryPrivacyClass,
     pub created_at: u64,
     pub updated_at: u64,
-    pub predecessor: Option<AgentToolExperienceRetainedRevisionDigestV2>,
+    pub predecessor: Option<AgentToolExperienceRetainedRevisionDigestV3>,
     pub content_digest: String,
 }
 
-impl AgentToolExperienceRevisionMaterialV2 {
+impl AgentToolExperienceRevisionMaterialV3 {
     #[allow(clippy::too_many_arguments)]
     pub fn build(
         memory_space_id: &str,
@@ -233,22 +463,13 @@ impl AgentToolExperienceRevisionMaterialV2 {
         registry_scope: AgentToolRegistryScope,
         tool_id: &str,
         schema_fingerprint: &str,
-        task_signature: &str,
         owner_revision: u64,
-        trigger_summary: &str,
-        usage_guidance: &str,
-        mut constraints: Vec<String>,
-        evidence_count: u32,
-        success_count: u32,
-        failure_count: u32,
-        last_outcome: AgentToolOutcome,
-        confidence: AgentToolExperienceConfidence,
+        body: AgentToolExperienceBodyV1,
         status: AgentToolExperienceStatus,
-        mut evidence_refs: Vec<String>,
         privacy_class: MemoryPrivacyClass,
         created_at: u64,
         updated_at: u64,
-        predecessor: Option<AgentToolExperienceRetainedRevisionDigestV2>,
+        predecessor: Option<AgentToolExperienceRetainedRevisionDigestV3>,
     ) -> Result<Self> {
         validate_identity_fields(
             memory_space_id,
@@ -257,18 +478,12 @@ impl AgentToolExperienceRevisionMaterialV2 {
             &registry_scope,
             tool_id,
             schema_fingerprint,
-            task_signature,
+            &body.focus(),
         )?;
-        constraints.sort();
-        evidence_refs.sort();
         if owner_revision == 0
             || created_at == 0
             || updated_at < created_at
-            || !is_canonical_text(trigger_summary)
-            || !is_canonical_text(usage_guidance)
-            || !canonical_unique(&constraints)
-            || !canonical_unique(&evidence_refs)
-            || success_count.saturating_add(failure_count) > evidence_count
+            || !body.validate_contract()
             || predecessor
                 .as_ref()
                 .is_some_and(|value| value.owner_revision.checked_add(1) != Some(owner_revision))
@@ -286,7 +501,7 @@ impl AgentToolExperienceRevisionMaterialV2 {
             &registry_scope,
             tool_id,
             schema_fingerprint,
-            task_signature,
+            &body.focus(),
         )?;
         let owner_ref =
             GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::AgentToolExperience, owner_id);
@@ -316,17 +531,8 @@ impl AgentToolExperienceRevisionMaterialV2 {
             registry_scope,
             tool_id: tool_id.to_string(),
             schema_fingerprint: schema_fingerprint.to_string(),
-            task_signature: task_signature.to_string(),
-            trigger_summary: trigger_summary.to_string(),
-            usage_guidance: usage_guidance.to_string(),
-            constraints,
-            evidence_count,
-            success_count,
-            failure_count,
-            last_outcome,
-            confidence,
+            body,
             status,
-            evidence_refs,
             privacy_class,
             created_at,
             updated_at,
@@ -345,61 +551,13 @@ impl AgentToolExperienceRevisionMaterialV2 {
     }
 
     pub fn canonical_content_digest(&self) -> Result<String> {
-        #[derive(Serialize)]
-        struct Input<'a> {
-            schema_version: u32,
-            memory_space_id: &'a str,
-            owning_scope: &'a AgentToolExperienceOwningScopeV1,
-            owner_ref: &'a GovernedMemoryOwnerRef,
-            owner_revision: u64,
-            registry_id: &'a str,
-            registry_scope: &'a AgentToolRegistryScope,
-            tool_id: &'a str,
-            schema_fingerprint: &'a str,
-            task_signature: &'a str,
-            trigger_summary: &'a str,
-            usage_guidance: &'a str,
-            constraints: &'a [String],
-            evidence_count: u32,
-            success_count: u32,
-            failure_count: u32,
-            last_outcome: AgentToolOutcome,
-            confidence: AgentToolExperienceConfidence,
-            status: AgentToolExperienceStatus,
-            evidence_refs: &'a [String],
-            privacy_class: MemoryPrivacyClass,
-            created_at: u64,
-            updated_at: u64,
-            predecessor: &'a Option<AgentToolExperienceRetainedRevisionDigestV2>,
-        }
-        let encoded = serde_json::to_vec(&Input {
-            schema_version: self.schema_version,
-            memory_space_id: &self.memory_space_id,
-            owning_scope: &self.owning_scope,
-            owner_ref: &self.owner_ref,
-            owner_revision: self.owner_revision,
-            registry_id: &self.registry_id,
-            registry_scope: &self.registry_scope,
-            tool_id: &self.tool_id,
-            schema_fingerprint: &self.schema_fingerprint,
-            task_signature: &self.task_signature,
-            trigger_summary: &self.trigger_summary,
-            usage_guidance: &self.usage_guidance,
-            constraints: &self.constraints,
-            evidence_count: self.evidence_count,
-            success_count: self.success_count,
-            failure_count: self.failure_count,
-            last_outcome: self.last_outcome,
-            confidence: self.confidence,
-            status: self.status,
-            evidence_refs: &self.evidence_refs,
-            privacy_class: self.privacy_class,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
-            predecessor: &self.predecessor,
-        })
-        .map_err(|error| {
-            Error::config("agent_tool_experience_material_digest", error.to_string())
+        let mut canonical = self.clone();
+        canonical.content_digest.clear();
+        let encoded = serde_json::to_vec(&canonical).map_err(|_| {
+            Error::config(
+                "agent_tool_experience_material_digest",
+                "material digest encoding failed",
+            )
         })?;
         Ok(domain_digest(MATERIAL_DIGEST_DOMAIN, &[&encoded]))
     }
@@ -416,7 +574,7 @@ impl AgentToolExperienceRevisionMaterialV2 {
             &self.registry_scope,
             &self.tool_id,
             &self.schema_fingerprint,
-            &self.task_signature,
+            &self.body.focus(),
         )
         .is_err()
         {
@@ -429,7 +587,7 @@ impl AgentToolExperienceRevisionMaterialV2 {
             &self.registry_scope,
             &self.tool_id,
             &self.schema_fingerprint,
-            &self.task_signature,
+            &self.body.focus(),
         );
         if self.owner_ref.owner_plane != GovernedMemoryOwnerPlane::AgentToolExperience
             || !expected_owner.is_ok_and(|value| value == self.owner_ref.owner_id)
@@ -461,11 +619,7 @@ impl AgentToolExperienceRevisionMaterialV2 {
         }
         if self.created_at == 0
             || self.updated_at < self.created_at
-            || !is_canonical_text(&self.trigger_summary)
-            || !is_canonical_text(&self.usage_guidance)
-            || !canonical_unique(&self.constraints)
-            || !canonical_unique(&self.evidence_refs)
-            || self.success_count.saturating_add(self.failure_count) > self.evidence_count
+            || !self.body.validate_contract()
         {
             failures.push(AgentToolExperienceContractFailure::ContentInvalid);
         }
@@ -481,26 +635,26 @@ impl AgentToolExperienceRevisionMaterialV2 {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AgentToolExperienceHeadStateV2 {
+pub enum AgentToolExperienceHeadStateV3 {
     Active,
     Tombstoned,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AgentToolExperienceOwnerHeadV2 {
+pub struct AgentToolExperienceOwnerHeadV3 {
     pub schema_version: u32,
     pub physical_key: String,
     pub memory_space_id: String,
     pub owning_scope: AgentToolExperienceOwningScopeV1,
     pub owner_ref: GovernedMemoryOwnerRef,
     pub current_revision: u64,
-    pub retained_revisions: Vec<AgentToolExperienceRetainedRevisionDigestV2>,
-    pub state: AgentToolExperienceHeadStateV2,
+    pub retained_revisions: Vec<AgentToolExperienceRetainedRevisionDigestV3>,
+    pub state: AgentToolExperienceHeadStateV3,
     pub content_digest: String,
 }
 
-impl AgentToolExperienceOwnerHeadV2 {
+impl AgentToolExperienceOwnerHeadV3 {
     /// Retains only historical commitment digests; materials must be removed atomically.
     pub fn tombstone(&self) -> Result<Self> {
         if !self.validate_contract().accepted {
@@ -510,7 +664,7 @@ impl AgentToolExperienceOwnerHeadV2 {
             ));
         }
         let mut head = self.clone();
-        head.state = AgentToolExperienceHeadStateV2::Tombstoned;
+        head.state = AgentToolExperienceHeadStateV3::Tombstoned;
         head.content_digest = head.canonical_content_digest()?;
         Ok(head)
     }
@@ -520,7 +674,7 @@ impl AgentToolExperienceOwnerHeadV2 {
         owning_scope: AgentToolExperienceOwningScopeV1,
         owner_ref: GovernedMemoryOwnerRef,
         current_revision: u64,
-        mut retained_revisions: Vec<AgentToolExperienceRetainedRevisionDigestV2>,
+        mut retained_revisions: Vec<AgentToolExperienceRetainedRevisionDigestV3>,
     ) -> Result<Self> {
         validate_scope(memory_space_id, &owning_scope)?;
         retained_revisions.sort_by_key(|value| value.owner_revision);
@@ -553,7 +707,7 @@ impl AgentToolExperienceOwnerHeadV2 {
             owner_ref,
             current_revision,
             retained_revisions,
-            state: AgentToolExperienceHeadStateV2::Active,
+            state: AgentToolExperienceHeadStateV3::Active,
             content_digest: String::new(),
         };
         head.content_digest = head.canonical_content_digest()?;
@@ -601,7 +755,7 @@ pub struct AgentToolExperienceHeadBindingV1 {
 }
 
 impl AgentToolExperienceHeadBindingV1 {
-    pub fn from_head(head: &AgentToolExperienceOwnerHeadV2) -> Result<Self> {
+    pub fn from_head(head: &AgentToolExperienceOwnerHeadV3) -> Result<Self> {
         if !head.validate_contract().accepted {
             return Err(Error::config(
                 "agent_tool_experience_head_binding",
@@ -625,11 +779,11 @@ impl AgentToolExperienceHeadBindingV1 {
     }
 
     pub fn from_head_and_material(
-        head: &AgentToolExperienceOwnerHeadV2,
-        material: &AgentToolExperienceRevisionMaterialV2,
+        head: &AgentToolExperienceOwnerHeadV3,
+        material: &AgentToolExperienceRevisionMaterialV3,
     ) -> Result<Self> {
         if !head.validate_contract().accepted
-            || head.state != AgentToolExperienceHeadStateV2::Active
+            || head.state != AgentToolExperienceHeadStateV3::Active
             || !material.validate_contract().accepted
             || head.owner_ref != material.owner_ref
             || head.current_revision != material.owner_revision
@@ -767,7 +921,7 @@ pub fn canonical_agent_tool_experience_owner_id(
     registry_scope: &AgentToolRegistryScope,
     tool_id: &str,
     schema_fingerprint: &str,
-    task_signature: &str,
+    focus: &AgentToolExperienceFocusV1<'_>,
 ) -> Result<String> {
     validate_identity_fields(
         memory_space_id,
@@ -776,10 +930,12 @@ pub fn canonical_agent_tool_experience_owner_id(
         registry_scope,
         tool_id,
         schema_fingerprint,
-        task_signature,
+        focus,
     )?;
     let registry_scope = serde_json::to_vec(registry_scope)
         .map_err(|error| Error::config("agent_tool_experience_owner_id", error.to_string()))?;
+    let focus = serde_json::to_vec(focus)
+        .map_err(|_| Error::config("agent_tool_experience_owner_id", "focus encoding failed"))?;
     Ok(format!(
         "agent_tool_experience:sha256:{}",
         domain_hex(
@@ -791,7 +947,7 @@ pub fn canonical_agent_tool_experience_owner_id(
                 &registry_scope,
                 tool_id.as_bytes(),
                 schema_fingerprint.as_bytes(),
-                task_signature.as_bytes(),
+                &focus,
             ],
         )
     ))
@@ -855,7 +1011,7 @@ pub fn agent_tool_experience_scope_manifest_key(
 }
 
 pub fn validate_agent_tool_experience_owner_history(
-    materials: &[AgentToolExperienceRevisionMaterialV2],
+    materials: &[AgentToolExperienceRevisionMaterialV3],
 ) -> Result<()> {
     let Some(first) = materials.first() else {
         return Err(Error::config(
@@ -876,7 +1032,7 @@ pub fn validate_agent_tool_experience_owner_history(
                 || (index == 0 && value.predecessor.is_some())
                 || (index > 0
                     && value.predecessor.as_ref()
-                        != AgentToolExperienceRetainedRevisionDigestV2::from_material(
+                        != AgentToolExperienceRetainedRevisionDigestV3::from_material(
                             &materials[index - 1],
                         )
                         .ok()
@@ -893,8 +1049,8 @@ pub fn validate_agent_tool_experience_owner_history(
 
 pub fn validate_agent_tool_experience_scope_closure(
     manifest: &AgentToolExperienceScopeManifestV1,
-    heads: &[AgentToolExperienceOwnerHeadV2],
-    materials: &[AgentToolExperienceRevisionMaterialV2],
+    heads: &[AgentToolExperienceOwnerHeadV3],
+    materials: &[AgentToolExperienceRevisionMaterialV3],
     max_entries: usize,
 ) -> Result<()> {
     let head_by_owner = heads
@@ -931,7 +1087,7 @@ pub fn validate_agent_tool_experience_scope_closure(
     let bindings = heads
         .iter()
         .map(|head| {
-            if head.state == AgentToolExperienceHeadStateV2::Tombstoned {
+            if head.state == AgentToolExperienceHeadStateV3::Tombstoned {
                 if materials
                     .iter()
                     .any(|material| material.owner_ref == head.owner_ref)
@@ -991,14 +1147,14 @@ fn validate_identity_fields(
     registry_scope: &AgentToolRegistryScope,
     tool_id: &str,
     schema_fingerprint: &str,
-    task_signature: &str,
+    focus: &AgentToolExperienceFocusV1<'_>,
 ) -> Result<()> {
     validate_scope(memory_space_id, owning_scope)?;
     if !registry_scope.validate_contract()
         || !is_canonical(registry_id)
         || !is_canonical(tool_id)
         || !is_canonical(schema_fingerprint)
-        || !is_canonical(task_signature)
+        || matches!(focus, AgentToolExperienceFocusV1::Method { task_signature } if !bounded_identifier(task_signature))
     {
         return Err(Error::config(
             "agent_tool_experience_identity",
@@ -1100,12 +1256,28 @@ fn hash_field(hasher: &mut Sha256, value: &[u8]) {
 mod lifecycle_tests {
     use super::*;
 
-    fn material() -> AgentToolExperienceRevisionMaterialV2 {
-        material_with_guidance("governed guidance")
+    fn material() -> AgentToolExperienceRevisionMaterialV3 {
+        material_with_guidance("1. Read the report.\n2. Verify the governed result.")
     }
 
-    fn material_with_guidance(guidance: &str) -> AgentToolExperienceRevisionMaterialV2 {
-        AgentToolExperienceRevisionMaterialV2::build(
+    fn material_with_guidance(guidance: &str) -> AgentToolExperienceRevisionMaterialV3 {
+        let mut body = AgentToolExperienceBodyV1::Method {
+            task_signature: "read-report".into(),
+            procedure: guidance.into(),
+            constraints: vec![],
+            sources: vec![],
+        };
+        let method_digest = body.method_content_digest().unwrap().unwrap();
+        let AgentToolExperienceBodyV1::Method { sources, .. } = &mut body else {
+            unreachable!()
+        };
+        sources.push(AgentToolMethodSourceRefV1 {
+            source_job_id: "synthetic-source".into(),
+            method_id: "method-a".into(),
+            method_digest,
+            execution_refs: vec![],
+        });
+        AgentToolExperienceRevisionMaterialV3::build(
             "space-a",
             AgentToolExperienceOwningScopeV1::Subject {
                 mounted_subject_id: "agent-a".to_string(),
@@ -1114,18 +1286,9 @@ mod lifecycle_tests {
             AgentToolRegistryScope::Global,
             "read",
             "schema-v1",
-            "read-report",
             1,
-            "private source summary",
-            guidance,
-            Vec::new(),
-            2,
-            2,
-            0,
-            AgentToolOutcome::Succeeded,
-            AgentToolExperienceConfidence::High,
+            body,
             AgentToolExperienceStatus::Active,
-            vec!["evidence-a".to_string()],
             MemoryPrivacyClass::SharedWithSubject,
             100,
             101,
@@ -1138,7 +1301,9 @@ mod lifecycle_tests {
     fn canonical_multiline_method_material_builds_and_retains_exact_digest() {
         let method = "1. Inspect archive inputs.\n2. Extract into an empty directory.\n3. Verify the manifest.";
         let multiline = material_with_guidance(method);
-        assert_eq!(multiline.usage_guidance, method);
+        assert!(
+            matches!(&multiline.body, AgentToolExperienceBodyV1::Method { procedure, .. } if procedure == method)
+        );
         assert!(multiline.validate_contract().accepted);
         assert_eq!(
             multiline.content_digest,
@@ -1146,20 +1311,28 @@ mod lifecycle_tests {
                 .canonical_content_digest()
                 .expect("canonical digest")
         );
-        let flattened = material_with_guidance(&method.replace('\n', " "));
-        assert_ne!(multiline.content_digest, flattened.content_digest);
+        let mut flattened = multiline.clone();
+        let AgentToolExperienceBodyV1::Method { procedure, .. } = &mut flattened.body else {
+            unreachable!()
+        };
+        *procedure = method.replace('\n', " ");
+        assert_ne!(
+            multiline.content_digest,
+            flattened.canonical_content_digest().unwrap()
+        );
+        assert!(!flattened.validate_contract().accepted);
     }
 
     #[test]
     fn tombstone_preserves_commitments_but_requires_raw_material_exact_zero() {
         let material = material();
-        let head = AgentToolExperienceOwnerHeadV2::build(
+        let head = AgentToolExperienceOwnerHeadV3::build(
             &material.memory_space_id,
             material.owning_scope.clone(),
             material.owner_ref.clone(),
             1,
             vec![
-                AgentToolExperienceRetainedRevisionDigestV2::from_material(&material)
+                AgentToolExperienceRetainedRevisionDigestV3::from_material(&material)
                     .expect("retained"),
             ],
         )
@@ -1226,7 +1399,7 @@ mod lifecycle_tests {
         )
         .expect("key");
         second.predecessor = Some(
-            AgentToolExperienceRetainedRevisionDigestV2::from_material(&first)
+            AgentToolExperienceRetainedRevisionDigestV3::from_material(&first)
                 .expect("predecessor"),
         );
         second.updated_at = 102;

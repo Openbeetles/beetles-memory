@@ -332,6 +332,7 @@ fn http_runtime_runs_maintenance_when_llm_services_are_injected() {
         AdapterRuntimeServices {
             http: Some(&mut http),
             llm: Some(&llm),
+            procedural_submission: None,
         },
     )
     .expect("maintain");

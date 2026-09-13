@@ -3,11 +3,11 @@ use bm_core::skills::{
     agent_tool_experience_head_key, agent_tool_experience_material_key,
     agent_tool_experience_scope_manifest_key, canonical_agent_tool_experience_owner_id,
     validate_agent_tool_experience_owner_history, validate_agent_tool_experience_scope_closure,
-    AgentToolExperienceConfidence, AgentToolExperienceHeadBindingV1,
-    AgentToolExperienceOwnerHeadV2, AgentToolExperienceOwnerLocatorV2,
-    AgentToolExperienceOwningScopeV1, AgentToolExperienceRetainedRevisionDigestV2,
-    AgentToolExperienceRevisionMaterialV2, AgentToolExperienceScopeManifestV1,
-    AgentToolExperienceStatus, AgentToolOutcome, AgentToolRegistryScope,
+    AgentToolExperienceBodyV1, AgentToolExperienceFocusV1, AgentToolExperienceHeadBindingV1,
+    AgentToolExperienceOwnerHeadV3, AgentToolExperienceOwnerLocatorV3,
+    AgentToolExperienceOwningScopeV1, AgentToolExperienceRetainedRevisionDigestV3,
+    AgentToolExperienceRevisionMaterialV3, AgentToolExperienceScopeManifestV1,
+    AgentToolExperienceStatus, AgentToolMethodSourceRefV1, AgentToolRegistryScope,
 };
 
 fn scope(subject: &str) -> AgentToolExperienceOwningScopeV1 {
@@ -20,9 +20,25 @@ fn material(
     memory_space_id: &str,
     mounted_subject_id: &str,
     revision: u64,
-    predecessor: Option<AgentToolExperienceRetainedRevisionDigestV2>,
-) -> AgentToolExperienceRevisionMaterialV2 {
-    AgentToolExperienceRevisionMaterialV2::build(
+    predecessor: Option<AgentToolExperienceRetainedRevisionDigestV3>,
+) -> AgentToolExperienceRevisionMaterialV3 {
+    let mut body = AgentToolExperienceBodyV1::Method {
+        task_signature: "extract_pdf_text_for_release_notes".into(),
+        procedure: "1. Inspect the PDF document.\n2. Extract and verify the release notes.".into(),
+        constraints: vec!["filesystem.read".into()],
+        sources: vec![],
+    };
+    let method_digest = body.method_content_digest().unwrap().unwrap();
+    let AgentToolExperienceBodyV1::Method { sources, .. } = &mut body else {
+        unreachable!()
+    };
+    sources.push(AgentToolMethodSourceRefV1 {
+        source_job_id: format!("source-{revision}"),
+        method_id: "method-a".into(),
+        method_digest,
+        execution_refs: vec![],
+    });
+    AgentToolExperienceRevisionMaterialV3::build(
         memory_space_id,
         scope(mounted_subject_id),
         "host-tools",
@@ -31,18 +47,9 @@ fn material(
         },
         "pdf.extract",
         "schema-pdf-v1",
-        "extract_pdf_text_for_release_notes",
         revision,
-        "PDF release-note extraction",
-        "Prefer the governed extraction path.",
-        vec!["filesystem.read".to_string()],
-        2,
-        2,
-        0,
-        AgentToolOutcome::Succeeded,
-        AgentToolExperienceConfidence::High,
+        body,
         AgentToolExperienceStatus::Active,
-        vec![format!("evidence-{revision}")],
         MemoryPrivacyClass::SharedWithSubject,
         100,
         100 + revision,
@@ -70,7 +77,9 @@ fn owner_identity_is_exactly_bound_to_space_subject_and_registry_scope() {
         },
         "pdf.extract",
         "schema-pdf-v1",
-        "extract_pdf_text_for_release_notes",
+        &AgentToolExperienceFocusV1::Method {
+            task_signature: "extract_pdf_text_for_release_notes",
+        },
     )
     .expect("owner id");
     assert_eq!(subject_a.owner_ref.owner_id, owner_id);
@@ -84,7 +93,9 @@ fn owner_identity_is_exactly_bound_to_space_subject_and_registry_scope() {
         },
         "pdf.extract",
         "schema-pdf-v1",
-        "extract_pdf_text_for_release_notes",
+        &AgentToolExperienceFocusV1::Method {
+            task_signature: "extract_pdf_text_for_release_notes",
+        },
     )
     .expect("other scoped owner id");
     assert_ne!(owner_id, other_registry_scope);
@@ -94,21 +105,21 @@ fn owner_identity_is_exactly_bound_to_space_subject_and_registry_scope() {
 fn revision_history_and_locator_are_canonical_and_tamper_evident() {
     let first = material("space-a", "subject-a", 1, None);
     let retained_first =
-        AgentToolExperienceRetainedRevisionDigestV2::from_material(&first).expect("retained first");
+        AgentToolExperienceRetainedRevisionDigestV3::from_material(&first).expect("retained first");
     let second = material("space-a", "subject-a", 2, Some(retained_first.clone()));
     validate_agent_tool_experience_owner_history(&[first.clone(), second.clone()])
         .expect("valid history");
 
-    let locator = AgentToolExperienceOwnerLocatorV2::from_material(&second);
+    let locator = AgentToolExperienceOwnerLocatorV3::from_material(&second);
     let encoded = serde_json::to_value(&locator).expect("locator json");
     assert_eq!(encoded["memory_space_id"], "space-a");
     assert_eq!(encoded["owner_revision"], 2);
-    assert!(serde_json::from_value::<AgentToolExperienceOwnerLocatorV2>(encoded).is_ok());
+    assert!(serde_json::from_value::<AgentToolExperienceOwnerLocatorV3>(encoded).is_ok());
 
     let mut wrong_predecessor = second;
     wrong_predecessor.predecessor = None;
     assert!(validate_agent_tool_experience_owner_history(&[first, wrong_predecessor]).is_err());
-    assert!(AgentToolExperienceOwnerLocatorV2::try_new(
+    assert!(AgentToolExperienceOwnerLocatorV3::try_new(
         " space-a",
         scope("subject-a"),
         retained_first.owner_ref.owner_id,
@@ -120,9 +131,9 @@ fn revision_history_and_locator_are_canonical_and_tamper_evident() {
 #[test]
 fn head_and_manifest_validate_the_exact_owner_closure() {
     let first = material("space-a", "subject-a", 1, None);
-    let retained = AgentToolExperienceRetainedRevisionDigestV2::from_material(&first)
+    let retained = AgentToolExperienceRetainedRevisionDigestV3::from_material(&first)
         .expect("retained revision");
-    let head = AgentToolExperienceOwnerHeadV2::build(
+    let head = AgentToolExperienceOwnerHeadV3::build(
         "space-a",
         scope("subject-a"),
         first.owner_ref.clone(),
@@ -165,7 +176,10 @@ fn head_and_manifest_validate_the_exact_owner_closure() {
     );
 
     let mut tampered = first;
-    tampered.usage_guidance.push_str(" tampered");
+    let AgentToolExperienceBodyV1::Method { procedure, .. } = &mut tampered.body else {
+        unreachable!()
+    };
+    procedure.push_str(" tampered");
     assert!(
         validate_agent_tool_experience_scope_closure(&manifest, &[head], &[tampered], 8,).is_err()
     );
@@ -184,12 +198,12 @@ fn head_and_manifest_validate_the_exact_owner_closure() {
 fn head_cannot_drop_the_initial_revision_from_retained_history() {
     let first = material("space-a", "subject-a", 1, None);
     let retained_first =
-        AgentToolExperienceRetainedRevisionDigestV2::from_material(&first).expect("retained first");
+        AgentToolExperienceRetainedRevisionDigestV3::from_material(&first).expect("retained first");
     let second = material("space-a", "subject-a", 2, Some(retained_first));
-    let retained_second = AgentToolExperienceRetainedRevisionDigestV2::from_material(&second)
+    let retained_second = AgentToolExperienceRetainedRevisionDigestV3::from_material(&second)
         .expect("retained second");
 
-    assert!(AgentToolExperienceOwnerHeadV2::build(
+    assert!(AgentToolExperienceOwnerHeadV3::build(
         "space-a",
         scope("subject-a"),
         second.owner_ref,

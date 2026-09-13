@@ -7,8 +7,8 @@ use bm_core::memory::{
 };
 use bm_core::skills::{
     validate_agent_tool_experience_owner_history, validate_agent_tool_experience_scope_closure,
-    AgentToolExperienceHeadStateV2, AgentToolExperienceOwnerHeadV2,
-    AgentToolExperienceRevisionMaterialV2, AgentToolExperienceScopeManifestV1,
+    AgentToolExperienceHeadStateV3, AgentToolExperienceOwnerHeadV3,
+    AgentToolExperienceRevisionMaterialV3, AgentToolExperienceScopeManifestV1,
 };
 use bm_core::skills::{AgentToolExperienceHeadBindingV1, AgentToolExperienceOwningScopeV1};
 use bm_core::{Error, Result};
@@ -59,10 +59,10 @@ pub struct AgentToolExperienceStoreMutationPlanV1 {
     operation_id: String,
     actor_subject_id: String,
     scope: StoreEventScope,
-    previous_head: Option<AgentToolExperienceOwnerHeadV2>,
+    previous_head: Option<AgentToolExperienceOwnerHeadV3>,
     previous_manifest: Option<AgentToolExperienceScopeManifestV1>,
-    material: AgentToolExperienceRevisionMaterialV2,
-    head: AgentToolExperienceOwnerHeadV2,
+    material: AgentToolExperienceRevisionMaterialV3,
+    head: AgentToolExperienceOwnerHeadV3,
     manifest: AgentToolExperienceScopeManifestV1,
     committed_at_unix_secs: u64,
 }
@@ -73,10 +73,10 @@ impl AgentToolExperienceStoreMutationPlanV1 {
         operation_id: impl Into<String>,
         actor_subject_id: impl Into<String>,
         scope: StoreEventScope,
-        previous_head: Option<AgentToolExperienceOwnerHeadV2>,
+        previous_head: Option<AgentToolExperienceOwnerHeadV3>,
         previous_manifest: Option<AgentToolExperienceScopeManifestV1>,
-        material: AgentToolExperienceRevisionMaterialV2,
-        head: AgentToolExperienceOwnerHeadV2,
+        material: AgentToolExperienceRevisionMaterialV3,
+        head: AgentToolExperienceOwnerHeadV3,
         manifest: AgentToolExperienceScopeManifestV1,
         committed_at_unix_secs: u64,
     ) -> Result<Self> {
@@ -157,7 +157,7 @@ impl AgentToolExperienceStoreMutationPlanV1 {
         if self
             .previous_head
             .as_ref()
-            .is_some_and(|head| head.state == AgentToolExperienceHeadStateV2::Tombstoned)
+            .is_some_and(|head| head.state == AgentToolExperienceHeadStateV3::Tombstoned)
         {
             return Err(Error::invalid_input(
                 "agent_tool_experience_store_plan",
@@ -245,10 +245,10 @@ impl AgentToolExperienceStoreMutationPlanV1 {
         struct Intent<'a> {
             actor_subject_id: &'a str,
             scope: &'a StoreEventScope,
-            previous_head: &'a Option<AgentToolExperienceOwnerHeadV2>,
+            previous_head: &'a Option<AgentToolExperienceOwnerHeadV3>,
             previous_manifest: &'a Option<AgentToolExperienceScopeManifestV1>,
-            material: &'a AgentToolExperienceRevisionMaterialV2,
-            head: &'a AgentToolExperienceOwnerHeadV2,
+            material: &'a AgentToolExperienceRevisionMaterialV3,
+            head: &'a AgentToolExperienceOwnerHeadV3,
             manifest: &'a AgentToolExperienceScopeManifestV1,
         }
         let bytes = serde_json::to_vec(&Intent {
@@ -492,7 +492,7 @@ pub(crate) fn validate_agent_tool_experience_transition_preconditions(
                     .ok_or_else(|| {
                         Error::config(stage, "material deletion requires exact prior material CAS")
                     })?;
-                let before: AgentToolExperienceRevisionMaterialV2 = decode(before, stage)?;
+                let before: AgentToolExperienceRevisionMaterialV3 = decode(before, stage)?;
                 if before.physical_key != *key
                     || before.memory_space_id != batch.scope.memory_space_id
                     || before.owning_scope.mounted_subject_id() != batch.scope.subject_id
@@ -517,7 +517,7 @@ pub(crate) fn validate_agent_tool_experience_transition_preconditions(
         if namespace != AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE {
             continue;
         }
-        let after: AgentToolExperienceOwnerHeadV2 = decode(value, stage)?;
+        let after: AgentToolExperienceOwnerHeadV3 = decode(value, stage)?;
         let before = preconditions.iter().find(|condition| match condition {
             StoreJsonPrecondition::Exact {
                 namespace: expected_namespace,
@@ -532,16 +532,16 @@ pub(crate) fn validate_agent_tool_experience_transition_preconditions(
         match before {
             Some(StoreJsonPrecondition::Absent { .. })
                 if after.current_revision == 1
-                    && after.state == AgentToolExperienceHeadStateV2::Active => {}
+                    && after.state == AgentToolExperienceHeadStateV3::Active => {}
             Some(StoreJsonPrecondition::Exact { value, .. }) => {
-                let before: AgentToolExperienceOwnerHeadV2 = decode(value, stage)?;
-                if before.state == AgentToolExperienceHeadStateV2::Tombstoned {
+                let before: AgentToolExperienceOwnerHeadV3 = decode(value, stage)?;
+                if before.state == AgentToolExperienceHeadStateV3::Tombstoned {
                     return Err(Error::config(
                         stage,
                         "tombstoned owner commitment cannot be rewritten or resurrected",
                     ));
                 }
-                if after.state == AgentToolExperienceHeadStateV2::Tombstoned {
+                if after.state == AgentToolExperienceHeadStateV3::Tombstoned {
                     if after != before.tombstone()? {
                         return Err(Error::config(
                             stage,
@@ -610,21 +610,21 @@ pub(crate) fn validate_agent_tool_experience_transaction_post_image(
                 *counts.entry(namespace.as_str()).or_default() += 1;
                 let exact_scope = match namespace.as_str() {
                     AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE => {
-                        let material: AgentToolExperienceRevisionMaterialV2 =
+                        let material: AgentToolExperienceRevisionMaterialV3 =
                             decode(value, "agent_tool_experience_store_post_image")?;
                         material.memory_space_id == batch.scope.memory_space_id
                             && material.owning_scope.mounted_subject_id() == batch.scope.subject_id
                     }
                     AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE => {
-                        let head: AgentToolExperienceOwnerHeadV2 =
+                        let head: AgentToolExperienceOwnerHeadV3 =
                             decode(value, "agent_tool_experience_store_post_image")?;
                         head.memory_space_id == batch.scope.memory_space_id
                             && head.owning_scope.mounted_subject_id() == batch.scope.subject_id
                             && head.state
                                 == if lifecycle {
-                                    AgentToolExperienceHeadStateV2::Tombstoned
+                                    AgentToolExperienceHeadStateV3::Tombstoned
                                 } else {
-                                    AgentToolExperienceHeadStateV2::Active
+                                    AgentToolExperienceHeadStateV3::Active
                                 }
                     }
                     AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE => {
@@ -737,10 +737,10 @@ pub(crate) fn validate_agent_tool_experience_store_image(
     for ((namespace, key), value) in &state.json {
         match namespace.as_str() {
             AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE => {
-                let material: AgentToolExperienceRevisionMaterialV2 = decode(value, stage)?;
+                let material: AgentToolExperienceRevisionMaterialV3 = decode(value, stage)?;
                 if material.physical_key != *key
                     || !material.validate_contract().accepted
-                    || material.evidence_refs.len() > budget.max_evidence_refs_per_owner
+                    || material.body.contribution_count() > budget.max_evidence_refs_per_owner
                 {
                     return Err(Error::config(
                         stage,
@@ -754,7 +754,7 @@ pub(crate) fn validate_agent_tool_experience_store_image(
                 materials.push(material);
             }
             AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE => {
-                let head: AgentToolExperienceOwnerHeadV2 = decode(value, stage)?;
+                let head: AgentToolExperienceOwnerHeadV3 = decode(value, stage)?;
                 if head.physical_key != *key
                     || !head.validate_contract().accepted
                     || head.retained_revisions.len() > budget.max_revisions_per_owner
@@ -821,7 +821,7 @@ pub(crate) fn validate_agent_tool_experience_store_image(
                 .cloned()
                 .collect::<Vec<_>>();
             history.sort_by_key(|material| material.owner_revision);
-            if head.state == AgentToolExperienceHeadStateV2::Tombstoned {
+            if head.state == AgentToolExperienceHeadStateV3::Tombstoned {
                 if !history.is_empty() {
                     return Err(Error::config(
                         stage,
@@ -893,12 +893,12 @@ mod lifecycle_tests {
     use super::*;
     use bm_core::memory::MemoryPrivacyClass;
     use bm_core::skills::{
-        AgentToolExperienceConfidence, AgentToolExperienceRetainedRevisionDigestV2,
-        AgentToolExperienceStatus, AgentToolOutcome, AgentToolRegistryScope,
+        AgentToolExperienceRetainedRevisionDigestV3, AgentToolExperienceStatus,
+        AgentToolRegistryScope,
     };
 
-    fn material(subject: &str) -> AgentToolExperienceRevisionMaterialV2 {
-        AgentToolExperienceRevisionMaterialV2::build(
+    fn material(subject: &str) -> AgentToolExperienceRevisionMaterialV3 {
+        AgentToolExperienceRevisionMaterialV3::build(
             "space",
             AgentToolExperienceOwningScopeV1::Subject {
                 mounted_subject_id: subject.to_string(),
@@ -907,18 +907,13 @@ mod lifecycle_tests {
             AgentToolRegistryScope::Global,
             "read",
             "schema",
-            "read-document",
             1,
-            "private source",
-            "governed guidance",
-            vec![],
-            2,
-            2,
-            0,
-            AgentToolOutcome::Succeeded,
-            AgentToolExperienceConfidence::High,
+            // This fixture proves deletion ownership, not successful execution.
+            bm_core::skills::AgentToolExperienceBodyV1::Execution {
+                counts: bm_core::memory::ToolExecutionCountsV1::default(),
+                contributions: Vec::new(),
+            },
             AgentToolExperienceStatus::Active,
-            vec!["source-a".to_string()],
             MemoryPrivacyClass::SharedWithSubject,
             100,
             101,
@@ -966,19 +961,19 @@ mod lifecycle_tests {
     #[test]
     fn terminal_commitment_cannot_be_resurrected_or_rewritten() {
         let material = material("agent-a");
-        let active = AgentToolExperienceOwnerHeadV2::build(
+        let active = AgentToolExperienceOwnerHeadV3::build(
             &material.memory_space_id,
             material.owning_scope.clone(),
             material.owner_ref.clone(),
             1,
             vec![
-                AgentToolExperienceRetainedRevisionDigestV2::from_material(&material)
+                AgentToolExperienceRetainedRevisionDigestV3::from_material(&material)
                     .expect("retained"),
             ],
         )
         .expect("head");
         let terminal = active.tombstone().expect("terminal");
-        let batch_for = |head: &AgentToolExperienceOwnerHeadV2| StoreMutationBatch {
+        let batch_for = |head: &AgentToolExperienceOwnerHeadV3| StoreMutationBatch {
             transaction_id: "lifecycle".to_string(),
             operation: "lifecycle".to_string(),
             scope: scope(),
@@ -988,7 +983,7 @@ mod lifecycle_tests {
                 serde_json::to_value(head).expect("head value"),
             )],
         };
-        let before_for = |head: &AgentToolExperienceOwnerHeadV2| StoreJsonPrecondition::Exact {
+        let before_for = |head: &AgentToolExperienceOwnerHeadV3| StoreJsonPrecondition::Exact {
             namespace: AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE.to_string(),
             key: head.physical_key.clone(),
             value: serde_json::to_value(head).expect("head value"),

@@ -66,6 +66,10 @@ pub(crate) fn authority_key(space: &str) -> String {
 }
 
 impl ProceduralSelectionAuthority {
+    pub(crate) fn incarnation(&self) -> &str {
+        &self.incarnation
+    }
+
     pub(crate) fn fresh(space: &str, now: u64) -> Result<Self> {
         let mut secret = [0u8; 32];
         getrandom::fill(&mut secret).map_err(|_| invalid())?;
@@ -199,18 +203,15 @@ pub(crate) fn validate_store_image(json: &BTreeMap<(String, String), Value>) -> 
                     return Err(invalid());
                 }
                 let mut ids = std::collections::BTreeSet::new();
-                for observation in evidence
-                    .agent_tool_feedback
-                    .iter()
-                    .flat_map(|feedback| &feedback.observations)
-                {
-                    if !ids.insert(&observation.observation_id)
-                        || !record.tool_observations.iter().any(|canonical| {
-                            canonical.observation_id == observation.observation_id
-                                && canonical.tool_name == observation.tool_id
-                                && canonical.summary == observation.summary
-                                && canonical.external_content == observation.external_content
-                        })
+                for feedback in &evidence.agent_tool_feedback {
+                    if !feedback.validates_canonical_turn(
+                        &record.tool_observations,
+                        record.external_content_used,
+                        record.created_at,
+                    ) || feedback
+                        .execution_facts
+                        .iter()
+                        .any(|fact| !ids.insert(&fact.observation_id))
                     {
                         return Err(invalid());
                     }
@@ -241,6 +242,20 @@ pub(crate) fn intake_dependencies(record: &TranscriptTurnRecord) -> Result<Vec<(
         return Ok(Vec::new());
     };
     let mut addresses = Vec::new();
+    if let bm_core::memory::ProceduralFeedbackAuthorityV2::Producer {
+        producer_revision, ..
+    } = &evidence.authority
+    {
+        addresses.push((NAMESPACE.into(), authority_key(&evidence.memory_space_id)));
+        addresses.push((
+            super::schema::PROCEDURAL_PRODUCER_BINDING_NAMESPACE.into(),
+            producer_revision.material_key(),
+        ));
+        addresses.push((
+            super::schema::PROCEDURAL_PRODUCER_HEAD_NAMESPACE.into(),
+            producer_revision.binding_key.clone(),
+        ));
+    }
     for feedback in &evidence.runtime_skill_feedback {
         addresses.push((
             super::schema::RUNTIME_SKILL_RECORD_NAMESPACE.to_owned(),
@@ -287,6 +302,7 @@ pub(crate) fn intake_dependencies(record: &TranscriptTurnRecord) -> Result<Vec<(
 pub(crate) fn validate_new_intakes(
     before: &BTreeMap<(String, String), Value>,
     after: &BTreeMap<(String, String), Value>,
+    authority: Option<&crate::learning::ProceduralIntakeAuthorization>,
 ) -> Result<()> {
     for (address, value) in after
         .iter()
@@ -304,6 +320,100 @@ pub(crate) fn validate_new_intakes(
         }
         if !evidence.validate_contract() {
             return Err(invalid());
+        }
+        if let bm_core::memory::ProceduralFeedbackAuthorityV2::Producer {
+            producer_revision, ..
+        } = &evidence.authority
+        {
+            use super::schema::{
+                PROCEDURAL_PRODUCER_BINDING_NAMESPACE as MATERIAL,
+                PROCEDURAL_PRODUCER_HEAD_NAMESPACE as HEAD,
+            };
+            // This is an intake proof, never permission to rewrite an existing
+            // declaration. Lifecycle updates may retain or remove that evidence.
+            if before.contains_key(address) {
+                return Err(invalid());
+            }
+            let proof = authority
+                .filter(|proof| proof.authorizes(&record))
+                .ok_or_else(invalid)?;
+            for precondition in &proof.source_preconditions {
+                let matches = match precondition {
+                    crate::StoreJsonPrecondition::Exact {
+                        namespace,
+                        key,
+                        value,
+                    } => before.get(&(namespace.clone(), key.clone())) == Some(value),
+                    crate::StoreJsonPrecondition::Absent { namespace, key } => {
+                        !before.contains_key(&(namespace.clone(), key.clone()))
+                    }
+                };
+                if !matches {
+                    return Err(invalid());
+                }
+            }
+            let incarnation_key = authority_key(&evidence.memory_space_id);
+            let incarnation: ProceduralSelectionAuthority = serde_json::from_value(
+                before
+                    .get(&(NAMESPACE.into(), incarnation_key.clone()))
+                    .ok_or_else(invalid)?
+                    .clone(),
+            )
+            .map_err(|_| invalid())?;
+            incarnation.validate(&incarnation_key)?;
+            if incarnation.incarnation != proof.store_incarnation {
+                return Err(invalid());
+            }
+            let head: bm_core::memory::ProceduralProducerHeadV1 = serde_json::from_value(
+                before
+                    .get(&(HEAD.into(), producer_revision.binding_key.clone()))
+                    .ok_or_else(invalid)?
+                    .clone(),
+            )
+            .map_err(|_| invalid())?;
+            if proof.current_head != head
+                || !head.validate_contract()
+                || !head.retained_revisions.contains(producer_revision)
+            {
+                return Err(invalid());
+            }
+            let materials = head
+                .retained_revisions
+                .iter()
+                .map(|reference| {
+                    serde_json::from_value::<bm_core::memory::ProceduralProducerBindingV1>(
+                        before
+                            .get(&(MATERIAL.into(), reference.material_key()))
+                            .ok_or_else(invalid)?
+                            .clone(),
+                    )
+                    .map_err(|_| invalid())
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if !head.validates_materials(&materials) {
+                return Err(invalid());
+            }
+            let historical = materials
+                .iter()
+                .find(|binding| binding.revision == producer_revision.revision)
+                .ok_or_else(invalid)?;
+            let current = materials.last().ok_or_else(invalid)?;
+            let index: bm_core::memory::ProceduralFeedbackScopeIndexV2 = serde_json::from_value(
+                before
+                    .get(&(
+                        super::schema::PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE.into(),
+                        head.scope.scope_index_key()?,
+                    ))
+                    .ok_or_else(invalid)?
+                    .clone(),
+            )
+            .map_err(|_| invalid())?;
+            if index.validate().is_err() || !index.producer_heads.contains(&head.current) {
+                return Err(invalid());
+            }
+            historical
+                .authorize_evidence_with_current(current, &head.scope, evidence)
+                .map_err(|_| invalid())?;
         }
         if let Some(receipt) = &evidence.selection_receipt {
             if receipt.issued_at > record.created_at
@@ -390,7 +500,7 @@ pub(crate) fn validate_new_intakes(
                     &scope,
                     &owner,
                 )?;
-                let head: bm_core::skills::AgentToolExperienceOwnerHeadV2 = serde_json::from_value(
+                let head: bm_core::skills::AgentToolExperienceOwnerHeadV3 = serde_json::from_value(
                     before
                         .get(&(
                             super::schema::AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE.to_owned(),
@@ -400,7 +510,7 @@ pub(crate) fn validate_new_intakes(
                         .clone(),
                 )
                 .map_err(|_| invalid())?;
-                if head.state == bm_core::skills::AgentToolExperienceHeadStateV2::Tombstoned
+                if head.state == bm_core::skills::AgentToolExperienceHeadStateV3::Tombstoned
                     || head.current_revision != selection.experience_revision
                     || head.retained_revisions.last().is_none_or(|revision| {
                         revision.content_digest != selection.experience_content_digest

@@ -1781,7 +1781,7 @@ pub(crate) fn governance_completion_transaction_id(
     Ok(digest)
 }
 
-fn merge_completion_preconditions(
+pub(super) fn merge_completion_preconditions(
     target: &mut Vec<StoreJsonPrecondition>,
     incoming: impl IntoIterator<Item = StoreJsonPrecondition>,
 ) -> Result<()> {

@@ -8,7 +8,7 @@ use super::transcript::TranscriptTurnRecordAttachments;
 use super::{
     default_session_speaker_for_role, ActorAttribution, CanonicalTurnAppendIntent,
     CanonicalTurnTranscriptCommitReport, ConversationKey, ConversationTranscriptStore,
-    HostOpaqueRef, PostTurnLearningEvidenceV1, SessionMessage, SessionMessageRecord, SessionStore,
+    HostOpaqueRef, PostTurnLearningEvidenceV2, SessionMessage, SessionMessageRecord, SessionStore,
     SubjectId, TranscriptAppendIntent, TranscriptCommitReport, TranscriptConversationAlias,
     TranscriptTurnRecord, MAX_SESSION_ENTRIES,
 };
@@ -190,12 +190,42 @@ pub struct ConversationScope {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolObservationDigest {
     pub observation_id: String,
+    pub call_id: String,
     pub tool_name: String,
     pub summary: String,
     #[serde(default)]
     pub external_content: bool,
+}
+
+/// Canonical execution references are unique within a turn. Both intake and
+/// persisted-image admission use this check, before interpreting any feedback.
+pub fn validate_tool_observation_identities(observations: &[ToolObservationDigest]) -> Result<()> {
+    let mut observation_ids = std::collections::BTreeSet::new();
+    let mut call_ids = std::collections::BTreeSet::new();
+    let canonical_id = |value: &str| {
+        !value.is_empty()
+            && value.len() <= 256
+            && value.trim() == value
+            && !value.chars().any(char::is_control)
+    };
+    if observations.len() > super::MAX_PROCEDURAL_EVIDENCE_ITEMS
+        || observations.iter().any(|observation| {
+            !canonical_id(&observation.observation_id)
+                || !canonical_id(&observation.call_id)
+                || !canonical_id(&observation.tool_name)
+                || !observation_ids.insert(&observation.observation_id)
+                || !call_ids.insert(&observation.call_id)
+        })
+    {
+        return Err(crate::error::Error::config(
+            "canonical_tool_observations",
+            "tool observation identities must be canonical, bounded and unique",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -255,12 +285,13 @@ pub struct CommittedSessionMessage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanonicalTurnTranscriptCommitOptions {
     pub host_refs: Vec<HostOpaqueRef>,
-    pub learning_evidence: Option<PostTurnLearningEvidenceV1>,
+    pub learning_evidence: Option<PostTurnLearningEvidenceV2>,
     pub conversation_alias: Option<TranscriptConversationAlias>,
     pub now_secs: u64,
 }
 
 pub fn canonical_turn_learning_digest(delta: &CanonicalTurnDelta) -> Result<String> {
+    validate_tool_observation_identities(&delta.tool_observations)?;
     let encoded = serde_json::to_vec(delta).map_err(|error| {
         crate::error::Error::config("canonical_turn_learning_digest", error.to_string())
     })?;
@@ -279,6 +310,50 @@ pub fn commit_canonical_turn_delta_with_transcript(
     delta: &CanonicalTurnDelta,
     options: CanonicalTurnTranscriptCommitOptions,
 ) -> Result<CanonicalTurnTranscriptCommitReport> {
+    plan_canonical_turn_delta_with_transcript(
+        session_store,
+        transcript_store,
+        memory_space_id,
+        delta,
+        options,
+    )?
+    .commit_with(|intent| transcript_store.append_canonical_turn_intent(intent))
+}
+
+/// One canonical Session + Transcript plan. The append seam carries local
+/// backend authority without putting that authority into serialized evidence.
+pub struct CanonicalTurnTranscriptCommitPlan {
+    append: Option<CanonicalTurnAppendIntent>,
+    report: CanonicalTurnTranscriptCommitReport,
+}
+
+impl CanonicalTurnTranscriptCommitPlan {
+    pub fn commit_with(
+        self,
+        append: impl FnOnce(&CanonicalTurnAppendIntent) -> Result<TranscriptCommitReport>,
+    ) -> Result<CanonicalTurnTranscriptCommitReport> {
+        let mut report = self.report;
+        if let Some(intent) = self.append {
+            let transcript_commit = append(&intent)?;
+            if !transcript_commit.committed {
+                report.session_commit.committed = false;
+                report.session_commit.after_count = report.session_commit.before_count;
+                report.session_commit.committed_messages.clear();
+                report.session_commit.skipped_reason = transcript_commit.skipped_reason.clone();
+            }
+            report.transcript_commit = Some(transcript_commit);
+        }
+        Ok(report)
+    }
+}
+
+pub fn plan_canonical_turn_delta_with_transcript(
+    session_store: &dyn SessionStore,
+    transcript_store: &dyn ConversationTranscriptStore,
+    memory_space_id: &str,
+    delta: &CanonicalTurnDelta,
+    options: CanonicalTurnTranscriptCommitOptions,
+) -> Result<CanonicalTurnTranscriptCommitPlan> {
     let CanonicalTurnTranscriptCommitOptions {
         host_refs,
         learning_evidence,
@@ -342,27 +417,35 @@ pub fn commit_canonical_turn_delta_with_transcript(
             skipped_reason: Some("conversation_transcript_turn_already_committed".to_string()),
         };
         let transcript_count = transcript_store.turn_count(&key, &delta.subject)?;
-        return Ok(CanonicalTurnTranscriptCommitReport {
-            session_commit,
-            transcript_commit: Some(TranscriptCommitReport {
-                key,
-                turn_id: delta.turn_id.clone(),
-                sequence: existing.sequence,
-                committed: false,
-                before_count: transcript_count,
-                after_count: transcript_count,
-                skipped_reason: Some("conversation_transcript_turn_already_committed".to_string()),
-            }),
+        return Ok(CanonicalTurnTranscriptCommitPlan {
+            append: None,
+            report: CanonicalTurnTranscriptCommitReport {
+                session_commit,
+                transcript_commit: Some(TranscriptCommitReport {
+                    key,
+                    turn_id: delta.turn_id.clone(),
+                    sequence: existing.sequence,
+                    committed: false,
+                    before_count: transcript_count,
+                    after_count: transcript_count,
+                    skipped_reason: Some(
+                        "conversation_transcript_turn_already_committed".to_string(),
+                    ),
+                }),
+            },
         });
     }
     let prepared = prepare_canonical_turn_delta(before_count, delta);
     let committed_inputs = prepared.messages.clone();
-    let (session_append, mut session_commit) =
+    let (session_append, session_commit) =
         plan_prepared_session_messages(&key, delta, prepared, now_secs);
     if !session_commit.committed {
-        return Ok(CanonicalTurnTranscriptCommitReport {
-            session_commit,
-            transcript_commit: None,
+        return Ok(CanonicalTurnTranscriptCommitPlan {
+            append: None,
+            report: CanonicalTurnTranscriptCommitReport {
+                session_commit,
+                transcript_commit: None,
+            },
         });
     }
     if committed_inputs.len() != session_commit.committed_messages.len() {
@@ -395,16 +478,12 @@ pub fn commit_canonical_turn_delta_with_transcript(
         transcript: intent,
     };
     atomic.validate()?;
-    let transcript_commit = transcript_store.append_canonical_turn_intent(&atomic)?;
-    if !transcript_commit.committed {
-        session_commit.committed = false;
-        session_commit.after_count = session_commit.before_count;
-        session_commit.committed_messages.clear();
-        session_commit.skipped_reason = transcript_commit.skipped_reason.clone();
-    }
-    Ok(CanonicalTurnTranscriptCommitReport {
-        session_commit,
-        transcript_commit: Some(transcript_commit),
+    Ok(CanonicalTurnTranscriptCommitPlan {
+        append: Some(atomic),
+        report: CanonicalTurnTranscriptCommitReport {
+            session_commit,
+            transcript_commit: None,
+        },
     })
 }
 

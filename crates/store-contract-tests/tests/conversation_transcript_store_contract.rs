@@ -30,12 +30,12 @@ fn temp_root(name: &str) -> std::path::PathBuf {
     root
 }
 
-fn rewrite_file_manifest_as_v11(root: &std::path::Path) {
+fn rewrite_file_manifest_schema(root: &std::path::Path, schema_id: &str, version: u32) {
     let manifest_path = root.join("manifest.json");
     let mut manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
-    manifest["schema_id"] = json!("beetle_memory_store_schema_v11");
-    manifest["schema_version"] = json!(11);
+    manifest["schema_id"] = json!(schema_id);
+    manifest["schema_version"] = json!(version);
     std::fs::write(manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
 }
 
@@ -1958,67 +1958,82 @@ fn sqlite_store_reopens_with_transcript_catalog_timeline_search_and_activity() {
 
 #[cfg(feature = "sqlite-store")]
 #[test]
-fn sqlite_store_v11_is_rejected_read_only_by_v13_clean_break() {
-    let root = temp_root("query-sqlite-v11-clean-break");
-    let path = root.join("memory.sqlite3");
-    let config = StoreBackendConfig::sqlite(&path, support::native_persistent_profile()).unwrap();
-    {
-        let platform = support::open_store(config.clone()).unwrap();
-        let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
-        platform
-            .conversation_transcript_store()
-            .append_turn(&transcript_record(&key, "turn-v11", "preserved v11 state"))
-            .unwrap();
-    }
-    {
-        let connection = rusqlite::Connection::open(&path).unwrap();
-        let raw: String = connection
-            .query_row("SELECT manifest_json FROM bm_schema", [], |row| row.get(0))
-            .unwrap();
-        let mut manifest: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        manifest["schema_id"] = json!("beetle_memory_store_schema_v11");
-        manifest["schema_version"] = json!(11);
-        connection.execute("DELETE FROM bm_schema", []).unwrap();
-        connection
+fn sqlite_store_rejects_unsupported_schemas_without_mutation() {
+    for (schema_id, version) in [
+        ("beetle_memory_store_schema_v11", 11),
+        ("beetle_memory_store_schema_v13", 13),
+        ("unknown_memory_store_schema_v999", 999),
+    ] {
+        let root = temp_root(&format!("query-sqlite-v{version}-clean-break"));
+        let path = root.join("memory.sqlite3");
+        let config =
+            StoreBackendConfig::sqlite(&path, support::native_persistent_profile()).unwrap();
+        {
+            let platform = support::open_store(config.clone()).unwrap();
+            let key =
+                ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+            platform
+                .conversation_transcript_store()
+                .append_turn(&transcript_record(&key, "turn-v11", "preserved v11 state"))
+                .unwrap();
+        }
+        {
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            let raw: String = connection
+                .query_row("SELECT manifest_json FROM bm_schema", [], |row| row.get(0))
+                .unwrap();
+            let mut manifest: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            manifest["schema_id"] = json!(schema_id);
+            manifest["schema_version"] = json!(version);
+            connection.execute("DELETE FROM bm_schema", []).unwrap();
+            connection
             .execute(
                 "INSERT INTO bm_schema(schema_id, schema_version, manifest_json) VALUES (?1, ?2, ?3)",
                 rusqlite::params![
-                    "beetle_memory_store_schema_v11",
-                    11,
+                    schema_id,
+                    version,
                     serde_json::to_string(&manifest).unwrap()
                 ],
             )
             .unwrap();
+        }
+        let before = file_tree_bytes(&root);
+        let error = match support::open_store(config) {
+            Ok(_) => panic!("v14 clean break must reject SQLite schema {schema_id}"),
+            Err(error) => error,
+        };
+        assert_eq!(error.stage(), "store_rebuild_required", "{schema_id}");
+        assert_eq!(file_tree_bytes(&root), before, "{schema_id}");
     }
-    let before = file_tree_bytes(&root);
-    let error = match support::open_store(config) {
-        Ok(_) => panic!("v12 clean break must reject a v11 SQLite Store"),
-        Err(error) => error,
-    };
-    assert_eq!(error.stage(), "store_rebuild_required");
-    assert_eq!(file_tree_bytes(&root), before);
 }
 
 #[test]
-fn file_store_v11_is_rejected_read_only_by_v13_clean_break() {
-    let root = temp_root("query-file-v11-clean-break");
-    let config = StoreBackendConfig::file(&root, support::native_persistent_profile()).unwrap();
-    {
-        let platform = support::open_store(config.clone()).unwrap();
-        let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
-        platform
-            .conversation_transcript_store()
-            .append_turn(&transcript_record(&key, "turn-v11", "preserved v11 state"))
-            .unwrap();
+fn file_store_rejects_unsupported_schemas_without_mutation() {
+    for (schema_id, version) in [
+        ("beetle_memory_store_schema_v11", 11),
+        ("beetle_memory_store_schema_v13", 13),
+        ("unknown_memory_store_schema_v999", 999),
+    ] {
+        let root = temp_root(&format!("query-file-v{version}-clean-break"));
+        let config = StoreBackendConfig::file(&root, support::native_persistent_profile()).unwrap();
+        {
+            let platform = support::open_store(config.clone()).unwrap();
+            let key =
+                ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+            platform
+                .conversation_transcript_store()
+                .append_turn(&transcript_record(&key, "turn-v11", "preserved v11 state"))
+                .unwrap();
+        }
+        rewrite_file_manifest_schema(&root, schema_id, version);
+        let before = file_tree_bytes(&root);
+        let error = match support::open_store(config) {
+            Ok(_) => panic!("v14 clean break must reject File schema {schema_id}"),
+            Err(error) => error,
+        };
+        assert_eq!(error.stage(), "store_rebuild_required", "{schema_id}");
+        assert_eq!(file_tree_bytes(&root), before, "{schema_id}");
     }
-    rewrite_file_manifest_as_v11(&root);
-    let before = file_tree_bytes(&root);
-    let error = match support::open_store(config) {
-        Ok(_) => panic!("v12 clean break must reject a v11 File Store"),
-        Err(error) => error,
-    };
-    assert_eq!(error.stage(), "store_rebuild_required");
-    assert_eq!(file_tree_bytes(&root), before);
 }
 
 #[test]

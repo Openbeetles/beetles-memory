@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod procedural;
+
 use std::sync::Arc;
 
 use bm_core::llm::{
@@ -25,6 +27,10 @@ use bm_sdk::{
 
 struct FixedMemoryClock {
     now_secs: u64,
+}
+
+pub fn fixed_clock(now_secs: u64) -> Arc<dyn MemoryClock> {
+    Arc::new(FixedMemoryClock::new(now_secs))
 }
 
 pub fn host_test_profile() -> ProfileId {

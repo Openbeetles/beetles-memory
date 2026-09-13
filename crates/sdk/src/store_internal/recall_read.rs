@@ -33,8 +33,8 @@ use bm_core::skills::{
     agent_tool_experience_head_key, agent_tool_experience_material_key,
     agent_tool_experience_scope_manifest_key, runtime_skill_scope_manifest_key,
     validate_agent_tool_experience_owner_history, validate_agent_tool_experience_scope_closure,
-    AgentToolExperienceHeadStateV2, AgentToolExperienceOwnerHeadV2,
-    AgentToolExperienceOwningScopeV1, AgentToolExperienceRevisionMaterialV2,
+    AgentToolExperienceHeadStateV3, AgentToolExperienceOwnerHeadV3,
+    AgentToolExperienceOwningScopeV1, AgentToolExperienceRevisionMaterialV3,
     AgentToolExperienceScopeManifestV1, RuntimeSkillOwnerBinding, RuntimeSkillOwnerRecord,
     RuntimeSkillOwningScope, RuntimeSkillPremise, RuntimeSkillScopeManifest,
 };
@@ -55,22 +55,40 @@ use super::transaction::{
     StoreBoundedKnownBlobRead, StoreBoundedKnownJsonRead, StoreImmutableReadSession,
 };
 use crate::StoreReadReceipt;
+use bm_core::memory::{
+    ProceduralFeedbackApplicationLedgerV2, ProceduralFeedbackJobV2,
+    ProceduralLearningReadAvailabilityV1, ProceduralReadAuthorityV1,
+    ProceduralSubjectValidityRootV1,
+};
 
 type RecallJsonRead = ((String, String), Option<serde_json::Value>);
 
 #[derive(Clone, Debug)]
 pub(crate) struct MaterializedAgentToolExperienceScopeClosure {
-    heads: Vec<AgentToolExperienceOwnerHeadV2>,
-    materials: Vec<AgentToolExperienceRevisionMaterialV2>,
+    heads: Vec<AgentToolExperienceOwnerHeadV3>,
+    owners: Vec<bm_core::skills::AgentToolExperienceReadProjectionV1>,
+    as_of_time: Option<u64>,
+    read_availability: ProceduralLearningReadAvailabilityV1,
 }
 
 impl MaterializedAgentToolExperienceScopeClosure {
-    pub(crate) fn heads(&self) -> &[AgentToolExperienceOwnerHeadV2] {
-        &self.heads
+    pub(crate) fn read_availability(&self) -> ProceduralLearningReadAvailabilityV1 {
+        self.read_availability
     }
+    pub(crate) fn owners(&self) -> &[bm_core::skills::AgentToolExperienceReadProjectionV1] {
+        &self.owners
+    }
+}
 
-    pub(crate) fn materials(&self) -> &[AgentToolExperienceRevisionMaterialV2] {
-        &self.materials
+struct MaterializedProceduralReadAuthority {
+    root: ProceduralSubjectValidityRootV1,
+    completion: Option<ProceduralFeedbackJobV2>,
+    applications: Vec<ProceduralFeedbackApplicationLedgerV2>,
+}
+
+impl MaterializedProceduralReadAuthority {
+    fn verified(&self) -> Result<ProceduralReadAuthorityV1<'_>> {
+        ProceduralReadAuthorityV1::try_new(&self.root, self.completion.as_ref(), &self.applications)
     }
 }
 
@@ -90,6 +108,7 @@ pub(crate) struct MaterializedRuntimeSkillScopeClosure {
     owning_scope: RuntimeSkillOwningScope,
     manifest: Option<RuntimeSkillScopeManifest>,
     records: Vec<RuntimeSkillOwnerRecord>,
+    read_availability: ProceduralLearningReadAvailabilityV1,
 }
 
 #[allow(
@@ -97,6 +116,9 @@ pub(crate) struct MaterializedRuntimeSkillScopeClosure {
     reason = "typed RuntimeSkill read substrate consumed by the next production runtime step"
 )]
 impl MaterializedRuntimeSkillScopeClosure {
+    pub(crate) fn read_availability(&self) -> ProceduralLearningReadAvailabilityV1 {
+        self.read_availability
+    }
     pub(crate) fn memory_space_id(&self) -> &str {
         &self.memory_space_id
     }
@@ -308,8 +330,7 @@ impl<'a> RecallImmutableReadContext<'a> {
             || (!self.long_term_owner_closures.contains_key(owner_ref)
                 && self.long_term_owner_closures.len() >= max_distinct_owners)
         {
-            return Err(Error::config(
-                "governed_current_recall",
+            return Err(super::store_budget_error(
                 "request-pinned validity join budget would be exceeded before owner IO",
             ));
         }
@@ -930,12 +951,201 @@ impl<'a> RecallImmutableReadContext<'a> {
         )
     }
 
+    /// Read the current subject fence in the same immutable session as every
+    /// candidate. Historical content never selects historical authorization.
+    fn materialize_subject_learning_fence(
+        &mut self,
+        memory_space_id: &str,
+        subject_id: &str,
+    ) -> Result<Option<ProceduralLearningReadAvailabilityV1>> {
+        Ok(self
+            .read_subject_learning_root(memory_space_id, subject_id)?
+            .map(|root| match root.state {
+                bm_core::memory::ProceduralSubjectValidityStateV1::Ready { .. } => {
+                    ProceduralLearningReadAvailabilityV1::Ready
+                }
+                bm_core::memory::ProceduralSubjectValidityStateV1::Reconciling { .. } => {
+                    ProceduralLearningReadAvailabilityV1::Reconciling
+                }
+                bm_core::memory::ProceduralSubjectValidityStateV1::Blocked { .. } => {
+                    ProceduralLearningReadAvailabilityV1::Blocked
+                }
+            }))
+    }
+
+    pub(crate) fn read_subject_learning_root(
+        &mut self,
+        memory_space_id: &str,
+        subject_id: &str,
+    ) -> Result<Option<bm_core::memory::ProceduralSubjectValidityRootV1>> {
+        use super::schema::{
+            PROCEDURAL_PRODUCER_BINDING_NAMESPACE, PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE,
+            PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE,
+        };
+        use bm_core::memory::{
+            ProceduralProducerBindingV1, ProceduralSubjectInitializationV1,
+            ProceduralSubjectScopeV1, ProceduralSubjectValidityRootV1,
+            MAX_PROCEDURAL_SUBJECT_SCOPES,
+        };
+        let invalid = || {
+            Error::config(
+                "procedural_read_authority",
+                "subject learning initialization or current validity proof is invalid",
+            )
+        };
+        let scope = ProceduralSubjectScopeV1 {
+            memory_space_id: memory_space_id.into(),
+            mounted_subject_id: subject_id.into(),
+        };
+        let root: Option<ProceduralSubjectValidityRootV1> =
+            self.read_json(PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE, &scope.root_key()?)?;
+        let initialization: Option<ProceduralSubjectInitializationV1> = self.read_json(
+            PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE,
+            &ProceduralSubjectInitializationV1::key(&scope)?,
+        )?;
+        let (root, initialization) = match (root, initialization) {
+            (None, None) => return Ok(None),
+            (Some(root), Some(initialization)) => (root, initialization),
+            _ => return Err(invalid()),
+        };
+        if root.scope != scope || initialization.scope != scope {
+            return Err(invalid());
+        }
+        root.validate(MAX_PROCEDURAL_SUBJECT_SCOPES)
+            .map_err(|_| invalid())?;
+        initialization.validate().map_err(|_| invalid())?;
+        let first: ProceduralProducerBindingV1 = self
+            .read_json(
+                PROCEDURAL_PRODUCER_BINDING_NAMESPACE,
+                &initialization.first_producer.material_key(),
+            )?
+            .ok_or_else(invalid)?;
+        initialization
+            .validate_producer(&first)
+            .map_err(|_| invalid())?;
+        if !root.producer_scopes.contains(&first.spec.scope) {
+            return Err(invalid());
+        }
+        root.permits_learning_reads(MAX_PROCEDURAL_SUBJECT_SCOPES)
+            .map_err(|_| invalid())?;
+        Ok(Some(root))
+    }
+
+    fn materialize_procedural_read_authority(
+        &mut self,
+        memory_space_id: &str,
+        subject_id: &str,
+        source_jobs: &BTreeSet<String>,
+    ) -> Result<MaterializedProceduralReadAuthority> {
+        use super::schema::{
+            PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE, PROCEDURAL_FEEDBACK_JOB_NAMESPACE,
+            PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE,
+        };
+        use bm_core::memory::{
+            MemoryMutationAuditRecord, MemoryMutationReceipt, ProceduralSubjectScopeV1,
+            ProceduralSubjectValidityStateV1, MEMORY_MUTATION_AUDIT_NAMESPACE,
+            MEMORY_MUTATION_RECEIPT_NAMESPACE,
+        };
+        let invalid = || {
+            Error::config(
+                "procedural_read_authority",
+                "exact learning proof is missing or invalid",
+            )
+        };
+        let scope = ProceduralSubjectScopeV1 {
+            memory_space_id: memory_space_id.into(),
+            mounted_subject_id: subject_id.into(),
+        };
+        let root: ProceduralSubjectValidityRootV1 = self
+            .read_json(PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE, &scope.root_key()?)?
+            .ok_or_else(invalid)?;
+        if root.scope != scope {
+            return Err(invalid());
+        }
+        let completion = if let ProceduralSubjectValidityStateV1::Ready {
+            completion: Some(completion),
+        } = &root.state
+        {
+            let job: ProceduralFeedbackJobV2 = self
+                .read_json(PROCEDURAL_FEEDBACK_JOB_NAMESPACE, &completion.work.job_id)?
+                .ok_or_else(invalid)?;
+            let authority = job.checkpoint_authority.as_ref().ok_or_else(invalid)?;
+            let page_key = authority.operation.storage_key();
+            let page_receipt: MemoryMutationReceipt = self
+                .read_json(MEMORY_MUTATION_RECEIPT_NAMESPACE, &page_key)?
+                .ok_or_else(invalid)?;
+            let page_audit: MemoryMutationAuditRecord = self
+                .read_json(MEMORY_MUTATION_AUDIT_NAMESPACE, &page_key)?
+                .ok_or_else(invalid)?;
+            super::procedural_feedback::validate_learning_mutation_proof(
+                &page_receipt,
+                &page_audit,
+                "procedural_read_authority",
+            )
+            .map_err(|_| invalid())?;
+            super::procedural_feedback::validate_reconciliation_checkpoint_commitment(
+                &job,
+                &page_receipt,
+            )
+            .map_err(|_| invalid())?;
+            let key = job
+                .receipt
+                .as_ref()
+                .ok_or_else(invalid)?
+                .mutation_receipt_key();
+            let receipt: MemoryMutationReceipt = self
+                .read_json(MEMORY_MUTATION_RECEIPT_NAMESPACE, key)?
+                .ok_or_else(invalid)?;
+            let audit: MemoryMutationAuditRecord = self
+                .read_json(MEMORY_MUTATION_AUDIT_NAMESPACE, key)?
+                .ok_or_else(invalid)?;
+            super::procedural_feedback::validate_reconciliation_completion(&job, &receipt, &audit)
+                .map_err(|_| invalid())?;
+            Some(job)
+        } else {
+            None
+        };
+        let mut applications = Vec::new();
+        for id in source_jobs {
+            let job: ProceduralFeedbackJobV2 = self
+                .read_json(PROCEDURAL_FEEDBACK_JOB_NAMESPACE, id)?
+                .ok_or_else(invalid)?;
+            let ledger: ProceduralFeedbackApplicationLedgerV2 = self
+                .read_json(PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE, id)?
+                .ok_or_else(invalid)?;
+            let key = job
+                .receipt
+                .as_ref()
+                .ok_or_else(invalid)?
+                .mutation_receipt_key();
+            let receipt: MemoryMutationReceipt = self
+                .read_json(MEMORY_MUTATION_RECEIPT_NAMESPACE, key)?
+                .ok_or_else(invalid)?;
+            let audit: MemoryMutationAuditRecord = self
+                .read_json(MEMORY_MUTATION_AUDIT_NAMESPACE, key)?
+                .ok_or_else(invalid)?;
+            super::procedural_feedback::validate_feedback_application_completion(
+                &job, &ledger, &receipt, &audit,
+            )
+            .map_err(|_| invalid())?;
+            applications.push(ledger);
+        }
+        let authority = MaterializedProceduralReadAuthority {
+            root,
+            completion,
+            applications,
+        };
+        authority.verified().map_err(|_| invalid())?;
+        Ok(authority)
+    }
+
     pub(crate) fn materialize_agent_tool_experience_scope(
         &mut self,
         memory_space_id: &str,
         owning_scope: &AgentToolExperienceOwningScopeV1,
         max_owners_per_scope: usize,
         max_revisions_per_owner: usize,
+        as_of_time: Option<u64>,
     ) -> Result<()> {
         use crate::store_internal::schema::{
             AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE, AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE,
@@ -956,7 +1166,8 @@ impl<'a> RecallImmutableReadContext<'a> {
         let manifest_key = agent_tool_experience_scope_manifest_key(memory_space_id, owning_scope)?;
         let scope_key = (memory_space_id.to_string(), owning_scope.clone());
         if let Some(closure) = self.agent_tool_experience_scope_closures.get(&scope_key) {
-            if closure.heads.len() > max_owners_per_scope
+            if closure.as_of_time != as_of_time
+                || closure.heads.len() > max_owners_per_scope
                 || closure
                     .heads
                     .iter()
@@ -964,6 +1175,22 @@ impl<'a> RecallImmutableReadContext<'a> {
             {
                 return Err(invalid());
             }
+            return Ok(());
+        }
+        let fence = self.materialize_subject_learning_fence(
+            memory_space_id,
+            owning_scope.mounted_subject_id(),
+        )?;
+        if let Some(read_availability) = fence.filter(|value| !value.is_ready()) {
+            self.agent_tool_experience_scope_closures.insert(
+                scope_key,
+                MaterializedAgentToolExperienceScopeClosure {
+                    heads: Vec::new(),
+                    owners: Vec::new(),
+                    as_of_time,
+                    read_availability,
+                },
+            );
             return Ok(());
         }
         let Some(value) = self.read_json_value(
@@ -974,12 +1201,17 @@ impl<'a> RecallImmutableReadContext<'a> {
             self.agent_tool_experience_scope_closures.insert(
                 scope_key,
                 MaterializedAgentToolExperienceScopeClosure {
+                    read_availability: ProceduralLearningReadAvailabilityV1::Ready,
                     heads: Vec::new(),
-                    materials: Vec::new(),
+                    owners: Vec::new(),
+                    as_of_time,
                 },
             );
             return Ok(());
         };
+        if fence.is_none() {
+            return Err(invalid());
+        }
         let manifest: AgentToolExperienceScopeManifestV1 =
             serde_json::from_value(value).map_err(|_| invalid())?;
         if manifest.physical_key != manifest_key
@@ -1009,7 +1241,7 @@ impl<'a> RecallImmutableReadContext<'a> {
             .read_json_values(&head_addresses)?
             .into_iter()
             .map(|(_, value)| {
-                serde_json::from_value::<AgentToolExperienceOwnerHeadV2>(value.ok_or_else(invalid)?)
+                serde_json::from_value::<AgentToolExperienceOwnerHeadV3>(value.ok_or_else(invalid)?)
                     .map_err(|_| invalid())
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1026,7 +1258,7 @@ impl<'a> RecallImmutableReadContext<'a> {
             {
                 return Err(invalid());
             }
-            if head.state == AgentToolExperienceHeadStateV2::Tombstoned {
+            if head.state == AgentToolExperienceHeadStateV3::Tombstoned {
                 continue;
             }
             for retained in &head.retained_revisions {
@@ -1047,7 +1279,7 @@ impl<'a> RecallImmutableReadContext<'a> {
             .read_json_values(&material_addresses)?
             .into_iter()
             .map(|(_, value)| {
-                serde_json::from_value::<AgentToolExperienceRevisionMaterialV2>(
+                serde_json::from_value::<AgentToolExperienceRevisionMaterialV3>(
                     value.ok_or_else(invalid)?,
                 )
                 .map_err(|_| invalid())
@@ -1060,7 +1292,7 @@ impl<'a> RecallImmutableReadContext<'a> {
             max_owners_per_scope,
         )?;
         for head in &heads {
-            if head.state == AgentToolExperienceHeadStateV2::Tombstoned {
+            if head.state == AgentToolExperienceHeadStateV3::Tombstoned {
                 continue;
             }
             let history = materials
@@ -1070,9 +1302,63 @@ impl<'a> RecallImmutableReadContext<'a> {
                 .collect::<Vec<_>>();
             validate_agent_tool_experience_owner_history(&history)?;
         }
+        let mut source_jobs = BTreeSet::new();
+        for material in &materials {
+            match &material.body {
+                bm_core::skills::AgentToolExperienceBodyV1::Execution { contributions, .. } => {
+                    source_jobs.extend(
+                        contributions
+                            .iter()
+                            .map(|reference| reference.source_job_id.clone()),
+                    )
+                }
+                bm_core::skills::AgentToolExperienceBodyV1::Method { sources, .. } => {
+                    source_jobs.extend(sources.iter().map(|source| source.source_job_id.clone()))
+                }
+            }
+        }
+        let authority = self.materialize_procedural_read_authority(
+            memory_space_id,
+            owning_scope.mounted_subject_id(),
+            &source_jobs,
+        )?;
+        let verified = authority.verified()?;
+        let owners = heads
+            .iter()
+            .map(|head| {
+                let history = materials
+                    .iter()
+                    .filter(|material| material.owner_ref == head.owner_ref)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                bm_core::skills::AgentToolExperienceReadProjectionV1::try_new(
+                    head, &history, &verified, as_of_time,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        // Read observations still prove every byte validated in this immutable
+        // session; raw histories do not become generic recall-view documents.
+        let permitted_keys = owners
+            .iter()
+            .filter_map(|owner| owner.material())
+            .map(|material| &material.physical_key)
+            .collect::<BTreeSet<_>>();
+        for material in &materials {
+            if !permitted_keys.contains(&material.physical_key) {
+                self.json_cache.remove(&(
+                    AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE.into(),
+                    material.physical_key.clone(),
+                ));
+            }
+        }
         self.agent_tool_experience_scope_closures.insert(
             scope_key,
-            MaterializedAgentToolExperienceScopeClosure { heads, materials },
+            MaterializedAgentToolExperienceScopeClosure {
+                heads,
+                owners,
+                as_of_time,
+                read_availability: ProceduralLearningReadAvailabilityV1::Ready,
+            },
         );
         Ok(())
     }
@@ -1100,6 +1386,14 @@ impl<'a> RecallImmutableReadContext<'a> {
             return Ok(closure.manifest.is_some().then(|| closure.records.clone()));
         }
         let manifest_key = runtime_skill_scope_manifest_key(memory_space_id, owning_scope)?;
+        let fence = match owning_scope {
+            RuntimeSkillOwningScope::Subject { mounted_subject_id } => {
+                self.materialize_subject_learning_fence(memory_space_id, mounted_subject_id)?
+            }
+            RuntimeSkillOwningScope::SharedProgram => {
+                Some(ProceduralLearningReadAvailabilityV1::Ready)
+            }
+        };
         let Some(manifest) = self.read_json::<RuntimeSkillScopeManifest>(
             crate::store_internal::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE,
             &manifest_key,
@@ -1108,6 +1402,7 @@ impl<'a> RecallImmutableReadContext<'a> {
             self.runtime_skill_scope_closures.insert(
                 scope_key,
                 MaterializedRuntimeSkillScopeClosure {
+                    read_availability: fence.unwrap_or(ProceduralLearningReadAvailabilityV1::Ready),
                     memory_space_id: memory_space_id.to_string(),
                     owning_scope: owning_scope.clone(),
                     manifest: None,
@@ -1151,7 +1446,7 @@ impl<'a> RecallImmutableReadContext<'a> {
                 )
             })
             .collect::<Vec<_>>();
-        let records = self
+        let mut records = self
             .read_json_values(&owner_addresses)?
             .into_iter()
             .map(|((_, key), value)| {
@@ -1182,9 +1477,90 @@ impl<'a> RecallImmutableReadContext<'a> {
             bindings,
             max_owners_per_scope,
         )?;
+        // Validate the persisted owner/manifest closure first, then expose only
+        // permitted owners to candidate construction. Static/task-owned skills
+        // are not procedural-feedback assets merely because they share a subject.
+        // The exact unfiltered manifest remains the Store authority, not a forged
+        // filtered index; denied raw documents are not copied to the read view.
+        let depends_on_feedback = |record: &RuntimeSkillOwnerRecord| {
+            matches!(
+                record.creation_ref,
+                bm_core::skills::RuntimeSkillCreationRef::AgentToolExperiencePromotion { .. }
+            ) || !record
+                .lifecycle
+                .usage_outcome
+                .retained_contributions
+                .is_empty()
+        };
+        if fence.is_none() && records.iter().any(depends_on_feedback) {
+            return Err(Error::config(
+                "procedural_read_authority",
+                "feedback-derived RuntimeSkill exists without subject initialization",
+            ));
+        }
+        if fence.is_some_and(|value| !value.is_ready()) {
+            for record in records.iter().filter(|record| depends_on_feedback(record)) {
+                self.json_cache.remove(&(
+                    crate::store_internal::RUNTIME_SKILL_RECORD_NAMESPACE.to_string(),
+                    record.physical_key.clone(),
+                ));
+            }
+            records.retain(|record| !depends_on_feedback(record));
+        } else if let RuntimeSkillOwningScope::Subject { mounted_subject_id } = owning_scope {
+            let mut source_jobs = BTreeSet::new();
+            for record in records.iter().filter(|record| depends_on_feedback(record)) {
+                source_jobs.extend(
+                    record
+                        .lifecycle
+                        .usage_outcome
+                        .retained_contributions
+                        .iter()
+                        .map(|reference| reference.source_job_id.clone()),
+                );
+                if matches!(
+                    record.creation_ref,
+                    bm_core::skills::RuntimeSkillCreationRef::AgentToolExperiencePromotion { .. }
+                ) {
+                    source_jobs.extend(
+                        record
+                            .intrinsic_contract
+                            .evidence_bindings
+                            .iter()
+                            .map(|evidence| evidence.safe_ref.clone()),
+                    );
+                }
+            }
+            if records.iter().any(depends_on_feedback) {
+                let authority = self.materialize_procedural_read_authority(
+                    memory_space_id,
+                    mounted_subject_id,
+                    &source_jobs,
+                )?;
+                let verified = authority.verified()?;
+                let mut permitted = Vec::new();
+                for record in records {
+                    let allowed = !depends_on_feedback(&record)
+                        || verified.permits_exact(
+                            &bm_core::memory::ProceduralAppliedOwnerBindingV1::RuntimeSkill {
+                                binding: RuntimeSkillOwnerBinding::from_record(&record)?,
+                            },
+                        )?;
+                    if allowed {
+                        permitted.push(record);
+                    } else {
+                        self.json_cache.remove(&(
+                            crate::store_internal::RUNTIME_SKILL_RECORD_NAMESPACE.into(),
+                            record.physical_key,
+                        ));
+                    }
+                }
+                records = permitted;
+            }
+        }
         self.runtime_skill_scope_closures.insert(
             scope_key,
             MaterializedRuntimeSkillScopeClosure {
+                read_availability: fence.unwrap_or(ProceduralLearningReadAvailabilityV1::Ready),
                 memory_space_id: memory_space_id.to_string(),
                 owning_scope: owning_scope.clone(),
                 manifest: Some(manifest),
@@ -1670,6 +2046,25 @@ pub(crate) struct RecallReadJsonDoc {
 }
 
 impl RecallReadView {
+    /// CAS the exact immutable source closure consumed by a governed mutation.
+    /// Values never leave the trusted Store/SDK boundary.
+    pub(crate) fn json_preconditions(&self) -> Vec<crate::StoreJsonPrecondition> {
+        self.json
+            .iter()
+            .map(|((namespace, key), value)| match value {
+                Some(value) => crate::StoreJsonPrecondition::Exact {
+                    namespace: namespace.clone(),
+                    key: key.clone(),
+                    value: value.clone(),
+                },
+                None => crate::StoreJsonPrecondition::Absent {
+                    namespace: namespace.clone(),
+                    key: key.clone(),
+                },
+            })
+            .collect()
+    }
+
     pub(crate) fn agent_tool_experience_scope(
         &self,
         memory_space_id: &str,
@@ -2777,90 +3172,187 @@ mod tests {
     }
 
     fn agent_tool_scope_fixture() -> (
-        AgentToolExperienceRevisionMaterialV2,
-        AgentToolExperienceOwnerHeadV2,
+        AgentToolExperienceRevisionMaterialV3,
+        AgentToolExperienceOwnerHeadV3,
         AgentToolExperienceScopeManifestV1,
         JsonMapSession,
     ) {
-        use crate::store_internal::schema::{
-            AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE, AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE,
-            AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE,
-        };
-        use bm_core::skills::{
-            AgentToolExperienceConfidence, AgentToolExperienceHeadBindingV1,
-            AgentToolExperienceRetainedRevisionDigestV2, AgentToolExperienceStatus,
-            AgentToolOutcome, AgentToolRegistryScope,
-        };
-
-        let scope = AgentToolExperienceOwningScopeV1::Subject {
-            mounted_subject_id: "agent-a".into(),
-        };
-        let material = AgentToolExperienceRevisionMaterialV2::build(
-            "space-1",
-            scope.clone(),
-            "tools",
-            AgentToolRegistryScope::Global,
-            "search",
-            "schema-v1",
-            "search-task",
-            1,
-            "Find facts",
-            "Search then verify",
-            Vec::new(),
-            2,
-            2,
-            0,
-            AgentToolOutcome::Succeeded,
-            AgentToolExperienceConfidence::Medium,
-            AgentToolExperienceStatus::Active,
-            vec!["observation-a".into(), "observation-b".into()],
-            MemoryPrivacyClass::SharedWithSubject,
+        use crate::store_internal::schema::*;
+        use crate::*;
+        use bm_core::memory::*;
+        struct Clock;
+        impl MemoryClock for Clock {
+            fn now_secs(&self) -> u64 {
+                100
+            }
+        }
+        #[cfg(target_os = "macos")]
+        let profile = ProfileId::DesktopMacosEmbeddedSdk;
+        #[cfg(target_os = "linux")]
+        let profile = ProfileId::DesktopLinuxEmbeddedSdk;
+        #[cfg(target_os = "windows")]
+        let profile = ProfileId::DesktopWindowsEmbeddedSdk;
+        let platform =
+            super::super::StorePlatform::open(StoreBackendConfig::in_memory(profile).unwrap())
+                .unwrap();
+        let registry = AgentToolRegistrySnapshot::compact(
+            "read-tools",
+            "host",
+            vec![AgentToolDescriptor::compact(
+                "search",
+                "Search",
+                "schema-v1",
+            )],
             100,
-            100,
-            None,
-        )
-        .unwrap();
-        let head = AgentToolExperienceOwnerHeadV2::build(
-            "space-1",
-            scope.clone(),
-            material.owner_ref.clone(),
-            1,
-            vec![AgentToolExperienceRetainedRevisionDigestV2::from_material(&material).unwrap()],
-        )
-        .unwrap();
-        let manifest = AgentToolExperienceScopeManifestV1::build(
-            1,
-            "space-1",
-            scope,
-            vec![
-                AgentToolExperienceHeadBindingV1::from_head_and_material(&head, &material).unwrap(),
-            ],
-            8,
-        )
-        .unwrap();
-        let json = BTreeMap::from([
-            (
-                (
-                    AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE.into(),
-                    manifest.physical_key.clone(),
-                ),
-                serde_json::to_value(&manifest).unwrap(),
-            ),
-            (
-                (
-                    AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE.into(),
-                    head.physical_key.clone(),
-                ),
-                serde_json::to_value(&head).unwrap(),
-            ),
-            (
-                (
-                    AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE.into(),
-                    material.physical_key.clone(),
-                ),
-                serde_json::to_value(&material).unwrap(),
-            ),
-        ]);
+        );
+        let identity = MemoryIdentity::new("read-agent", "read-owner").unwrap();
+        let scope = MemoryScope::new("sdk.direct", "read-chat").unwrap();
+        let build = |scoped| {
+            MemoryRuntime::builder()
+                .identity(identity.clone())
+                .scope(scope.clone())
+                .scoped_runtime(scoped)
+                .store(MemoryStoreHandle::from_platform(platform.clone()))
+                .clock(Arc::new(Clock))
+                .capability_policy(MemoryCapabilityPolicy::strict_profile())
+                .privacy_policy(MemoryPrivacyPolicy::standard_private_boundary())
+                .agent_tool_registry(registry.clone())
+                .build()
+                .unwrap()
+        };
+        let mounted =
+            SubjectScopedRuntime::single_agent_default("read-owner", "read-agent", None).unwrap();
+        let memory = build(mounted.clone());
+        let mut governing = mounted;
+        governing.actor_subject_id = system_governor_subject_id("read-owner");
+        let governor = build(governing);
+        let registered = governor
+            .control_procedural_producer(MemoryProceduralProducerControlRequest {
+                operation_id: "read-fixture-register".into(),
+                expected_revision: None,
+                state: ProceduralProducerStateV1::Active,
+                spec: ProceduralProducerSpecV1 {
+                    binding_id: "read-witness".into(),
+                    scope: ProceduralProducerScopeV1 {
+                        memory_space_id: memory.memory_space_id().into(),
+                        mounted_subject_id: memory.subject_id().into(),
+                        channel_id: "sdk.direct".into(),
+                        chat_id: "read-chat".into(),
+                    },
+                    principal: ProceduralProducerPrincipalV1::LocalCapability {
+                        capability_id: "read-fixture-executor".into(),
+                    },
+                    source_authority: ProceduralProducerSourceAuthorityV1::RuntimeObservation,
+                    claims: ProceduralProducerClaimsV1 {
+                        execution_facts: true,
+                        method_declarations: false,
+                        usage_feedback: false,
+                        source_classifications: vec![ProceduralSourceSensitivity::NonPrivate],
+                    },
+                    tools: vec![ProceduralProducerToolV1 {
+                        registry_ref: registry.registry_ref(),
+                        tool_id: "search".into(),
+                        schema_fingerprint: "schema-v1".into(),
+                    }],
+                    source_config_ref: "synthetic-read-fixture".into(),
+                },
+            })
+            .unwrap();
+        let capability = governor
+            .procedural_submission_capability(&registered.binding.revision_ref().unwrap())
+            .unwrap();
+        let finalized = memory
+            .finalize_turn_with_procedural_evidence(
+                &capability,
+                MemoryTurnFinalizeRequest {
+                    turn: CanonicalTurnDelta {
+                        turn_id: "read-source".into(),
+                        conversation: ConversationScope {
+                            channel: "sdk.direct".into(),
+                            chat_id: "read-chat".into(),
+                            conversation_id: Some("read-chat".into()),
+                        },
+                        subject: memory.subject_id().into(),
+                        delivery_status: MemoryTurnDeliveryStatus::Delivered,
+                        source: MemoryTurnSource {
+                            ingress: IngressKind::User,
+                            channel: "sdk.direct".into(),
+                            provider: None,
+                            protocol: MemoryTurnProtocol::Native,
+                            endpoint: None,
+                            model_alias: None,
+                            model_resolved: None,
+                            request_id: None,
+                            client_conversation_hint: None,
+                        },
+                        actor: None,
+                        input_messages: vec![TranscriptInputMessage::user("Synthetic search")],
+                        assistant_message: Some(TranscriptInputMessage::assistant(
+                            "Synthetic result",
+                        )),
+                        tool_observations: vec![ToolObservationDigest {
+                            observation_id: "read-observation".into(),
+                            call_id: "read-call".into(),
+                            tool_name: "search".into(),
+                            summary: "Synthetic result".into(),
+                            external_content: false,
+                        }],
+                        external_content_used: false,
+                        candidate_ids: vec![],
+                    },
+                    learning: PostTurnLearningInputV2 {
+                        tool_call_count: 1,
+                        agent_tool_feedback: vec![AgentToolUsageFeedbackV3 {
+                            registry_ref: registry.registry_ref(),
+                            tool_id: "search".into(),
+                            schema_fingerprint: "schema-v1".into(),
+                            execution_facts: vec![ToolExecutionFactV1 {
+                                observation_id: "read-observation".into(),
+                                call_id: "read-call".into(),
+                                outcome: ToolExecutionOutcome::Succeeded,
+                                source_sensitivity: ProceduralSourceSensitivity::NonPrivate,
+                                started_at: Some(100),
+                                completed_at: Some(100),
+                            }],
+                            method_evidence: vec![],
+                        }],
+                        ..PostTurnLearningInputV2::empty()
+                    },
+                    pressure: PressureLevel::Normal,
+                    mode_input: RuntimeLifecycleModeInput::default(),
+                },
+            )
+            .unwrap();
+        let job = memory
+            .claim_due_procedural_feedback_job(
+                &finalized.procedural_learning.job_id.unwrap(),
+                "read-worker",
+                160,
+            )
+            .unwrap();
+        memory
+            .run_claimed_procedural_feedback_job(&job, "read-worker")
+            .unwrap();
+        let first = |namespace| {
+            platform
+                .read_json_namespace(namespace)
+                .unwrap()
+                .into_iter()
+                .next()
+                .unwrap()
+                .value
+        };
+        let material =
+            serde_json::from_value(first(AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE)).unwrap();
+        let head = serde_json::from_value(first(AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE)).unwrap();
+        let manifest =
+            serde_json::from_value(first(AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE)).unwrap();
+        // The map session only instruments reads. All owner, ledger, root and
+        // receipt records above came from the actual sealed intake transaction.
+        let json = store_json_namespaces()
+            .flat_map(|namespace| platform.read_json_namespace(namespace).unwrap())
+            .map(|document| ((document.namespace, document.key), document.value))
+            .collect();
         (material, head, manifest, JsonMapSession { json })
     }
 
@@ -2874,40 +3366,94 @@ mod tests {
             ),
         }));
         context
-            .materialize_agent_tool_experience_scope("space-1", &material.owning_scope, 8, 4)
+            .materialize_agent_tool_experience_scope(
+                &material.memory_space_id,
+                &material.owning_scope,
+                8,
+                4,
+                None,
+            )
             .unwrap();
-        assert_eq!(context.cached_address_counts(), (3, 0));
+        let cached = context.cached_address_counts();
         context
-            .materialize_agent_tool_experience_scope("space-1", &material.owning_scope, 1, 1)
+            .materialize_agent_tool_experience_scope(
+                &material.memory_space_id,
+                &material.owning_scope,
+                1,
+                1,
+                None,
+            )
             .unwrap();
-        assert_eq!(context.cached_address_counts(), (3, 0));
+        assert_eq!(
+            context.cached_address_counts(),
+            cached,
+            "same anchor reuses the verified read set"
+        );
+        assert!(
+            context
+                .materialize_agent_tool_experience_scope(
+                    &material.memory_space_id,
+                    &material.owning_scope,
+                    8,
+                    4,
+                    Some(100)
+                )
+                .is_err(),
+            "a scope cache cannot silently reuse a different temporal operation"
+        );
         let view = context.take_materialized_view();
         let closure = view
-            .agent_tool_experience_scope("space-1", &material.owning_scope)
+            .agent_tool_experience_scope(&material.memory_space_id, &material.owning_scope)
             .unwrap();
-        assert_eq!(closure.heads(), &[head]);
-        assert_eq!(closure.materials(), &[material]);
+        assert_eq!(closure.heads.as_slice(), &[head]);
+        assert_eq!(
+            closure
+                .owners()
+                .iter()
+                .filter_map(|owner| owner.material())
+                .collect::<Vec<_>>(),
+            vec![&material]
+        );
+        assert!(!view
+            .json_docs::<ProceduralFeedbackApplicationLedgerV2>(
+                super::super::schema::PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE
+            )
+            .unwrap()
+            .is_empty());
         assert!(context.finish().unwrap().1.read_set_exact);
     }
 
     #[test]
     fn agent_tool_scope_other_subject_only_reads_its_absent_manifest() {
-        let (_, _, _, session) = agent_tool_scope_fixture();
+        let (material, _, _, session) = agent_tool_scope_fixture();
         let mut context = RecallImmutableReadContext::new(Box::new(session));
         let scope = AgentToolExperienceOwningScopeV1::Subject {
             mounted_subject_id: "agent-b".into(),
         };
         context
-            .materialize_agent_tool_experience_scope("space-1", &scope, 8, 4)
+            .materialize_agent_tool_experience_scope(&material.memory_space_id, &scope, 8, 4, None)
             .unwrap();
         context
-            .materialize_agent_tool_experience_scope("space-1", &scope, 8, 4)
+            .materialize_agent_tool_experience_scope(&material.memory_space_id, &scope, 8, 4, None)
             .unwrap();
-        assert_eq!(context.cached_address_counts(), (1, 0));
+        assert!(
+            context
+                .json_observations
+                .keys()
+                .all(|(namespace, _)| matches!(
+                    namespace.as_str(),
+                    super::super::schema::PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE
+                        | super::super::schema::PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE
+                        | super::super::schema::AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE
+                )),
+            "another subject cannot read any owner body or evidence"
+        );
         let view = context.take_materialized_view();
-        let closure = view.agent_tool_experience_scope("space-1", &scope).unwrap();
-        assert!(closure.heads().is_empty());
-        assert!(closure.materials().is_empty());
+        let closure = view
+            .agent_tool_experience_scope(&material.memory_space_id, &scope)
+            .unwrap();
+        assert!(closure.heads.is_empty());
+        assert!(closure.owners().is_empty());
     }
 
     #[test]
@@ -2918,7 +3464,7 @@ mod tests {
             mounted_subject_id: " agent-a".into(),
         };
         assert!(context
-            .materialize_agent_tool_experience_scope("space-1", &scope, 8, 4)
+            .materialize_agent_tool_experience_scope("space-1", &scope, 8, 4, None)
             .is_err());
         assert_eq!(context.cached_address_counts(), (0, 0));
     }
@@ -2931,7 +3477,7 @@ mod tests {
         bindings[0].head_key = "outside-scope-head".into();
         let redirected = AgentToolExperienceScopeManifestV1::build(
             1,
-            "space-1",
+            &manifest.memory_space_id,
             manifest.owning_scope.clone(),
             bindings,
             8,
@@ -2946,9 +3492,19 @@ mod tests {
         );
         let mut context = RecallImmutableReadContext::new(Box::new(session));
         assert!(context
-            .materialize_agent_tool_experience_scope("space-1", &manifest.owning_scope, 8, 4,)
+            .materialize_agent_tool_experience_scope(
+                &manifest.memory_space_id,
+                &manifest.owning_scope,
+                8,
+                4,
+                None
+            )
             .is_err());
-        assert_eq!(context.cached_address_counts(), (1, 0));
+        assert!(!context
+            .json_observations
+            .keys()
+            .any(|(namespace, _)| namespace
+                == super::super::schema::AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE));
     }
 
     #[test]
@@ -2961,11 +3517,17 @@ mod tests {
         ));
         let mut context = RecallImmutableReadContext::new(Box::new(session));
         assert!(context
-            .materialize_agent_tool_experience_scope("space-1", &material.owning_scope, 8, 4,)
+            .materialize_agent_tool_experience_scope(
+                &material.memory_space_id,
+                &material.owning_scope,
+                8,
+                4,
+                None
+            )
             .is_err());
         assert!(context
             .take_materialized_view()
-            .agent_tool_experience_scope("space-1", &material.owning_scope)
+            .agent_tool_experience_scope(&material.memory_space_id, &material.owning_scope)
             .is_none());
     }
 
@@ -2976,11 +3538,11 @@ mod tests {
         };
         use bm_core::skills::AgentToolExperienceHeadBindingV1;
         let (material, mut head, _, mut session) = agent_tool_scope_fixture();
-        head.state = AgentToolExperienceHeadStateV2::Tombstoned;
+        head.state = AgentToolExperienceHeadStateV3::Tombstoned;
         head.content_digest = head.canonical_content_digest().unwrap();
         let manifest = AgentToolExperienceScopeManifestV1::build(
             2,
-            "space-1",
+            &material.memory_space_id,
             material.owning_scope.clone(),
             vec![AgentToolExperienceHeadBindingV1::from_head(&head).unwrap()],
             8,
@@ -3002,15 +3564,27 @@ mod tests {
         );
         let mut context = RecallImmutableReadContext::new(Box::new(session));
         context
-            .materialize_agent_tool_experience_scope("space-1", &material.owning_scope, 8, 4)
+            .materialize_agent_tool_experience_scope(
+                &material.memory_space_id,
+                &material.owning_scope,
+                8,
+                4,
+                None,
+            )
             .unwrap();
-        assert_eq!(context.cached_address_counts(), (2, 0));
+        assert!(!context.json_observations.contains_key(&(
+            super::super::schema::AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE.into(),
+            material.physical_key.clone()
+        )));
         let view = context.take_materialized_view();
         let closure = view
-            .agent_tool_experience_scope("space-1", &material.owning_scope)
+            .agent_tool_experience_scope(&material.memory_space_id, &material.owning_scope)
             .unwrap();
-        assert_eq!(closure.heads(), &[head]);
-        assert!(closure.materials().is_empty());
+        assert_eq!(closure.heads.as_slice(), &[head]);
+        assert!(closure
+            .owners()
+            .iter()
+            .all(|owner| owner.material().is_none()));
     }
 
     fn runtime_skill_digest(byte: char) -> String {
@@ -3142,6 +3716,44 @@ mod tests {
         )
         .expect("runtime skill owner with governed evidence");
         owner
+    }
+
+    fn runtime_skill_expected_reads(
+        scopes: &[RuntimeSkillOwningScope],
+        owner_keys: &[String],
+    ) -> BTreeSet<(String, String)> {
+        use crate::store_internal::schema::{
+            PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE, PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE,
+        };
+        use bm_core::memory::{ProceduralSubjectInitializationV1, ProceduralSubjectScopeV1};
+        let mut addresses = BTreeSet::new();
+        for scope in scopes {
+            addresses.insert((
+                crate::store_internal::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE.into(),
+                runtime_skill_scope_manifest_key("space-1", scope).unwrap(),
+            ));
+            if let RuntimeSkillOwningScope::Subject { mounted_subject_id } = scope {
+                let subject = ProceduralSubjectScopeV1 {
+                    memory_space_id: "space-1".into(),
+                    mounted_subject_id: mounted_subject_id.clone(),
+                };
+                addresses.insert((
+                    PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE.into(),
+                    subject.root_key().unwrap(),
+                ));
+                addresses.insert((
+                    PROCEDURAL_SUBJECT_INITIALIZATION_NAMESPACE.into(),
+                    ProceduralSubjectInitializationV1::key(&subject).unwrap(),
+                ));
+            }
+        }
+        addresses.extend(owner_keys.iter().map(|key| {
+            (
+                crate::store_internal::RUNTIME_SKILL_RECORD_NAMESPACE.into(),
+                key.clone(),
+            )
+        }));
+        addresses
     }
 
     fn runtime_skill_scope_documents(
@@ -3659,7 +4271,7 @@ mod tests {
             mounted_subject_id: "subject-1".into(),
         };
         let shared_scope = RuntimeSkillOwningScope::SharedProgram;
-        let (documents, _) = runtime_skill_scope_documents(subject_scope);
+        let (documents, owner) = runtime_skill_scope_documents(subject_scope.clone());
         let mut context = RecallImmutableReadContext::new(Box::new(JsonMapSession {
             json: documents.clone(),
         }));
@@ -3667,7 +4279,17 @@ mod tests {
         context
             .materialize_runtime_skill_scopes("space-1", "subject-1", 1)
             .expect("missing shared manifest is an empty scope");
-        assert_eq!(context.cached_address_counts(), (3, 0));
+        assert_eq!(
+            context
+                .json_observations
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            runtime_skill_expected_reads(
+                &[subject_scope, shared_scope.clone()],
+                &[owner.physical_key]
+            )
+        );
         let view = context.take_materialized_view();
         let shared = view
             .runtime_skill_scope("space-1", &shared_scope)
@@ -3715,7 +4337,7 @@ mod tests {
                     crate::store_internal::RUNTIME_SKILL_RECORD_NAMESPACE.to_string(),
                     owner.physical_key.clone(),
                 ),
-                serde_json::to_value(owner).expect("owner JSON"),
+                serde_json::to_value(&owner).expect("owner JSON"),
             ),
         ]);
         let mut context = RecallImmutableReadContext::new(Box::new(JsonMapSession {
@@ -3727,10 +4349,25 @@ mod tests {
         context
             .materialize_runtime_skill_premise_evidence("space-1", "subject-1", 1)
             .expect("exact missing evidence read");
+        let mut expected_reads = runtime_skill_expected_reads(
+            &[
+                owner.owning_scope.clone(),
+                RuntimeSkillOwningScope::SharedProgram,
+            ],
+            std::slice::from_ref(&owner.physical_key),
+        );
+        let evidence_document = governed_environment_document("environment-1");
+        expected_reads.insert((
+            crate::store_internal::GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE.into(),
+            evidence_document.physical_key.clone(),
+        ));
         assert_eq!(
-            context.cached_address_counts(),
-            (4, 0),
-            "two manifests, one owner, and exactly one evidence owner address"
+            context
+                .json_observations
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            expected_reads
         );
         let view = context.take_materialized_view();
         assert_eq!(
@@ -3738,7 +4375,6 @@ mod tests {
             Some(false)
         );
 
-        let evidence_document = governed_environment_document("environment-1");
         let mut documents_with_evidence = documents;
         documents_with_evidence.insert(
             (
@@ -3809,15 +4445,20 @@ mod tests {
         context
             .materialize_runtime_skill_scopes("space-1", "subject-1", 1)
             .expect("runtime skill closure");
+        let before_reads = context.json_observations.clone();
         let error = context
             .materialize_runtime_skill_premise_evidence("space-1", "subject-1", 1)
             .expect_err("two evidence refs cannot fit one read slot");
         assert_eq!(error.stage(), "recall_runtime_skill_premise_evidence");
         assert_eq!(
-            context.cached_address_counts(),
-            (3, 0),
-            "evidence owners are not read after the pre-IO budget rejection"
+            context.json_observations, before_reads,
+            "budget rejection must perform no additional evidence IO"
         );
+        assert!(!context
+            .json_observations
+            .keys()
+            .any(|(namespace, _)| namespace
+                == crate::store_internal::GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE));
     }
 
     #[test]
@@ -3929,7 +4570,20 @@ mod tests {
             .expect("exact owner budget")
             .expect("subject manifest");
         assert_eq!(records, owners);
-        assert_eq!(exact.cached_address_counts(), (3, 0));
+        assert_eq!(
+            exact
+                .json_observations
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            runtime_skill_expected_reads(
+                std::slice::from_ref(&subject_scope),
+                &owners
+                    .iter()
+                    .map(|owner| owner.physical_key.clone())
+                    .collect::<Vec<_>>()
+            )
+        );
         let error = exact
             .materialize_runtime_skill_scope("space-1", &subject_scope, 1)
             .expect_err("a cached scope cannot bypass a tighter request bound");
@@ -3941,11 +4595,9 @@ mod tests {
             .materialize_runtime_skill_scope("space-1", &subject_scope, 1)
             .expect_err("two bound owners cannot fit one slot");
         assert_eq!(error.stage(), "recall_runtime_skill_scope");
-        assert_eq!(
-            n_plus_one.cached_address_counts(),
-            (1, 0),
-            "only the exact manifest may be read before owner budget rejection"
-        );
+        assert_eq!(n_plus_one.json_observations.keys().cloned().collect::<BTreeSet<_>>(),
+            runtime_skill_expected_reads(std::slice::from_ref(&subject_scope), &[]),
+            "only the subject authority and exact manifest may be read before owner budget rejection");
 
         let (zero_documents, _) = runtime_skill_scope_documents(subject_scope.clone());
         let mut zero = RecallImmutableReadContext::new(Box::new(JsonMapSession {
@@ -4047,7 +4699,17 @@ mod tests {
             .expect("exact subject closure")
             .expect("subject manifest");
         assert_eq!(records, vec![owner.clone()]);
-        assert_eq!(context.cached_address_counts(), (2, 0));
+        assert_eq!(
+            context
+                .json_observations
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            runtime_skill_expected_reads(
+                std::slice::from_ref(&subject_scope),
+                std::slice::from_ref(&owner.physical_key)
+            )
+        );
 
         let (mut missing_documents, _) = runtime_skill_scope_documents(subject_scope.clone());
         missing_documents.remove(&(
@@ -4132,7 +4794,7 @@ mod tests {
         let error = context
             .materialize_long_term_owner_closure("space-1", "space-1", &long_term_owner_ref(), 4, 0)
             .expect_err("a cached owner cannot bypass a zero request ceiling");
-        assert_eq!(error.stage(), "governed_current_recall");
+        assert_eq!(error.stage(), "store_budget_exceeded");
         let second = GovernedMemoryOwnerRef::new(
             bm_core::memory::GovernedMemoryOwnerPlane::LongTerm,
             "ltm-2",
@@ -4140,7 +4802,7 @@ mod tests {
         let error = context
             .materialize_long_term_owner_closure("space-1", "space-1", &second, 4, 1)
             .expect_err("second distinct owner must be rejected before IO");
-        assert_eq!(error.stage(), "governed_current_recall");
+        assert_eq!(error.stage(), "store_budget_exceeded");
     }
 
     #[test]

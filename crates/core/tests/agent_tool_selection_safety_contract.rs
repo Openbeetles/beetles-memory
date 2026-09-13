@@ -16,8 +16,24 @@ fn registry() -> AgentToolRegistrySnapshot {
     )
 }
 
-fn material(signature: &str, guidance: &str) -> AgentToolExperienceRevisionMaterialV2 {
-    AgentToolExperienceRevisionMaterialV2::build(
+fn material(signature: &str, guidance: &str) -> AgentToolExperienceRevisionMaterialV3 {
+    let mut body = AgentToolExperienceBodyV1::Method {
+        task_signature: signature.into(),
+        procedure: format!("1. {guidance}.\n2. Verify the result."),
+        constraints: vec![],
+        sources: vec![],
+    };
+    let method_digest = body.method_content_digest().unwrap().unwrap();
+    let AgentToolExperienceBodyV1::Method { sources, .. } = &mut body else {
+        unreachable!()
+    };
+    sources.push(AgentToolMethodSourceRefV1 {
+        source_job_id: "private-evidence-marker".into(),
+        method_id: "method-a".into(),
+        method_digest,
+        execution_refs: vec![],
+    });
+    AgentToolExperienceRevisionMaterialV3::build(
         "space",
         AgentToolExperienceOwningScopeV1::Subject {
             mounted_subject_id: "agent".into(),
@@ -26,18 +42,9 @@ fn material(signature: &str, guidance: &str) -> AgentToolExperienceRevisionMater
         AgentToolRegistryScope::Global,
         "search",
         "schema-v1",
-        signature,
         1,
-        "Governed procedure",
-        guidance,
-        vec![],
-        2,
-        2,
-        0,
-        AgentToolOutcome::Succeeded,
-        AgentToolExperienceConfidence::High,
+        body,
         AgentToolExperienceStatus::Active,
-        vec!["private-evidence-marker".into()],
         MemoryPrivacyClass::SharedWithSubject,
         100,
         100,
@@ -48,7 +55,7 @@ fn material(signature: &str, guidance: &str) -> AgentToolExperienceRevisionMater
 
 fn select(
     query: &str,
-    materials: &[AgentToolExperienceRevisionMaterialV2],
+    materials: &[AgentToolExperienceRevisionMaterialV3],
     registries: &[AgentToolRegistrySnapshot],
     refs: &[AgentToolRegistryRef],
 ) -> AgentToolSelectionReport {
@@ -58,22 +65,87 @@ fn select(
     let heads = materials
         .iter()
         .map(|material| {
-            AgentToolExperienceOwnerHeadV2::build(
+            AgentToolExperienceOwnerHeadV3::build(
                 "space",
                 scope.clone(),
                 material.owner_ref.clone(),
                 1,
-                vec![AgentToolExperienceRetainedRevisionDigestV2::from_material(material).unwrap()],
+                vec![AgentToolExperienceRetainedRevisionDigestV3::from_material(material).unwrap()],
             )
             .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let subject_scope = bm_core::memory::ProceduralSubjectScopeV1 {
+        memory_space_id: "space".into(),
+        mounted_subject_id: "agent".into(),
+    };
+    let source_scope = bm_core::memory::ProceduralProducerScopeV1 {
+        memory_space_id: "space".into(),
+        mounted_subject_id: "agent".into(),
+        channel_id: "sdk.direct".into(),
+        chat_id: "selection-test".into(),
+    };
+    let root = bm_core::memory::ProceduralSubjectValidityRootV1::initialize(
+        subject_scope,
+        source_scope,
+        8,
+    )
+    .unwrap();
+    let job = bm_core::memory::ProceduralFeedbackJobV2::pending(
+        bm_core::memory::ProceduralFeedbackIdentityV1::new(
+            "space",
+            "agent",
+            "sdk.direct",
+            "selection-test",
+            "selection-test",
+            "turn-a",
+        )
+        .unwrap(),
+        1,
+        format!("sha256:{}", "a".repeat(64)),
+        format!("sha256:{}", "b".repeat(64)),
+        1,
+        5,
+        100,
+    )
+    .unwrap();
+    let applications = [
+        bm_core::memory::ProceduralFeedbackApplicationLedgerV2::build(
+            &job,
+            materials
+                .iter()
+                .map(|material| {
+                    bm_core::memory::ProceduralAppliedOwnerBindingV1::AgentToolExperience {
+                        owner_revision: material.owner_revision_ref(),
+                        content_digest: material.content_digest.clone(),
+                    }
+                })
+                .collect(),
+            vec![],
+            vec![],
+            1,
+            100,
+        )
+        .unwrap(),
+    ];
+    let authority =
+        bm_core::memory::ProceduralReadAuthorityV1::try_new(&root, None, &applications).unwrap();
+    let owners = heads
+        .iter()
+        .map(|head| {
+            let history = materials
+                .iter()
+                .filter(|material| material.owner_ref == head.owner_ref)
+                .cloned()
+                .collect::<Vec<_>>();
+            AgentToolExperienceReadProjectionV1::try_new(head, &history, &authority, None).unwrap()
         })
         .collect::<Vec<_>>();
     select_subject_agent_tool_hints(AgentToolExperienceSelectionInput {
         query,
         memory_space_id: "space",
         owning_scope: &scope,
-        heads: &heads,
-        materials,
+        owners: &owners,
         registries,
         registry_refs: refs,
         applicability: &ProceduralApplicabilityContextV1::try_new(None, None, None).unwrap(),
@@ -93,6 +165,150 @@ fn assert_safe_rejected(report: &AgentToolSelectionReport, reason: &str) {
     let encoded = serde_json::to_string(report).unwrap();
     assert!(!encoded.contains("secret-guidance-marker"));
     assert!(!encoded.contains("private-evidence-marker"));
+}
+
+#[test]
+fn pfi2_verified_projection_selects_before_authorizing_and_never_carries_denied_history() {
+    use bm_core::memory::*;
+    let first = material("weather-task", "A private-history method marker");
+    let next = |previous: &AgentToolExperienceRevisionMaterialV3, time| {
+        AgentToolExperienceRevisionMaterialV3::build(
+            &previous.memory_space_id,
+            previous.owning_scope.clone(),
+            &previous.registry_id,
+            previous.registry_scope.clone(),
+            &previous.tool_id,
+            &previous.schema_fingerprint,
+            previous.owner_revision + 1,
+            previous.body.clone(),
+            previous.status,
+            previous.privacy_class,
+            previous.created_at,
+            time,
+            Some(AgentToolExperienceRetainedRevisionDigestV3::from_material(previous).unwrap()),
+        )
+        .unwrap()
+    };
+    let second = next(&first, 200);
+    let third = next(&second, 300);
+    let history = vec![first.clone(), second, third.clone()];
+    let head = AgentToolExperienceOwnerHeadV3::build(
+        "space",
+        first.owning_scope.clone(),
+        first.owner_ref.clone(),
+        3,
+        history
+            .iter()
+            .map(|material| {
+                AgentToolExperienceRetainedRevisionDigestV3::from_material(material).unwrap()
+            })
+            .collect(),
+    )
+    .unwrap();
+    let root = ProceduralSubjectValidityRootV1::initialize(
+        ProceduralSubjectScopeV1 {
+            memory_space_id: "space".into(),
+            mounted_subject_id: "agent".into(),
+        },
+        ProceduralProducerScopeV1 {
+            memory_space_id: "space".into(),
+            mounted_subject_id: "agent".into(),
+            channel_id: "sdk.direct".into(),
+            chat_id: "chat".into(),
+        },
+        8,
+    )
+    .unwrap();
+    let application = |material: &AgentToolExperienceRevisionMaterialV3| {
+        let job = ProceduralFeedbackJobV2::pending(
+            ProceduralFeedbackIdentityV1::new(
+                "space",
+                "agent",
+                "sdk.direct",
+                "chat",
+                "chat",
+                &format!("turn-{}", material.owner_revision),
+            )
+            .unwrap(),
+            material.owner_revision,
+            format!("sha256:{}", "a".repeat(64)),
+            format!("sha256:{}", "b".repeat(64)),
+            1,
+            5,
+            100,
+        )
+        .unwrap();
+        ProceduralFeedbackApplicationLedgerV2::build(
+            &job,
+            vec![ProceduralAppliedOwnerBindingV1::AgentToolExperience {
+                owner_revision: material.owner_revision_ref(),
+                content_digest: material.content_digest.clone(),
+            }],
+            vec![],
+            vec![],
+            1,
+            100,
+        )
+        .unwrap()
+    };
+    let applications = [application(&first), application(&third)];
+    let authority = ProceduralReadAuthorityV1::try_new(&root, None, &applications).unwrap();
+    let positive =
+        AgentToolExperienceReadProjectionV1::try_new(&head, &history, &authority, Some(150))
+            .unwrap();
+    assert_eq!(positive.material(), Some(&first));
+    let denied =
+        AgentToolExperienceReadProjectionV1::try_new(&head, &history, &authority, Some(250))
+            .unwrap();
+    assert!(
+        denied.material().is_none(),
+        "rev2 is denied; do not fall back to rev1"
+    );
+    assert_eq!(
+        denied.rejection(),
+        Some("agent_tool_experience_authority_withdrawn")
+    );
+    assert!(!format!("{denied:?}").contains("private-history method marker"));
+    let only_old = [application(&first)];
+    let authority = ProceduralReadAuthorityV1::try_new(&root, None, &only_old).unwrap();
+    assert!(
+        AgentToolExperienceReadProjectionV1::try_new(&head, &history, &authority, Some(150))
+            .unwrap()
+            .material()
+            .is_none(),
+        "an allowed historical revision cannot bypass denied current authority"
+    );
+    let mut broken = history;
+    broken[1].updated_at = 201;
+    assert!(
+        AgentToolExperienceReadProjectionV1::try_new(&head, &broken, &authority, Some(250))
+            .is_err(),
+        "normal withdrawal cannot hide structural corruption of the denied history"
+    );
+}
+
+#[test]
+fn candidate_method_never_enters_a_model_hint() {
+    let registry = registry();
+    let mut candidate = material("task", "secret-guidance-marker");
+    assert!(!select(
+        "secret-guidance-marker",
+        from_ref(&candidate),
+        from_ref(&registry),
+        &[]
+    )
+    .tool_hints
+    .is_empty());
+    candidate.status = AgentToolExperienceStatus::Candidate;
+    candidate.content_digest = candidate.canonical_content_digest().unwrap();
+    let report = select("secret-guidance-marker", &[candidate], &[registry], &[]);
+    assert!(
+        report.tool_hints.is_empty(),
+        "an admitted proposal is not a governed active method"
+    );
+    let wire = serde_json::to_string(&report).unwrap();
+    assert!(!wire.contains("secret-guidance-marker"));
+    assert!(!wire.contains("private-evidence-marker"));
 }
 
 #[test]
@@ -142,25 +358,16 @@ fn private_and_scope_denials_have_safe_nonempty_audit() {
         project_id: "other-project".into(),
     };
     // Rebuild the complete canonical owner when changing applicability.
-    scoped = AgentToolExperienceRevisionMaterialV2::build(
+    scoped = AgentToolExperienceRevisionMaterialV3::build(
         "space",
         scoped.owning_scope,
         "tools",
         scoped.registry_scope,
         "search",
         "schema-v1",
-        "task",
         1,
-        "Governed procedure",
-        "secret-guidance-marker",
-        vec![],
-        2,
-        2,
-        0,
-        AgentToolOutcome::Succeeded,
-        AgentToolExperienceConfidence::High,
+        scoped.body,
         AgentToolExperienceStatus::Active,
-        vec![],
         MemoryPrivacyClass::SharedWithSubject,
         100,
         100,
