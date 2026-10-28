@@ -453,7 +453,8 @@ pub use next_gen_contract::{
 pub(crate) use outer_voice::run_outer_voice_refresh_with_state;
 pub use outer_voice::{
     render_outer_voice_block, OuterVoice, OuterVoiceRefreshContext, OuterVoiceRefreshInput,
-    OuterVoiceRefreshOutcome, OUTER_VOICE_SYSTEM_PROMPT, OUTER_VOICE_TOTAL_CHAR_LIMIT,
+    OuterVoiceRefreshOutcome, SubjectExpressionDiscipline, OUTER_VOICE_SYSTEM_PROMPT,
+    OUTER_VOICE_TOTAL_CHAR_LIMIT,
 };
 #[cfg(all(
     any(test, feature = "nonproduction-replay-harness"),

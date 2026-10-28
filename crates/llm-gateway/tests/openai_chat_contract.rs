@@ -452,3 +452,162 @@ fn repeated_turn_window_preserves_new_user_even_after_empty_assistant_boundary()
         }
     }
 }
+
+#[cfg(feature = "client-reqwest")]
+#[test]
+fn partial_soul_projection_reaches_loopback_http_once_without_payload_drift() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+
+    struct CapturingUpstream {
+        inner: bm_llm_gateway::ReqwestOpenAiCompatibleUpstream,
+        submitted: Option<Value>,
+    }
+    impl OpenAiCompatibleUpstream for CapturingUpstream {
+        fn bind_response_budget(
+            &mut self,
+            budget: bm_llm_gateway::GatewayUpstreamResponseBudget,
+        ) -> bm_llm_gateway::Result<()> {
+            self.inner.bind_response_budget(budget)
+        }
+        fn models(
+            &mut self,
+            provider: &bm_llm_gateway::GatewayProviderConfig,
+        ) -> bm_llm_gateway::Result<OpenAiUpstreamResponse> {
+            self.inner.models(provider)
+        }
+        fn chat_completion(
+            &mut self,
+            provider: &bm_llm_gateway::GatewayProviderConfig,
+            request: OpenAiUpstreamRequest,
+        ) -> bm_llm_gateway::Result<OpenAiUpstreamResponse> {
+            assert!(self.submitted.is_none(), "one upstream request per turn");
+            self.submitted = Some(request.body.clone());
+            self.inner.chat_completion(provider, request)
+        }
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").expect("synthetic provider");
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let capture = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(error) => panic!("loopback request not received: {error}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut bytes = Vec::new();
+        let (header_end, length) = loop {
+            let mut chunk = [0u8; 4096];
+            let n = stream.read(&mut chunk).expect("request bytes");
+            assert!(n > 0);
+            bytes.extend_from_slice(&chunk[..n]);
+            if let Some(index) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                let header = std::str::from_utf8(&bytes[..index]).unwrap();
+                let length: usize = header
+                    .lines()
+                    .find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        key.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse().unwrap())
+                    })
+                    .expect("content length");
+                break (index + 4, length);
+            }
+            assert!(bytes.len() < 64 * 1024);
+        };
+        while bytes.len() < header_end + length {
+            let mut chunk = [0u8; 4096];
+            let n = stream.read(&mut chunk).unwrap();
+            assert!(n > 0);
+            bytes.extend_from_slice(&chunk[..n]);
+        }
+        let body: Value = serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
+        let response = r#"{"choices":[{"message":{"role":"assistant","content":"synthetic response"},"finish_reason":"stop"}]}"#;
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
+        body
+    });
+    let mut config = gateway_config();
+    let provider = config.providers.get_mut(&config.default_provider).unwrap();
+    provider.base_url = format!("http://{address}/v1");
+    provider.max_prompt_chars = Some(32768);
+    let gateway = GatewayRuntime::open(config.clone()).unwrap();
+    let scope = scope_request();
+    let resolved = GatewayScopeResolver::new(config.scope.clone())
+        .resolve(&scope)
+        .unwrap();
+    let entry = gateway.runtime_for_scope(resolved.entry_scope).unwrap();
+    entry
+        .runtime()
+        .provision_subject_soul(bm_sdk::SubjectSoulProvisionIntentV1::Founding {
+            operation_id: "wire-partial-charter".into(),
+            human_actor_subject_id: bm_sdk::primary_human_subject_id(
+                &entry.runtime().identity().owner_id,
+            ),
+            charter: Box::new(
+                bm_sdk::SubjectSoulFoundingCharterSeedV1 {
+                    character_tendencies: vec!["wire-charter-marker".into()],
+                    ..Default::default()
+                }
+                .canonicalize()
+                .unwrap(),
+            ),
+            source_asserted_at: Some(1_700_000_000),
+        })
+        .unwrap();
+    let mut upstream = CapturingUpstream {
+        inner: bm_llm_gateway::ReqwestOpenAiCompatibleUpstream::new_with_timeout(
+            Duration::from_secs(5),
+        )
+        .unwrap(),
+        submitted: None,
+    };
+    let result = handle_openai_request(
+        &gateway,
+        OpenAiGatewayRequest::post_json(
+            "/v1/chat/completions",
+            scope,
+            json!({
+                "model": "local", "messages": [{"role": "user", "content": "How do you approach this task?"}]
+            }),
+        ),
+        &mut upstream,
+    );
+    let wire = capture.join().expect("capture thread");
+    let result = result.expect("loopback provider response");
+    assert_eq!(result.status_code, 200);
+    assert_eq!(
+        Some(&wire),
+        upstream.submitted.as_ref(),
+        "the official client must preserve the SDK-bearing request"
+    );
+    let messages = wire["messages"].as_array().unwrap();
+    let system = messages
+        .iter()
+        .filter(|m| m["role"] == "system")
+        .map(|m| m["content"].as_str().unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        system
+            .matches("<beetle-memory-projection version=\"1\">")
+            .count(),
+        1
+    );
+    assert!(system.contains("wire-charter-marker"));
+    assert!(!system.contains("Reply stance: ## Self-Authored Core"));
+    assert!(!serde_json::to_string(&result.audit)
+        .unwrap()
+        .contains("wire-charter-marker"));
+}

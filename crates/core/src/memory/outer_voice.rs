@@ -56,6 +56,74 @@ impl OuterVoice {
     }
 }
 
+/// Ephemeral expression guidance, never an identity, permission, or public audit source.
+/// The persisted OuterVoice remains the sole owner of its six expressive dimensions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubjectExpressionDiscipline {
+    pub guidance: OuterVoice,
+    pub voice_shift: Option<super::RelationshipOuterVoiceShift>,
+    pub boundary_shift: Option<super::RelationshipBoundaryShift>,
+    pub disclosure_allowance: Option<super::RelationshipDisclosureAllowance>,
+    pub task_scope: Option<super::RelationshipTaskScopeCeiling>,
+}
+
+impl SubjectExpressionDiscipline {
+    pub fn compile(
+        voice: &OuterVoice,
+        constitution: Option<&RelationshipConstitution>,
+    ) -> Option<Self> {
+        Some(Self {
+            guidance: normalize_outer_voice(voice.clone(), voice.updated_at)?,
+            voice_shift: constitution.map(|c| c.allowed_outer_voice_shift),
+            boundary_shift: constitution.map(|c| c.allowed_boundary_shift),
+            disclosure_allowance: constitution.map(|c| c.disclosure_allowance),
+            task_scope: constitution.map(|c| c.task_scope_ceiling),
+        })
+    }
+
+    /// Render one governed unit; consumers must omit the entire unit if it cannot fit.
+    /// These instructions do not replace Store/privacy/tool permission enforcement.
+    pub fn render(&self) -> String {
+        let mut out = String::from("## Expression Guidance\n- Style only: follow the current identity, relationship constitution, disclosure protocol and work integrity. Never grant action permissions, widen disclosure, or rewrite identity through style.\n");
+        if let Some(value) = self.voice_shift {
+            let _ = writeln!(out, "- Relationship voice shift ceiling: {}", value.label());
+        }
+        if let Some(value) = self.boundary_shift {
+            let _ = writeln!(
+                out,
+                "- Relationship boundary shift ceiling: {}",
+                value.label()
+            );
+        }
+        if let Some(value) = self.disclosure_allowance {
+            let _ = writeln!(out, "- Relationship disclosure ceiling: {}", value.label());
+        }
+        if let Some(value) = self.task_scope {
+            let _ = writeln!(out, "- Relationship task scope ceiling: {}", value.label());
+        }
+        for (label, value) in self.fields() {
+            if !value.trim().is_empty() {
+                let _ = writeln!(out, "- {label}: {}", value.trim());
+            }
+        }
+        out
+    }
+
+    pub fn fields(&self) -> [(&'static str, &str); 6] {
+        [
+            ("Expression", &self.guidance.expression_mode),
+            ("Tone", &self.guidance.tone),
+            ("Pacing", &self.guidance.pacing),
+            ("Initiative expression", &self.guidance.initiative),
+            ("Boundary expression", &self.guidance.boundary_style),
+            (
+                "Relationship expression",
+                &self.guidance.relational_response_style,
+            ),
+        ]
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OuterVoiceRefreshInput<'a> {
     pub mounted_subject_id: &'a str,
@@ -586,6 +654,53 @@ fn apply_relationship_constitution_to_outer_voice(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expression_projection_preserves_typed_ceilings_and_independent_unicode_fields() {
+        let voice = OuterVoice {
+            expression_mode: "表达".repeat(200),
+            tone: "last-tone-marker".into(),
+            pacing: "last-pacing-marker".into(),
+            initiative: "last-initiative-marker".into(),
+            boundary_style: "last-boundary-marker".into(),
+            relational_response_style: "last-relation-marker".into(),
+            updated_at: 7,
+        };
+        let before = voice.clone();
+        let constitution = RelationshipConstitution {
+            allowed_outer_voice_shift: super::super::RelationshipOuterVoiceShift::Minimal,
+            allowed_boundary_shift: super::super::RelationshipBoundaryShift::Sealed,
+            disclosure_allowance: super::super::RelationshipDisclosureAllowance::Closed,
+            ..Default::default()
+        };
+        let expression = SubjectExpressionDiscipline::compile(&voice, Some(&constitution)).unwrap();
+        assert_eq!(
+            voice, before,
+            "projection must not mutate the persisted voice"
+        );
+        assert!(expression.guidance.expression_mode.chars().count() <= OUTER_VOICE_FIELD_MAX_CHARS);
+        let rendered = expression.render();
+        assert!(rendered.contains("voice shift ceiling: minimal"));
+        assert!(rendered.contains("boundary shift ceiling: sealed"));
+        assert!(rendered.contains("disclosure ceiling: closed"));
+        for marker in [
+            "last-tone-marker",
+            "last-pacing-marker",
+            "last-initiative-marker",
+            "last-boundary-marker",
+            "last-relation-marker",
+        ] {
+            assert!(
+                rendered.contains(marker),
+                "long first field swallowed {marker}"
+            );
+        }
+        assert!(
+            SubjectExpressionDiscipline::compile(&OuterVoice::default(), Some(&constitution))
+                .is_none(),
+            "constitution cannot fabricate expression"
+        );
+    }
 
     const TEST_SUBJECT_ID: &str = "agent:test";
     use crate::orchestrator::PressureLevel;

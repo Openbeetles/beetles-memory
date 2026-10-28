@@ -156,6 +156,8 @@ pub struct InhabitedSubjectProjectionInput<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InhabitedSubjectProjection {
     pub subject_mount: InhabitedSubjectMount,
+    /// Runtime-only expression guidance; exclude from public/operator surfaces.
+    pub expression_guidance: Option<super::SubjectExpressionDiscipline>,
     pub boundary_and_disclosure_protocol: BoundaryAndDisclosureProtocol,
     pub soul_private_runtime_context: Vec<ProtectedRuntimeContext>,
     pub work_integrity_covenant: WorkIntegrityCovenant,
@@ -224,7 +226,8 @@ pub fn compile_inhabited_subject_projection(
         self_authored_core: input.context.self_authored_core.as_ref(),
         self_continuity: input.context.self_continuity.as_ref(),
         self_model: None,
-        outer_voice: input.context.outer_voice.as_ref(),
+        // Expression is compiled separately, never copied into the public mount.
+        outer_voice: None,
         relationship_constitution: input.context.relationship_constitution.as_ref(),
         summary_text: input.context.summary_text.as_deref(),
         recent_turn_observation_text: input.context.recent_turn_observation_text.as_deref(),
@@ -274,6 +277,7 @@ pub fn compile_inhabited_subject_projection(
     );
     let soul_private_runtime_context = compile_soul_private_runtime_context(
         input.context,
+        state.as_ref(),
         &classified_sources,
         input.runtime_private_context_allowed,
     );
@@ -292,20 +296,60 @@ pub fn compile_inhabited_subject_projection(
             reason: "runtime_private_context_denied".to_string(),
         });
     }
-    let rendered = render_inhabited_subject_projection(
+    let expression_guidance = input.context.outer_voice.as_ref().and_then(|voice| {
+        super::SubjectExpressionDiscipline::compile(
+            voice,
+            input.context.relationship_constitution.as_ref(),
+        )
+    });
+    let mut render_private_context = soul_private_runtime_context.clone();
+    let mut rendered = render_inhabited_subject_projection(
         &subject_mount,
         &boundary_and_disclosure_protocol,
-        &soul_private_runtime_context,
+        &render_private_context,
         &work_integrity_covenant,
     );
+    while rendered.trim().chars().count() > input.render_budget_chars {
+        let Some(omitted) = render_private_context.pop() else {
+            break;
+        };
+        dropped_candidates.push(InhabitedSubjectDroppedCandidate {
+            candidate_id: omitted.source_id,
+            reason: "private_context_render_budget".into(),
+        });
+        rendered = render_inhabited_subject_projection(
+            &subject_mount,
+            &boundary_and_disclosure_protocol,
+            &render_private_context,
+            &work_integrity_covenant,
+        );
+    }
+    if let Some(expression) = &expression_guidance {
+        let block = expression.render();
+        if rendered.trim().chars().count() + 2 + block.trim().chars().count()
+            <= input.render_budget_chars
+        {
+            rendered = format!("{}\n\n{}", rendered.trim(), block.trim());
+        } else {
+            dropped_candidates.push(InhabitedSubjectDroppedCandidate {
+                candidate_id: "outer_voice".into(),
+                reason: "expression_guidance_render_budget".into(),
+            });
+        }
+    }
     let trimmed = truncate_content_to_max(rendered.trim(), input.render_budget_chars)
         .trim()
         .to_string();
-    let profile_trim_reason =
-        (rendered.len() > trimmed.len()).then(|| "subject_projection_render_budget".to_string());
+    let profile_trim_reason = (rendered.trim().chars().count() > trimmed.chars().count()
+        || dropped_candidates.iter().any(|item| {
+            item.reason == "expression_guidance_render_budget"
+                || item.reason == "private_context_render_budget"
+        }))
+    .then(|| "subject_projection_render_budget".to_string());
 
     InhabitedSubjectProjection {
         subject_mount,
+        expression_guidance,
         boundary_and_disclosure_protocol,
         soul_private_runtime_context,
         work_integrity_covenant,
@@ -738,28 +782,6 @@ impl PromptMemoryContext {
         );
         push_projection_source(
             &mut report,
-            "outer_voice",
-            "outer_voice_text",
-            &self.outer_voice_text,
-            &[
-                ProjectionSourceAuthority::PrivateInternal,
-                ProjectionSourceAuthority::CanonicalSubject,
-            ],
-            &[
-                PromptProjectionSurfaceRole::ReplyStrategy,
-                PromptProjectionSurfaceRole::SubjectCompiler,
-            ],
-            false,
-            false,
-            false,
-            false,
-            true,
-            false,
-            Vec::new(),
-            "outer voice guides expression style without becoming factual grounding",
-        );
-        push_projection_source(
-            &mut report,
             "inner_life",
             "inner_life_text",
             &self.inner_life_text,
@@ -900,6 +922,48 @@ impl PromptMemoryContext {
             Vec::new(),
             "mental privacy adjudication is in-runtime disclosure guidance, not a final LLM judge",
         );
+        for (id, loaded, private_runtime) in [
+            (
+                "outer_voice",
+                self.outer_voice
+                    .as_ref()
+                    .is_some_and(super::OuterVoice::is_meaningful),
+                false,
+            ),
+            (
+                "felt_significance",
+                self.felt_significance
+                    .as_ref()
+                    .is_some_and(super::FeltSignificance::is_meaningful),
+                true,
+            ),
+            (
+                "temperament_continuity",
+                self.temperament_continuity
+                    .as_ref()
+                    .is_some_and(super::TemperamentContinuity::is_meaningful),
+                true,
+            ),
+            (
+                "inner_conflict",
+                self.inner_conflict
+                    .as_ref()
+                    .is_some_and(super::InnerConflict::is_meaningful),
+                true,
+            ),
+        ] {
+            report.push(PromptProjectionSource {
+                source_id: id.into(), field_name: id.into(),
+                authorities: vec![ProjectionSourceAuthority::PrivateInternal, ProjectionSourceAuthority::CanonicalSubject],
+                surface_roles: vec![if private_runtime { PromptProjectionSurfaceRole::SoulPrivateRuntime } else { PromptProjectionSurfaceRole::ReplyStrategy }, PromptProjectionSurfaceRole::SubjectCompiler],
+                loaded, runtime_private_context_allowed: private_runtime, foreground_disclosure_allowed: false,
+                shared_fact_surface_allowed: false, raw_audit_plaintext_allowed: false,
+                subject_compiler_input_allowed: true, personality_judgment_allowed: false,
+                evidence_refs: Vec::new(), dropped_reason: (!loaded).then(|| "not_loaded_or_empty".into()),
+                degraded_reason: None,
+                reason: if private_runtime { "typed derived subject state; protected runtime only, never public personality or factual evidence" } else { "typed expression guidance only; never public identity, audit plaintext or factual evidence" }.into(),
+            });
+        }
         if !self.memory_health_issues.is_empty() {
             report.push(PromptProjectionSource {
                 source_id: "memory_health".to_string(),
@@ -1071,9 +1135,7 @@ fn compile_inhabited_subject_mount(
         push_subject_mount_pair(
             &mut parts,
             "identity",
-            state
-                .map(|state| state.identity_anchor.as_str())
-                .or(input.context.self_authored_core_text.as_deref()),
+            state.map(|state| state.identity_anchor.as_str()),
         );
         push_subject_mount_pair(
             &mut parts,
@@ -1133,20 +1195,10 @@ fn compile_inhabited_subject_mount(
         input.context.long_term_memory_text.as_deref(),
         input.context.summary_text.as_deref(),
     ]);
-    let reply_stance = first_subject_text(&[
-        state.map(|state| state.response_mode.as_str()),
-        input.context.persona_priority_text.as_deref(),
-        input.context.self_authored_core_text.as_deref(),
-    ]);
-    let initiative_posture = first_subject_text(&[
-        state.map(|state| state.initiative_posture.as_str()),
-        input.context.autonomy_strategy_text.as_deref(),
-    ]);
-    let boundary_mode = first_subject_text(&[
-        state.map(|state| state.boundary_mode.as_str()),
-        input.context.mental_privacy_adjudication_text.as_deref(),
-        input.context.mental_privacy_text.as_deref(),
-    ]);
+    let reply_stance = first_subject_text(&[state.map(|state| state.response_mode.as_str())]);
+    let initiative_posture =
+        first_subject_text(&[state.map(|state| state.initiative_posture.as_str())]);
+    let boundary_mode = first_subject_text(&[state.map(|state| state.boundary_mode.as_str())]);
 
     InhabitedSubjectMount {
         identity_mount,
@@ -1193,6 +1245,7 @@ fn compile_boundary_and_disclosure_protocol(
 
 fn compile_soul_private_runtime_context(
     context: &PromptMemoryContext,
+    state: Option<&SubjectState>,
     sources: &[PromptProjectionSource],
     runtime_private_context_allowed: bool,
 ) -> Vec<ProtectedRuntimeContext> {
@@ -1209,16 +1262,57 @@ fn compile_soul_private_runtime_context(
                     .contains(&PromptProjectionSurfaceRole::SoulPrivateRuntime)
         })
         .filter_map(|source| {
-            projection_source_text(context, &source.source_id).map(|content| {
-                ProtectedRuntimeContext {
+            let derived = state
+                .and_then(|state| derived_private_projection(context, state, &source.source_id));
+            derived
+                .as_deref()
+                .or_else(|| projection_source_text(context, &source.source_id))
+                .map(|content| ProtectedRuntimeContext {
                     source_id: source.source_id.clone(),
                     role: "protected_runtime_only".to_string(),
                     content: compact_private_runtime_field(&source.source_id, content, 420),
-                }
-            })
+                })
         })
         .filter(|context| !context.content.trim().is_empty())
         .collect()
+}
+
+fn derived_private_projection(
+    context: &PromptMemoryContext,
+    state: &SubjectState,
+    source_id: &str,
+) -> Option<String> {
+    let mut fields = Vec::new();
+    match source_id {
+        "felt_significance" if context.felt_significance.is_some() => {
+            fields.push((
+                "Current significance",
+                state.significance_direction.as_str(),
+            ));
+        }
+        "temperament_continuity" => {
+            let source = context.temperament_continuity.as_ref()?;
+            // The state also has constitutional fallbacks. They are not temperament evidence.
+            if !source.stability_summary.trim().is_empty() {
+                fields.push(("Self reading", state.self_reading.as_str()));
+            }
+            if !source.boundary_inertia.trim().is_empty() {
+                fields.push(("Resistance", state.resistance_mode.as_str()));
+            }
+        }
+        "inner_conflict" if context.inner_conflict.is_some() => {
+            fields.push(("Certainty", state.certainty_mode.as_str()));
+            fields.push(("Unresolved tension", state.unresolved_tension.as_str()));
+        }
+        _ => return None,
+    }
+    let content = fields
+        .into_iter()
+        .filter(|(_, value)| !value.trim().is_empty())
+        .map(|(label, value)| format!("{label}: {value}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!content.is_empty()).then_some(content)
 }
 
 fn compile_work_integrity_covenant(
@@ -1362,6 +1456,17 @@ fn render_inhabited_subject_projection(
         );
     }
 
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Work Integrity Covenant");
+    let _ = writeln!(
+        out,
+        "- Task goal: {}",
+        render_optional_projection_value(&work.task_goal)
+    );
+    let _ = writeln!(out, "- Evidence ceiling: {}", work.evidence_ceiling);
+    let _ = writeln!(out, "- Tool boundary: {}", work.tool_permission_boundary);
+    let _ = writeln!(out, "- Uncertainty rule: {}", work.uncertainty_rule);
+    let _ = writeln!(out, "- No obstruction: {}", work.no_obstruction_rule);
     if !private_context.is_empty() {
         let _ = writeln!(out);
         let _ = writeln!(out, "## Soul Private Runtime Context");
@@ -1384,17 +1489,6 @@ fn render_inhabited_subject_projection(
         }
     }
 
-    let _ = writeln!(out);
-    let _ = writeln!(out, "## Work Integrity Covenant");
-    let _ = writeln!(
-        out,
-        "- Task goal: {}",
-        render_optional_projection_value(&work.task_goal)
-    );
-    let _ = writeln!(out, "- Evidence ceiling: {}", work.evidence_ceiling);
-    let _ = writeln!(out, "- Tool boundary: {}", work.tool_permission_boundary);
-    let _ = writeln!(out, "- Uncertainty rule: {}", work.uncertainty_rule);
-    let _ = writeln!(out, "- No obstruction: {}", work.no_obstruction_rule);
     out
 }
 
@@ -1992,6 +2086,169 @@ mod tests {
             .any(|evidence| evidence == "subject_mount:degraded"));
         assert!(projection.soul_private_runtime_context.is_empty());
         assert!(projection.rendered_block.contains("subject_mount_degraded"));
+    }
+
+    fn semantic_projection(
+        context: &PromptMemoryContext,
+        private: bool,
+        budget: usize,
+    ) -> InhabitedSubjectProjection {
+        compile_inhabited_subject_projection(InhabitedSubjectProjectionInput {
+            context,
+            mounted_subject_id: "agent:test",
+            now_secs: 42,
+            platform: "synthetic",
+            device_identity: "agent:test",
+            channel: "sdk.direct",
+            chat_id: "synthetic-chat",
+            pressure: PressureLevel::Normal,
+            render_budget_chars: budget,
+            runtime_private_context_allowed: private,
+            foreground_disclosure_allowed: false,
+            user_query: "continue the task",
+        })
+    }
+
+    #[test]
+    fn partial_core_never_uses_display_markdown_as_behavior() {
+        let mut context = minimal_prompt_context_for_projection();
+        context.self_authored_core = Some(SelfAuthoredCore {
+            character_tendencies: vec!["synthetic-curiosity".into()],
+            ..SelfAuthoredCore::default()
+        });
+        context.self_authored_core_text = Some("## Self-Authored Core\nDISPLAY_ONLY_CORE".into());
+        context.persona_priority_text = Some("DISPLAY_ONLY_PRIORITY".into());
+        context.autonomy_strategy_text = Some("DISPLAY_ONLY_AUTONOMY".into());
+        context.mental_privacy_text = Some("DISPLAY_ONLY_PRIVACY".into());
+        let projection = semantic_projection(&context, false, 16000);
+        assert!(projection.subject_mount.reply_stance.is_empty());
+        assert!(!format!("{:?}", projection.subject_mount).contains("DISPLAY_ONLY"));
+        assert!(
+            projection.profile_trim_reason.is_none(),
+            "trailing newline is not budget loss"
+        );
+    }
+
+    #[test]
+    fn every_outer_voice_dimension_reaches_governed_projection() {
+        let markers = [
+            "voice-expression",
+            "voice-tone",
+            "voice-pacing",
+            "voice-initiative",
+            "voice-boundary",
+            "voice-relational",
+        ];
+        for constitution in [false, true] {
+            for private in [false, true] {
+                // Single-field controls prevent one dimension masking another.
+                for selected in 0..=6 {
+                    let mut context = minimal_prompt_context_for_projection();
+                    let mut values = [
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                    ];
+                    for (i, value) in values.iter_mut().enumerate() {
+                        if selected == 6 || selected == i {
+                            *value = markers[i].into();
+                        }
+                    }
+                    context.outer_voice = Some(super::super::OuterVoice {
+                        expression_mode: values[0].clone(),
+                        tone: values[1].clone(),
+                        pacing: values[2].clone(),
+                        initiative: values[3].clone(),
+                        boundary_style: values[4].clone(),
+                        relational_response_style: values[5].clone(),
+                        updated_at: 1,
+                    });
+                    if constitution {
+                        context.relationship_constitution =
+                            Some(super::super::RelationshipConstitution::default());
+                    }
+                    let projection = semantic_projection(&context, private, 16000);
+                    for (i, marker) in markers.iter().enumerate() {
+                        assert_eq!(
+                            projection.rendered_block.contains(marker),
+                            selected == 6 || selected == i,
+                            "{marker}, constitution={constitution}, private={private}"
+                        );
+                        assert!(
+                            !format!("{:?}", projection.subject_mount).contains(marker),
+                            "raw style must not enter public mount"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn derived_soul_state_is_consumed_only_as_protected_context() {
+        let mut context = minimal_prompt_context_for_projection();
+        context.felt_significance = Some(super::super::FeltSignificance {
+            significance_summary: "private-salience-marker".into(),
+            ..Default::default()
+        });
+        context.temperament_continuity = Some(super::super::TemperamentContinuity {
+            stability_summary: "private-stability-marker".into(),
+            boundary_inertia: "private-resistance-marker".into(),
+            ..Default::default()
+        });
+        context.inner_conflict = Some(super::super::InnerConflict {
+            topic: "private-tension-marker".into(),
+            pull_a: "choice-a".into(),
+            pull_b: "choice-b".into(),
+            ..Default::default()
+        });
+        let markers = [
+            "private-salience-marker",
+            "private-stability-marker",
+            "private-resistance-marker",
+            "private-tension-marker",
+        ];
+        let allowed = semantic_projection(&context, true, 16000);
+        let denied = semantic_projection(&context, false, 16000);
+        for marker in markers {
+            assert!(
+                allowed
+                    .soul_private_runtime_context
+                    .iter()
+                    .any(|item| item.content.contains(marker)),
+                "{marker}"
+            );
+            assert!(allowed.rendered_block.contains(marker));
+            assert!(!format!("{:?}", allowed.subject_mount).contains(marker));
+            assert!(!denied.rendered_block.contains(marker));
+        }
+        assert!(denied.soul_private_runtime_context.is_empty());
+        for id in [
+            "felt_significance",
+            "temperament_continuity",
+            "inner_conflict",
+        ] {
+            let sources = context.classified_projection_sources();
+            let source = sources
+                .iter()
+                .find(|s| s.source_id == id)
+                .expect("typed source authority");
+            assert!(source.loaded && source.runtime_private_context_allowed);
+            assert!(!source.raw_audit_plaintext_allowed && !source.shared_fact_surface_allowed);
+        }
+        context.felt_significance = None;
+        context.temperament_continuity = None;
+        context.inner_conflict = None;
+        let empty = semantic_projection(&context, true, 16000);
+        assert!(empty.soul_private_runtime_context.iter().all(|s| ![
+            "felt_significance",
+            "temperament_continuity",
+            "inner_conflict"
+        ]
+        .contains(&s.source_id.as_str())));
     }
 
     fn minimal_prompt_context_for_projection() -> PromptMemoryContext {

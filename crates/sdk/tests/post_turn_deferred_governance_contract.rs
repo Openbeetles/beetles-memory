@@ -961,6 +961,10 @@ fn create_autonomous_relationship_source(
 }
 
 fn seed_stable_persona_evidence(platform: &MemoryStoreHandle, relationship_id: &str) {
+    seed_stable_persona_evidence_at(platform, relationship_id, 1_800_000_100);
+}
+
+fn seed_stable_persona_evidence_at(platform: &MemoryStoreHandle, relationship_id: &str, at: u64) {
     let evidence_store = platform.replay_harness().turn_continuity_evidence_store();
     for sequence in 0..4u64 {
         evidence_store
@@ -971,11 +975,20 @@ fn seed_stable_persona_evidence(platform: &MemoryStoreHandle, relationship_id: &
                     status: bm_core::memory::TurnLedgerStatus::Answered,
                     final_reply_delivered: true,
                     canonical_reply_source: "assistant_final".to_string(),
-                    observed_at_ms: (1_800_000_100 + sequence) * 1_000,
+                    observed_at_ms: (at + sequence) * 1_000,
                     persona: Some(bm_core::memory::TurnPersonaLedger {
                         priority: Some(bm_core::memory::TurnPersonaPriorityLedger {
                             stance_summary: "stable repair-first posture".to_string(),
-                            priority_order: vec!["truth".to_string(), "repair".to_string()],
+                            priority_order: [
+                                "self_authored_core",
+                                "boundary",
+                                "user_contract",
+                                "relationship",
+                                "task",
+                                "resources",
+                            ]
+                            .map(str::to_string)
+                            .to_vec(),
                             relationship_posture: "stable repair-first".to_string(),
                             ..bm_core::memory::TurnPersonaPriorityLedger::default()
                         }),
@@ -994,6 +1007,7 @@ fn assert_production_autonomous_revision(
     owner: &str,
     relationship_id: &str,
 ) -> (String, String, String, String) {
+    let llm = AutonomousRevisionLlm::default();
     let (runtime, mounted_subject_id, human_subject_id) =
         autonomous_relationship_runtime(platform.clone(), clock.clone(), owner, relationship_id);
     create_autonomous_relationship_source(
@@ -1013,7 +1027,7 @@ fn assert_production_autonomous_revision(
                 non_negotiables: vec!["never fabricate confirmation".to_string()],
                 default_response_mode: None,
                 default_initiative_posture: None,
-                default_relationship_posture: None,
+                default_relationship_posture: Some("stable repair-first".into()),
                 boundary_doctrine: None,
                 truth_seeking_commitment: None,
                 self_preservation_doctrine: None,
@@ -1040,7 +1054,6 @@ fn assert_production_autonomous_revision(
     seed_stable_persona_evidence(&platform, relationship_id);
 
     let mut http = StaticHttpClient;
-    let llm = AutonomousRevisionLlm::default();
     runtime
         .finalize_turn_with_inline_governance(
             Some(&mut http),
@@ -4900,4 +4913,330 @@ fn memory_precondition_conflict_keeps_job_leased_and_commits_no_semantic_post_im
     let encoded = serde_json::to_string(&snapshot.json_docs).expect("snapshot json");
     assert!(encoded.contains("concurrent winner"));
     assert!(!encoded.contains("This semantic write must not partially commit."));
+}
+
+// This is a synthetic model, but intake, governance planning, transaction, verified reads
+// and backend reopen below are the production owners; no derived-state raw seeding.
+#[derive(Default)]
+struct DerivedProjectionLlm {
+    autonomous: AutonomousRevisionLlm,
+    voice_calls: AtomicUsize,
+}
+
+impl LlmClient for DerivedProjectionLlm {
+    fn chat(
+        &self,
+        http: &mut dyn LlmHttpClient,
+        system: &str,
+        messages: &[Message],
+        tools: Option<&[ToolSpec]>,
+        tool_choice: ToolChoicePolicy,
+    ) -> Result<LlmResponse> {
+        let content = if system.contains("inward autonomy runtime") {
+            serde_json::json!({
+                "refresh_self_authored_core": true,
+                "self_authored_core_intent": "review adopted doctrine after the observation window",
+                "self_authored_core_sources": ["self_model", "self_continuity", "recent_persona_evidence"],
+                "refresh_outer_voice": true,
+                "outer_voice_intent": "reflect repeated bounded relational evidence",
+                "outer_voice_sources": ["recent_persona_evidence", "boundary_persona"]
+            })
+        } else if system.contains("persistent self-authored core") {
+            serde_json::json!({
+                "board_scope_decision": "no_change",
+                "rationale": "Observation supports keeping the adopted truthful repair doctrine.",
+                "evidence_summary": ["stable repair and priority evidence"],
+                "counterevidence": [], "proposed_actions": []
+            })
+        } else if system.contains("felt-significance contract") {
+            serde_json::json!({"significance_summary": "governed-significance-marker"})
+        } else if system.contains("temperament-continuity contract") {
+            serde_json::json!({"stability_summary": "governed-temperament-marker", "boundary_inertia": "governed-resistance-marker"})
+        } else if system.contains("inner-conflict contract") {
+            serde_json::json!({"topic": "governed-conflict-marker", "pull_a": "preserve continuity", "pull_b": "repair with new evidence", "review_after_secs": 1800})
+        } else if system.contains("outer voice layer") {
+            self.voice_calls.fetch_add(1, Ordering::SeqCst);
+            serde_json::json!({"expression_mode": "governed-expression-marker", "tone": "governed-tone-marker", "pacing": "governed-pacing-marker", "initiative": "governed-initiative-marker", "boundary_style": "governed-boundary-marker", "relational_response_style": "governed-relational-marker"})
+        } else {
+            return self
+                .autonomous
+                .chat(http, system, messages, tools, tool_choice);
+        };
+        Ok(LlmResponse {
+            content: content.to_string(),
+            stop_reason: StopReason::EndTurn,
+            tool_calls: None,
+        })
+    }
+}
+
+fn assert_governed_derived_projection(
+    platform: MemoryStoreHandle,
+    clock: Arc<AdjustableMemoryClock>,
+    owner: &str,
+    relation: &str,
+    founding_digest: &str,
+) {
+    let (base, _, _) =
+        autonomous_relationship_runtime(platform.clone(), clock.clone(), owner, relation);
+    let mut privacy = base.config().privacy_policy.clone();
+    privacy.private_plane_projection_allowed = true;
+    let runtime = MemoryRuntime::builder()
+        .identity(base.config().identity.clone())
+        .scope(base.config().scope.clone())
+        .subject_registry(base.config().subject_registry.clone())
+        .subject_relationship_graph(base.config().subject_relationship_graph.clone())
+        .scoped_runtime(base.scoped_runtime().clone())
+        .store(platform.clone())
+        .clock(clock.clone())
+        .privacy_policy(privacy)
+        .build()
+        .unwrap();
+    let request = bm_sdk::MemoryProjectionRequest {
+        binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
+        temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
+        user_query: "Continue with the governed relationship and current subject state".into(),
+        system_max_len: 32000,
+        recent_messages_limit: 0,
+        pressure: PressureLevel::Normal,
+        mode_input: RuntimeLifecycleModeInput::default(),
+        structured_query_facets: vec![],
+        tool_registry_refs: vec![],
+    };
+    let current = runtime
+        .project(request.clone())
+        .expect("current governed projection");
+    let markers = [
+        "governed-significance-marker",
+        "governed-temperament-marker",
+        "governed-resistance-marker",
+        "governed-conflict-marker",
+        "governed-expression-marker",
+        "governed-tone-marker",
+        "governed-pacing-marker",
+        "governed-initiative-marker",
+        "governed-relational-marker",
+    ];
+    for marker in markers {
+        assert!(
+            current
+                .provider_payload()
+                .system_memory_block()
+                .contains(marker),
+            "production positive: {marker}"
+        );
+        assert!(!current.report().ui_api_projection().contains(marker));
+        assert!(!current.report().operator_projection().contains(marker));
+        assert!(!current.report().shared_fact_projection().contains(marker));
+    }
+    assert!(
+        current
+            .provider_payload()
+            .system_memory_block()
+            .contains("Hold the private boundary and speak in summaries or explanations only."),
+        "relationship governance must clamp the sixth expression field"
+    );
+    assert!(
+        !current
+            .provider_payload()
+            .system_memory_block()
+            .contains("governed-boundary-marker"),
+        "unaccepted model boundary style must not override the source ceiling"
+    );
+    let denied = base
+        .project(request.clone())
+        .expect("private-policy-denied projection");
+    assert!(
+        denied
+            .provider_payload()
+            .system_memory_block()
+            .contains("governed-expression-marker"),
+        "expression remains legal without private context"
+    );
+    for marker in &markers[..4] {
+        assert!(
+            !denied
+                .provider_payload()
+                .system_memory_block()
+                .contains(marker),
+            "private policy leaked {marker}"
+        );
+    }
+    let mut registry = base.config().subject_registry.clone();
+    registry
+        .upsert_subject(bm_sdk::SubjectDescriptor::agent_persona(
+            default_agent_subject_id("agent-other"),
+            "Synthetic other agent",
+        ))
+        .unwrap();
+    let other = MemoryRuntime::builder()
+        .identity(MemoryIdentity::new("agent-other", owner).unwrap())
+        .scope(base.config().scope.clone())
+        .subject_registry(registry)
+        .privacy_policy(runtime.config().privacy_policy.clone())
+        .store(platform)
+        .clock(clock)
+        .build()
+        .unwrap();
+    other
+        .provision_subject_soul(SubjectSoulProvisionIntentV1::Founding {
+            operation_id: "derived-projection-other-founding".into(),
+            human_actor_subject_id: primary_human_subject_id(owner),
+            charter: Box::new(
+                SubjectSoulFoundingCharterSeedV1 {
+                    character_tendencies: vec!["independent-other-character".into()],
+                    ..Default::default()
+                }
+                .canonicalize()
+                .unwrap(),
+            ),
+            source_asserted_at: Some(1_700_000_000),
+        })
+        .expect("independent subject founding or durable replay");
+    let other_projection = other
+        .project(request.clone())
+        .expect("independent subject positive");
+    assert!(other_projection
+        .provider_payload()
+        .system_memory_block()
+        .contains("independent-other-character"));
+    for marker in markers {
+        assert!(
+            !other_projection
+                .provider_payload()
+                .system_memory_block()
+                .contains(marker),
+            "cross-subject leak: {marker}"
+        );
+    }
+    let historical = runtime
+        .project_with_subject_soul_selector(
+            request,
+            Some(SubjectSoulReadSelectorV1::Exact {
+                generation: 1,
+                revision: 1,
+                material_digest: founding_digest.into(),
+            }),
+        )
+        .expect("exact founding projection");
+    assert!(historical
+        .provider_payload()
+        .system_memory_block()
+        .contains("founding identity must remain in revision one"));
+    for marker in markers {
+        assert!(
+            !historical
+                .provider_payload()
+                .system_memory_block()
+                .contains(marker),
+            "historical must not read current derived state: {marker}"
+        );
+    }
+}
+
+fn prepare_governed_derived_projection(
+    platform: MemoryStoreHandle,
+    clock: Arc<AdjustableMemoryClock>,
+) -> String {
+    let (_, founding_digest, _, _) = assert_production_autonomous_revision(
+        platform.clone(),
+        clock.clone(),
+        "derived-projection-owner",
+        "relationship:derived-projection",
+    );
+    let llm = DerivedProjectionLlm::default();
+    let (runtime, subject, _) = autonomous_relationship_runtime(
+        platform.clone(),
+        clock.clone(),
+        "derived-projection-owner",
+        "relationship:derived-projection",
+    );
+    // The adopted board must finish its observation window before ordinary voice
+    // evolution. The existing revision fixture already records a follow-up review.
+    seed_stable_persona_evidence_at(&platform, "relationship:derived-projection", 1_800_086_500);
+    clock.set(1_800_086_700);
+    runtime
+        .finalize_turn_with_inline_governance(
+            Some(&mut StaticHttpClient),
+            Some(&llm),
+            finalize_request(
+                &subject,
+                "window-derived-projection",
+                "turn-derived-projection",
+                "Keep the unresolved tension private and express the bounded posture.",
+            ),
+        )
+        .expect("governed derived-state refresh after the adopted board revision");
+    assert!(
+        llm.voice_calls.load(Ordering::SeqCst) > 0,
+        "voice refresh must pass the real governance gate"
+    );
+    let SubjectSoulReadOutcomeV1::Verified { view } = runtime
+        .read_subject_soul(SubjectSoulReadRequestV1 {
+            target_subject_id: subject,
+            selector: SubjectSoulReadSelectorV1::Current,
+            view: SubjectSoulReadViewV1::OperatorSafe,
+        })
+        .unwrap()
+    else {
+        panic!("derived refresh must retain a verified Soul root")
+    };
+    assert_eq!(
+        view.revision,
+        Some(2),
+        "derived refresh preserves the adopted board revision"
+    );
+    drop(runtime);
+    assert_governed_derived_projection(
+        platform,
+        clock,
+        "derived-projection-owner",
+        "relationship:derived-projection",
+        &founding_digest,
+    );
+    founding_digest
+}
+
+#[test]
+fn governed_derived_projection_in_memory_uses_standard_provider_and_safe_surfaces() {
+    prepare_governed_derived_projection(
+        empty_store_platform(support::host_test_profile()),
+        Arc::new(AdjustableMemoryClock::new(1_800_000_000)),
+    );
+}
+
+fn assert_governed_derived_projection_reopen(config: StoreBackendConfig) {
+    let clock = Arc::new(AdjustableMemoryClock::new(1_800_000_000));
+    let digest = prepare_governed_derived_projection(
+        support::open_memory_store(config.clone()).unwrap(),
+        clock.clone(),
+    );
+    // Every runtime and store handle from the first scope is dropped before opening again.
+    let reopened = support::open_memory_store(config).expect("reopen governed derived state");
+    assert_governed_derived_projection(
+        reopened,
+        clock,
+        "derived-projection-owner",
+        "relationship:derived-projection",
+        &digest,
+    );
+}
+
+#[test]
+fn governed_derived_projection_survives_file_reopen() {
+    let root = persistent_test_root("derived-projection-file");
+    assert_governed_derived_projection_reopen(
+        StoreBackendConfig::file(&root, support::host_test_profile()).unwrap(),
+    );
+    std::fs::remove_dir_all(root).expect("remove synthetic file fixture");
+}
+
+#[cfg(feature = "sqlite-store")]
+#[test]
+fn governed_derived_projection_survives_sqlite_reopen() {
+    let root = persistent_test_root("derived-projection-sqlite");
+    assert_governed_derived_projection_reopen(
+        StoreBackendConfig::sqlite(&root, support::host_test_profile()).unwrap(),
+    );
+    std::fs::remove_file(root).expect("remove synthetic sqlite fixture");
 }

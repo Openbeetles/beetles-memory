@@ -553,9 +553,17 @@ pub(crate) fn load_constitutional_stage(
                     }
                 }
             });
-    let relationship_constitution_text = relationship_constitution
-        .as_ref()
-        .and_then(|constitution| render_relationship_constitution_block(constitution, 420));
+    let relationship_constitution_text =
+        relationship_constitution.as_ref().and_then(|constitution| {
+            render_relationship_constitution_block(
+                constitution,
+                super::profile::prompt_context_normalization_budget(
+                    seed.profile.into(),
+                    params.system_max_len,
+                )
+                .constitutional_stack_max_len,
+            )
+        });
 
     Box::new(PromptConstitutionalStage {
         recent_turn_observation_text,

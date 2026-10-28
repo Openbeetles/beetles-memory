@@ -2830,7 +2830,7 @@ fn relationship_runtime_view_uses_source_truth_and_recompiles_missing_or_stale_p
         "agent:a",
         &SubjectSoulRelationshipRuntimeInputV1 {
             source: source.clone(),
-            current_material: Some(material),
+            current_material: Some(material.clone()),
             stored_projection: Some(projection),
         },
         None,
@@ -2842,6 +2842,15 @@ fn relationship_runtime_view_uses_source_truth_and_recompiles_missing_or_stale_p
     );
     assert_eq!(missing.truth_commitments, stale.truth_commitments);
     assert_eq!(missing.response_commitments, stale.response_commitments);
+    assert_eq!(stale.inherited_core_revision, Some(material.revision));
+    assert_eq!(
+        stale.inherited_priority_constitution,
+        material.core.priority_constitution
+    );
+    assert_eq!(
+        stale.inherited_relationship_posture,
+        material.core.default_relationship_posture
+    );
 
     let mut inactive_source = source.clone();
     inactive_source.state = RelationshipSourceStateV1::Archived;
@@ -2898,4 +2907,153 @@ fn relationship_runtime_view_uses_source_truth_and_recompiles_missing_or_stale_p
         None,
     )
     .is_err());
+}
+
+#[test]
+fn relationship_runtime_bridge_inherits_persona_from_exact_material_not_source_commitments() {
+    use bm_core::memory::{
+        audit_relationship_constitution, compile_relationship_constitutional_runtime_input_v1,
+        RecentPersonaEvidence,
+    };
+    let (_, _, snapshot) = active_founding_snapshot();
+    let mut material = snapshot.current_material.unwrap();
+    let partial_material = material.clone();
+    material.core.priority_constitution = [
+        "self_authored_core",
+        "boundary",
+        "user_contract",
+        "relationship",
+        "task",
+        "resources",
+    ]
+    .map(str::to_string)
+    .to_vec();
+    material.core.default_response_mode = "steady_task".into();
+    material.core.default_initiative_posture = "ask carefully".into();
+    material.core.default_relationship_posture = "warm but bounded".into();
+    material.refresh_digest().unwrap();
+    let mut source = relationship_source_with_provenance(
+        RelationshipSourceAuthorityKindV1::HumanRelationshipCommitment,
+        "human:a",
+    );
+    source.revision = material.revision + 9;
+    source.supersedes_revision = Some(source.revision - 1);
+    source.refresh_digest().unwrap();
+    let compile = |material: Option<bm_core::memory::SubjectSoulRevisionMaterialV1>| {
+        let view = compile_subject_soul_relationship_runtime_view_v1(
+            "agent:a",
+            &SubjectSoulRelationshipRuntimeInputV1 {
+                source: source.clone(),
+                current_material: material,
+                stored_projection: None,
+            },
+            None,
+        )
+        .unwrap();
+        compile_relationship_constitutional_runtime_input_v1(
+            &view,
+            &source.relationship_id,
+            "local",
+            "chat-a",
+            100,
+        )
+    };
+    let constitution = compile(Some(material.clone()));
+    assert_eq!(
+        constitution.inherited_priority_constitution,
+        material.core.priority_constitution
+    );
+    assert_eq!(constitution.board_revision, material.revision);
+    assert_eq!(
+        constitution.inherited_response_mode,
+        material.core.default_response_mode
+    );
+    assert_eq!(
+        constitution.inherited_initiative_posture,
+        material.core.default_initiative_posture
+    );
+    assert_eq!(
+        constitution.inherited_relationship_posture,
+        material.core.default_relationship_posture
+    );
+    assert_eq!(
+        constitution.truth_floor,
+        source.clauses.truth_commitments.join("; ")
+    );
+    assert_eq!(
+        constitution.boundary_floor,
+        source.clauses.mutual_boundary_commitments.join("; ")
+    );
+    let evidence = RecentPersonaEvidence {
+        repeated_priority_order: material.core.priority_constitution.clone(),
+        repeated_response_mode: material.core.default_response_mode.clone(),
+        repeated_relationship_posture: material.core.default_relationship_posture.clone(),
+        ..Default::default()
+    };
+    let audit = audit_relationship_constitution(&constitution, None, None, Some(&evidence), 100);
+    assert!(
+        !audit.has_material_drift(),
+        "aligned persona evidence must not compare against source commitments: {audit:?}"
+    );
+    let partial = compile(Some(partial_material.clone()));
+    assert_eq!(
+        partial.inherited_priority_constitution,
+        partial_material.core.priority_constitution
+    );
+    assert_eq!(
+        partial.inherited_response_mode,
+        partial_material.core.default_response_mode
+    );
+    assert_eq!(
+        partial.inherited_relationship_posture,
+        partial_material.core.default_relationship_posture
+    );
+    let mut archived = source.clone();
+    archived.state = RelationshipSourceStateV1::Archived;
+    archived.refresh_digest().unwrap();
+    let inactive = compile_subject_soul_relationship_runtime_view_v1(
+        "agent:a",
+        &SubjectSoulRelationshipRuntimeInputV1 {
+            source: archived,
+            current_material: Some(material.clone()),
+            stored_projection: None,
+        },
+        None,
+    )
+    .unwrap();
+    assert_eq!(inactive.inherited_core_revision, None);
+    assert!(inactive.inherited_priority_constitution.is_empty());
+    assert!(inactive.inherited_response_mode.is_empty());
+    assert!(inactive.inherited_initiative_posture.is_empty());
+    assert!(inactive.inherited_relationship_posture.is_empty());
+    let unseeded = compile(None);
+    assert_eq!(unseeded.board_revision, 0);
+    assert!(unseeded.inherited_priority_constitution.is_empty());
+    assert!(unseeded.inherited_response_mode.is_empty());
+    assert!(unseeded.inherited_relationship_posture.is_empty());
+    assert!(!unseeded.truth_floor.is_empty());
+    let unseeded_render =
+        bm_core::memory::render_relationship_constitution_block(&unseeded, 4096).unwrap();
+    assert!(
+        unseeded_render.contains("Board revision: none"),
+        "unseeded source constraints must not fabricate a board revision"
+    );
+
+    let mut next = material.clone();
+    next.revision += 1;
+    next.core.supersedes_revision = Some(next.core.revision);
+    next.supersedes_revision = next.core.supersedes_revision;
+    next.core.revision = next.revision;
+    next.core.default_relationship_posture = "patient and explicit".into();
+    next.refresh_digest().unwrap();
+    let successor = compile(Some(next.clone()));
+    assert_eq!(successor.board_revision, next.revision);
+    assert_eq!(
+        successor.inherited_relationship_posture,
+        "patient and explicit"
+    );
+    assert_eq!(
+        compile(Some(material)).inherited_relationship_posture,
+        "warm but bounded"
+    );
 }

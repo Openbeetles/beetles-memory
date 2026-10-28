@@ -202,7 +202,7 @@ pub fn compile_relationship_constitutional_runtime_input_v1(
         scope_id: scope_id.to_string(),
         channel: channel.to_string(),
         chat_id: chat_id.to_string(),
-        board_revision: view.relationship_source_revision,
+        board_revision: view.inherited_core_revision.unwrap_or(0),
         governance_state: if inactive {
             RelationshipGovernanceState::Deprioritize
         } else {
@@ -214,8 +214,10 @@ pub fn compile_relationship_constitutional_runtime_input_v1(
         } else {
             RelationshipConstitutionAlignment::Aligned
         },
-        inherited_priority_constitution: view.response_commitments.clone(),
-        inherited_relationship_posture: view.inherited_postures.join("; "),
+        inherited_priority_constitution: view.inherited_priority_constitution.clone(),
+        inherited_response_mode: view.inherited_response_mode.clone(),
+        inherited_initiative_posture: view.inherited_initiative_posture.clone(),
+        inherited_relationship_posture: view.inherited_relationship_posture.clone(),
         task_scope_ceiling,
         allowed_outer_voice_shift,
         allowed_boundary_shift,
@@ -744,14 +746,11 @@ pub fn render_relationship_constitution_block(
     }
     let mut out = String::with_capacity(max_len.min(1024));
     out.push_str("## Relationship Constitution\n");
-    out.push_str(
-        "Board-level constitutional contract for the current relationship overlay. This layer says what the relation inherits, what it may vary, and when drift must be realigned.\n",
-    );
-    let _ = writeln!(
-        out,
-        "Board revision: {}",
-        constitution.board_revision.max(1)
-    );
+    if constitution.board_revision == 0 {
+        let _ = writeln!(out, "Board revision: none");
+    } else {
+        let _ = writeln!(out, "Board revision: {}", constitution.board_revision);
+    }
     let _ = writeln!(
         out,
         "Governance: {} / inheritance={}",
@@ -759,6 +758,39 @@ pub fn render_relationship_constitution_block(
         constitution.inheritance_mode.label()
     );
     let _ = writeln!(out, "Alignment: {}", constitution.alignment.label());
+    let _ = writeln!(
+        out,
+        "Task scope ceiling: {}",
+        constitution.task_scope_ceiling.label()
+    );
+    let _ = writeln!(
+        out,
+        "Outer voice shift: {}",
+        constitution.allowed_outer_voice_shift.label()
+    );
+    let _ = writeln!(
+        out,
+        "Boundary shift: {}",
+        constitution.allowed_boundary_shift.label()
+    );
+    let _ = writeln!(
+        out,
+        "Disclosure allowance: {}",
+        constitution.disclosure_allowance.label()
+    );
+    for (label, floor) in [
+        ("Truth floor", &constitution.truth_floor),
+        ("Boundary floor", &constitution.boundary_floor),
+        ("Repair floor", &constitution.repair_floor),
+        (
+            "Self-preservation floor",
+            &constitution.self_preservation_floor,
+        ),
+    ] {
+        if !floor.trim().is_empty() {
+            let _ = writeln!(out, "{label}: {}", floor.trim());
+        }
+    }
     if !constitution.inherited_priority_constitution.is_empty() {
         let _ = writeln!(
             out,
@@ -791,26 +823,6 @@ pub fn render_relationship_constitution_block(
             constitution.inherited_initiative_posture.trim()
         );
     }
-    let _ = writeln!(
-        out,
-        "Task scope ceiling: {}",
-        constitution.task_scope_ceiling.label()
-    );
-    let _ = writeln!(
-        out,
-        "Outer voice shift: {}",
-        constitution.allowed_outer_voice_shift.label()
-    );
-    let _ = writeln!(
-        out,
-        "Boundary shift: {}",
-        constitution.allowed_boundary_shift.label()
-    );
-    let _ = writeln!(
-        out,
-        "Disclosure allowance: {}",
-        constitution.disclosure_allowance.label()
-    );
     if !constitution.deviation_reason.trim().is_empty() {
         let _ = writeln!(
             out,

@@ -855,3 +855,40 @@ fn restricted_subject_is_exact_zero_for_facet_only_hit_and_audit_is_safe() {
         }
     }
 }
+
+#[test]
+fn partial_founding_charter_preserves_character_without_display_fallback() {
+    let runtime = runtime_for_subject(
+        empty_store_platform(support::host_test_profile()),
+        two_agent_registry(),
+        "agent-a",
+    );
+    runtime
+        .provision_subject_soul(SubjectSoulProvisionIntentV1::Founding {
+            operation_id: "partial-charter-projection".into(),
+            human_actor_subject_id: primary_human_subject_id("owner-shared"),
+            charter: Box::new(
+                SubjectSoulFoundingCharterSeedV1 {
+                    character_tendencies: vec!["synthetic-curious-character".into()],
+                    ..Default::default()
+                }
+                .canonicalize()
+                .expect("partial charter"),
+            ),
+            source_asserted_at: Some(1_700_000_000),
+        })
+        .expect("provision partial charter");
+    let output = project(&runtime);
+    assert!(output
+        .provider_payload()
+        .system_memory_block()
+        .contains("synthetic-curious-character"));
+    assert!(!output
+        .provider_payload()
+        .system_memory_block()
+        .contains("Reply stance: ## Self-Authored Core"));
+    assert!(!output
+        .provider_payload()
+        .system_memory_block()
+        .contains("Reply stance: This is"));
+}

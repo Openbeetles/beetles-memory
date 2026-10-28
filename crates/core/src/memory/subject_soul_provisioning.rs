@@ -4664,6 +4664,12 @@ pub struct SubjectSoulRelationshipRuntimeViewV1 {
     pub repair_commitments: Vec<String>,
     pub inherited_postures: Vec<String>,
     pub response_commitments: Vec<String>,
+    /// Ephemeral inheritance from the exact validated Soul material, never source clauses.
+    pub inherited_core_revision: Option<u64>,
+    pub inherited_priority_constitution: Vec<String>,
+    pub inherited_response_mode: String,
+    pub inherited_initiative_posture: String,
+    pub inherited_relationship_posture: String,
 }
 
 pub fn compile_subject_soul_relationship_runtime_view_v1(
@@ -4699,6 +4705,11 @@ pub fn compile_subject_soul_relationship_runtime_view_v1(
         repair_commitments: source.clauses.repair_commitments.clone(),
         inherited_postures: source.clauses.mutual_boundary_commitments.clone(),
         response_commitments,
+        inherited_core_revision: None,
+        inherited_priority_constitution: Vec::new(),
+        inherited_response_mode: String::new(),
+        inherited_initiative_posture: String::new(),
+        inherited_relationship_posture: String::new(),
     };
     if source.state != RelationshipSourceStateV1::Active {
         view.access_constraints.clear();
@@ -4786,6 +4797,13 @@ pub fn compile_subject_soul_relationship_runtime_view_v1(
             }
         }
     };
+    // All owner, digest and stored-projection checks above must succeed before
+    // exposing board inheritance. Source commitments stay in their own constraint fields.
+    view.inherited_core_revision = Some(material.revision);
+    view.inherited_priority_constitution = material.core.priority_constitution.clone();
+    view.inherited_response_mode = material.core.default_response_mode.clone();
+    view.inherited_initiative_posture = material.core.default_initiative_posture.clone();
+    view.inherited_relationship_posture = material.core.default_relationship_posture.clone();
     Ok(view)
 }
 

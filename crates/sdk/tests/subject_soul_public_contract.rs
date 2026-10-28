@@ -1355,3 +1355,138 @@ fn subject_soul_sqlite_reopen_preserves_projection_and_durable_provision_replay(
     drop(reopened);
     std::fs::remove_file(path).expect("remove sqlite Soul fixture");
 }
+
+fn assert_partial_charter_projection(runtime: &MemoryRuntime) {
+    let before = current_operator_soul(runtime);
+    let output = runtime
+        .project(projection_request(MemoryRecallTemporalOperation::Current))
+        .expect("partial charter projection");
+    let payload = output.provider_payload().system_memory_block();
+    assert!(payload.contains("partial-charter-curiosity"));
+    let stance = payload
+        .lines()
+        .find(|line| line.starts_with("- Reply stance:"))
+        .expect("reply stance slot");
+    assert_eq!(stance, "- Reply stance: unavailable");
+    assert!(!output
+        .report()
+        .operator_projection()
+        .contains("## Self-Authored Core"));
+    assert_eq!(
+        before,
+        current_operator_soul(runtime),
+        "projection must not mutate the Soul root"
+    );
+}
+
+fn partial_charter_intent() -> SubjectSoulProvisionIntentV1 {
+    SubjectSoulProvisionIntentV1::Founding {
+        operation_id: "partial-charter-reopen".into(),
+        human_actor_subject_id: primary_human_subject_id("partial-charter-owner"),
+        charter: Box::new(
+            SubjectSoulFoundingCharterSeedV1 {
+                character_tendencies: vec!["partial-charter-curiosity".into()],
+                ..Default::default()
+            }
+            .canonicalize()
+            .expect("partial seed"),
+        ),
+        source_asserted_at: Some(1_700_000_000),
+    }
+}
+
+#[test]
+fn partial_charter_in_memory_runtime_reopen_preserves_typed_projection() {
+    let store = support::open_memory_store(
+        StoreBackendConfig::in_memory(support::host_test_profile()).unwrap(),
+    )
+    .unwrap();
+    let runtime =
+        single_agent_runtime_with_store("partial-charter-owner", "agent-main", store.clone());
+    runtime
+        .provision_subject_soul(partial_charter_intent())
+        .expect("founding");
+    assert_partial_charter_projection(&runtime);
+    drop(runtime);
+    let reopened = single_agent_runtime_with_store("partial-charter-owner", "agent-main", store);
+    assert_partial_charter_projection(&reopened);
+}
+
+fn assert_persistent_partial_charter(config: StoreBackendConfig) {
+    let runtime = single_agent_runtime_with_store(
+        "partial-charter-owner",
+        "agent-main",
+        support::open_memory_store(config.clone()).unwrap(),
+    );
+    let receipt = runtime
+        .provision_subject_soul(partial_charter_intent())
+        .expect("founding");
+    assert_partial_charter_projection(&runtime);
+    drop(runtime);
+    let reopened = single_agent_runtime_with_store(
+        "partial-charter-owner",
+        "agent-main",
+        support::open_memory_store(config).unwrap(),
+    );
+    assert_partial_charter_projection(&reopened);
+    let replay = reopened
+        .provision_subject_soul(partial_charter_intent())
+        .expect("durable replay");
+    assert_eq!(replay.outcome, SubjectSoulMutationOutcomeV1::Replayed);
+    assert_eq!(receipt.transaction_id, replay.transaction_id);
+}
+
+#[test]
+fn partial_charter_file_reopen_preserves_typed_projection() {
+    let root = temp_root("partial-charter-file");
+    assert_persistent_partial_charter(
+        StoreBackendConfig::file(&root, support::host_test_profile()).unwrap(),
+    );
+    std::fs::remove_dir_all(root).expect("remove synthetic file fixture");
+}
+
+#[cfg(feature = "sqlite-store")]
+#[test]
+fn partial_charter_sqlite_reopen_preserves_typed_projection() {
+    let root = temp_root("partial-charter-sqlite");
+    assert_persistent_partial_charter(
+        StoreBackendConfig::sqlite(&root, support::host_test_profile()).unwrap(),
+    );
+    std::fs::remove_file(root).expect("remove synthetic sqlite fixture");
+}
+
+#[test]
+fn relationship_inheritance_reaches_model_without_raw_safe_surface_disclosure() {
+    let owner = "owner-private-inheritance";
+    let agent = "agent-main";
+    let relation = "relationship:private-inheritance";
+    let runtime = relationship_runtime(owner, agent, relation);
+    create_relationship_root(&runtime, owner, agent, relation);
+    let marker = "private-inherited-priority-marker";
+    let mut seed = founding_seed();
+    seed.priority_constitution = vec![marker.into()];
+    runtime
+        .provision_subject_soul(SubjectSoulProvisionIntentV1::Founding {
+            operation_id: "private-inheritance-founding".into(),
+            human_actor_subject_id: primary_human_subject_id(owner),
+            charter: Box::new(seed.canonicalize().unwrap()),
+            source_asserted_at: Some(1_700_000_000),
+        })
+        .unwrap();
+    let mut request = projection_request(MemoryRecallTemporalOperation::Current);
+    request.system_max_len = 16000;
+    let projection = runtime.project(request).unwrap();
+    assert!(projection
+        .provider_payload()
+        .system_memory_block()
+        .contains(marker));
+    let safe = projection.report();
+    assert!(
+        !safe.ui_api_projection().contains(marker),
+        "raw constitutional inheritance leaked to UI"
+    );
+    assert!(!safe.operator_projection().contains(marker));
+    assert!(!safe.gateway_audit().block.contains(marker));
+    assert!(!safe.shared_fact_projection().contains(marker));
+    assert!(!format!("{:?}", safe.audit()).contains(marker));
+}

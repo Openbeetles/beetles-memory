@@ -186,6 +186,7 @@ pub use bm_core::llm::{
     LlmClient, LlmHttpClient, LlmModelCompat, LlmResponse, Message, StopReason, ToolChoicePolicy,
     ToolSpec,
 };
+pub use bm_core::memory::SubjectExpressionDiscipline;
 pub use bm_core::memory::{
     build_core_revision_diff_from_record, build_memory_graph_persistence_plan,
     build_relationship_boundary_audit_from_constitution_audit, build_soul_compact_digest,

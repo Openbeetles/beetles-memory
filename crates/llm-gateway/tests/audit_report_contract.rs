@@ -13,10 +13,10 @@ use bm_llm_gateway::{
 };
 #[cfg(feature = "nonproduction-replay-harness")]
 use bm_sdk::{
-    default_agent_subject_id, MemoryAuditSink, MemoryClock, MemoryIdentity, MemoryPrivacyPolicy,
-    MemoryProjectionRequest, MemoryRuntime, MemoryScope, MemoryStoreHandle, NoopMemoryAuditSink,
-    PressureLevel, PrivateDocEntry, PrivateDocWorkspace, ProceduralProjectionBindingV1, ProfileId,
-    RuntimeLifecycleModeInput, RuntimeSkillWrite, StoreBackendConfig,
+    MemoryAuditSink, MemoryClock, MemoryIdentity, MemoryPrivacyPolicy, MemoryProjectionRequest,
+    MemoryRuntime, MemoryScope, MemoryStoreHandle, NoopMemoryAuditSink, PressureLevel,
+    ProceduralProjectionBindingV1, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillWrite,
+    StoreBackendConfig,
 };
 
 #[cfg(feature = "nonproduction-replay-harness")]
@@ -65,7 +65,6 @@ fn gateway_audit_report_has_stages_without_raw_sensitive_payloads() {
 #[test]
 #[cfg(feature = "nonproduction-replay-harness")]
 fn raw_projection_audit_records_redacted_final_sdk_projection_to_local_diagnostics() {
-    let mounted_subject_id = default_agent_subject_id("agent-main");
     let platform = MemoryStoreHandle::open_in_memory(
         StoreBackendConfig::in_memory(
             ProfileId::native_dev_full().expect("supported host-native dev-full profile"),
@@ -73,30 +72,6 @@ fn raw_projection_audit_records_redacted_final_sdk_projection_to_local_diagnosti
         .expect("store config"),
     )
     .expect("store platform");
-    platform
-        .replay_harness()
-        .seed_private_doc_workspace(
-            &mounted_subject_id,
-            &PrivateDocWorkspace {
-                inner_journal: Some(PrivateDocEntry {
-                    content: "RAW_PRIVATE_WORKSPACE_NOTE_DO_NOT_AUDIT".to_string(),
-                    updated_at: 1_800_000_000,
-                    revision: 1,
-                }),
-                ..PrivateDocWorkspace::default()
-            },
-        )
-        .expect("private workspace seed");
-    platform
-        .replay_harness()
-        .seed_private_garden_doc(
-            &mounted_subject_id,
-            "diary/gateway.md",
-            "RAW_PRIVATE_GARDEN_NOTE_DO_NOT_AUDIT",
-            1_800_000_000,
-        )
-        .expect("private garden seed");
-
     let mut privacy = MemoryPrivacyPolicy::standard_private_boundary();
     privacy.private_plane_projection_allowed = true;
     let runtime = MemoryRuntime::builder()
@@ -109,13 +84,14 @@ fn raw_projection_audit_records_redacted_final_sdk_projection_to_local_diagnosti
         .audit_sink(Arc::new(NoopMemoryAuditSink) as Arc<dyn MemoryAuditSink>)
         .build()
         .expect("runtime");
+    seed_governed_private_context(&runtime);
     let projection = runtime
         .project(MemoryProjectionRequest {
             binding: ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
             structured_query_facets: Vec::new(),
             user_query: "gateway private audit".to_string(),
-            system_max_len: 4096,
+            system_max_len: 16000,
             recent_messages_limit: 8,
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
@@ -251,10 +227,7 @@ fn raw_projection_audit_records_redacted_final_sdk_projection_to_local_diagnosti
 #[cfg(feature = "nonproduction-replay-harness")]
 fn procedural_provider_payload_is_exact_zero_in_gateway_audit_and_local_diagnostic() {
     let platform = MemoryStoreHandle::open_in_memory(
-        StoreBackendConfig::in_memory(
-            ProfileId::native_dev_full().expect("supported host-native dev-full profile"),
-        )
-        .expect("store config"),
+        StoreBackendConfig::in_memory(ProfileId::EspStandaloneMemory).expect("store config"),
     )
     .expect("store platform");
     let runtime = MemoryRuntime::builder()
@@ -370,4 +343,104 @@ fn unique_audit_dir() -> PathBuf {
         "bm-llm-gateway-raw-audit-test-{}-{nanos}",
         std::process::id()
     ))
+}
+
+#[cfg(feature = "nonproduction-replay-harness")]
+fn seed_governed_private_context(runtime: &MemoryRuntime) {
+    use bm_sdk::*;
+    struct NoNetwork;
+    impl LlmHttpClient for NoNetwork {
+        fn do_post(
+            &mut self,
+            _: &str,
+            _: &[(&str, &str)],
+            _: &[u8],
+        ) -> Result<(u16, ResponseBody)> {
+            panic!("synthetic privacy fixture must never send a network request")
+        }
+    }
+    struct PrivateContextModel;
+    impl LlmClient for PrivateContextModel {
+        fn chat(
+            &self,
+            _: &mut dyn LlmHttpClient,
+            system: &str,
+            _: &[Message],
+            _: Option<&[ToolSpec]>,
+            _: ToolChoicePolicy,
+        ) -> Result<LlmResponse> {
+            let content = if system.contains("governed private document workspace") {
+                serde_json::json!({"inner_journal": "RAW_PRIVATE_WORKSPACE_NOTE_DO_NOT_AUDIT"})
+                    .to_string()
+            } else if system.contains("private garden") {
+                serde_json::json!({"writes": [{"path": "diary/gateway.md", "content": "RAW_PRIVATE_GARDEN_NOTE_DO_NOT_AUDIT"}]}).to_string()
+            } else if system.contains("inward autonomy runtime") {
+                serde_json::json!({"refresh_private_docs": true, "private_docs_action": "rewrite", "private_docs_intent": "retain compact protected inward continuity"}).to_string()
+            } else if system.contains("long-term memory") {
+                "[]".to_string()
+            } else {
+                "null".to_string()
+            };
+            Ok(LlmResponse {
+                content,
+                stop_reason: StopReason::EndTurn,
+                tool_calls: None,
+            })
+        }
+    }
+    runtime
+        .provision_subject_soul(SubjectSoulProvisionIntentV1::Founding {
+            operation_id: "gateway-private-founding".into(),
+            human_actor_subject_id: primary_human_subject_id("owner-default"),
+            charter: Box::new(SubjectSoulFoundingCharterSeedV1 {
+                character_tendencies: vec!["respect protected inward continuity".into()],
+                ..Default::default()
+            }),
+            source_asserted_at: Some(1_700_000_000),
+        })
+        .expect("typed founding before private governance");
+    let report = runtime
+        .finalize_turn_with_inline_governance(
+            Some(&mut NoNetwork),
+            Some(&PrivateContextModel),
+            MemoryTurnFinalizeRequest {
+                turn: CanonicalTurnDelta {
+                    turn_id: "gateway-private-turn".into(),
+                    conversation: ConversationScope {
+                        channel: "llm.gateway".into(),
+                        chat_id: "chat-a".into(),
+                        conversation_id: Some("gateway-private-conversation".into()),
+                    },
+                    subject: runtime.subject_id().into(),
+                    delivery_status: MemoryTurnDeliveryStatus::Delivered,
+                    source: MemoryTurnSource {
+                        ingress: IngressKind::User,
+                        channel: "llm.gateway".into(),
+                        provider: None,
+                        protocol: MemoryTurnProtocol::Native,
+                        endpoint: None,
+                        model_alias: Some("synthetic".into()),
+                        model_resolved: Some("synthetic".into()),
+                        request_id: None,
+                        client_conversation_hint: None,
+                    },
+                    actor: None,
+                    input_messages: vec![TranscriptInputMessage::user(
+                        "Keep inward reflections within their governed private owner.",
+                    )],
+                    assistant_message: Some(TranscriptInputMessage::assistant(
+                        "I will preserve the private boundary.",
+                    )),
+                    tool_observations: vec![],
+                    external_content_used: false,
+                    candidate_ids: vec![],
+                },
+                learning: PostTurnLearningInputV2::empty(),
+                pressure: PressureLevel::Normal,
+                mode_input: RuntimeLifecycleModeInput::default(),
+            },
+        )
+        .expect("official private generation mutation");
+    assert!(report.private_garden_self_work.executed);
+    assert!(report.private_garden_self_work.writes > 0);
 }
