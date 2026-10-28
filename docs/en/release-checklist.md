@@ -112,3 +112,7 @@ Run staged `cargo publish --dry-run -p <crate>` through `scripts/check_release_s
 - README, examples, and crates describe a host-neutral memory runtime.
 - Adapter crates keep memory write, recall, projection, and store semantics inside `MemoryRuntime`.
 - Standalone deployment covers memory runtime entry points. Product-specific surfaces and deployment infrastructure are supplied by the host deployment.
+
+## 0.9.0 candidate scope
+
+Verify the source-read proof repair and subject projection API changes together. Store v14 and material v5 remain unchanged. Require the explicit Gateway `client-reqwest,nonproduction-replay-harness` OpenAI and audit contracts, including local HTTP capture, in addition to the suites above. Keep 0.8.0 notes/tags unchanged; exclude comparative-learning implementation and real Provider/GUI claims.

@@ -30,7 +30,7 @@ After the crates are published:
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.8.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.9.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 Use exactly one profile feature for a build. Linux desktop, Linux device, and Linux server are distinct deployment targets; do not substitute one for another.
@@ -129,7 +129,7 @@ model-context assembly. Pass the complete returned `selection_receipt` unchanged
 turn reuses its id and receipt; a separate turn gets a new id even when the input
 text is identical. Never reconstruct a receipt from selected ids or digests.
 
-In 0.8.0, feedback additionally requires an explicitly issued
+In 0.9.0, feedback additionally requires an explicitly issued
 `MemoryProceduralSubmissionCapability` and `finalize_turn_with_procedural_evidence`.
 Ordinary turns with no feedback still use `finalize_turn` without a producer grant.
 Follow [procedural evidence authority](api.md#procedural-evidence-authority)
@@ -176,7 +176,7 @@ Its `expected_revision: None` is only for this fresh ephemeral Store. Persistent
 existing binding references and manage revisions explicitly, never automatically regrant on each
 startup or turn. Adapt `GovernanceBindingSource` and `GovernanceCredentialResolver` to the product's
 one configuration owner for real model execution; they are deliberately unconfigured here.
-See the [0.8.0 source release notes](release-notes-0.8.0.md) for changes and release boundaries.
+See the [0.9.0 source release notes](release-notes-0.9.0.md) for changes and release boundaries.
 
 The host remains responsible for final ordering of system, developer, user, and
 tool messages.
@@ -252,7 +252,7 @@ mutations, or implement a second queue/worker/retry policy. Operator and
 attachment status reads must use the SDK-minted typed inspection authority;
 unauthorized or cross-subject requests fail before job identity or reason detail
 is returned. Store v13 and earlier schemas are rejected. Owners may explicitly
-recreate disposable development stores; v0.8.0 neither deletes real data nor
+recreate disposable development stores; v0.9.0 neither deletes real data nor
 provides automatic migration or a compatibility reader.
 
 `project()` returns `MemoryProjectionReport.audit` as the projection diagnostic
@@ -437,3 +437,5 @@ Add a smoke test in the integrating project that:
 7. Calls `run_retention_compaction()` and verifies that host deletion of accepted memory is not allowed.
 8. Exports an opaque archive, imports it into a runtime with the same exact typed scope and policy, and checks the governed archive root.
 9. Runs operator inspect and replay against the replaced scope.
+
+For the 0.9.0 projection API changes, update explicit struct literals and typed constraint consumers as described in the [source candidate notes](release-notes-0.9.0.md). Existing Store v14 data does not require a rebuild solely for this upgrade.

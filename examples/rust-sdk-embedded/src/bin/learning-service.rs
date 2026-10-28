@@ -1,4 +1,4 @@
-//! 0.8.0 API example; not compatible with the v0.7.0 tag.
+//! 0.9.0 API example; not compatible with the v0.7.0 tag.
 //! Uses only an isolated InMemory Store and synthetic text. No provider, key,
 //! network listener, disk Store or nonproduction harness is used.
 use std::sync::Arc;

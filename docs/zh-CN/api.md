@@ -2,6 +2,16 @@
 
 SDK API 是主要入口。宿主项目应通过 `bm-sdk` 进入，或通过 `bm-entry` 加协议 adapter 进入；不应自行实现记忆 schema、store envelope、replay 格式或 adapter dispatch 规则。
 
+## 0.9.0 主体投影
+
+`LLMRuntimeProjectionEnvelope.expression_guidance` 承载仅供模型运行时消费的 `SubjectExpressionDiscipline`。
+`runtime_constraints` 现为 `Vec<RuntimeProjectionSourceBlock>`，保留内容来源和保护标记。
+显式构造 envelope、Core `InhabitedSubjectProjection` 或 `SubjectSoulRelationshipRuntimeViewV1` 的调用方
+必须补齐新字段；后者运行时 view 的序列化形状也改变。Store v14 和持久 material 不变。
+模型使用 `projection.provider_payload().system_memory_block()`；UI/operator/Gateway 展示与诊断使用
+`projection.report()` 的对应安全方法，不记录 raw envelope、不重建第二份 renderer。
+见 [0.9.0 API 变更与 Store 边界](release-notes-0.9.0.md)。
+
 ## Crates
 
 | Crate | 责任 |
@@ -64,7 +74,7 @@ Status read 与 recovery control 必须携带 SDK 铸造的 opaque capability。
 
 ## 程序性证据声明权
 
-0.8.0 源码使用 `PostTurnLearningInputV2`，不能与已发布 0.7.0 API 混用。普通回合使用 `PostTurnLearningInputV2::empty()` 或 `with_tool_call_count(n)`，通过 `finalize_turn` 提交；不要求注册 producer，空反馈不创建 procedural job。Selection receipt 证明的是精确投影，不是执行事实声明权。
+0.9.0 源码使用 `PostTurnLearningInputV2`，不能与已发布 0.7.0 API 混用。普通回合使用 `PostTurnLearningInputV2::empty()` 或 `with_tool_call_count(n)`，通过 `finalize_turn` 提交；不要求注册 producer，空反馈不创建 procedural job。Selection receipt 证明的是精确投影，不是执行事实声明权。
 
 有反馈时，受信初始化代码使用同 Store、SubjectRegistry、MemorySpace 和 mounted scope 的 active governing `SystemGovernor` runtime：
 
@@ -88,7 +98,7 @@ Producer 收窄／撤权及受治理来源撤回，会立即阻断受影响的 c
 
 ## Subject Soul Provisioning
 
-`bm-sdk` 0.8.0 提供宿主无关的 Subject Soul 建档与生命周期公共合同。宿主只能提交 typed intent；Soul revision、generation、material、manifest、ledger、审计、事件和 durable operation receipt 由 Core、SDK 与 Store 在同一事务中拥有。Adapter、HTTP、MCP、Console 或宿主数据库不得维护第二套 Soul 状态，也不得先写默认人格再覆盖。
+`bm-sdk` 0.9.0 提供宿主无关的 Subject Soul 建档与生命周期公共合同。宿主只能提交 typed intent；Soul revision、generation、material、manifest、ledger、审计、事件和 durable operation receipt 由 Core、SDK 与 Store 在同一事务中拥有。Adapter、HTTP、MCP、Console 或宿主数据库不得维护第二套 Soul 状态，也不得先写默认人格再覆盖。
 
 | 操作 | SDK surface | 合同 |
 | --- | --- | --- |
@@ -137,7 +147,7 @@ CTQ1 query surface 统一使用 Store-owned `TranscriptQueryCursor`。调用方�
 
 `HostUi` 只是 **host-presentable redacted disclosure view**。它不是聊天窗口 API、分页方向、宿主产品名、transcript index owner 或 authorization token。Catalog、timeline、search、activity 只返回 Runtime hydration 后仍能通过请求 view 脱敏规则的结果。Search hit 携带受治理的 Unicode-safe excerpt 和 durable `TranscriptAnchor`；宿主应把 anchor 交给 `TranscriptTimelineAnchor::Around`，不得在 UI 内扫描或二次匹配 transcript 正文。
 
-0.8.0 只接受 Store v14；0.7.0 使用 Store v13。不提供 public Store migration API、compatibility reader、双写或 automatic migration。旧代、partial 与 foreign schema payload 都会 fail closed。旧代开发数据只能由其 owner 明确删除并重建；archive export/import 不是 schema migration。
+0.9.0 只接受 Store v14；0.7.0 使用 Store v13。不提供 public Store migration API、compatibility reader、双写或 automatic migration。旧代、partial 与 foreign schema payload 都会 fail closed。旧代开发数据只能由其 owner 明确删除并重建；archive export/import 不是 schema migration。
 
 Timeline 支持 latest、before、after、around-anchor、around-sequence、around-time 与 first-visible-in-range；页内 turn 始终按 sequence 正序，report 可返回 opaque older/newer cursor。日历换算归宿主：按用户 IANA timezone 把本地日期转换为 canonical UTC `[start_inclusive, end_exclusive)` 后再调用 Memory。不得假设每天都是 86400 秒，DST 当天可以是 23 或 25 小时；Beetle Memory 不保存也不猜宿主时区。
 

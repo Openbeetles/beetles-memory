@@ -110,3 +110,7 @@ bm-a2a
 - README、examples 和 crates 描述的是宿主无关的 memory runtime。
 - Adapter crates 保持 memory write、recall、projection 和 store 语义由 `MemoryRuntime` 承担。
 - Standalone deployment 覆盖 memory runtime 入口。产品专属表面和部署基础设施由宿主部署提供。
+
+## 0.9.0 候选范围
+
+将来源读取证明修复与主体投影 API 变更一起验收；Store v14 和 material v5 不变。除上述矩阵外，显式执行 Gateway 的 `client-reqwest,nonproduction-replay-harness` OpenAI 与 audit 合同（含本机 HTTP 捕获）。保留 0.8.0 notes/tag，不混入比较学习实现或真实 Provider/GUI 完成声明。

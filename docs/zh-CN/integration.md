@@ -30,7 +30,7 @@ crates 发布后：
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.8.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.9.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 每次构建只使用一个 profile feature。Linux desktop、Linux device 与 Linux server 是三个不同部署目标，禁止相互替代。
@@ -127,7 +127,7 @@ let preview_block = projection.provider_payload().system_memory_block();
 receipt；即使输入正文相同，另一个 turn 也必须使用新 id。禁止从 selected ids 或 digest
 重建 receipt。
 
-0.8.0 中，有反馈的提交还必须使用显式签发的
+0.9.0 中，有反馈的提交还必须使用显式签发的
 `MemoryProceduralSubmissionCapability` 和 `finalize_turn_with_procedural_evidence`。
 无反馈普通回合仍直接使用 `finalize_turn`，不要求 producer grant。
 受信初始化、部分接受、撤权与容量恢复见 [程序性证据声明权](api.md#程序性证据声明权)。
@@ -166,7 +166,7 @@ Linux/Windows 配置分别增加 `--no-default-features --features desktop-linux
 示例的 `expected_revision: None` 只用于本次新建的易失 Store。持久宿主应保存/查询既有 binding 引用并显式管理其 revision，
 不能在每次启动或每个回合自动重授权限。真实模型配置与凭证分别通过既有 `GovernanceBindingSource`、
 `GovernanceCredentialResolver` 接入产品的同一配置真源；本示例刻意不配置它们。
-行为变更与发布边界见 [0.8.0 源码发布说明](release-notes-0.8.0.md)。
+行为变更与发布边界见 [0.9.0 源码发布说明](release-notes-0.9.0.md)。
 
 system、developer、user、tool message 的最终排序仍归宿主 prompt assembly。
 
@@ -235,7 +235,7 @@ raw credential 永不持久化。
 宿主不得自行 claim job、运行 governance transition、拼装 memory mutation，也不得维护第二套
 queue/worker/retry policy。Operator 与 attachment status read 必须携带 SDK 铸造的 typed inspection authority；
 无权或跨主体请求必须在返回 job identity 或 reason detail 前失败。Store v13 及更早 schema
-直接拒绝；可丢弃的开发 Store 由 owner 明确重建。v0.8.0 不自动删除真实数据，也不提供自动迁移或兼容 reader。
+直接拒绝；可丢弃的开发 Store 由 owner 明确重建。v0.9.0 不自动删除真实数据，也不提供自动迁移或兼容 reader。
 
 `project()` 返回的 `MemoryProjectionReport.audit` 是投影诊断真源，包含 source plane、selected ids、
 section chars、source/render budget、scope 和 private gate decision。宿主可以展示这些字段，
@@ -410,3 +410,5 @@ if catalog.adapter.http.visible {
 7. 调用 `run_retention_compaction()`，确认不授权宿主删除已接受记忆。
 8. 导出 opaque archive，将其导入具有完全相同 typed scope 与 policy 的 runtime，并检查 governed archive root。
 9. 对替换后的 scope 运行 operator inspect 和 replay。
+
+0.9.0 的投影 API 变更要求更新显式 struct literal 和 typed constraint 消费代码，详见[源码候选说明](release-notes-0.9.0.md)。仅因本次升级，不需要重建既有 Store v14 数据。

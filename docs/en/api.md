@@ -2,6 +2,17 @@
 
 The SDK API is the primary entry point. Host projects should enter through `bm-sdk` or through `bm-entry` plus a protocol adapter. They should not implement their own memory schema, store envelope, replay format, or adapter dispatch rules.
 
+## Subject projection in 0.9.0
+
+`LLMRuntimeProjectionEnvelope.expression_guidance` carries model-only `SubjectExpressionDiscipline`.
+`runtime_constraints` is now `Vec<RuntimeProjectionSourceBlock>`, preserving content provenance and protection.
+Explicit struct-literal consumers of the envelope, Core `InhabitedSubjectProjection` or
+`SubjectSoulRelationshipRuntimeViewV1` must update to the new fields; the latter runtime view also has a changed
+serialized shape. Store v14 and persistent materials are unchanged.
+Use `projection.provider_payload().system_memory_block()` for the model; use `projection.report()` safe
+UI/operator/Gateway methods for display and diagnostics. Do not log the raw envelope or rebuild a renderer.
+See [0.9.0 API changes and Store boundaries](release-notes-0.9.0.md).
+
 ## Crates
 
 | Crate | Responsibility |
@@ -64,7 +75,7 @@ Status and recovery controls require opaque SDK-minted capabilities. `MemoryRunt
 
 ## Procedural Evidence Authority
 
-The 0.8.0 source uses `PostTurnLearningInputV2`. The published 0.7.0 API is not interchangeable with this contract. Ordinary turns use `PostTurnLearningInputV2::empty()` or `with_tool_call_count(n)` and `finalize_turn`; no producer registration is required, and an empty feedback set creates no procedural job. A selection receipt proves an exact projection, not permission to report execution.
+The 0.9.0 source uses `PostTurnLearningInputV2`. The published 0.7.0 API is not interchangeable with this contract. Ordinary turns use `PostTurnLearningInputV2::empty()` or `with_tool_call_count(n)` and `finalize_turn`; no producer registration is required, and an empty feedback set creates no procedural job. A selection receipt proves an exact projection, not permission to report execution.
 
 For feedback, a trusted composition root uses an active governing `SystemGovernor` runtime with the same Store, SubjectRegistry, MemorySpace and mounted scope:
 
@@ -88,7 +99,7 @@ Only `RuntimeObservation` and `HumanUser` producer authorities may claim executi
 
 ## Subject Soul Provisioning
 
-`bm-sdk` 0.8.0 exposes a host-neutral Subject Soul provisioning and lifecycle contract. Hosts submit typed intent only; Core, SDK, and Store own Soul revisions, generations, material, manifests, ledgers, audit records, events, and durable operation receipts in one transaction. Adapters, HTTP, MCP, Console, and host databases must not maintain a second Soul state or create a default personality and overwrite it later.
+`bm-sdk` 0.9.0 exposes a host-neutral Subject Soul provisioning and lifecycle contract. Hosts submit typed intent only; Core, SDK, and Store own Soul revisions, generations, material, manifests, ledgers, audit records, events, and durable operation receipts in one transaction. Adapters, HTTP, MCP, Console, and host databases must not maintain a second Soul state or create a default personality and overwrite it later.
 
 | Operation | SDK surface | Contract |
 | --- | --- | --- |
@@ -137,7 +148,7 @@ CTQ1 query surfaces use the Store-owned `TranscriptQueryCursor`. Treat it as opa
 
 `HostUi` is only the host-presentable redacted disclosure view. It is not a chat-window API, pagination direction, product name, transcript index owner, or authorization token. Catalog, timeline, search, and activity return only candidates that remain visible after Runtime hydration and redaction for the requested view. Search hits contain a governed Unicode-safe excerpt and durable `TranscriptAnchor`; pass that anchor to `TranscriptTimelineAnchor::Around` instead of asking the host UI to scan or re-match transcript text.
 
-0.8.0 accepts Store v14 only; 0.7.0 uses Store v13. There is no public Store migration API, compatibility reader, dual write, or automatic migration. Older, partial, and foreign schema payloads fail closed. Development data from an older generation must be explicitly discarded and recreated by its owner; archive export/import is not schema migration.
+0.9.0 accepts Store v14 only; 0.7.0 uses Store v13. There is no public Store migration API, compatibility reader, dual write, or automatic migration. Older, partial, and foreign schema payloads fail closed. Development data from an older generation must be explicitly discarded and recreated by its owner; archive export/import is not schema migration.
 
 Timeline supports latest, before, after, around-anchor, around-sequence, around-time, and first-visible-in-range queries. Page turns stay in sequence order and reports may carry opaque older/newer cursors. Calendar conversion stays with the host: resolve the user's IANA time zone and local date into a canonical UTC `[start_inclusive, end_exclusive)` range before calling Memory. Do not assume every local day is 86,400 seconds; DST days can be 23 or 25 hours. Beetle Memory does not store or guess the host time zone.
 

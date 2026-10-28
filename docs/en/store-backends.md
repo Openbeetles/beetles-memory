@@ -38,9 +38,9 @@ let config = StoreBackendConfig::file("/var/lib/beetle-memory", profile)?
     .with_fsync(true);
 ```
 
-## 0.8.0 Schema Admission
+## 0.9.0 Schema Admission
 
-The 0.8.0 source accepts Store v14 only. Do not open a 0.7.0 Store v13 with this source. This is a direct clean break with no migration, compatibility reader or automatic replacement Store. Older stores are rejected without rewriting their bytes.
+The 0.9.0 source accepts Store v14, the same format as 0.8.0; upgrading from 0.8.0 does not itself require migration or rebuilding data. Store v13 from 0.7.0 and earlier formats remain rejected by the existing clean break, with no migration, compatibility reader or automatic replacement Store. Rejection does not rewrite the original bytes.
 
 Store v14 binds durable producer revisions, current subject validity, exact governed-source dependencies, execution/method contributions and bounded reconciliation checkpoints to the existing atomic mutation/receipt/audit closure. Procedural evidence/job/index/ledger/receipt use V2; Agent Tool material/head use V3, while Runtime Skill owner records use schema 2. Unchanged long-term material remains v5. Reopen checks the same closure, including checkpoint publication receipts and retained contribution references; missing or contradictory authority requires repair rather than trusting a resealed digest. Capacity blocks remain durable until explicit authorized recovery. These changes do not expand backend/profile projection support.
 

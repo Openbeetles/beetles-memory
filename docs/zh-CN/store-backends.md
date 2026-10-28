@@ -38,9 +38,9 @@ let config = StoreBackendConfig::file("/var/lib/beetle-memory", profile)?
     .with_fsync(true);
 ```
 
-## 0.8.0 Schema Admission
+## 0.9.0 Schema Admission
 
-0.8.0 源码只接受 Store v14。不要用该源码打开 0.7.0 的 Store v13。这是直接 clean break，不提供迁移、兼容 reader 或自动另开空库；拒绝旧库时不改写原有字节。
+0.9.0 源码沿用 0.8.0 的 Store v14，从 0.8.0 升级本身不要求迁移或重建数据。0.7.0 的 Store v13 及更早格式仍按既有 clean break 拒绝，不提供迁移、兼容 reader 或自动另开空库；拒绝旧库时不改写原有字节。
 
 Store v14 把持久 producer revision、当前主体有效性、精确受治理来源依赖、执行／方法贡献和有界重算 checkpoint 纳入原有原子 mutation／receipt／audit 闭包。Procedural evidence/job/index/ledger/receipt 使用 V2，Agent Tool material/head 使用 V3，Runtime Skill owner record 使用 schema 2；未改变的长期记忆 material 仍为 v5。重开检查相同闭包，包括 checkpoint 发布回执和保留的贡献引用；缺失或矛盾权威必须修复，不能靠重新计算 digest 取得信任。容量阻断持续保留，直到显式获权恢复。这些变更不扩大 backend/profile 投影支持。
 

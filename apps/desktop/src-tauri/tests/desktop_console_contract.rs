@@ -22,10 +22,10 @@ use bm_sdk::{
     MemoryStoreHandle, MemorySubjectVisibilityPolicy, MemoryTurnDeliveryStatus,
     MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteRequest,
     ParsedLongTermMemoryExtraction, PostTurnLearningInputV2, PressureLevel,
-    ProceduralProjectionBindingV1, ProceduralSourceSensitivity, ProfileId,
-    RuntimeLifecycleModeInput, RuntimeSkillListRequest, RuntimeSkillOwningScope,
-    StoreBackendConfig, ToolExecutionFactV1, ToolExecutionOutcome, ToolMethodEvidenceV1,
-    TranscriptInputMessage,
+    ProceduralLearningReadAvailabilityV1, ProceduralProjectionBindingV1,
+    ProceduralSourceSensitivity, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillListRequest,
+    RuntimeSkillOwningScope, StoreBackendConfig, ToolExecutionFactV1, ToolExecutionOutcome,
+    ToolMethodEvidenceV1, TranscriptInputMessage,
 };
 use serde_json::Value;
 
@@ -141,7 +141,7 @@ fn desktop_console_mutates_skills_through_entry_runtime() {
     assert_eq!(disabled.status_code, 200, "{}", disabled.body);
     let disabled_body: Value = serde_json::from_str(&disabled.body).expect("disable mutation json");
     let disabled_locator = disabled_body["mutation"]["currentLocator"].clone();
-    finish_procedural_reconciliation(&learning_runtime);
+    finish_procedural_reconciliation(&learning_runtime, "disable");
 
     let retired = state
         .handle_console_request(DesktopConsoleRequest::post_json(
@@ -152,7 +152,7 @@ fn desktop_console_mutates_skills_through_entry_runtime() {
     assert_eq!(retired.status_code, 200, "{}", retired.body);
     let retired_body: Value = serde_json::from_str(&retired.body).expect("retire mutation json");
     let retired_locator = retired_body["mutation"]["currentLocator"].clone();
-    finish_procedural_reconciliation(&learning_runtime);
+    finish_procedural_reconciliation(&learning_runtime, "retire");
 
     let retired_detail = state
         .handle_console_request(DesktopConsoleRequest::post_json(
@@ -534,10 +534,13 @@ fn learn_runtime_skill(path: std::path::PathBuf) -> Arc<MemoryRuntime> {
     memory
 }
 
-fn finish_procedural_reconciliation(memory: &Arc<MemoryRuntime>) {
+fn finish_procedural_reconciliation(memory: &Arc<MemoryRuntime>, transition: &str) {
     // DesktopConsoleState owns EntryRuntime's official background service.
     // Observe its committed result instead of racing it with a second worker.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    // The real desktop File Store fsyncs each bounded reconciliation page. This
+    // is a completion contract, not a ten-second throughput requirement.
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_secs(60);
     loop {
         let report = memory
             .list_runtime_skills(RuntimeSkillListRequest {
@@ -555,13 +558,24 @@ fn finish_procedural_reconciliation(memory: &Arc<MemoryRuntime>) {
                 !report.skills.is_empty(),
                 "completed learning owner stays inspectable"
             );
+            eprintln!(
+                "official desktop {transition} reconciliation ready after {:?}",
+                started.elapsed()
+            );
             return;
         }
+        assert_eq!(
+            report.read_availability,
+            ProceduralLearningReadAvailabilityV1::Reconciling,
+            "official desktop {transition} reconciliation entered a non-progress state"
+        );
         assert!(
             std::time::Instant::now() < deadline,
-            "official desktop reconciliation did not become readable: {:?}",
+            "official desktop {transition} reconciliation did not become readable after {:?}: {:?}",
+            started.elapsed(),
             report.read_availability
         );
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        // Avoid flooding the same backend fence while the official worker writes.
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }

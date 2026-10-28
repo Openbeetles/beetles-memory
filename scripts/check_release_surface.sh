@@ -53,6 +53,7 @@ required_docs=(
   "docs/en/adapters.md"
   "docs/en/operator-guide.md"
   "docs/en/release-checklist.md"
+  "docs/en/release-notes-0.9.0.md"
   "docs/en/release-notes-0.8.0.md"
   "docs/en/release-notes-0.7.0.md"
   "docs/en/release-notes-0.6.0.md"
@@ -70,6 +71,7 @@ required_docs=(
   "docs/zh-CN/adapters.md"
   "docs/zh-CN/operator-guide.md"
   "docs/zh-CN/release-checklist.md"
+  "docs/zh-CN/release-notes-0.9.0.md"
   "docs/zh-CN/release-notes-0.8.0.md"
   "docs/zh-CN/release-notes-0.7.0.md"
   "docs/zh-CN/release-notes-0.6.0.md"
@@ -92,7 +94,7 @@ for doc in "${required_docs[@]}"; do
   fi
 done
 
-release_version="0.8.0"
+release_version="0.9.0"
 version_manifests=(
   "crates/core/Cargo.toml"
   "crates/store-contract-tests/Cargo.toml"
@@ -179,10 +181,10 @@ for desktop_identity in apps/desktop/package.json apps/desktop/package-lock.json
   }
 done
 
-for doc in docs/en/release-notes-0.8.0.md docs/zh-CN/release-notes-0.8.0.md; do
-  for marker in 'Store v14' 'material v5' 'Adapter V2' 'automatic migration' 'PostTurnLearningInputV2' 'AgentToolUsageFeedbackV3' 'MemoryLearningService' 'MemoryProceduralSubmissionCapability' 'procedural_reconciliation_status'; do
+for doc in docs/en/release-notes-0.9.0.md docs/zh-CN/release-notes-0.9.0.md; do
+  for marker in 'Store v14' 'material v5' 'Adapter V2' 'automatic migration' 'PostTurnLearningInputV2' 'AgentToolUsageFeedbackV3' 'MemoryLearningService' 'MemoryProceduralSubmissionCapability' 'procedural_reconciliation_status' 'SubjectExpressionDiscipline' 'RuntimeProjectionSourceBlock' 'SubjectSoulRelationshipRuntimeViewV1'; do
     rg -F -q "$marker" "$doc" || {
-      echo "0.8.0 source candidate notes omit required compatibility marker: doc=$doc marker=$marker" >&2
+      echo "0.9.0 source candidate notes omit required compatibility marker: doc=$doc marker=$marker" >&2
       exit 1
     }
   done
@@ -557,6 +559,13 @@ cargo clippy --locked -p bm-sdk --all-targets --no-default-features \
   --features nonproduction-replay-harness,sqlite-store -- -D warnings
 cargo clippy --locked -p bm-entry --all-targets --no-default-features \
   --features governance-model-client-std,nonproduction-replay-harness,bm-sdk/sqlite-store -- -D warnings
+
+# ISP safe surfaces and actual local HTTP delivery require the official reqwest client.
+cargo test --locked -p bm-llm-gateway --no-default-features \
+  --features client-reqwest,nonproduction-replay-harness \
+  --test openai_chat_contract --test audit_report_contract
+cargo clippy --locked -p bm-llm-gateway --all-targets --no-default-features \
+  --features client-reqwest,nonproduction-replay-harness -- -D warnings
 
 bash scripts/emit_platform_capability_snapshots.sh --check
 bash scripts/check_entry_runtime_contract.sh
