@@ -686,6 +686,19 @@ impl SourceDependencyReadProof {
                         return Err(repair());
                     }
                     requests.insert(key.clone(), (root.owner_ref, false));
+                } else if let Some((space, owner)) = owner_identity(namespace, value)? {
+                    // Space-owned source reads can reach another subject's
+                    // operation proof without changing that source. Admit only
+                    // the exact durable source, never a caller-proposed image
+                    // or arbitrary foreign receipt. Reverse fanout remains
+                    // reserved for root mutations below.
+                    if space != batch.scope.memory_space_id
+                        || source_address(&space, &owner)? != (namespace.clone(), key.clone())
+                    {
+                        return Err(repair());
+                    }
+                    plan.before(namespace, key)?;
+                    requests.insert(Root::key(&space, &owner)?, (owner, false));
                 }
             }
         }

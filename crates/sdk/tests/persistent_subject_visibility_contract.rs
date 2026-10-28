@@ -718,3 +718,208 @@ fn sqlite_runtime_reopen_preserves_subject_visibility() {
         .expect("sqlite store")
     });
 }
+
+// Independent records share the MemorySpace's version manifest, even when
+// their disclosure policies admit different mounted subjects. No producer or
+// learning service is needed for ordinary long-term writes.
+fn assert_cross_subject_source_proof(open: impl Fn() -> MemoryStoreHandle) {
+    const A: &str = "PSV1_ALPHA_PRIVATE_SENTINEL prefers quiet reading.";
+    const B: &str = "PSV1_BETA_PRIVATE_SENTINEL prefers outdoor exercise.";
+    let write = |agent: &str, body: &str| {
+        let topic = format!("{agent}_preference");
+        let target = MemoryCandidateTarget::LongTermMemory {
+            kind: LongTermMemoryKind::Preference,
+            topic: topic.clone(),
+        };
+        MemoryWriteRequest::Candidates {
+            candidates: vec![MemoryWriteCandidate {
+                candidate_id: format!("independent-{agent}"),
+                authority: MemoryEvidenceAuthority::UserAsserted,
+                target: target.clone(),
+                long_term_subject_visibility: Some(MemorySubjectVisibilityPolicy::OnlySubjects(
+                    vec![default_agent_subject_id(agent)],
+                )),
+                privacy: MemoryPrivacyClass::SharedWithSubject,
+                content: MemoryCandidateContent::Text {
+                    topic,
+                    body: body.into(),
+                    keywords: vec!["psv1".into(), "preference".into()],
+                },
+                evidence_refs: vec![format!("private-evidence-{agent}")],
+                canonical_entities: vec![],
+                semantic_judgment: Some(MemoryCandidateSemanticJudgment {
+                    source: MemorySemanticJudgmentSource::RuntimeGate,
+                    decision: MemoryCandidateSemanticDecision::Accept,
+                    governed_target: Some(target),
+                    reason: "synthetic explicit preference".into(),
+                }),
+            }],
+        }
+    };
+    let assert_views = |platform: &MemoryStoreHandle, phase: &str| {
+        for (agent, own, foreign, foreign_agent) in
+            [("agent-a", A, B, "agent-b"), ("agent-b", B, A, "agent-a")]
+        {
+            let memory = runtime(platform.clone(), registry(), agent);
+            let recall = current_recall(&memory);
+            assert!(
+                recall
+                    .delivery_report
+                    .rendered_capsules
+                    .iter()
+                    .any(|capsule| capsule.content.contains(own)),
+                "missing own positive: {recall:#?}"
+            );
+            let foreign_id = bm_core::memory::LongTermMemorySlot {
+                kind: LongTermMemoryKind::Preference,
+                topic: format!("{foreign_agent}_preference"),
+            }
+            .stable_id()
+            .unwrap();
+            assert_owner_exact_zero(
+                &recall,
+                &foreign_id,
+                foreign,
+                &format!("private-evidence-{foreign_agent}"),
+            );
+            for binding in [
+                bm_sdk::ProceduralProjectionBindingV1::Preview,
+                bm_sdk::ProceduralProjectionBindingV1::Turn {
+                    turn_id: format!("source-proof-{phase}-{agent}"),
+                },
+            ] {
+                let projected = memory
+                    .project(MemoryProjectionRequest {
+                        binding,
+                        temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
+                        structured_query_facets: vec![QueryFacetInput::Keyword("psv1".into())],
+                        user_query: "psv1 preference".into(),
+                        system_max_len: 4096,
+                        recent_messages_limit: 4,
+                        pressure: PressureLevel::Normal,
+                        mode_input: RuntimeLifecycleModeInput::default(),
+                        tool_registry_refs: vec![],
+                    })
+                    .expect("projection after switching mounted subject");
+                let payload = projected.provider_payload().system_memory_block();
+                assert!(
+                    payload.contains(own),
+                    "missing own projected positive: {payload}"
+                );
+                assert!(!payload.contains(foreign));
+                assert!(!payload.contains(&format!("private-evidence-{foreign_agent}")));
+            }
+        }
+    };
+    {
+        let platform = open();
+        let a = runtime(platform.clone(), registry(), "agent-a");
+        let b = runtime(platform.clone(), registry(), "agent-b");
+        for (memory, agent, body) in [(&a, "agent-a", A), (&b, "agent-b", B)] {
+            let committed = memory
+                .write_operation(format!("create-{agent}"), write(agent, body))
+                .expect("independent private owner must commit after another subject wrote");
+            assert!(
+                matches!(committed, bm_sdk::MemoryMutationExecution::Committed { .. }),
+                "{committed:#?}"
+            );
+        }
+        assert_views(&platform, "created");
+        let before = platform.replay_harness().export_store_snapshot().unwrap();
+        let replay = b
+            .write_operation("create-agent-b", write("agent-b", B))
+            .unwrap();
+        assert!(matches!(
+            replay,
+            bm_sdk::MemoryMutationExecution::Replayed { .. }
+        ));
+        assert_eq!(
+            platform.replay_harness().export_store_snapshot().unwrap(),
+            before
+        );
+    }
+    // File/SQLite drop every handle before reopening; InMemory rebuilds the
+    // runtimes against the same handle, since it intentionally has no disk.
+    let reopened = open();
+    assert_views(&reopened, "reopened");
+    let a = runtime(reopened.clone(), registry(), "agent-a");
+    let updated = a
+        .write_operation(
+            "reopen-update-a",
+            write("agent-a", &format!("{A} Also prefers paper books.")),
+        )
+        .expect("write after reopen must prove the other subject's retained source");
+    assert!(matches!(
+        updated,
+        bm_sdk::MemoryMutationExecution::Committed { .. }
+    ));
+    let a_id = bm_core::memory::LongTermMemorySlot {
+        kind: LongTermMemoryKind::Preference,
+        topic: "agent-a_preference".into(),
+    }
+    .stable_id()
+    .unwrap();
+    assert!(
+        reopened
+            .replay_harness()
+            .read_json_namespace("long_term_version_materials")
+            .unwrap()
+            .into_iter()
+            .map(|doc| serde_json::from_value::<LongTermMemoryVersionMaterial>(doc.value).unwrap())
+            .any(|material| material.owner_ref.owner_id == a_id && material.owner_revision == 2),
+        "reopen exercise must create a real successor, not a no-op"
+    );
+    assert_views(&reopened, "updated");
+}
+
+#[test]
+fn in_memory_cross_subject_source_proof_preserves_private_writes_and_projection() {
+    let platform = support::open_memory_store(
+        StoreBackendConfig::in_memory(support::host_test_profile()).unwrap(),
+    )
+    .unwrap();
+    assert_cross_subject_source_proof(|| platform.clone());
+}
+
+#[test]
+fn file_cross_subject_source_proof_preserves_private_writes_and_projection() {
+    let directory = SourceProofTestDirectory::new("source-proof-file");
+    assert_cross_subject_source_proof(|| {
+        support::open_memory_store(
+            StoreBackendConfig::file(&directory.0, support::host_test_profile()).unwrap(),
+        )
+        .unwrap()
+    });
+}
+
+#[test]
+#[cfg(feature = "sqlite-store")]
+fn sqlite_cross_subject_source_proof_preserves_private_writes_and_projection() {
+    let directory = SourceProofTestDirectory::new("source-proof-sqlite");
+    assert_cross_subject_source_proof(|| {
+        support::open_memory_store(
+            StoreBackendConfig::sqlite(
+                directory.0.join("synthetic.db"),
+                support::host_test_profile(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    });
+}
+
+struct SourceProofTestDirectory(std::path::PathBuf);
+
+impl SourceProofTestDirectory {
+    fn new(label: &str) -> Self {
+        let path = temp_path(label);
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for SourceProofTestDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}

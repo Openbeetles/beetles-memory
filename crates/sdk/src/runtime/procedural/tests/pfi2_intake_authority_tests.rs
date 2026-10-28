@@ -932,6 +932,126 @@ fn pfi2_shared_sources_fence_every_dependent_once_and_reopen() {
 }
 
 #[test]
+fn pfi2_exact_source_read_proof_requires_real_scope_and_preimage_without_reverse_fanout() {
+    use crate::store_internal::procedural_feedback::source_dependents::SourceDependencyReadProof;
+    use crate::store_internal::schema::{
+        PROCEDURAL_PRODUCER_HEAD_NAMESPACE, PROCEDURAL_SOURCE_DEPENDENTS_NAMESPACE,
+    };
+    let platform = platform();
+    let a = shared_source_runtime(&platform, "pfi2-agent", false);
+    let b = shared_source_runtime(&platform, "pfi2-agent-b", false);
+    let created = a
+        .write_operation("source-proof-create", shared_sources(&a, 1))
+        .unwrap();
+    let crate::MemoryMutationExecution::Committed { receipt, .. } = created else {
+        panic!("real source creation must commit");
+    };
+    let governor = shared_source_runtime(&platform, "pfi2-agent", true);
+    let mut spec = grant(&governor).binding.spec;
+    spec.binding_id = "source-proof-dependent".into();
+    spec.claims.execution_facts = false;
+    spec.source_authority = ProceduralProducerSourceAuthorityV1::GovernedSource {
+        source_revision: GovernedOwnerRevisionRef::try_new(
+            GovernedMemoryOwnerRef::new(
+                GovernedMemoryOwnerPlane::EvidenceDocument,
+                "shared-method-a",
+            ),
+            1,
+        )
+        .unwrap(),
+    };
+    let dependent = governor
+        .control_procedural_producer(crate::MemoryProceduralProducerControlRequest {
+            operation_id: "source-proof-register".into(),
+            expected_revision: None,
+            spec,
+            state: ProceduralProducerStateV1::Active,
+        })
+        .unwrap();
+    let document = platform
+        .read_json_namespace(crate::store_internal::GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE)
+        .unwrap()
+        .into_iter()
+        .find(|doc| doc.value["document_id"] == "shared-method-a")
+        .unwrap();
+    let condition = StoreJsonPrecondition::Exact {
+        namespace: document.namespace.clone(),
+        key: document.key.clone(),
+        value: document.value.clone(),
+    };
+    let batch = crate::StoreMutationBatch {
+        transaction_id: "source-proof-read".into(),
+        operation: "write".into(),
+        scope: b.memory_write_transaction_scope(),
+        mutations: vec![],
+    };
+    let before = image(&platform);
+    let proof = SourceDependencyReadProof::prepare(
+        &platform,
+        &batch,
+        std::slice::from_ref(&condition),
+        platform.capacity(),
+    )
+    .unwrap();
+    let reads = proof.actual_reads().cloned().collect::<BTreeSet<_>>();
+    assert!(
+        reads.contains(&(
+            MEMORY_MUTATION_RECEIPT_NAMESPACE.into(),
+            receipt.identity.storage_key()
+        )),
+        "the real foreign source operation must have a read proof"
+    );
+    assert!(reads
+        .iter()
+        .any(|(ns, _)| ns == PROCEDURAL_SOURCE_DEPENDENTS_NAMESPACE));
+    assert!(
+        !reads.contains(&(
+            PROCEDURAL_PRODUCER_HEAD_NAMESPACE.into(),
+            dependent.binding.spec.binding_key().unwrap()
+        )),
+        "a read-only source must not discover reverse producer/job/body dependencies"
+    );
+
+    let mut wrong_address = condition.clone();
+    let StoreJsonPrecondition::Exact { key, .. } = &mut wrong_address else {
+        unreachable!()
+    };
+    key.push_str("-forged");
+    let mut wrong_image = condition.clone();
+    let StoreJsonPrecondition::Exact { value, .. } = &mut wrong_image else {
+        unreachable!()
+    };
+    value["body"] = serde_json::json!("forged source image");
+    for (label, forged) in [("address", wrong_address), ("preimage", wrong_image)] {
+        assert!(
+            SourceDependencyReadProof::prepare(&platform, &batch, &[forged], platform.capacity())
+                .is_err(),
+            "{label} cannot mint a source read proof"
+        );
+    }
+    let mut foreign_space = batch.clone();
+    foreign_space.scope.memory_space_id = "space:another-owner".into();
+    assert!(SourceDependencyReadProof::prepare(
+        &platform,
+        &foreign_space,
+        std::slice::from_ref(&condition),
+        platform.capacity()
+    )
+    .is_err());
+    let mut tiny_budget = platform.capacity();
+    tiny_budget.kv_max_entries = 1;
+    assert!(
+        SourceDependencyReadProof::prepare(&platform, &batch, &[condition], tiny_budget).is_err(),
+        "exact source proofs remain within the existing read budget"
+    );
+    assert_eq!(
+        image(&platform),
+        before,
+        "proof validation never mutates durable state"
+    );
+}
+
+#[test]
 fn pfi2_archive_changed_sources_fence_every_dependent_once_and_reopen() {
     shared_sources_fence_every_dependent_once_and_reopen("archive_update");
 }

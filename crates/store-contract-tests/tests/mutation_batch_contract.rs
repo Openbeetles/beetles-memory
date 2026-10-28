@@ -267,6 +267,31 @@ fn typed_long_term_scope_docs(
 
     let mut docs =
         Vec::with_capacity(materials.len() + heads.len() + facets.len() + postings.len() + 2);
+    // Imported synthetic owners need the same source closure as owners created
+    // by a governed transaction. A bare head/material pair is not a complete
+    // Store v14 source and must not earn a read proof from an Exact condition.
+    for material in &materials {
+        let source = bm_core::memory::ProceduralSourceDependentsRootV1::create(
+            memory_space_id.to_string(),
+            material.owner_ref.clone(),
+            bm_core::memory::ProceduralSourcePostImageV1::Present {
+                revision: bm_core::memory::GovernedOwnerRevisionRef::try_new(
+                    material.owner_ref.clone(),
+                    material.owner_revision,
+                )
+                .expect("fixture source revision"),
+                content_digest: format!("sha256:{}", material.content_digest),
+            },
+            "synthetic-graph-owner-creation".to_string(),
+            None,
+        )
+        .expect("fixture source root");
+        docs.push(StoreSnapshotJsonDoc {
+            namespace: "procedural_source_dependents".to_string(),
+            key: source.physical_key.clone(),
+            value: serde_json::to_value(source).expect("serialize fixture source root"),
+        });
+    }
     docs.extend(materials.iter().map(|material| {
         StoreSnapshotJsonDoc {
             namespace: LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
@@ -329,6 +354,9 @@ fn typed_long_term_scope_docs_without_facets(
         .filter(|doc| {
             doc.namespace != MEMORY_FACET_INDEX_NAMESPACE
                 && doc.namespace != MEMORY_FACET_POSTING_NAMESPACE
+                // This helper builds a mutation, not an imported snapshot;
+                // the Store alone derives source roots for live writes.
+                && doc.namespace != "procedural_source_dependents"
         })
         .collect()
 }
