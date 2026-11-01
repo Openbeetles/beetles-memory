@@ -6,7 +6,7 @@ use crate::llm::{LlmClient, LlmHttpClient, Message, ToolChoicePolicy};
 use crate::orchestrator::PressureLevel;
 use crate::reminder::ReminderItem;
 use crate::task::{TaskPriority, TaskQuery, TaskStatus, TaskStore};
-use crate::util::{epoch_to_ymdhms, scrub_credentials, truncate_content_to_max, weekday_name};
+use crate::util::{scrub_credentials, truncate_content_to_max};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
@@ -19,7 +19,7 @@ use super::{
     render_execution_state_block, render_self_continuity_block, whole_record_lease_advanced,
     AutonomyStrategy, AutonomyStrategyStore, ExecutionState, ExecutionStateStore, MemoryProfile,
     RemindAtStore, SelfContinuity, SelfContinuityStore, SessionMessage, SessionStore,
-    SessionSummaryStore, WorldSensePolicy, WorldSenseStore,
+    SessionSummaryStore, UserLocalTimeContext, WorldSensePolicy, WorldSenseStore,
 };
 
 pub const WORLD_SENSE_SYSTEM_PROMPT: &str = "You maintain the assistant's private world-sense layer. Return JSON only: either null or one object with fields current_scene, body_state, social_field, world_changes, external_focus. This layer describes the outer situation you currently feel yourself to be in: environment, device/body condition, interaction field, and what in the outside world deserves attention now. Do not write self-model, inner-life drift, or transcript summary. Keep it compact, situational, and current.";
@@ -31,9 +31,9 @@ const WORLD_REMINDER_PREVIEW_LIMIT: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorldSnapshot {
-    pub weekday: String,
-    pub hour: u32,
-    pub day_phase: String,
+    /// UTC instant used for duration/due comparisons, never rendered as local time.
+    pub now_secs: u64,
+    pub user_local_time: Option<UserLocalTimeContext>,
     pub interaction_mode: String,
     pub activity_rhythm: String,
     pub situational_pull: String,
@@ -94,6 +94,7 @@ pub struct WorldSnapshotContext<'a> {
     pub chat_id: &'a str,
     pub source_channel: &'a str,
     pub now_secs: u64,
+    pub user_local_time: Option<&'a UserLocalTimeContext>,
     pub self_continuity: Option<&'a SelfContinuity>,
     pub remind_store: &'a dyn RemindAtStore,
     pub task_store: &'a dyn TaskStore,
@@ -199,11 +200,11 @@ pub(crate) fn build_world_snapshot_from_commitments(
     ctx: WorldSnapshotContext<'_>,
     reminders: &[ReminderItem],
     tasks: &[crate::task::TaskItem],
-) -> WorldSnapshot {
+) -> Result<WorldSnapshot> {
+    if let Some(local_time) = ctx.user_local_time {
+        local_time.validate_for_epoch(ctx.now_secs)?;
+    }
     let resource = crate::orchestrator::snapshot();
-    let (_, _, _, hour, _, _) = epoch_to_ymdhms(ctx.now_secs);
-    let weekday = weekday_name(ctx.now_secs / 86400).to_string();
-    let day_phase = describe_day_phase(hour).to_string();
     let source_channel = normalize_channel(ctx.source_channel).to_string();
     let open_tasks = tasks
         .iter()
@@ -258,10 +259,9 @@ pub(crate) fn build_world_snapshot_from_commitments(
         resource.outbound_depth,
     )
     .to_string();
-    WorldSnapshot {
-        weekday,
-        hour,
-        day_phase,
+    Ok(WorldSnapshot {
+        now_secs: ctx.now_secs,
+        user_local_time: ctx.user_local_time.cloned(),
         interaction_mode,
         activity_rhythm,
         situational_pull,
@@ -287,28 +287,62 @@ pub(crate) fn build_world_snapshot_from_commitments(
         next_reminder_at: reminders.first().map(|item| item.at_unix_secs).unwrap_or(0),
         user_idle_secs,
         autonomy_idle_secs,
-    }
+    })
 }
 
 pub fn build_world_snapshot(ctx: WorldSnapshotContext<'_>) -> Result<WorldSnapshot> {
     let reminders = load_world_snapshot_reminders(ctx)?;
     let tasks = load_world_snapshot_tasks(ctx)?;
-    Ok(build_world_snapshot_from_commitments(
-        ctx, &reminders, &tasks,
-    ))
+    build_world_snapshot_from_commitments(ctx, &reminders, &tasks)
 }
 
 pub fn render_world_snapshot_block(snapshot: &WorldSnapshot, max_len: usize) -> Option<String> {
+    render_world_snapshot_context(snapshot, max_len, true)
+}
+
+/// Foreground context can be trimmed by later projection stages. Its clock is
+/// rendered once in the SDK's final envelope with an indivisible line budget.
+pub(crate) fn render_world_snapshot_context_without_clock(
+    snapshot: &WorldSnapshot,
+    max_len: usize,
+) -> Option<String> {
+    render_world_snapshot_context(snapshot, max_len, false)
+}
+
+fn render_world_snapshot_context(
+    snapshot: &WorldSnapshot,
+    max_len: usize,
+    include_clock: bool,
+) -> Option<String> {
     if max_len == 0 {
         return None;
     }
     let mut out = String::with_capacity(max_len.min(640));
     out.push_str("## World Snapshot\n");
-    let _ = writeln!(
-        out,
-        "Outer scene now: {} {}:00-{}:59, {}.",
-        snapshot.weekday, snapshot.hour, snapshot.hour, snapshot.day_phase
-    );
+    if include_clock {
+        let local_time = snapshot
+            .user_local_time
+            .as_ref()
+            .filter(|time| time.validate_for_epoch(snapshot.now_secs).is_ok());
+        if let Some(time) = local_time {
+            let time_line = format!(
+                "User-local time: {} {}. Local day phase: {}.\n",
+                time.format_local_datetime(),
+                time.local_weekday(),
+                describe_day_phase(time.local_hour())
+            );
+            // A time without its zone is misleading. Omit the whole clock line
+            // when it cannot fit; later truncation affects non-clock details only.
+            if out
+                .chars()
+                .count()
+                .saturating_add(time_line.chars().count())
+                <= max_len
+            {
+                out.push_str(&time_line);
+            }
+        }
+    }
     let _ = writeln!(
         out,
         "Derived state: interaction_mode={}, activity_rhythm={}, situational_pull={}, resource_tension={}.",
@@ -344,15 +378,23 @@ pub fn render_world_snapshot_block(snapshot: &WorldSnapshot, max_len: usize) -> 
             snapshot.source_channel
         );
     }
+    let next_reminder = if snapshot.next_reminder_at != 0 {
+        format!(
+            ", next_reminder_in_secs={}",
+            snapshot.next_reminder_at.saturating_sub(snapshot.now_secs)
+        )
+    } else {
+        String::new()
+    };
     let _ = writeln!(
         out,
-        "Task/reminder field: open_tasks={}, in_progress_tasks={}, due_tasks={}, high_priority_tasks={}, upcoming_reminders={}, next_reminder_at={}.",
+        "Task/reminder field: open_tasks={}, in_progress_tasks={}, due_tasks={}, high_priority_tasks={}, upcoming_reminders={}{}.",
         snapshot.open_tasks,
         snapshot.in_progress_tasks,
         snapshot.due_tasks,
         snapshot.high_priority_tasks,
         snapshot.upcoming_reminders,
-        snapshot.next_reminder_at
+        next_reminder
     );
     let _ = writeln!(
         out,
@@ -367,9 +409,9 @@ pub fn render_world_sense_block(world_sense: &WorldSense, max_len: usize) -> Opt
     let normalized = normalize_world_sense(world_sense.clone(), world_sense.updated_at)?;
     let mut out = String::with_capacity(max_len.min(640));
     out.push_str("## World Sense\n");
-    out.push_str("Private outer-situation layer. It records what the world currently feels like around you.\n");
+    out.push_str("Previously observed situational impression; not the current clock or proof of a physical location. User-local runtime time takes precedence over remembered time descriptions.\n");
     if !normalized.current_scene.is_empty() {
-        let _ = writeln!(out, "Current scene: {}", normalized.current_scene);
+        let _ = writeln!(out, "Observed situation: {}", normalized.current_scene);
     }
     if !normalized.body_state.is_empty() {
         let _ = writeln!(out, "Body state: {}", normalized.body_state);
@@ -389,9 +431,17 @@ pub fn render_world_sense_block(world_sense: &WorldSense, max_len: usize) -> Opt
 
 pub fn world_snapshot_fingerprint(snapshot: &WorldSnapshot) -> u64 {
     let mut hasher = DefaultHasher::new();
-    snapshot.weekday.hash(&mut hasher);
-    snapshot.hour.hash(&mut hasher);
-    snapshot.day_phase.hash(&mut hasher);
+    snapshot
+        .user_local_time
+        .as_ref()
+        .map(|time| {
+            (
+                time.local_date_hour(),
+                time.utc_offset_seconds(),
+                time.time_zone(),
+            )
+        })
+        .hash(&mut hasher);
     snapshot.interaction_mode.hash(&mut hasher);
     snapshot.activity_rhythm.hash(&mut hasher);
     snapshot.situational_pull.hash(&mut hasher);
@@ -773,7 +823,8 @@ fn build_world_sense_refresh_input(
         input.push_str("\n\n");
     }
     input.push_str("## Snapshot Reading Guide\n");
-    input.push_str("- current_scene should describe the present outer scene using interaction_mode, activity_rhythm, and situational_pull.\n");
+    input.push_str("- current_scene describes the observed interaction situation using interaction_mode, activity_rhythm, and situational_pull. It does not imply an outdoor location or a room. Never invent physical surroundings.\n");
+    input.push_str("- User-local runtime time with its offset/time zone is the only current clock. Do not turn UTC epochs, remembered scenes or time-of-day impressions into a competing clock. If user-local time is absent, omit current-time claims entirely.\n");
     input.push_str("- body_state should translate device/body/resource_tension into a lived operational condition.\n");
     input.push_str("- social_field should capture how open, paused, direct, or distant the interaction field feels right now.\n");
     input.push_str("- world_changes should name what recently shifted in the outside situation, not your inward state.\n");
@@ -834,9 +885,8 @@ mod tests {
     #[test]
     fn parse_world_sense_response_coerces_nested_fields() {
         let snapshot = WorldSnapshot {
-            weekday: "Wednesday".to_string(),
-            hour: 19,
-            day_phase: "evening".to_string(),
+            now_secs: 42,
+            user_local_time: None,
             interaction_mode: "live_exchange".to_string(),
             activity_rhythm: "steady".to_string(),
             situational_pull: "reply_ready".to_string(),
@@ -886,9 +936,8 @@ mod tests {
     fn render_world_snapshot_block_includes_outer_state() {
         let block = render_world_snapshot_block(
             &WorldSnapshot {
-                weekday: "Wednesday".to_string(),
-                hour: 19,
-                day_phase: "evening".to_string(),
+                now_secs: 42,
+                user_local_time: None,
                 interaction_mode: "live_exchange".to_string(),
                 activity_rhythm: "steady".to_string(),
                 situational_pull: "reply_ready".to_string(),
@@ -915,7 +964,7 @@ mod tests {
                 user_idle_secs: 45,
                 autonomy_idle_secs: 90,
             },
-            512,
+            1024,
         )
         .expect("snapshot block");
         assert!(block.contains("## World Snapshot"));
@@ -936,19 +985,17 @@ mod tests {
                 source_fingerprint: 1,
                 updated_at: 2,
             },
-            512,
+            1024,
         )
         .expect("world sense block");
         assert!(block.contains("## World Sense"));
         assert!(block.contains("External focus"));
     }
 
-    #[test]
-    fn world_snapshot_fingerprint_ignores_raw_idle_counter_drift() {
-        let first = WorldSnapshot {
-            weekday: "Wednesday".to_string(),
-            hour: 19,
-            day_phase: "evening".to_string(),
+    fn sample_snapshot() -> WorldSnapshot {
+        WorldSnapshot {
+            now_secs: 42,
+            user_local_time: None,
             interaction_mode: "paused_exchange".to_string(),
             activity_rhythm: "steady".to_string(),
             situational_pull: "light_watch".to_string(),
@@ -974,7 +1021,12 @@ mod tests {
             next_reminder_at: 0,
             user_idle_secs: 600,
             autonomy_idle_secs: 120,
-        };
+        }
+    }
+
+    #[test]
+    fn world_snapshot_fingerprint_ignores_raw_idle_counter_drift() {
+        let first = sample_snapshot();
         let mut second = first.clone();
         second.user_idle_secs = 660;
         second.autonomy_idle_secs = 180;
@@ -989,5 +1041,68 @@ mod tests {
             world_snapshot_fingerprint(&first),
             world_snapshot_fingerprint(&second)
         );
+    }
+    #[test]
+    fn local_clock_rendering_and_fingerprint_preserve_zone_and_calendar_identity() {
+        let first = sample_snapshot();
+        // Local date and zone are part of the observation identity; minute
+        // drift is not a reason to regenerate the learned situational summary.
+        let at = crate::util::ymdhms_to_epoch(2026, 10, 29, 6, 14, 0);
+        let mut local = first.clone();
+        local.now_secs = at;
+        local.user_local_time =
+            Some(UserLocalTimeContext::new(at, 28_800, "Asia/Shanghai").unwrap());
+        let mut minute_later = local.clone();
+        minute_later.now_secs += 60;
+        minute_later.user_local_time =
+            Some(UserLocalTimeContext::new(at + 60, 28_800, "Asia/Shanghai").unwrap());
+        assert_eq!(
+            world_snapshot_fingerprint(&local),
+            world_snapshot_fingerprint(&minute_later)
+        );
+        for (epoch, offset, zone) in [
+            (at, 0, "UTC"),
+            (at, 28_800, "Asia/Singapore"),
+            (at + 86_400, 28_800, "Asia/Shanghai"),
+        ] {
+            let mut changed = local.clone();
+            changed.now_secs = epoch;
+            changed.user_local_time = Some(UserLocalTimeContext::new(epoch, offset, zone).unwrap());
+            assert_ne!(
+                world_snapshot_fingerprint(&local),
+                world_snapshot_fingerprint(&changed)
+            );
+        }
+
+        let text = render_world_snapshot_block(&local, 2048).unwrap();
+        assert!(text.contains("2026-10-29 14:14:00 UTC+08:00 [Asia/Shanghai]"));
+        assert!(!text.contains("06:14"));
+        assert!(!text.contains("Outer scene now"));
+        for budget in 1..=200 {
+            let short = render_world_snapshot_block(&local, budget).unwrap();
+            assert!(short.chars().count() <= budget);
+            if short.contains("14:14") {
+                assert!(short.contains("UTC+08:00 [Asia/Shanghai]"));
+            }
+        }
+        for budget in [1, 64, 200, 2048] {
+            let foreground = render_world_snapshot_context_without_clock(&local, budget).unwrap();
+            assert!(!foreground.contains("User-local time"));
+            assert!(!foreground.contains("14:14"));
+            assert!(!foreground.contains("UTC+08:00"));
+            assert!(!foreground.contains("Local day phase"));
+        }
+        let unknown = render_world_snapshot_block(&first, 2048).unwrap();
+        assert!(!unknown.contains("User-local time"));
+        assert!(!unknown.contains("time zone:"));
+        assert!(!unknown.contains("Local day phase:"));
+        assert!(!unknown.contains("00:00"));
+        assert!(!unknown.contains("next_reminder_in_secs"));
+        assert!(!unknown.contains("unavailable"));
+        assert!(!unknown.contains("unknown"));
+        local.next_reminder_at = at + 120;
+        let reminder = render_world_snapshot_block(&local, 2048).unwrap();
+        assert!(reminder.contains("next_reminder_in_secs=120"));
+        assert!(!reminder.contains(&(at + 120).to_string()));
     }
 }

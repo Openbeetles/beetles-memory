@@ -38,7 +38,13 @@ let config = StoreBackendConfig::file("/var/lib/beetle-memory", profile)?
     .with_fsync(true);
 ```
 
-## 0.9.0 Schema Admission
+## 0.10.0 Schema Admission：Store v15
+
+0.10.0 源码只接受 Store v15。新增必填方法来源、任务贡献、人格来源复审合同：post-turn input/evidence V3、method material V4、application ledger V3、semantic job/scope index/receipt V4、projection receipt V2、Soul schema 2、source-dependents schema 2 和 reconciliation checkpoint schema 2。长期记忆 material v5 与 Adapter V2 不因本阶段变动。
+
+打开 Store v14 或更早数据库时只读拒绝，不自动迁移、不自动创建替代空库。所有验证使用合成 Store；真实数据未删除或迁移。InMemory、File 和 SQLite 共用原子 owner/material/head/来源/receipt/audit 校验与受预算约束的依赖读取；缺失来源或不完整状态要求修复，不能重新算 digest 冒充合法性。
+
+## 历史 0.9.0 Schema Admission
 
 0.9.0 源码沿用 0.8.0 的 Store v14，从 0.8.0 升级本身不要求迁移或重建数据。0.7.0 的 Store v13 及更早格式仍按既有 clean break 拒绝，不提供迁移、兼容 reader 或自动另开空库；拒绝旧库时不改写原有字节。
 

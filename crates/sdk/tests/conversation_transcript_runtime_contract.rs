@@ -67,7 +67,7 @@ fn finalize_request(user: &str, assistant: &str) -> MemoryTurnFinalizeRequest {
             external_content_used: false,
             candidate_ids: Vec::new(),
         },
-        learning: bm_sdk::PostTurnLearningInputV2::empty(),
+        learning: bm_sdk::PostTurnLearningInputV3::empty(),
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     }
@@ -2036,7 +2036,10 @@ fn private_garden_self_work_records_private_garden_derived_refs_without_raw_cont
     let llm = StaticLlmClient::summary_response(
         r#"{"writes":[{"path":"journal/qingchuan.md","content":"Keep a private note that the current exchange made the name Qingchuan salient."}]}"#,
     );
-    let request = finalize_request("叫我青川，后续称呼要自然一些", "我会记住这个称呼。");
+    let request = admit_soul_turn(
+        &runtime,
+        finalize_request("叫我青川，后续称呼要自然一些", "我会记住这个称呼。"),
+    );
     let turn_id = request.turn.turn_id.clone();
 
     let report = runtime
@@ -2050,7 +2053,7 @@ fn private_garden_self_work_records_private_garden_derived_refs_without_raw_cont
         .request_transcript_lifecycle(MemoryTranscriptLifecycleRequest {
             memory_space_id: runtime.memory_space_id().to_string(),
             channel_id: "llm.gateway".to_string(),
-            conversation_id: "conversation-a".to_string(),
+            conversation_id: "chat-a".to_string(),
             turn_id: Some(turn_id.clone()),
             transition: TranscriptLifecycleTransition::Mask,
             reason: "review_private_garden_source".to_string(),
@@ -3186,4 +3189,49 @@ fn compact_profiles_fail_closed_for_indexed_query_without_hiding_catalog() {
     assert!(activity_error
         .to_string()
         .contains("query.transcript.activity is not visible"));
+}
+
+fn admit_soul_turn(
+    runtime: &bm_sdk::MemoryRuntime,
+    mut request: MemoryTurnFinalizeRequest,
+) -> MemoryTurnFinalizeRequest {
+    request.turn.conversation.channel = runtime.scope().channel.clone();
+    request.turn.conversation.chat_id = runtime.scope().chat_id.clone();
+    request.turn.conversation.conversation_id = Some(
+        runtime
+            .scope()
+            .conversation_id
+            .clone()
+            .unwrap_or_else(|| runtime.scope().chat_id.clone()),
+    );
+    let projection = runtime
+        .project(bm_sdk::MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Turn {
+                turn_id: request.turn.turn_id.clone(),
+            },
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
+            user_query: request.turn.input_messages[0].content.clone(),
+            system_max_len: 16000,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+            structured_query_facets: vec![],
+            tool_registry_refs: vec![],
+        })
+        .expect("public turn-bound projection");
+    request.learning.selection_receipt = Some(
+        projection
+            .report()
+            .selection_receipt()
+            .expect("signed turn admission")
+            .clone(),
+    );
+    assert!(request
+        .learning
+        .selection_receipt
+        .as_ref()
+        .unwrap()
+        .soul_source_admission
+        .is_some());
+    request
 }

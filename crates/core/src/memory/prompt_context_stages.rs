@@ -4,6 +4,8 @@ use crate::task_execution::{
 };
 use std::collections::BTreeSet;
 
+use super::world_sense::render_world_snapshot_context_without_clock;
+
 use super::{
     build_archive_evidence_block, build_continuity_recall_query, build_self_state,
     build_world_snapshot_from_commitments, collect_private_targets,
@@ -19,10 +21,9 @@ use super::{
     render_relationship_constitution_block, render_relationship_portfolio_block,
     render_self_continuity_block, render_self_model_block, render_self_state_block,
     render_turn_observation_ledger_block, render_work_continuity_block, render_world_sense_block,
-    render_world_snapshot_block, ContinuityCapsuleRecallInspectionInput,
-    ContinuityCapsuleScopeKind, MemoryProfile, PromptMemoryContextParams,
-    PromptRecallRouterDecision, RecallPlane, RecallQuery, RecallSelectionReport, SessionMessage,
-    WorldSnapshotContext, MAX_WORK_CONTINUITY_BLOCK_LEN,
+    ContinuityCapsuleRecallInspectionInput, ContinuityCapsuleScopeKind, MemoryProfile,
+    PromptMemoryContextParams, PromptRecallRouterDecision, RecallPlane, RecallQuery,
+    RecallSelectionReport, SessionMessage, WorldSnapshotContext, MAX_WORK_CONTINUITY_BLOCK_LEN,
 };
 
 pub(crate) struct PromptContextSeed {
@@ -613,6 +614,7 @@ pub(crate) fn load_private_projection_stage(
                 chat_id: params.chat_id,
                 source_channel: params.current_channel,
                 now_secs: params.now_secs,
+                user_local_time: params.user_local_time,
                 self_continuity: constitutional.self_continuity.as_deref(),
                 remind_store: params.remind_store,
                 task_store: params.task_store,
@@ -635,8 +637,15 @@ pub(crate) fn load_private_projection_stage(
                 return None;
             };
             let world_snapshot =
-                build_world_snapshot_from_commitments(world_snapshot_ctx, &reminders, &tasks);
-            render_world_snapshot_block(
+                match build_world_snapshot_from_commitments(world_snapshot_ctx, &reminders, &tasks)
+                {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        health.record("world_snapshot_user_local_time", &error);
+                        return None;
+                    }
+                };
+            render_world_snapshot_context_without_clock(
                 &world_snapshot,
                 memory_policy(seed.profile).world_sense.snapshot_max_len,
             )

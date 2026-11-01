@@ -19,7 +19,7 @@ use bm_sdk::{
     MemoryTranscriptAttrWriteRequest, MemoryTranscriptCommitRequest, MemoryTranscriptReplayRequest,
     MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource,
     MemoryWriteCandidate, MemoryWriteRequest, Message, NoopMemoryAuditSink,
-    PostTurnLearningInputV2, PressureLevel, ProceduralApplicabilityContextV1, ProfileId,
+    PostTurnLearningInputV3, PressureLevel, ProceduralApplicabilityContextV1, ProfileId,
     QueryFacetInput, ResponseBody, RuntimeLifecycleModeInput, RuntimeSkillListRequest,
     RuntimeSkillOwningScope, StopReason, StoreBackendConfig, ToolChoicePolicy, ToolExecutionFactV1,
     ToolExecutionOutcome, ToolObservationDigest, ToolSpec, TranscriptAttrEnvelope,
@@ -634,7 +634,7 @@ fn v1_rejects_every_mutation_reliability_class_but_keeps_reads() {
                 external_content_used: false,
                 candidate_ids: Vec::new(),
             },
-            learning: bm_sdk::PostTurnLearningInputV2::empty(),
+            learning: bm_sdk::PostTurnLearningInputV3::empty(),
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
         })),
@@ -1306,6 +1306,7 @@ fn runtime_with_tool_registry() -> (
             expected_revision: None,
             state: bm_sdk::ProceduralProducerStateV1::Active,
             spec: bm_sdk::ProceduralProducerSpecV1 {
+                method_evaluators: Vec::new(),
                 binding_id: "adapter-fixture".into(),
                 scope: bm_sdk::ProceduralProducerScopeV1 {
                     memory_space_id: runtime.memory_space_id().into(),
@@ -1318,6 +1319,9 @@ fn runtime_with_tool_registry() -> (
                 },
                 source_authority: bm_sdk::ProceduralProducerSourceAuthorityV1::RuntimeObservation,
                 claims: bm_sdk::ProceduralProducerClaimsV1 {
+                    method_learning_materials: false,
+                    method_adoptions: false,
+                    method_task_evaluations: false,
                     execution_facts: true,
                     method_declarations: true,
                     usage_feedback: false,
@@ -1341,7 +1345,7 @@ fn runtime_with_tool_registry() -> (
 fn adapter_finalize_report_json(
     runtime: &MemoryRuntime,
     turn: CanonicalTurnDelta,
-    learning: PostTurnLearningInputV2,
+    learning: PostTurnLearningInputV3,
     capability: Option<&bm_sdk::MemoryProceduralSubmissionCapability>,
 ) -> serde_json::Value {
     let lease = runtime.acquire_runtime_budget_lease().unwrap();
@@ -1486,7 +1490,7 @@ fn json_decoder_covers_adapter_memory_operations() {
 
     let finalize_body = json!({
         "turn": transcript_turn(),
-        "learning": bm_sdk::PostTurnLearningInputV2::empty()
+        "learning": bm_sdk::PostTurnLearningInputV3::empty()
     })
     .to_string();
     let finalize = decode_json_adapter_command(AdapterOperation::FinalizeTurn, &finalize_body)
@@ -1609,7 +1613,7 @@ fn finalize_dispatch_queues_governance_even_when_request_services_are_injected()
         AdapterOperation::FinalizeTurn,
         &json!({
             "turn": transcript_turn(),
-            "learning": bm_sdk::PostTurnLearningInputV2::empty()
+            "learning": bm_sdk::PostTurnLearningInputV3::empty()
         })
         .to_string(),
     )
@@ -1651,7 +1655,7 @@ fn finalize_report_serializes_distinct_procedural_learning_intent() {
     let no_feedback = adapter_finalize_report_json(
         &no_feedback_runtime,
         transcript_turn(),
-        PostTurnLearningInputV2::empty(),
+        PostTurnLearningInputV3::empty(),
         None,
     );
     assert_eq!(no_feedback["proceduralLearning"]["state"], "not_scheduled");
@@ -1684,7 +1688,10 @@ fn finalize_report_serializes_distinct_procedural_learning_intent() {
     let queued = adapter_finalize_report_json(
         &queued_runtime,
         queued_turn,
-        PostTurnLearningInputV2 {
+        PostTurnLearningInputV3 {
+            method_learning_inputs: Vec::new(),
+            method_adoptions: Vec::new(),
+            method_task_evaluations: Vec::new(),
             tool_call_count: 1,
             selection_receipt: None,
             runtime_skill_feedback: Vec::new(),

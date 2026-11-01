@@ -564,7 +564,7 @@ mod tests {
             }),
             Some(&RecentPersonaEvidence {
                 repeated_relationship_posture: "direct architecture review".into(),
-                repeated_priority_order: vec!["agent constitution first".into()],
+                repeated_priority_order: vec!["self_authored_core".into()],
                 ..RecentPersonaEvidence::default()
             }),
             4096,

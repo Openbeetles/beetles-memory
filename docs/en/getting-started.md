@@ -11,11 +11,11 @@ From this repository:
 bm-sdk = { path = "crates/sdk", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
-From an external repository, adjust the path or use the published version once the crates are released:
+From an external repository, use the source tag (this does not require a crates.io publication):
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.9.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.10.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.10.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 Select exactly one desktop embedded feature for the host OS: `profile-desktop-macos-embedded-sdk`, `profile-desktop-windows-embedded-sdk`, or `profile-desktop-linux-embedded-sdk`. Linux desktop hosts must not use a server or dev-full profile.

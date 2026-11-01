@@ -15,11 +15,35 @@ use crate::{
     MemoryGovernanceJobBlockRequest, MemoryGovernanceJobClaimRequest,
     MemoryGovernanceJobFailRequest, MemoryGovernanceJobResumeRequest,
     MemoryGovernanceJobRetryRequest, MemoryGovernanceJobRunReport, MemoryGovernanceJobRunRequest,
-    MemoryRuntime, PostTurnGovernanceJobV3,
+    MemoryRuntime, PostTurnGovernanceJobV4,
 };
 
 const MAX_LEARNING_CYCLE_JOBS: usize = 32;
 const MAX_LEARNING_LEASE_SECS: u64 = 15 * 60;
+
+/// Explicit opt-in to trying an unvalidated method; ordinary recall never
+/// presents these candidates as established experience.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryMethodTrialRequest {
+    pub tool: bm_core::memory::ProceduralProducerToolV1,
+    pub max_candidates: usize,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct MemoryMethodTrialCandidate {
+    pub method: bm_core::memory::MethodContentRefV1,
+    pub status: bm_core::skills::AgentToolExperienceStatus,
+    pub task_signature: String,
+    pub procedure: String,
+    pub constraints: Vec<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct MemoryMethodTrialReport {
+    pub read_availability: crate::ProceduralLearningReadAvailabilityV1,
+    pub candidates: Vec<MemoryMethodTrialCandidate>,
+}
 
 /// Management intent, accepted only from the mounted runtime's active governing
 /// SystemGovernor. It never grants reporting authority merely by deserialization.
@@ -99,7 +123,7 @@ pub(crate) struct ProceduralIntakeAuthorization {
     pub(crate) store_authority_digest: String,
     pub(crate) store_incarnation: String,
     pub(crate) current_head: bm_core::memory::ProceduralProducerHeadV1,
-    pub(crate) evidence: bm_core::memory::PostTurnLearningEvidenceV2,
+    pub(crate) evidence: bm_core::memory::PostTurnLearningEvidenceV3,
     pub(crate) source_preconditions: Vec<crate::StoreJsonPrecondition>,
 }
 
@@ -356,7 +380,7 @@ pub struct AuthorizedGovernanceEnvelope {
 }
 
 impl AuthorizedGovernanceEnvelope {
-    fn from_claimed(job: &PostTurnGovernanceJobV3) -> Result<Self> {
+    fn from_claimed(job: &PostTurnGovernanceJobV4) -> Result<Self> {
         let authority = job.attempt_authority.as_ref().ok_or_else(|| {
             Error::config(
                 "memory_learning_envelope",
@@ -441,7 +465,7 @@ impl From<Error> for GovernanceExecutionPortFailure {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryLearningStateReport {
-    pub job: PostTurnGovernanceJobV3,
+    pub job: PostTurnGovernanceJobV4,
     pub reason: String,
 }
 
@@ -837,7 +861,7 @@ impl MemoryLearningEngine {
 
     fn transition_execution_failure(
         &self,
-        claimed: PostTurnGovernanceJobV3,
+        claimed: PostTurnGovernanceJobV4,
         request: &MemoryLearningCycleRequest,
         egress: &GovernanceEgressAuthority,
         failure: GovernanceExecutionPortFailure,
@@ -977,7 +1001,7 @@ impl MemoryLearningEngine {
     #[allow(clippy::too_many_arguments)]
     fn block_claimed_execution(
         &self,
-        claimed: PostTurnGovernanceJobV3,
+        claimed: PostTurnGovernanceJobV4,
         request: &MemoryLearningCycleRequest,
         kind: MemoryGovernanceBlockKind,
         reason: crate::PostTurnGovernanceExecutionBlockReasonV1,
@@ -1015,7 +1039,7 @@ impl MemoryLearningEngine {
 
     fn transition_classified_failure(
         &self,
-        claimed: PostTurnGovernanceJobV3,
+        claimed: PostTurnGovernanceJobV4,
         request: &MemoryLearningCycleRequest,
         error_class: PostTurnGovernanceErrorClassV2,
     ) -> Result<MemoryLearningCycleOutcome> {
@@ -1089,7 +1113,7 @@ impl GovernanceExecutionOperation for RuntimeGovernanceExecutionOperation {
     }
 }
 
-fn is_due(job: &PostTurnGovernanceJobV3, now_secs: u64) -> bool {
+fn is_due(job: &PostTurnGovernanceJobV4, now_secs: u64) -> bool {
     match job.status {
         PostTurnGovernanceJobStatusV2::Pending => job
             .next_attempt_at

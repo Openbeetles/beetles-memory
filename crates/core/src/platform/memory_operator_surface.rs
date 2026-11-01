@@ -369,7 +369,6 @@ pub fn build_memory_operator_surface_with_capabilities(
         .map(|target| target.chat_id.as_str())
         .unwrap_or("");
     let subject_shell_grounded = compile_subject_shell(SubjectShellCompileInput {
-        now_secs,
         platform: memory_system_kind.as_str(),
         relationship_scope: active_relationship_scope,
         channel: active_relationship_channel,
@@ -711,11 +710,15 @@ fn build_policy_view(
     let recent_persona_evidence = platform
         .turn_continuity_evidence_store()
         .recent_persona_evidence(target.scope_id.as_str())?;
+    let subject_persona_evidence = platform
+        .turn_continuity_evidence_store()
+        .recent_subject_persona_evidence(subject_id)?;
     let latest_turn_soul_feedback = platform
         .turn_ledger_store()
         .get(target.scope_id.as_str())?
         .and_then(|ledger| ledger.soul_feedback);
     let inspection = inspect_personality_governance(PersonalityGovernanceInspectionInput {
+        relationship_scope: crate::memory::PersonalityRelationshipScope::Active(&target.scope_id),
         mounted_subject_id: subject_id,
         channel: target.channel.as_str(),
         chat_id: target.chat_id.as_str(),
@@ -724,6 +727,7 @@ fn build_policy_view(
         core_revision_ledger: core_revision_ledger.as_ref(),
         relationship_constitution: relationship_constitution.as_ref(),
         relationship_topology: relationship_topology.as_ref(),
+        subject_persona_evidence: subject_persona_evidence.as_ref(),
         recent_persona_evidence: recent_persona_evidence.as_ref(),
     });
     let gate = derive_personality_runtime_governance_gate_from_inspection(&inspection);

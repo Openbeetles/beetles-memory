@@ -17,7 +17,10 @@ use super::{
 };
 use crate::util::truncate_content_to_max;
 
-pub const SUBJECT_SOUL_SCHEMA_VERSION: u32 = 1;
+mod source_lineage;
+pub use source_lineage::*;
+
+pub const SUBJECT_SOUL_SCHEMA_VERSION: u32 = 2;
 pub const SUBJECT_SOUL_MAX_CLAUSE_CHARS: usize = 220;
 pub const SUBJECT_SOUL_MAX_CLAUSES_PER_FIELD: usize = 16;
 pub const SUBJECT_SOUL_MAX_TOTAL_CHARS: usize = 4_096;
@@ -37,6 +40,8 @@ pub enum SubjectSoulLifecycleErrorKey {
     OperationConflict,
     CapacityExceeded,
     RepairRequired,
+    SourceReviewRequired,
+    RevisionSourceWithdrawn,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -502,13 +507,15 @@ pub struct SubjectSoulRevisionMaterialV1 {
     pub supersedes_revision: Option<u64>,
     pub core: SelfAuthoredCore,
     pub provenance: SubjectSoulRevisionProvenanceV1,
+    pub source_lineage: Vec<SubjectSoulSourceRefV1>,
+    pub source_review_basis: Option<SubjectSoulSourceReviewBasisV1>,
     pub content_digest: String,
 }
 
 impl SubjectSoulRevisionMaterialV1 {
     pub fn refresh_digest(&mut self) -> SubjectSoulContractResult<()> {
         self.content_digest.clear();
-        self.content_digest = canonical_digest("subject_soul_material_v1", self)?;
+        self.content_digest = canonical_digest("subject_soul_material_v2", self)?;
         Ok(())
     }
 
@@ -530,10 +537,33 @@ impl SubjectSoulRevisionMaterialV1 {
             ));
         }
         self.provenance.validate_contract()?;
+        if let Some(basis) = &self.source_review_basis {
+            if basis.epoch == 0
+                || self.provenance.origin == SubjectSoulRevisionOriginV1::HumanFoundingCharter
+            {
+                return Err(SubjectSoulContractError::repair(
+                    "material review basis is invalid",
+                ));
+            }
+            validate_digest(&basis.pending_digest, "material_review_basis")?;
+        }
+        source_lineage::validate_source_lineage(
+            &SubjectSoulOwnerV1 {
+                memory_space_id: self.memory_space_id.clone(),
+                subject_id: self.subject_id.clone(),
+                soul_id: self.soul_id.clone(),
+            },
+            &self.source_lineage,
+        )?;
+        if (self.provenance.origin == SubjectSoulRevisionOriginV1::HumanFoundingCharter)
+            != self.source_lineage.is_empty()
+        {
+            return Err(SubjectSoulContractError::repair("autonomous material requires source lineage; founding uses its HumanUser authority"));
+        }
         validate_digest(&self.content_digest, "content_digest")?;
         let mut canonical = self.clone();
         canonical.content_digest.clear();
-        if canonical_digest("subject_soul_material_v1", &canonical)? != self.content_digest {
+        if canonical_digest("subject_soul_material_v2", &canonical)? != self.content_digest {
             return Err(SubjectSoulContractError::repair("material digest mismatch"));
         }
         Ok(())
@@ -558,11 +588,13 @@ pub struct SubjectSoulScopeManifestEntryV1 {
     pub generation: u64,
     pub revision: Option<u64>,
     pub content_digest: String,
+    pub source_lineage: Vec<SubjectSoulSourceRefV1>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubjectSoulScopeManifestV1 {
+    pub source_review: SubjectSoulSourceReviewStateV1,
     pub schema_version: u32,
     pub memory_space_id: String,
     pub subject_id: String,
@@ -576,7 +608,7 @@ pub struct SubjectSoulScopeManifestV1 {
 impl SubjectSoulScopeManifestV1 {
     pub fn refresh_digest(&mut self) -> SubjectSoulContractResult<()> {
         self.closure_digest.clear();
-        self.closure_digest = canonical_digest("subject_soul_manifest_v1", self)?;
+        self.closure_digest = canonical_digest("subject_soul_manifest_v2", self)?;
         Ok(())
     }
 
@@ -592,8 +624,24 @@ impl SubjectSoulScopeManifestV1 {
                 "manifest generation and revision must be positive",
             ));
         }
+        self.source_review.validate(
+            &SubjectSoulOwnerV1 {
+                memory_space_id: self.memory_space_id.clone(),
+                subject_id: self.subject_id.clone(),
+                soul_id: self.soul_id.clone(),
+            },
+            self.generation,
+        )?;
         let mut previous: Option<(&str, &str)> = None;
         for entry in &self.entries {
+            source_lineage::validate_source_lineage(
+                &SubjectSoulOwnerV1 {
+                    memory_space_id: self.memory_space_id.clone(),
+                    subject_id: self.subject_id.clone(),
+                    soul_id: self.soul_id.clone(),
+                },
+                &entry.source_lineage,
+            )?;
             validate_component(&entry.namespace, "manifest.namespace")?;
             validate_component(&entry.physical_key, "manifest.physical_key")?;
             validate_digest(&entry.content_digest, "manifest.content_digest")?;
@@ -613,7 +661,7 @@ impl SubjectSoulScopeManifestV1 {
         validate_digest(&self.closure_digest, "closure_digest")?;
         let mut canonical = self.clone();
         canonical.closure_digest.clear();
-        if canonical_digest("subject_soul_manifest_v1", &canonical)? != self.closure_digest {
+        if canonical_digest("subject_soul_manifest_v2", &canonical)? != self.closure_digest {
             return Err(SubjectSoulContractError::repair("manifest digest mismatch"));
         }
         Ok(())
@@ -967,6 +1015,7 @@ pub struct SubjectSoulManifestAddressV1 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubjectSoulOwnedDocumentV1 {
+    pub source_lineage: Vec<SubjectSoulSourceRefV1>,
     pub schema_version: u32,
     pub memory_space_id: String,
     pub subject_id: String,
@@ -998,6 +1047,7 @@ impl SubjectSoulOwnedDocumentV1 {
             SubjectSoulContractError::repair("owned Soul document body is not serializable")
         })?;
         let mut document = Self {
+            source_lineage: Vec::new(),
             schema_version: SUBJECT_SOUL_SCHEMA_VERSION,
             memory_space_id: owner.memory_space_id.clone(),
             subject_id: owner.subject_id.clone(),
@@ -1032,6 +1082,14 @@ impl SubjectSoulOwnedDocumentV1 {
                 "owned Soul document generation/revision is invalid",
             ));
         }
+        source_lineage::validate_source_lineage(
+            &SubjectSoulOwnerV1 {
+                memory_space_id: self.memory_space_id.clone(),
+                subject_id: self.subject_id.clone(),
+                soul_id: self.soul_id.clone(),
+            },
+            &self.source_lineage,
+        )?;
         validate_component(&self.namespace, "owned_document.namespace")?;
         validate_component(&self.physical_key, "owned_document.physical_key")?;
         validate_digest(&self.content_digest, "owned_document.content_digest")?;
@@ -1543,17 +1601,19 @@ pub fn subject_soul_self_authored_revision_intent_digest_v1(
     owner: &SubjectSoulOwnerV1,
     expected_state: &SubjectSoulExpectedStateV1,
     refresh_plan: &SelfAuthoredCoreRefreshPlanV1,
+    evidence: &SubjectSoulRevisionEvidenceV1,
 ) -> SubjectSoulContractResult<String> {
     owner.validate_contract()?;
+    evidence.validate(owner)?;
     expected_state.validate_contract()?;
     match expected_state {
         SubjectSoulExpectedStateV1::PristineAbsent { .. } => canonical_digest(
             "subject_soul_self_authored_revision_intent_v1",
-            &(owner, refresh_plan),
+            &(owner, refresh_plan, evidence),
         ),
         SubjectSoulExpectedStateV1::Exact { .. } => canonical_digest(
             "subject_soul_self_authored_revision_intent_v1",
-            &(owner, expected_state, refresh_plan),
+            &(owner, expected_state, refresh_plan, evidence),
         ),
     }
 }
@@ -1562,6 +1622,7 @@ pub fn plan_subject_soul_self_authored_revision_v1(
     owner: &SubjectSoulOwnerV1,
     basis: &SubjectSoulSelfAuthoredRevisionBasisV1,
     refresh_plan: &SelfAuthoredCoreRefreshPlanV1,
+    evidence: &SubjectSoulRevisionEvidenceV1,
     addresses: Option<&SubjectSoulSelfAuthoredPostImageAddressesV1>,
     recorded_at: u64,
 ) -> SubjectSoulContractResult<SubjectSoulSelfAuthoredCommitPlanV1> {
@@ -1572,6 +1633,7 @@ pub fn plan_subject_soul_self_authored_revision_v1(
         ));
     }
     validate_self_authored_revision_basis(owner, basis)?;
+    source_lineage::validate_revision_evidence(owner, basis, evidence, refresh_plan)?;
     if matches!(
         basis,
         SubjectSoulSelfAuthoredRevisionBasisV1::Verified { snapshot }
@@ -1591,8 +1653,12 @@ pub fn plan_subject_soul_self_authored_revision_v1(
     }
 
     let expected_state = self_authored_basis_expected_state(basis);
-    let intent_digest =
-        subject_soul_self_authored_revision_intent_digest_v1(owner, &expected_state, refresh_plan)?;
+    let intent_digest = subject_soul_self_authored_revision_intent_digest_v1(
+        owner,
+        &expected_state,
+        refresh_plan,
+        evidence,
+    )?;
     let empty_ledger = CoreRevisionLedger::default();
     let (observed_core, observed_ledger) = match basis {
         SubjectSoulSelfAuthoredRevisionBasisV1::ImplicitUnseeded { .. } => (None, &empty_ledger),
@@ -1631,6 +1697,7 @@ pub fn plan_subject_soul_self_authored_revision_v1(
             *origin,
             proposal_ref,
             source_refs,
+            evidence,
             addresses,
             expected_state,
             intent_digest,
@@ -1654,6 +1721,7 @@ pub fn plan_subject_soul_self_authored_revision_v1(
             *origin,
             proposal_ref,
             source_refs,
+            evidence,
             addresses,
             expected_state,
             intent_digest,
@@ -1665,6 +1733,7 @@ pub fn plan_subject_soul_self_authored_revision_v1(
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubjectSoulGenerationLayerKindV1 {
+    TurnPersonaEvidence,
     SelfModel,
     SelfContinuity,
     RelationshipPortfolio,
@@ -1683,6 +1752,7 @@ pub enum SubjectSoulGenerationLayerKindV1 {
 impl SubjectSoulGenerationLayerKindV1 {
     pub fn canonical_namespace(self) -> &'static str {
         match self {
+            Self::TurnPersonaEvidence => "soul_turn_persona_evidence",
             Self::SelfModel => "self_model",
             Self::SelfContinuity => "self_continuity",
             Self::RelationshipPortfolio => "relationship_portfolio",
@@ -1705,7 +1775,8 @@ impl SubjectSoulGenerationLayerKindV1 {
             | Self::RelationshipTopology
             | Self::AutonomyStrategy
             | Self::OuterVoice => SubjectSoulManifestOwnerRoleV1::GenerationDerived,
-            Self::SelfModel
+            Self::TurnPersonaEvidence
+            | Self::SelfModel
             | Self::SelfContinuity
             | Self::InnerLife
             | Self::FeltSignificance
@@ -1764,15 +1835,26 @@ pub enum SubjectSoulGenerationLayerBasisV1 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "authority", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SubjectSoulGenerationLayerAuthorityV1 {
-    MountedAgentPersona { actor_subject_id: String },
-    SystemGovernor { actor_subject_id: String },
+    MountedAgentPersona {
+        actor_subject_id: String,
+    },
+    SystemGovernor {
+        actor_subject_id: String,
+    },
+    SourceReviewEvidence {
+        actor_subject_id: String,
+        basis: SubjectSoulSourceReviewBasisV1,
+    },
 }
 
 impl SubjectSoulGenerationLayerAuthorityV1 {
     pub fn actor_subject_id(&self) -> &str {
         match self {
             Self::MountedAgentPersona { actor_subject_id }
-            | Self::SystemGovernor { actor_subject_id } => actor_subject_id,
+            | Self::SystemGovernor { actor_subject_id }
+            | Self::SourceReviewEvidence {
+                actor_subject_id, ..
+            } => actor_subject_id,
         }
     }
 }
@@ -1791,6 +1873,7 @@ pub struct SubjectSoulGenerationLayerIntentV1 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubjectSoulAutonomousCycleIntentV1 {
+    pub evidence: SubjectSoulRevisionEvidenceV1,
     pub operation_id: String,
     pub actor_subject_id: String,
     #[serde(default)]
@@ -1875,6 +1958,7 @@ pub fn plan_subject_soul_autonomous_cycle_v1(
 ) -> SubjectSoulContractResult<SubjectSoulAutonomousCyclePlanV1> {
     owner.validate_contract()?;
     validate_self_authored_revision_basis(owner, basis)?;
+    source_lineage::validate_revision_evidence(owner, basis, &intent.evidence, refresh_plan)?;
     validate_subject_soul_autonomous_cycle_intent(owner, intent)?;
     if recorded_at == 0 {
         return Err(SubjectSoulContractError::repair(
@@ -1910,8 +1994,14 @@ pub fn plan_subject_soul_autonomous_cycle_v1(
         }
         let generation_intent = SubjectSoulGenerationLayerIntentV1 {
             operation_id: intent.operation_id.clone(),
-            authority: SubjectSoulGenerationLayerAuthorityV1::MountedAgentPersona {
-                actor_subject_id: intent.actor_subject_id.clone(),
+            authority: match &intent.evidence.source_review {
+                Some(basis) => SubjectSoulGenerationLayerAuthorityV1::SourceReviewEvidence {
+                    actor_subject_id: intent.actor_subject_id.clone(),
+                    basis: basis.clone(),
+                },
+                None => SubjectSoulGenerationLayerAuthorityV1::MountedAgentPersona {
+                    actor_subject_id: intent.actor_subject_id.clone(),
+                },
             },
             mutations: intent.layer_mutations.clone(),
         };
@@ -1934,6 +2024,7 @@ pub fn plan_subject_soul_autonomous_cycle_v1(
         owner,
         basis,
         refresh_plan,
+        &intent.evidence,
         self_authored_addresses,
         recorded_at,
     )?;
@@ -2004,6 +2095,11 @@ pub fn plan_subject_soul_generation_layer_delta_v1(
             closure_certificate_digest,
         } => {
             validate_digest(closure_certificate_digest, "closure_certificate_digest")?;
+            source_lineage::validate_layer_review_admission(
+                owner,
+                &SubjectSoulSourceReviewStateV1::empty(),
+                intent,
+            )?;
             (
                 SubjectSoulExpectedStateV1::PristineAbsent {
                     closure_certificate_digest: closure_certificate_digest.clone(),
@@ -2025,6 +2121,7 @@ pub fn plan_subject_soul_generation_layer_delta_v1(
                     head_digest: String::new(),
                 },
                 SubjectSoulScopeManifestV1 {
+                    source_review: SubjectSoulSourceReviewStateV1::empty(),
                     schema_version: SUBJECT_SOUL_SCHEMA_VERSION,
                     memory_space_id: owner.memory_space_id.clone(),
                     subject_id: owner.subject_id.clone(),
@@ -2040,6 +2137,11 @@ pub fn plan_subject_soul_generation_layer_delta_v1(
         SubjectSoulGenerationLayerBasisV1::Verified { snapshot } => {
             snapshot.validate_contract()?;
             validate_subject_soul_snapshot_owner(owner, snapshot)?;
+            source_lineage::validate_layer_review_admission(
+                owner,
+                &snapshot.manifest.source_review,
+                intent,
+            )?;
             match snapshot.head.state {
                 SubjectSoulLifecycleStateV1::Unseeded | SubjectSoulLifecycleStateV1::Active => {}
                 SubjectSoulLifecycleStateV1::Archived => {
@@ -2152,6 +2254,7 @@ pub fn plan_subject_soul_generation_layer_delta_v1(
                 }
                 if expected_previous_digest.as_deref() == Some(&document.content_digest) {
                     post_manifest.entries.push(SubjectSoulScopeManifestEntryV1 {
+                        source_lineage: document.source_lineage.clone(),
                         namespace: address.namespace,
                         physical_key: address.physical_key,
                         owner_role: layer.owner_role(),
@@ -2162,6 +2265,7 @@ pub fn plan_subject_soul_generation_layer_delta_v1(
                     continue;
                 }
                 post_manifest.entries.push(SubjectSoulScopeManifestEntryV1 {
+                    source_lineage: document.source_lineage.clone(),
                     namespace: address.namespace,
                     physical_key: address.physical_key,
                     owner_role: layer.owner_role(),
@@ -2246,6 +2350,7 @@ fn validate_subject_soul_autonomous_cycle_intent(
     owner: &SubjectSoulOwnerV1,
     intent: &SubjectSoulAutonomousCycleIntentV1,
 ) -> SubjectSoulContractResult<()> {
+    intent.evidence.validate(owner)?;
     validate_component(&intent.operation_id, "operation_id")?;
     validate_component(&intent.actor_subject_id, "actor_subject_id")?;
     if intent.actor_subject_id != owner.subject_id {
@@ -2462,6 +2567,36 @@ fn apply_autonomous_cycle_layer_mutations(
     let mut upserts = Vec::new();
     let mut deletes = Vec::new();
     for mutation in mutations {
+        if let SubjectSoulGenerationLayerMutationV1::Upsert {
+            layer, document, ..
+        } = mutation
+        {
+            if document.source_lineage.iter().any(|source| {
+                post_manifest
+                    .source_review
+                    .withdrawn_sources
+                    .contains(source)
+            }) {
+                return Err(SubjectSoulContractError {
+                    key: SubjectSoulLifecycleErrorKey::SourceReviewRequired,
+                    reason: "withdrawn sources cannot reenter autonomous layer mutations".into(),
+                });
+            }
+            if post_manifest.source_review.requires_review()
+                && (*layer != SubjectSoulGenerationLayerKindV1::TurnPersonaEvidence
+                    || document.source_lineage.is_empty())
+            {
+                return Err(SubjectSoulContractError {
+                    key: SubjectSoulLifecycleErrorKey::SourceReviewRequired,
+                    reason: "pending review only admits lawful observation evidence".into(),
+                });
+            }
+        } else if post_manifest.source_review.requires_review() {
+            return Err(SubjectSoulContractError {
+                key: SubjectSoulLifecycleErrorKey::SourceReviewRequired,
+                reason: "pending review cannot delete Soul layers".into(),
+            });
+        }
         let (layer, address) = match mutation {
             SubjectSoulGenerationLayerMutationV1::Upsert {
                 layer, document, ..
@@ -2530,10 +2665,12 @@ fn apply_autonomous_cycle_layer_mutations(
                     final_revision,
                     &address,
                     &document.body,
-                )?;
+                )?
+                .with_source_lineage(document.source_lineage.clone())?;
                 let unchanged =
                     expected_previous_digest.as_deref() == Some(rebound.content_digest.as_str());
                 post_manifest.entries.push(SubjectSoulScopeManifestEntryV1 {
+                    source_lineage: document.source_lineage.clone(),
                     namespace: address.namespace,
                     physical_key: address.physical_key,
                     owner_role: layer.owner_role(),
@@ -2594,8 +2731,9 @@ fn validate_generation_layer_intent(
     validate_component(intent.authority.actor_subject_id(), "actor_subject_id")?;
     match &intent.authority {
         SubjectSoulGenerationLayerAuthorityV1::MountedAgentPersona { actor_subject_id }
-            if actor_subject_id != &owner.subject_id =>
-        {
+        | SubjectSoulGenerationLayerAuthorityV1::SourceReviewEvidence {
+            actor_subject_id, ..
+        } if actor_subject_id != &owner.subject_id => {
             return Err(SubjectSoulContractError {
                 key: SubjectSoulLifecycleErrorKey::AuthorityDenied,
                 reason: "mounted AgentPersona layer authority must match the Soul owner"
@@ -2669,8 +2807,25 @@ impl SubjectSoulReadRequestV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "availability", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SubjectSoulSourceReadAvailabilityV1 {
+    Available,
+    SourceReviewPending {
+        basis: SubjectSoulSourceReviewBasisV1,
+    },
+    RevisionSourceWithdrawn,
+}
+
+impl SubjectSoulSourceReadAvailabilityV1 {
+    pub fn permits_content(&self) -> bool {
+        matches!(self, Self::Available)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VerifiedSubjectSoulReadViewV1 {
+    pub source_read_availability: SubjectSoulSourceReadAvailabilityV1,
     pub memory_space_id: String,
     pub subject_id: String,
     pub soul_id: String,
@@ -2723,6 +2878,23 @@ impl VerifiedSubjectSoulReadViewV1 {
             }
         }
         validate_optional_digest(&self.material_digest, "material_digest")?;
+        if !self.source_read_availability.permits_content()
+            && (self.runtime_private_core.is_some() || self.governed_disclosure.is_some())
+        {
+            return Err(SubjectSoulContractError::repair(
+                "unavailable Soul sources cannot expose content",
+            ));
+        }
+        if let SubjectSoulSourceReadAvailabilityV1::SourceReviewPending { basis } =
+            &self.source_read_availability
+        {
+            if basis.epoch == 0 {
+                return Err(SubjectSoulContractError::repair(
+                    "pending read basis requires a positive epoch",
+                ));
+            }
+            validate_digest(&basis.pending_digest, "pending_review_digest")?;
+        }
         match self.requested_view {
             SubjectSoulReadViewV1::OperatorSafe => {
                 if self.runtime_private_core.is_some() || self.governed_disclosure.is_some() {
@@ -2733,6 +2905,7 @@ impl VerifiedSubjectSoulReadViewV1 {
             }
             SubjectSoulReadViewV1::RuntimePrivate => {
                 if self.state == SubjectSoulLifecycleStateV1::Active
+                    && self.source_read_availability.permits_content()
                     && self.runtime_private_core.is_none()
                 {
                     return Err(SubjectSoulContractError::repair(
@@ -3083,6 +3256,7 @@ pub fn validate_subject_soul_post_image(
                 entry.owner_role == SubjectSoulManifestOwnerRoleV1::SubjectGlobal
                     && entry.revision == Some(material.revision)
                     && entry.content_digest == material.content_digest
+                    && entry.source_lineage == material.source_lineage
             });
             let ledger_is_owned = manifest.entries.iter().any(|entry| {
                 entry.owner_role == SubjectSoulManifestOwnerRoleV1::SubjectGlobal
@@ -5268,6 +5442,7 @@ fn subject_soul_manifest_entry(
     content_digest: String,
 ) -> SubjectSoulScopeManifestEntryV1 {
     SubjectSoulScopeManifestEntryV1 {
+        source_lineage: Vec::new(),
         namespace: address.namespace.clone(),
         physical_key: address.physical_key.clone(),
         owner_role: SubjectSoulManifestOwnerRoleV1::SubjectGlobal,
@@ -5349,6 +5524,8 @@ fn build_subject_soul_founding_revision(
         supersedes_revision: None,
         core: core.clone(),
         provenance,
+        source_lineage: Vec::new(),
+        source_review_basis: None,
         content_digest: String::new(),
     };
     material.refresh_digest()?;
@@ -5398,6 +5575,7 @@ fn build_subject_soul_founding_revision(
     ];
     entries.sort();
     let mut manifest = SubjectSoulScopeManifestV1 {
+        source_review: SubjectSoulSourceReviewStateV1::empty(),
         schema_version: SUBJECT_SOUL_SCHEMA_VERSION,
         memory_space_id: owner.memory_space_id.clone(),
         subject_id: owner.subject_id.clone(),
@@ -5497,11 +5675,13 @@ fn plan_subject_soul_reviewed_rejection(
     origin: SubjectSoulRevisionOriginV1,
     proposal_ref: &str,
     source_refs: &[String],
+    evidence: &SubjectSoulRevisionEvidenceV1,
     addresses: Option<&SubjectSoulSelfAuthoredPostImageAddressesV1>,
     expected_state: SubjectSoulExpectedStateV1,
     intent_digest: String,
     recorded_at: u64,
 ) -> SubjectSoulContractResult<SubjectSoulSelfAuthoredCommitPlanV1> {
+    evidence.validate(owner)?;
     let SubjectSoulSelfAuthoredRevisionBasisV1::Verified { snapshot } = basis else {
         return Err(SubjectSoulContractError::repair(
             "unseeded Soul cannot persist a rejected revision without an existing Core",
@@ -5551,7 +5731,8 @@ fn plan_subject_soul_reviewed_rejection(
         Some(current_revision),
         revision_ledger,
         next_ledger,
-    )?;
+    )?
+    .with_source_lineage(source_lineage::ledger_lineage(owner, basis, evidence)?)?;
     let old_address = SubjectSoulManifestAddressV1 {
         namespace: previous_ledger_document.namespace.clone(),
         physical_key: previous_ledger_document.physical_key.clone(),
@@ -5571,6 +5752,13 @@ fn plan_subject_soul_reviewed_rejection(
         current_revision,
         next_document.content_digest.clone(),
     ));
+    for entry in &mut post_manifest.entries {
+        if entry.namespace == revision_ledger.namespace
+            && entry.physical_key == revision_ledger.physical_key
+        {
+            entry.source_lineage = next_document.source_lineage.clone();
+        }
+    }
     post_manifest.entries.sort();
     post_manifest.refresh_digest()?;
     let mut post_head = snapshot.head.clone();
@@ -5612,6 +5800,7 @@ fn plan_subject_soul_adopted_revision(
     origin: SubjectSoulRevisionOriginV1,
     proposal_ref: &str,
     source_refs: &[String],
+    evidence: &SubjectSoulRevisionEvidenceV1,
     addresses: Option<&SubjectSoulSelfAuthoredPostImageAddressesV1>,
     expected_state: SubjectSoulExpectedStateV1,
     intent_digest: String,
@@ -5686,6 +5875,7 @@ fn plan_subject_soul_adopted_revision(
         source_refs: source_refs.to_vec(),
     };
     provenance.validate_contract()?;
+    let lineage = source_lineage::revision_lineage(owner, basis, evidence)?;
     let mut material = SubjectSoulRevisionMaterialV1 {
         schema_version: SUBJECT_SOUL_SCHEMA_VERSION,
         memory_space_id: owner.memory_space_id.clone(),
@@ -5696,6 +5886,8 @@ fn plan_subject_soul_adopted_revision(
         supersedes_revision: previous_revision,
         core: next_core.clone(),
         provenance,
+        source_lineage: lineage.clone(),
+        source_review_basis: evidence.source_review.clone(),
         content_digest: String::new(),
     };
     material.refresh_digest()?;
@@ -5705,14 +5897,17 @@ fn plan_subject_soul_adopted_revision(
         Some(next_revision),
         &revision.core,
         next_core,
-    )?;
+    )?
+    .with_source_lineage(lineage.clone())?;
+    let ledger_lineage = source_lineage::ledger_lineage(owner, basis, evidence)?;
     let ledger_document = SubjectSoulOwnedDocumentV1::new(
         owner,
         generation,
         Some(next_revision),
         &revision.revision_ledger,
         next_ledger,
-    )?;
+    )?
+    .with_source_lineage(ledger_lineage.clone())?;
 
     let (mut post_head, mut post_manifest, mut purge_manifest_addresses) = match basis {
         SubjectSoulSelfAuthoredRevisionBasisV1::ImplicitUnseeded { .. } => (
@@ -5733,6 +5928,7 @@ fn plan_subject_soul_adopted_revision(
                 head_digest: String::new(),
             },
             SubjectSoulScopeManifestV1 {
+                source_review: SubjectSoulSourceReviewStateV1::empty(),
                 schema_version: SUBJECT_SOUL_SCHEMA_VERSION,
                 memory_space_id: owner.memory_space_id.clone(),
                 subject_id: owner.subject_id.clone(),
@@ -5773,6 +5969,11 @@ fn plan_subject_soul_adopted_revision(
             "new immutable material address collides with retained history",
         ));
     }
+    if evidence.source_review.is_some() {
+        // Only an adopted, exact-basis correction reaches this point. Denials
+        // and withdrawn-source commitments are never cleared in this generation.
+        post_manifest.source_review.pending = None;
+    }
     post_manifest.entries.extend([
         subject_soul_manifest_entry(
             &revision.material,
@@ -5793,6 +5994,32 @@ fn plan_subject_soul_adopted_revision(
             ledger_document.content_digest.clone(),
         ),
     ]);
+    for entry in &mut post_manifest.entries {
+        let address = (&entry.namespace, &entry.physical_key);
+        if [
+            (
+                &revision.material.namespace,
+                &revision.material.physical_key,
+            ),
+            (&revision.core.namespace, &revision.core.physical_key),
+            (
+                &revision.revision_ledger.namespace,
+                &revision.revision_ledger.physical_key,
+            ),
+        ]
+        .contains(&address)
+        {
+            entry.source_lineage = if address
+                == (
+                    &revision.revision_ledger.namespace,
+                    &revision.revision_ledger.physical_key,
+                ) {
+                ledger_lineage.clone()
+            } else {
+                lineage.clone()
+            };
+        }
+    }
     post_manifest.entries.sort();
     post_manifest.refresh_digest()?;
     post_head.state = SubjectSoulLifecycleStateV1::Active;
@@ -6063,6 +6290,15 @@ fn validate_subject_soul_snapshot_documents(
                         "verified snapshot is missing revision-ledger envelope",
                     )
                 })?;
+            if snapshot
+                .current_material
+                .as_ref()
+                .is_none_or(|material| material.source_lineage != core_document.source_lineage)
+            {
+                return Err(SubjectSoulContractError::repair(
+                    "current Core envelope must retain the exact material source lineage",
+                ));
+            }
             for document in [core_document, ledger_document] {
                 document.validate_contract()?;
                 if document.memory_space_id != snapshot.head.memory_space_id
@@ -6217,6 +6453,7 @@ fn empty_subject_soul_manifest(
     manifest_revision: u64,
 ) -> SubjectSoulContractResult<SubjectSoulScopeManifestV1> {
     let mut manifest = SubjectSoulScopeManifestV1 {
+        source_review: SubjectSoulSourceReviewStateV1::empty(),
         schema_version: SUBJECT_SOUL_SCHEMA_VERSION,
         memory_space_id: owner.memory_space_id.clone(),
         subject_id: owner.subject_id.clone(),
@@ -6330,6 +6567,7 @@ fn update_subject_soul_projection_manifest(
     });
     if let Some(projection) = projection {
         manifest.entries.push(SubjectSoulScopeManifestEntryV1 {
+            source_lineage: Vec::new(),
             namespace: address.namespace.clone(),
             physical_key: address.physical_key.clone(),
             owner_role: SubjectSoulManifestOwnerRoleV1::RelationshipProjection,

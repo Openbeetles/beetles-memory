@@ -86,7 +86,7 @@ fn real_http_socket_finalize_queues_then_reports_durable_configuration_block() {
             },
             "external_content_used": false
         },
-        "learning": bm_sdk::PostTurnLearningInputV2::empty()
+        "learning": bm_sdk::PostTurnLearningInputV3::empty()
     })
     .to_string();
     let response = serve_memory_request(
@@ -180,7 +180,7 @@ fn remote_runtime_with_maintenance(
 fn pfi2_finalize_body(runtime: &EntryRuntime, id: &str, feedback: bool) -> serde_json::Value {
     use bm_sdk::*;
     let memory = runtime.runtime();
-    let mut learning = PostTurnLearningInputV2::empty();
+    let mut learning = PostTurnLearningInputV3::empty();
     let mut observations = Vec::new();
     if feedback {
         let now = memory.config().clock.now_secs();
@@ -272,6 +272,7 @@ fn pfi2_real_http_body_and_bearer_cannot_mint_procedural_submission_authority() 
             expected_revision: None,
             state: ProceduralProducerStateV1::Active,
             spec: ProceduralProducerSpecV1 {
+                method_evaluators: Vec::new(),
                 binding_id: "http-executor".into(),
                 scope: ProceduralProducerScopeV1 {
                     memory_space_id: runtime.runtime().memory_space_id().into(),
@@ -285,6 +286,9 @@ fn pfi2_real_http_body_and_bearer_cannot_mint_procedural_submission_authority() 
                 },
                 source_authority: ProceduralProducerSourceAuthorityV1::RuntimeObservation,
                 claims: ProceduralProducerClaimsV1 {
+                    method_learning_materials: false,
+                    method_adoptions: false,
+                    method_task_evaluations: false,
                     execution_facts: true,
                     method_declarations: true,
                     usage_feedback: false,

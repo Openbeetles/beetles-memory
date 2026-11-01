@@ -20,8 +20,8 @@ use super::{
     AutonomyStrategy, CoreRevisionActionKind, CoreRevisionConflictClass,
     CoreRevisionCorrectionKind, CoreRevisionGovernanceDigest, CoreRevisionLedger,
     CoreRevisionOutcome, CoreRevisionRecord, CoreRevisionRecordChange, MentalPrivacyState,
-    RecentPersonaEvidence, RelationshipPortfolio, RelationshipTopology, SelfContinuity, SelfModel,
-    SubjectSoulRevisionOriginV1, WorldSense,
+    PersonalityRelationshipScope, RecentPersonaEvidence, RelationshipPortfolio,
+    RelationshipTopology, SelfContinuity, SelfModel, SubjectSoulRevisionOriginV1, WorldSense,
 };
 
 pub const SELF_AUTHORED_CORE_SYSTEM_PROMPT: &str = "You maintain the assistant's persistent self-authored core for the whole board-level subject, not one chat. Return JSON only with fields board_scope_decision, rationale, evidence_summary, counterevidence, proposed_actions. board_scope_decision must be revise_board, relation_local, or no_change. proposed_actions must be an array of compact action objects. Allowed action kinds are revise_identity_anchor, add_non_negotiables, remove_non_negotiables, revise_priority_constitution, revise_default_response_mode, revise_default_task_scope, revise_default_initiative_posture, revise_default_relationship_posture, revise_boundary_doctrine, revise_truth_doctrine, revise_self_preservation_doctrine, revise_repair_doctrine, revise_change_protocol. This is a constitutional revision pass, not a free rewrite. Propose only stable board-level changes that deserve cross-chat carry-forward. Use self_model, self_continuity, boundary state, relationship portfolio, relationship topology, and recent multi-turn persona evidence as grounding. Treat recent persona evidence as evidence, never automatic promotion authority. Operational traces such as task scope, response mode, pressure, tool usage, or reply scope are not sufficient constitutional revision grounds by themselves. A quarantined, cooled-down, or otherwise isolated relation must not directly rewrite the board-level core. If the latest material should stay relation-local, set board_scope_decision=relation_local. If no constitutional change is warranted, set board_scope_decision=no_change. Do not copy transcripts, raw tool payloads, long quotes, or private documents.";
@@ -36,7 +36,7 @@ const SELF_AUTHORED_CORE_MAX_CANDIDATE_ACTIONS: usize = 10;
 pub const SELF_AUTHORED_CORE_TOTAL_CHAR_LIMIT: usize =
     (SELF_AUTHORED_CORE_TEXT_MAX_CHARS * 6) + (SELF_AUTHORED_CORE_SHORT_TEXT_MAX_CHARS * 4) + 420;
 const SELF_AUTHORED_CORE_MIN_EVIDENCE_TURNS: usize = 4;
-const SELF_AUTHORED_CORE_MIN_STABLE_SIGNALS: usize = 2;
+const SELF_AUTHORED_CORE_MIN_STABLE_SIGNALS: usize = 1;
 const SELF_AUTHORED_CORE_VOLATILITY_GRACE_TURNS: usize = 8;
 const SELF_AUTHORED_CORE_MAX_VOLATILITY_WITHOUT_GRACE: usize = 2;
 
@@ -417,7 +417,7 @@ pub fn plan_self_authored_core_refresh_with_state(
     self_continuity: Option<&SelfContinuity>,
     mental_privacy_state: Option<&MentalPrivacyState>,
     relationship_portfolio: Option<&RelationshipPortfolio>,
-    current_relationship_scope_id: &str,
+    relationship_scope: PersonalityRelationshipScope<'_>,
     recent_persona_evidence: Option<&RecentPersonaEvidence>,
     relationship_topology: Option<&RelationshipTopology>,
     world_sense: Option<&WorldSense>,
@@ -426,6 +426,20 @@ pub fn plan_self_authored_core_refresh_with_state(
     distillation_intent: Option<&str>,
     distillation_sources: &[String],
 ) -> Result<SelfAuthoredCoreRefreshPlanV1> {
+    let current_relationship_scope_id = match relationship_scope {
+        PersonalityRelationshipScope::SubjectOnly => "",
+        PersonalityRelationshipScope::Active(id)
+            if !id.is_empty() && id.trim() == id && !id.chars().any(char::is_control) =>
+        {
+            id
+        }
+        _ => {
+            return Err(crate::Error::invalid_input(
+                "self_authored_core",
+                "relationship applicability is unverified",
+            ))
+        }
+    };
     let revision_ledger = existing_revision_ledger
         .is_meaningful()
         .then_some(&existing_revision_ledger);
@@ -528,7 +542,7 @@ pub fn plan_self_authored_core_refresh_with_state(
         self_continuity,
         mental_privacy_state,
         relationship_portfolio,
-        current_relationship_scope_id,
+        relationship_scope,
         recent_persona_evidence,
         relationship_topology,
         &governance,
@@ -1289,7 +1303,13 @@ fn merge_revision_evidence(
 }
 
 fn build_recent_persona_evidence_summary(evidence: &RecentPersonaEvidence) -> Vec<String> {
-    let mut summary = Vec::with_capacity(3);
+    let mut summary = Vec::with_capacity(4);
+    if !evidence.repeated_value_orientation.trim().is_empty() {
+        summary.push(format!(
+            "value_orientation={}",
+            evidence.repeated_value_orientation.trim()
+        ));
+    }
     if !evidence.repeated_priority_order.is_empty() {
         summary.push(format!(
             "priority={}",
@@ -1308,7 +1328,7 @@ fn build_recent_persona_evidence_summary(evidence: &RecentPersonaEvidence) -> Ve
             evidence.repeated_disclosure_action.trim()
         ));
     }
-    normalize_short_list(summary, 3, SELF_AUTHORED_CORE_TEXT_MAX_CHARS)
+    normalize_short_list(summary, 4, SELF_AUTHORED_CORE_TEXT_MAX_CHARS)
 }
 
 fn rejected_changes_to_records(
@@ -1821,11 +1841,19 @@ fn evaluate_self_authored_core_revision_gate(
     self_continuity: Option<&SelfContinuity>,
     mental_privacy_state: Option<&MentalPrivacyState>,
     relationship_portfolio: Option<&RelationshipPortfolio>,
-    current_relationship_scope_id: &str,
+    relationship_scope: PersonalityRelationshipScope<'_>,
     recent_persona_evidence: Option<&RecentPersonaEvidence>,
     relationship_topology: Option<&RelationshipTopology>,
     governance: &CoreRevisionGovernanceDigest,
 ) -> SelfAuthoredCoreRevisionGate {
+    if matches!(relationship_scope, PersonalityRelationshipScope::Unverified)
+        || matches!(relationship_scope, PersonalityRelationshipScope::Active(id) if id.is_empty() || id.trim() != id || id.chars().any(char::is_control))
+    {
+        return SelfAuthoredCoreRevisionGate {
+            allowed: false,
+            reason: "unverified_relationship_scope",
+        };
+    }
     if existing_core.is_none() {
         let bootstrap = derive_self_authored_core_from_layers(
             self_model,
@@ -1855,18 +1883,31 @@ fn evaluate_self_authored_core_revision_gate(
             reason: "missing_recent_persona_evidence",
         };
     };
-    let Some(portfolio_entry) = relationship_portfolio
-        .and_then(|portfolio| portfolio.entry_for_scope(current_relationship_scope_id))
-    else {
+    if evidence.counterevidence_turns > 0 {
         return SelfAuthoredCoreRevisionGate {
             allowed: false,
-            reason: "missing_relationship_portfolio_entry",
+            reason: "unresolved_persona_counterevidence",
         };
-    };
-    if !portfolio_entry.permits_board_level_promotion() {
+    }
+    if let PersonalityRelationshipScope::Active(id) = relationship_scope {
+        let Some(portfolio_entry) =
+            relationship_portfolio.and_then(|portfolio| portfolio.entry_for_scope(id))
+        else {
+            return SelfAuthoredCoreRevisionGate {
+                allowed: false,
+                reason: "missing_relationship_portfolio_entry",
+            };
+        };
+        if !portfolio_entry.permits_board_level_promotion() {
+            return SelfAuthoredCoreRevisionGate {
+                allowed: false,
+                reason: "relationship_portfolio_blocks_promotion",
+            };
+        }
+    } else if !evidence.repeated_relationship_posture.is_empty() {
         return SelfAuthoredCoreRevisionGate {
             allowed: false,
-            reason: "relationship_portfolio_blocks_promotion",
+            reason: "relationship_evidence_in_subject_scope",
         };
     }
     if evidence.meaningful_turns < SELF_AUTHORED_CORE_MIN_EVIDENCE_TURNS && !scheduled_review {
@@ -2296,7 +2337,7 @@ mod tests {
                 }],
                 updated_at: 120,
             }),
-            "rel:qq:c1",
+            PersonalityRelationshipScope::Active("rel:qq:c1"),
             Some(&RecentPersonaEvidence {
                 meaningful_turns: 6,
                 repeated_priority_order: default_priority_constitution(),
@@ -2398,7 +2439,7 @@ mod tests {
             None,
             None,
             None,
-            "relationship:none",
+            PersonalityRelationshipScope::SubjectOnly,
             None,
             None,
             None,
@@ -2459,7 +2500,7 @@ mod tests {
             None,
             None,
             None,
-            "relationship:none",
+            PersonalityRelationshipScope::SubjectOnly,
             None,
             None,
             None,
@@ -2600,7 +2641,7 @@ mod tests {
                 }],
                 updated_at: 120,
             }),
-            "rel:qq:c1",
+            PersonalityRelationshipScope::Active("rel:qq:c1"),
             Some(&RecentPersonaEvidence {
                 meaningful_turns: 6,
                 repeated_priority_order: default_priority_constitution(),
@@ -2682,7 +2723,7 @@ mod tests {
                 }],
                 updated_at: 60,
             }),
-            "rel:qq:c1",
+            PersonalityRelationshipScope::Active("rel:qq:c1"),
             Some(&RecentPersonaEvidence {
                 meaningful_turns: 2,
                 repeated_priority_order: vec!["self_authored_core".to_string()],
@@ -2703,6 +2744,58 @@ mod tests {
         );
         assert!(!gate.allowed);
         assert_eq!(gate.reason, "insufficient_meaningful_turns");
+    }
+
+    #[test]
+    fn subject_only_revision_uses_subject_evidence_without_inventing_a_relationship() {
+        let core = SelfAuthoredCore {
+            revision: 1,
+            identity_anchor: "continuous subject".into(),
+            updated_at: 10,
+            ..Default::default()
+        };
+        let mut evidence = RecentPersonaEvidence {
+            meaningful_turns: 6,
+            sampled_turns: 6,
+            repeated_value_orientation: "truth_before_comfort".into(),
+            updated_at: 60,
+            ..Default::default()
+        };
+        let governance = CoreRevisionGovernanceDigest::default();
+        let evaluate = |scope, evidence: &RecentPersonaEvidence| {
+            evaluate_self_authored_core_revision_gate(
+                Some(&core),
+                None,
+                None,
+                None,
+                None,
+                scope,
+                Some(evidence),
+                None,
+                &governance,
+            )
+        };
+        assert!(evaluate(PersonalityRelationshipScope::SubjectOnly, &evidence).allowed);
+        assert!(!evaluate(PersonalityRelationshipScope::Unverified, &evidence).allowed);
+        assert_eq!(
+            evaluate(
+                PersonalityRelationshipScope::Active("relation-a"),
+                &evidence
+            )
+            .reason,
+            "missing_relationship_portfolio_entry"
+        );
+        evidence.counterevidence_turns = 1;
+        assert_eq!(
+            evaluate(PersonalityRelationshipScope::SubjectOnly, &evidence).reason,
+            "unresolved_persona_counterevidence"
+        );
+        evidence.counterevidence_turns = 0;
+        evidence.repeated_relationship_posture = "relation-local".into();
+        assert_eq!(
+            evaluate(PersonalityRelationshipScope::SubjectOnly, &evidence).reason,
+            "relationship_evidence_in_subject_scope"
+        );
     }
 
     #[test]
@@ -2742,7 +2835,7 @@ mod tests {
                 }],
                 updated_at: 60,
             }),
-            "rel:qq:c1",
+            PersonalityRelationshipScope::Active("rel:qq:c1"),
             Some(&RecentPersonaEvidence {
                 meaningful_turns: 8,
                 repeated_response_mode: "protective_brief".to_string(),
@@ -2808,7 +2901,7 @@ mod tests {
                 }],
                 updated_at: 80,
             }),
-            "rel:qq:c1",
+            PersonalityRelationshipScope::Active("rel:qq:c1"),
             None,
             Some(&RelationshipTopology {
                 entries: vec![RelationshipTopologyEntry {

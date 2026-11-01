@@ -24,7 +24,6 @@ pub(crate) struct SubjectShell {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SubjectShellCompileInput<'a> {
-    pub(crate) now_secs: u64,
     pub(crate) platform: &'a str,
     pub(crate) device_identity: &'a str,
     pub(crate) relationship_scope: &'a str,
@@ -50,7 +49,6 @@ pub(crate) struct SubjectShellCompileInput<'a> {
 impl Default for SubjectShellCompileInput<'_> {
     fn default() -> Self {
         Self {
-            now_secs: 0,
             platform: "",
             device_identity: "",
             relationship_scope: "",
@@ -215,7 +213,6 @@ fn compile_relationship_position(
 
 fn compile_situated_now(input: &SubjectShellCompileInput<'_>) -> String {
     let mut parts = Vec::new();
-    parts.push(format!("now={}", input.now_secs));
     if !input.channel.trim().is_empty() {
         parts.push(format!("channel={}", input.channel.trim()));
     }
@@ -375,7 +372,6 @@ mod tests {
     #[test]
     fn grounded_shell_includes_body_memory_and_relationship() {
         let shell = compile_subject_shell(SubjectShellCompileInput {
-            now_secs: 42,
             platform: "Linux",
             device_identity: "beetle-linux-dev",
             relationship_scope: "chat_channel:chat-grounded",
@@ -411,7 +407,8 @@ mod tests {
             .memory_ownership
             .contains("wake as the same board subject"));
         assert!(shell.relationship_position.contains("maintain/adaptive"));
-        assert!(shell.situated_now.contains("now=42"));
+        assert!(!shell.situated_now.contains("now="));
+        assert!(shell.situated_now.contains("channel="));
         assert!(shell
             .current_reasoning_basis
             .contains("recalled exact plan constraints"));
@@ -423,7 +420,6 @@ mod tests {
     #[test]
     fn world_and_scope_inputs_influence_shell_projection() {
         let shell = compile_subject_shell(SubjectShellCompileInput {
-            now_secs: 42,
             platform: "Linux",
             device_identity: "beetle-linux-dev",
             relationship_scope: "chat_channel:chat-world",
@@ -467,7 +463,6 @@ mod tests {
     #[test]
     fn complete_source_coverage_omits_source_notes() {
         let shell = compile_subject_shell(SubjectShellCompileInput {
-            now_secs: 42,
             platform: "Linux",
             device_identity: "",
             relationship_scope: "chat_channel:chat-complete",
@@ -502,7 +497,6 @@ mod tests {
     #[test]
     fn platform_only_runtime_context_does_not_emit_pseudo_device_identity() {
         let shell = compile_subject_shell(SubjectShellCompileInput {
-            now_secs: 42,
             platform: "Linux",
             device_identity: "",
             relationship_scope: "chat_channel:chat-platform",

@@ -88,6 +88,7 @@ pub use snapshot::{StoreSnapshot, StoreSnapshotJsonDoc};
 pub use snapshot::{StoreSnapshotExportReport, StoreSnapshotImportReport};
 #[cfg(all(feature = "sqlite-store", feature = "nonproduction-replay-harness"))]
 pub use sqlite::SqliteStoreEngine;
+pub(crate) use transaction::merge_json_preconditions;
 pub(crate) use transaction::StoreReadReceipt;
 pub(crate) use transaction::{
     scoped_projection_json_addresses, GraphRepairAuthority, StoreGovernedEvidenceExactReadRequest,

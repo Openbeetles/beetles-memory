@@ -52,6 +52,158 @@ pub(crate) fn source_address(space: &str, owner: &GovernedMemoryOwnerRef) -> Res
     }
 }
 
+fn method_edges(
+    material: &AgentToolExperienceRevisionMaterialV4,
+) -> Result<Vec<bm_core::memory::ProceduralMethodSourceDependentV1>> {
+    if !material.validate_contract().accepted {
+        return Err(repair());
+    }
+    let mut edges = Vec::new();
+    for source in material
+        .body
+        .method_sources()
+        .iter()
+        .filter_map(|source| source.governance_extraction())
+    {
+        for reference in &source.materials {
+            let bm_core::memory::MethodLearningMaterialSourceV1::GovernedRevision {
+                revision, ..
+            } = &reference.source
+            else {
+                continue;
+            };
+            let edge = bm_core::memory::ProceduralMethodSourceDependentV1 {
+                scope: ProceduralSubjectScopeV1 {
+                    memory_space_id: material.memory_space_id.clone(),
+                    mounted_subject_id: material.owning_scope.mounted_subject_id().into(),
+                },
+                owner_revision: material.owner_revision_ref(),
+                content_digest: material.content_digest.clone(),
+                source_job_id: source.source_job_id.clone(),
+                source_revision: revision.clone(),
+            };
+            if !edges
+                .iter()
+                .any(|old: &bm_core::memory::ProceduralMethodSourceDependentV1| {
+                    old.same_identity(&edge)
+                })
+            {
+                edges.push(edge);
+            }
+        }
+    }
+    Ok(edges)
+}
+
+fn method_head_address(
+    edge: &bm_core::memory::ProceduralMethodSourceDependentV1,
+) -> Result<Address> {
+    Ok((
+        AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE.into(),
+        bm_core::skills::agent_tool_experience_head_key(
+            &edge.scope.memory_space_id,
+            &bm_core::skills::AgentToolExperienceOwningScopeV1::Subject {
+                mounted_subject_id: edge.scope.mounted_subject_id.clone(),
+            },
+            &edge.owner_revision.owner_ref,
+        )?,
+    ))
+}
+
+/// Validates the retained producing commitment before following a cross-subject
+/// edge. A tombstone retains only the commitment and never reloads old raw text.
+fn verify_method_dependent(
+    edge: &bm_core::memory::ProceduralMethodSourceDependentV1,
+    mut read: impl FnMut(&str, &str) -> Result<Option<serde_json::Value>>,
+) -> Result<()> {
+    let (ns, key) = method_head_address(edge)?;
+    let head: AgentToolExperienceOwnerHeadV3 = parse(read(&ns, &key)?.ok_or_else(repair)?)?;
+    if !head.validate_contract().accepted
+        || head.memory_space_id != edge.scope.memory_space_id
+        || head.owning_scope.mounted_subject_id() != edge.scope.mounted_subject_id
+        || head.owner_ref != edge.owner_revision.owner_ref
+    {
+        return Err(repair());
+    }
+    let retained = head
+        .retained_revisions
+        .iter()
+        .find(|reference| {
+            reference.owner_revision == edge.owner_revision.owner_revision
+                && reference.content_digest == edge.content_digest
+        })
+        .ok_or_else(repair)?;
+    if head.state == bm_core::skills::AgentToolExperienceHeadStateV3::Tombstoned {
+        return Ok(());
+    }
+    let material: AgentToolExperienceRevisionMaterialV4 = parse(
+        read(
+            AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE,
+            &retained.material_key,
+        )?
+        .ok_or_else(repair)?,
+    )?;
+    if material.content_digest != edge.content_digest
+        || material.owner_revision_ref() != edge.owner_revision
+        || !method_edges(&material)?.iter().any(|actual| actual == edge)
+    {
+        return Err(repair());
+    }
+    Ok(())
+}
+
+fn completed_semantic_jobs(mutations: &[StoreMutation]) -> Result<BTreeSet<String>> {
+    let mut jobs = BTreeSet::new();
+    for mutation in mutations {
+        if let StoreMutation::PutJson {
+            namespace, value, ..
+        } = mutation
+        {
+            if namespace == bm_core::memory::POST_TURN_GOVERNANCE_JOB_NAMESPACE {
+                let job: PostTurnGovernanceJobV4 = parse(value.clone())?;
+                job.validate()?;
+                if job.status == bm_core::memory::PostTurnGovernanceJobStatusV2::Succeeded {
+                    jobs.insert(job.job_id);
+                }
+            }
+        }
+    }
+    Ok(jobs)
+}
+
+fn bind_material_edges(
+    root: &Root,
+    edges: &[bm_core::memory::ProceduralMethodSourceDependentV1],
+    completed: &BTreeSet<String>,
+) -> Result<Root> {
+    let mut next = root.clone();
+    for edge in edges.iter().filter(|edge| {
+        edge.scope.memory_space_id == root.memory_space_id
+            && edge.source_revision.owner_ref == root.owner_ref
+    }) {
+        if next
+            .method_dependents
+            .iter()
+            .any(|old| old.same_identity(edge))
+        {
+            continue;
+        }
+        // Reconciliation/copy may reuse proven origins but cannot originate one.
+        if !completed.contains(&edge.source_job_id) {
+            return Err(repair());
+        }
+        if next.dependents.len() + next.method_dependents.len()
+            >= bm_core::memory::MAX_PROCEDURAL_SOURCE_DEPENDENTS
+        {
+            return Err(crate::store_internal::store_budget_error(
+                "source dependent retention capacity is exhausted",
+            ));
+        }
+        next = next.bind_method(edge.clone())?;
+    }
+    Ok(next)
+}
+
 /// One resolver for planning, locked post-image and Store-open. A terminal head
 /// is not absence: its retained exact material and real control binding remain.
 fn source_image(
@@ -285,7 +437,7 @@ pub(crate) fn append(
     if !batch.mutations.iter().any(|mutation| {
         matches!(mutation,
         StoreMutation::PutJson { namespace, .. } | StoreMutation::DeleteJson { namespace, .. }
-        if matches!(namespace.as_str(), LT_HEAD | DOCUMENT | PRODUCER))
+        if matches!(namespace.as_str(), LT_HEAD | DOCUMENT | PRODUCER | AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE))
     }) {
         return Ok(());
     }
@@ -300,6 +452,8 @@ pub(crate) fn append(
     };
     let mut sources = BTreeSet::new();
     let mut producers = Vec::new();
+    let completed = completed_semantic_jobs(&batch.mutations)?;
+    let mut methods = Vec::new();
     for mutation in &batch.mutations {
         match mutation {
             StoreMutation::PutJson {
@@ -307,6 +461,16 @@ pub(crate) fn append(
             } => {
                 if let Some(identity) = owner_identity(namespace, value)? {
                     sources.insert(identity);
+                }
+                if namespace == AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE {
+                    let material: AgentToolExperienceRevisionMaterialV4 = parse(value.clone())?;
+                    for edge in method_edges(&material)? {
+                        sources.insert((
+                            edge.scope.memory_space_id.clone(),
+                            edge.source_revision.owner_ref.clone(),
+                        ));
+                        methods.push(edge);
+                    }
                 }
                 if namespace == PRODUCER {
                     let producer: ProceduralProducerBindingV1 = parse(value.clone())?;
@@ -377,7 +541,8 @@ pub(crate) fn append(
             if matches!(&producer.spec.source_authority, ProceduralProducerSourceAuthorityV1::GovernedSource { source_revision } if source_revision.owner_ref == owner)
                 && producer.spec.scope.memory_space_id == space
             {
-                if root.dependents.len() >= bm_core::memory::MAX_PROCEDURAL_SOURCE_DEPENDENTS
+                if root.dependents.len() + root.method_dependents.len()
+                    >= bm_core::memory::MAX_PROCEDURAL_SOURCE_DEPENDENTS
                     && !root.dependents.iter().any(|item| {
                         producer
                             .spec
@@ -392,6 +557,7 @@ pub(crate) fn append(
                 root = root.bind(producer)?;
             }
         }
+        root = bind_material_edges(&root, &methods, &completed)?;
         if before != after && before.is_some() {
             let change = ProceduralSourceTransitionV1 {
                 owner_ref: owner,
@@ -399,10 +565,9 @@ pub(crate) fn append(
                 after: after.unwrap_or(Image::Deleted),
             };
             let subjects = root
-                .dependents
-                .iter()
-                .map(|item| (space.clone(), item.scope.mounted_subject_id.clone()))
-                .collect::<BTreeSet<_>>();
+                .dependent_subjects()
+                .into_iter()
+                .map(|subject| (space.clone(), subject));
             for subject in subjects {
                 affected.entry(subject).or_default().push(change.clone());
             }
@@ -604,11 +769,27 @@ pub(crate) fn dependencies(
                 ));
             }
             if expand_dependents {
+                for edge in &root.method_dependents {
+                    addresses.push(method_head_address(edge)?);
+                    addresses.push((
+                        PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE.into(),
+                        edge.scope.root_key()?,
+                    ));
+                }
                 addresses.extend(
                     root.dependents
                         .iter()
                         .map(|item| (HEAD.into(), item.binding_key.clone())),
                 );
+            }
+        }
+        AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE => {
+            let material: AgentToolExperienceRevisionMaterialV4 = parse(value.clone())?;
+            for edge in method_edges(&material)? {
+                addresses.push((
+                    ROOT.into(),
+                    Root::key(&edge.scope.memory_space_id, &edge.source_revision.owner_ref)?,
+                ));
             }
         }
         PRODUCER => {
@@ -642,7 +823,13 @@ pub(crate) fn dependencies(
 pub(crate) fn relevant(namespace: &str) -> bool {
     matches!(
         namespace,
-        ROOT | PRODUCER | LT_HEAD | LT_MATERIAL | LT_SCOPE | DOCUMENT | CONTROL
+        ROOT | PRODUCER
+            | LT_HEAD
+            | LT_MATERIAL
+            | LT_SCOPE
+            | DOCUMENT
+            | CONTROL
+            | AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE
     )
 }
 
@@ -770,6 +957,9 @@ impl SourceDependencyReadProof {
                         super::validate_producer_operation_proof(&producer, &receipt, &audit)?;
                     }
                 }
+                for edge in &root.method_dependents {
+                    verify_method_dependent(edge, |ns, key| plan.before(ns, key))?;
+                }
                 let known = plan
                     .observed
                     .iter()
@@ -812,7 +1002,23 @@ impl SourceDependencyReadProof {
             };
             for next in node.addresses {
                 let expected = if let Some(root) = &source_root {
-                    if next.0 == HEAD {
+                    if next.0 == PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE {
+                        let dependent = root
+                            .method_dependents
+                            .iter()
+                            .find(|edge| edge.scope.root_key().is_ok_and(|key| key == next.1))
+                            .ok_or_else(repair)?;
+                        Some(dependent.scope.clone())
+                    } else if next.0 == AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE {
+                        let dependent = root
+                            .method_dependents
+                            .iter()
+                            .find(|edge| {
+                                method_head_address(edge).is_ok_and(|address| address == next)
+                            })
+                            .ok_or_else(repair)?;
+                        Some(dependent.scope.clone())
+                    } else if next.0 == HEAD {
                         let dependent = root
                             .dependents
                             .iter()
@@ -957,6 +1163,11 @@ impl SourceValidationScope<'_> {
 }
 
 fn validate_root_dependents(root: &Root, json: &Json) -> Result<()> {
+    for edge in &root.method_dependents {
+        verify_method_dependent(edge, |ns, key| {
+            Ok(json.get(&(ns.into(), key.into())).cloned())
+        })?;
+    }
     for dependent in &root.dependents {
         let head: bm_core::memory::ProceduralProducerHeadV1 = parse(
             json.get(&(HEAD.into(), dependent.binding_key.clone()))
@@ -1057,6 +1268,23 @@ pub(crate) fn validate_image(json: &Json, scope: SourceValidationScope<'_>) -> R
                     validate_root_dependents(&root, json)?;
                 }
             }
+            AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE => {
+                let material: AgentToolExperienceRevisionMaterialV4 = parse(value.clone())?;
+                for edge in method_edges(&material)? {
+                    let root = root_in(
+                        json,
+                        &edge.scope.memory_space_id,
+                        &edge.source_revision.owner_ref,
+                    )?;
+                    if !root.method_dependents.iter().any(|existing| {
+                        existing.same_identity(&edge)
+                            && existing.owner_revision.owner_revision
+                                <= edge.owner_revision.owner_revision
+                    }) {
+                        return Err(repair());
+                    }
+                }
+            }
             PRODUCER => {
                 let producer: ProceduralProducerBindingV1 = parse(value.clone())?;
                 if let ProceduralProducerSourceAuthorityV1::GovernedSource { source_revision } =
@@ -1119,6 +1347,24 @@ pub(crate) fn validate_transition(
         return Err(repair());
     }
     let operation = operations.first().map(|receipt| receipt.identity.clone());
+    let mut methods = Vec::new();
+    let mut completed = BTreeSet::new();
+    for (namespace, key) in &changed {
+        let Some(value) = after.json.get(&(namespace.clone(), key.clone())) else {
+            continue;
+        };
+        if namespace == AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE {
+            methods.extend(method_edges(&parse::<
+                AgentToolExperienceRevisionMaterialV4,
+            >(value.clone())?)?);
+        } else if namespace == bm_core::memory::POST_TURN_GOVERNANCE_JOB_NAMESPACE {
+            let job: PostTurnGovernanceJobV4 = parse(value.clone())?;
+            job.validate()?;
+            if job.status == bm_core::memory::PostTurnGovernanceJobStatusV2::Succeeded {
+                completed.insert(job.job_id);
+            }
+        }
+    }
     let mut affected: BTreeMap<(String, String), Vec<ProceduralSourceTransitionV1>> =
         BTreeMap::new();
     for (namespace, key) in &changed {
@@ -1194,6 +1440,7 @@ pub(crate) fn validate_transition(
                 expected = expected.bind(&producer)?;
             }
         }
+        expected = bind_material_edges(&expected, &methods, &completed)?;
         if expected != next
             || !conditions.iter().any(|condition| {
                 match (
@@ -1227,12 +1474,7 @@ pub(crate) fn validate_transition(
                 before: actual_before.ok_or_else(repair)?,
                 after: actual_after.unwrap_or(Image::Deleted),
             };
-            for subject in next
-                .dependents
-                .iter()
-                .map(|item| item.scope.mounted_subject_id.clone())
-                .collect::<BTreeSet<_>>()
-            {
+            for subject in next.dependent_subjects() {
                 affected
                     .entry((next.memory_space_id.clone(), subject))
                     .or_default()
@@ -1298,4 +1540,68 @@ pub(crate) fn validate_transition(
         fences.insert(key);
     }
     Ok(fences)
+}
+
+#[cfg(test)]
+mod method_dependency_tests {
+    use super::*;
+
+    #[test]
+    fn semantic_method_material_cannot_bypass_source_dependency_admission() {
+        let malformed = serde_json::json!({"body": {"kind": "method", "sources": []}});
+        assert!(
+            dependencies(AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE, &malformed, false).is_err(),
+            "method material must enter typed source dependency admission, not be ignored"
+        );
+    }
+    #[test]
+    fn method_dependency_registration_requires_actual_semantic_completion() {
+        let owner = GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, "source");
+        let revision = GovernedOwnerRevisionRef::try_new(owner.clone(), 1).unwrap();
+        let root = Root::create(
+            "space".into(),
+            owner,
+            Image::Present {
+                revision: revision.clone(),
+                content_digest: format!("sha256:{}", "a".repeat(64)),
+            },
+            "create".into(),
+            None,
+        )
+        .unwrap();
+        let edge = bm_core::memory::ProceduralMethodSourceDependentV1 {
+            scope: ProceduralSubjectScopeV1 {
+                memory_space_id: "space".into(),
+                mounted_subject_id: "agent".into(),
+            },
+            owner_revision: GovernedOwnerRevisionRef::try_new(
+                GovernedMemoryOwnerRef::new(
+                    GovernedMemoryOwnerPlane::AgentToolExperience,
+                    "method",
+                ),
+                1,
+            )
+            .unwrap(),
+            content_digest: format!("sha256:{}", "b".repeat(64)),
+            source_job_id: "semantic-job".into(),
+            source_revision: revision,
+        };
+        assert!(bind_material_edges(&root, std::slice::from_ref(&edge), &BTreeSet::new()).is_err());
+        let bound = bind_material_edges(
+            &root,
+            std::slice::from_ref(&edge),
+            &[edge.source_job_id.clone()].into_iter().collect(),
+        )
+        .unwrap();
+        assert_eq!(bound.method_dependents, vec![edge.clone()]);
+        // Later accepted copies retain the first material commitment, not a new
+        // application proof invented by reconciliation.
+        let mut copied = edge;
+        copied.owner_revision.owner_revision = 2;
+        copied.content_digest = format!("sha256:{}", "c".repeat(64));
+        assert_eq!(
+            bind_material_edges(&bound, &[copied], &BTreeSet::new()).unwrap(),
+            bound
+        );
+    }
 }

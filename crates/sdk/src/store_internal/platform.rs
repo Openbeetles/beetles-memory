@@ -1471,6 +1471,14 @@ impl StorePlatform {
             transaction_timestamp,
             operation_capacity,
         )?;
+        super::procedural_feedback::transcript_control::append(
+            self,
+            &mut batch,
+            &mut preconditions,
+            mutation_operation,
+            transaction_timestamp,
+            operation_capacity,
+        )?;
         super::procedural_feedback::runtime_skill_control::append(
             self,
             &mut batch,
@@ -2260,10 +2268,20 @@ impl StorePlatform {
 
     pub(crate) fn verify_procedural_selection_receipt(
         &self,
-        receipt: &bm_core::memory::ProceduralSelectionReceiptV1,
+        receipt: &bm_core::memory::MemoryTurnProjectionReceiptV2,
     ) -> Result<()> {
         self.procedural_selection_authority(&receipt.identity.memory_space_id)?
             .verify(receipt)
+    }
+
+    pub(crate) fn post_turn_learning_input_commitment(
+        &self,
+        space: &str,
+        turn: &bm_core::memory::CanonicalTurnDelta,
+        input: &bm_core::memory::PostTurnLearningInputV3,
+    ) -> Result<String> {
+        self.procedural_selection_authority(space)?
+            .learning_input_commitment(space, turn, input)
     }
 
     fn procedural_transaction_dependency_json_reads(
@@ -5907,6 +5925,7 @@ pub(crate) fn validate_governed_transaction_post_image(
     validate_runtime_skill_owner_post_image(batch, before, after, limits.runtime_skill_owners)?;
     crate::store_internal::agent_tool_experience::validate_agent_tool_experience_transaction_post_image(
         batch,
+        before,
         after,
         limits.agent_tool_experience,
     )?;
@@ -6541,6 +6560,8 @@ fn governed_transaction_dependency_json_reads(
 
     let mut reads = BTreeSet::new();
     for (namespace, _key, value) in documents {
+        // Soul/source/relationship dependencies are resolved from both old
+        // and proposed values under each backend's transaction fence.
         match namespace {
             GOVERNED_EVIDENCE_SOURCE_CLAIM_MANIFEST_NAMESPACE => {
                 let manifest = decode_transaction_dependency::<GovernedEvidenceSourceClaimManifest>(
@@ -6749,110 +6770,6 @@ fn governed_transaction_dependency_json_reads(
                     ),
                     tombstone.last_owner_revision,
                 )?);
-            }
-            crate::store_internal::schema::SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE => {
-                let manifest = decode_transaction_dependency::<SubjectSoulScopeManifestV1>(
-                    value,
-                    "Subject Soul scope manifest",
-                )?;
-                reads.extend(
-                    manifest
-                        .entries
-                        .into_iter()
-                        .map(|entry| (entry.namespace, entry.physical_key)),
-                );
-            }
-            crate::store_internal::schema::SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE => {
-                let head = decode_transaction_dependency::<SubjectSoulLifecycleHeadV1>(
-                    value,
-                    "Subject Soul lifecycle head",
-                )?;
-                reads.extend(head.retained_revision_refs.into_iter().map(|key| {
-                    (
-                        crate::store_internal::schema::SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE
-                            .to_string(),
-                        key,
-                    )
-                }));
-                reads.extend(head.retained_tombstone_refs.into_iter().map(|key| {
-                    (
-                        crate::store_internal::schema::SUBJECT_SOUL_GENERATION_TOMBSTONE_NAMESPACE
-                            .to_string(),
-                        key,
-                    )
-                }));
-            }
-            crate::store_internal::schema::RELATIONSHIP_SOURCE_SCOPE_MANIFEST_NAMESPACE => {
-                let manifest = decode_transaction_dependency::<RelationshipSourceScopeManifestV1>(
-                    value,
-                    "Relationship Source scope manifest",
-                )?;
-                reads.insert((
-                    crate::store_internal::schema::RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE
-                        .to_string(),
-                    crate::store_internal::schema::relationship_source_revision_key(
-                        &manifest.memory_space_id,
-                        &manifest.relationship_id,
-                        manifest.current_revision,
-                    )?,
-                ));
-                reads.extend(manifest.retained_revision_refs.into_iter().map(|key| {
-                    (
-                        crate::store_internal::schema::RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE
-                            .to_string(),
-                        key,
-                    )
-                }));
-            }
-            crate::store_internal::schema::SUBJECT_SOUL_RELATIONSHIP_PROJECTION_NAMESPACE => {
-                let projection = decode_transaction_dependency::<
-                    SubjectSoulRelationshipProjectionV1,
-                >(value, "Subject Soul relationship projection")?;
-                let soul_scope_key = crate::store_internal::schema::subject_soul_scope_key(
-                    &projection.memory_space_id,
-                    &projection.subject_id,
-                    &projection.soul_id,
-                )?;
-                reads.extend([
-                    (
-                        crate::store_internal::schema::SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE
-                            .to_string(),
-                        soul_scope_key.clone(),
-                    ),
-                    (
-                        crate::store_internal::schema::SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE
-                            .to_string(),
-                        soul_scope_key,
-                    ),
-                    (
-                        crate::store_internal::schema::SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE
-                            .to_string(),
-                        crate::store_internal::schema::subject_soul_revision_material_key(
-                            &projection.memory_space_id,
-                            &projection.subject_id,
-                            &projection.soul_id,
-                            projection.generation,
-                            projection.soul_revision,
-                        )?,
-                    ),
-                    (
-                        crate::store_internal::schema::RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE
-                            .to_string(),
-                        crate::store_internal::schema::relationship_source_revision_key(
-                            &projection.memory_space_id,
-                            &projection.relationship_id,
-                            projection.relationship_source_revision,
-                        )?,
-                    ),
-                    (
-                        crate::store_internal::schema::RELATIONSHIP_SOURCE_SCOPE_MANIFEST_NAMESPACE
-                            .to_string(),
-                        crate::store_internal::schema::relationship_source_scope_key(
-                            &projection.memory_space_id,
-                            &projection.relationship_id,
-                        )?,
-                    ),
-                ]);
             }
             _ => {}
         }
@@ -11693,14 +11610,20 @@ impl StorePlatform {
                     "submission proof differs from the admitted turn",
                 ));
             }
-            owner_preconditions.extend(authority.source_preconditions.clone());
-            owner_preconditions.push(StoreJsonPrecondition::Exact {
-                namespace: super::schema::PROCEDURAL_PRODUCER_HEAD_NAMESPACE.into(),
-                key: authority.current_head.binding_key.clone(),
-                value: serde_json::to_value(&authority.current_head).map_err(|_| {
-                    Error::config("procedural_intake_authority", "invalid producer head")
-                })?,
-            });
+            super::transaction::merge_json_preconditions(
+                &mut owner_preconditions,
+                authority.source_preconditions.clone(),
+            )?;
+            super::transaction::merge_json_preconditions(
+                &mut owner_preconditions,
+                [StoreJsonPrecondition::Exact {
+                    namespace: super::schema::PROCEDURAL_PRODUCER_HEAD_NAMESPACE.into(),
+                    key: authority.current_head.binding_key.clone(),
+                    value: serde_json::to_value(&authority.current_head).map_err(|_| {
+                        Error::config("procedural_intake_authority", "invalid producer head")
+                    })?,
+                }],
+            )?;
         }
         self.commit_recall_indexed_mutations_with_intake_authority(
             "conversation.transcript.append",
@@ -13474,36 +13397,51 @@ impl ConversationTranscriptStore for StorePlatform {
                     record_key: key,
                 });
             }
-            let intent_bytes = serde_json::to_vec(&(request, &mutations, &preconditions))
-                .map_err(|error| Error::config("transcript_lifecycle_plan", error.to_string()))?;
-            let intent_digest = format!("sha256:{:x}", Sha256::digest(&intent_bytes));
-            let identity = MemoryMutationOperationIdentity::new(
-                format!("transcript-lifecycle-{intent_digest}"),
-                &scope.memory_space_id,
-                &scope.subject_id,
-                &request.requested_by,
-                MemoryMutationOperationKind::ProceduralLifecycle,
-            )?;
-            let operation = StoreMutationOperationPlan::new(
-                identity,
-                intent_digest,
-                MemoryMutationEffect::Changed,
-                mutations.len(),
-                &request.requested_by,
-                request.requested_at,
-            )?;
             let runtime_budget = self.current_runtime_budget(current_unix_secs());
-            self.commit_memory_mutation_operation_with_runtime_budget(
-                StoreMutationBatch {
-                    transaction_id: operation.transaction_id().to_string(),
-                    operation: "conversation.transcript.lifecycle".to_string(),
-                    scope,
-                    mutations,
-                },
+            if let Some(soul_plan) = super::subject_soul::plan_transcript_subject_soul_withdrawal(
+                self,
+                &scope,
+                &changed_records,
+                request,
+                &mutations,
                 &preconditions,
-                operation,
                 &runtime_budget,
-            )?;
+            )? {
+                self.commit_subject_soul_mutation_with_runtime_budget(soul_plan, &runtime_budget)
+                    .map_err(super::subject_soul::SubjectSoulStoreFailure::into_store_error)?;
+            } else {
+                let intent_bytes = serde_json::to_vec(&(request, &mutations, &preconditions))
+                    .map_err(|error| {
+                        Error::config("transcript_lifecycle_plan", error.to_string())
+                    })?;
+                let intent_digest = format!("sha256:{:x}", Sha256::digest(&intent_bytes));
+                let identity = MemoryMutationOperationIdentity::new(
+                    format!("transcript-lifecycle-{intent_digest}"),
+                    &scope.memory_space_id,
+                    &scope.subject_id,
+                    &request.requested_by,
+                    MemoryMutationOperationKind::ProceduralLifecycle,
+                )?;
+                let operation = StoreMutationOperationPlan::new(
+                    identity,
+                    intent_digest,
+                    MemoryMutationEffect::Changed,
+                    mutations.len(),
+                    &request.requested_by,
+                    request.requested_at,
+                )?;
+                self.commit_memory_mutation_operation_with_runtime_budget(
+                    StoreMutationBatch {
+                        transaction_id: operation.transaction_id().to_string(),
+                        operation: "conversation.transcript.lifecycle".to_string(),
+                        scope,
+                        mutations,
+                    },
+                    &preconditions,
+                    operation,
+                    &runtime_budget,
+                )?;
+            }
         }
         let mut derived_memory_refs = Vec::new();
         for turn_id in &affected_turn_ids {
@@ -14992,12 +14930,12 @@ fn validate_post_turn_governance_transaction_closure(
         if namespace == POST_TURN_GOVERNANCE_JOB_NAMESPACE {
             let before_job = before
                 .get(&(namespace.clone(), key.clone()))
-                .map(|value| serde_json::from_value::<PostTurnGovernanceJobV3>(value.clone()))
+                .map(|value| serde_json::from_value::<PostTurnGovernanceJobV4>(value.clone()))
                 .transpose()
                 .map_err(|error| Error::config(stage, error.to_string()))?;
             let after_job = after
                 .get(&(namespace.clone(), key.clone()))
-                .map(|value| serde_json::from_value::<PostTurnGovernanceJobV3>(value.clone()))
+                .map(|value| serde_json::from_value::<PostTurnGovernanceJobV4>(value.clone()))
                 .transpose()
                 .map_err(|error| Error::config(stage, error.to_string()))?;
             if let Some(job) = after_job.as_ref() {
@@ -15014,7 +14952,7 @@ fn validate_post_turn_governance_transaction_closure(
                         )
                     })?;
                 let index =
-                    serde_json::from_value::<PostTurnGovernanceScopeIndexV3>(index_value.clone())
+                    serde_json::from_value::<PostTurnGovernanceScopeIndexV4>(index_value.clone())
                         .map_err(|error| Error::config(stage, error.to_string()))?;
                 let expected = PostTurnGovernanceJobRefV2::from_job(job);
                 let refs = index
@@ -15047,7 +14985,7 @@ fn validate_post_turn_governance_transaction_closure(
                         )
                     })?;
                 let index =
-                    serde_json::from_value::<PostTurnGovernanceScopeIndexV3>(index_value.clone())
+                    serde_json::from_value::<PostTurnGovernanceScopeIndexV4>(index_value.clone())
                         .map_err(|error| Error::config(stage, error.to_string()))?;
                 if index
                     .active_jobs
@@ -15099,7 +15037,7 @@ fn validate_post_turn_governance_transaction_closure(
                                 "new or changed governance index ref points to a missing job",
                             )
                         })?;
-                    let job = serde_json::from_value::<PostTurnGovernanceJobV3>(value.clone())
+                    let job = serde_json::from_value::<PostTurnGovernanceJobV4>(value.clone())
                         .map_err(|error| Error::config(stage, error.to_string()))?;
                     if reference != &PostTurnGovernanceJobRefV2::from_job(&job) {
                         return Err(Error::config(
@@ -15141,7 +15079,7 @@ fn governance_index_refs(
     value: &serde_json::Value,
     stage: &'static str,
 ) -> Result<BTreeMap<String, PostTurnGovernanceJobRefV2>> {
-    let index = serde_json::from_value::<PostTurnGovernanceScopeIndexV3>(value.clone())
+    let index = serde_json::from_value::<PostTurnGovernanceScopeIndexV4>(value.clone())
         .map_err(|error| Error::config(stage, error.to_string()))?;
     index.validate()?;
     Ok(index
@@ -15153,7 +15091,7 @@ fn governance_index_refs(
 }
 
 fn validate_touched_bound_job_authority(
-    job: &PostTurnGovernanceJobV3,
+    job: &PostTurnGovernanceJobV4,
     after: &BTreeMap<(String, String), serde_json::Value>,
 ) -> Result<()> {
     let PostTurnGovernanceExecutionBindingV1::Bound {
@@ -15418,8 +15356,8 @@ fn validate_touched_binding_authority(
 fn validate_post_turn_governance_snapshot_closure(
     json: &BTreeMap<(String, String), serde_json::Value>,
 ) -> Result<()> {
-    let mut jobs = BTreeMap::<String, PostTurnGovernanceJobV3>::new();
-    let mut indexes = BTreeMap::<String, PostTurnGovernanceScopeIndexV3>::new();
+    let mut jobs = BTreeMap::<String, PostTurnGovernanceJobV4>::new();
+    let mut indexes = BTreeMap::<String, PostTurnGovernanceScopeIndexV4>::new();
     let mut snapshots = BTreeMap::<(String, u64), PostTurnGovernanceBindingSnapshotV1>::new();
     let mut binding_indexes = BTreeMap::<String, PostTurnGovernanceBindingRevisionIndexV1>::new();
     for ((namespace, key), value) in json {
@@ -15462,7 +15400,7 @@ fn validate_post_turn_governance_snapshot_closure(
                 }
             }
             POST_TURN_GOVERNANCE_JOB_NAMESPACE => {
-                let job = serde_json::from_value::<PostTurnGovernanceJobV3>(value.clone())
+                let job = serde_json::from_value::<PostTurnGovernanceJobV4>(value.clone())
                     .map_err(|error| {
                         Error::config("post_turn_governance_closure", error.to_string())
                     })?;
@@ -15475,7 +15413,7 @@ fn validate_post_turn_governance_snapshot_closure(
                 }
             }
             POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE => {
-                let index = serde_json::from_value::<PostTurnGovernanceScopeIndexV3>(value.clone())
+                let index = serde_json::from_value::<PostTurnGovernanceScopeIndexV4>(value.clone())
                     .map_err(|error| {
                         Error::config("post_turn_governance_closure", error.to_string())
                     })?;
@@ -16771,6 +16709,7 @@ mod transaction_error_contract_tests {
                 .with_memory_space("space-a")
                 .with_subject("agent-a");
             let spec = ProceduralProducerSpecV1 {
+                method_evaluators: Vec::new(),
                 binding_id: "usage-reporter".into(),
                 scope: ProceduralProducerScopeV1 {
                     memory_space_id: "space-a".into(),
@@ -16783,6 +16722,9 @@ mod transaction_error_contract_tests {
                 },
                 source_authority: ProceduralProducerSourceAuthorityV1::RuntimeObservation,
                 claims: ProceduralProducerClaimsV1 {
+                    method_learning_materials: false,
+                    method_adoptions: false,
+                    method_task_evaluations: false,
                     execution_facts: false,
                     method_declarations: false,
                     usage_feedback: true,
@@ -16912,7 +16854,7 @@ mod transaction_error_contract_tests {
 
     fn governance_job_and_index(
         now_secs: u64,
-    ) -> (PostTurnGovernanceJobV3, PostTurnGovernanceScopeIndexV3) {
+    ) -> (PostTurnGovernanceJobV4, PostTurnGovernanceScopeIndexV4) {
         let identity = PostTurnGovernanceIdentityV2::new(
             "space:closure",
             "subject:closure",
@@ -16922,7 +16864,7 @@ mod transaction_error_contract_tests {
             "turn",
         )
         .expect("governance identity");
-        let job = PostTurnGovernanceJobV3::pending(
+        let job = PostTurnGovernanceJobV4::pending(
             identity.clone(),
             1,
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -16940,7 +16882,7 @@ mod transaction_error_contract_tests {
             now_secs,
         )
         .expect("governance job");
-        let mut index = PostTurnGovernanceScopeIndexV3::empty(&identity, now_secs);
+        let mut index = PostTurnGovernanceScopeIndexV4::empty(&identity, now_secs);
         index
             .active_jobs
             .push(PostTurnGovernanceJobRefV2::from_job(&job));
@@ -17023,7 +16965,7 @@ mod transaction_error_contract_tests {
     #[test]
     fn governance_transaction_rejects_index_only_job_deletion() {
         let (job, index) = governance_job_and_index(1_800_000_000);
-        let mut empty_index = PostTurnGovernanceScopeIndexV3::empty(&job.identity, 1_800_000_001);
+        let mut empty_index = PostTurnGovernanceScopeIndexV4::empty(&job.identity, 1_800_000_001);
         empty_index.index_revision = index.index_revision + 1;
         empty_index.validate().expect("empty governance index");
         let address = (
@@ -18292,7 +18234,11 @@ mod transaction_error_contract_tests {
                 .expect("foreign authority")
                 .sign(&mut selection)
                 .expect("canonical signed receipt");
-            let mut evidence = PostTurnLearningEvidenceV2 {
+            let mut evidence = PostTurnLearningEvidenceV3 {
+                method_learning_inputs: Vec::new(),
+                method_adoptions: Vec::new(),
+                method_task_evaluations: Vec::new(),
+                submitted_input_commitment: None,
                 schema_version: POST_TURN_LEARNING_EVIDENCE_SCHEMA_VERSION,
                 memory_space_id: "space-a".into(),
                 mounted_subject_id: "subject-a".into(),

@@ -38,7 +38,13 @@ let config = StoreBackendConfig::file("/var/lib/beetle-memory", profile)?
     .with_fsync(true);
 ```
 
-## 0.9.0 Schema Admission
+## 0.10.0 Schema Admission: Store v15
+
+The 0.10.0 source accepts only Store v15. Required method provenance, task contributions and persona source review use post-turn input/evidence V3, method material V4, application ledger V3, semantic job/scope index/receipt V4, projection receipt V2, Soul schema 2, source-dependents schema 2 and reconciliation checkpoint schema 2. Long-term material v5 and Adapter V2 are unchanged by this stage.
+
+Opening Store v14 or older is rejected without writing, migrating or silently creating an empty replacement. Validation uses synthetic Stores; real data has not been deleted or migrated. InMemory, File and SQLite share atomic owner/material/head/source/receipt/audit validation and budgeted dependency reads. Missing sources or partial state require repair; recomputing digests does not create authority.
+
+## Historical 0.9.0 Schema Admission
 
 The 0.9.0 source accepts Store v14, the same format as 0.8.0; upgrading from 0.8.0 does not itself require migration or rebuilding data. Store v13 from 0.7.0 and earlier formats remain rejected by the existing clean break, with no migration, compatibility reader or automatic replacement Store. Rejection does not rewrite the original bytes.
 

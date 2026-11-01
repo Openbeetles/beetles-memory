@@ -111,6 +111,6 @@ bm-a2a
 - Adapter crates 保持 memory write、recall、projection 和 store 语义由 `MemoryRuntime` 承担。
 - Standalone deployment 覆盖 memory runtime 入口。产品专属表面和部署基础设施由宿主部署提供。
 
-## 0.9.0 候选范围
+## 0.10.0 候选范围
 
-将来源读取证明修复与主体投影 API 变更一起验收；Store v14 和 material v5 不变。除上述矩阵外，显式执行 Gateway 的 `client-reqwest,nonproduction-replay-harness` OpenAI 与 audit 合同（含本机 HTTP 捕获）。保留 0.8.0 notes/tag，不混入比较学习实现或真实 Provider/GUI 完成声明。
+统一验收生产方法提炼／采用／独立任务评价、受治理人格成长与用户设备本地时间。要求 Store v15；长期记忆 material v5 与 Adapter V2 不变。显式运行不带 `nonproduction-replay-harness` 的正式 SDK 方法／人格／时间三组合同，以及启用 `governance-model-client-std` 的官方 Entry 学习服务。保留完整 File/SQLite 重开、撤源、current/as-of 与隐私矩阵，执行 strict target 和全部包 dry-run。旧 notes/tag 不变；不提供兼容 reader、automatic migration，不删除真实数据，不宣称完整比较学习、真实 Provider 或 GUI 已验收。

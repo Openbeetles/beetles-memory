@@ -696,7 +696,11 @@ pub(crate) fn run_p8_gate_contract() -> Result<(), String> {
             .identity(
                 MemoryIdentity::new("agent-main", owner_id).map_err(|error| error.to_string())?,
             )
-            .scope(MemoryScope::new("p8.gate", "chat-a").map_err(|error| error.to_string())?)
+            .scope(
+                MemoryScope::new("p8.gate", "chat-a")
+                    .and_then(|scope| scope.with_conversation_id("p8-gate-private-conversation"))
+                    .map_err(|error| error.to_string())?,
+            )
             .store(platform);
         if let Some(subject_id) = actor_subject_id {
             builder = builder.subject_id(subject_id);
@@ -735,10 +739,13 @@ pub(crate) fn run_p8_gate_contract() -> Result<(), String> {
         }
     }
 
-    fn project(runtime: &MemoryRuntime) -> Result<bm_sdk::MemoryProjectionOutput, String> {
+    fn project(
+        runtime: &MemoryRuntime,
+        binding: bm_sdk::ProceduralProjectionBindingV1,
+    ) -> Result<bm_sdk::MemoryProjectionOutput, String> {
         runtime
             .project(MemoryProjectionRequest {
-                binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
+                binding,
                 temporal_operation: MemoryRecallTemporalOperation::Current,
                 user_query: "P8 gate privacy procedure".into(),
                 system_max_len: 4096,
@@ -866,13 +873,30 @@ pub(crate) fn run_p8_gate_contract() -> Result<(), String> {
     let llm = P8GateLlmClient {
         private_garden_content,
     };
+    let private_turn_id = "p8-gate-private-founding-turn";
+    let intake_projection = project(
+        &runtime,
+        bm_sdk::ProceduralProjectionBindingV1::Turn {
+            turn_id: private_turn_id.to_string(),
+        },
+    )?;
+    let admission = intake_projection
+        .report()
+        .selection_receipt()
+        .ok_or_else(|| "P8 gate turn projection has no signed admission".to_string())?
+        .clone();
+    if admission.soul_source_admission.is_none() {
+        return Err("P8 gate turn projection has no Soul source admission".into());
+    }
+    let mut learning = bm_sdk::PostTurnLearningInputV3::empty();
+    learning.selection_receipt = Some(admission);
     let private_report = runtime
         .finalize_turn_with_inline_governance(
             Some(&mut http),
             Some(&llm),
             MemoryTurnFinalizeRequest {
                 turn: CanonicalTurnDelta {
-                    turn_id: "p8-gate-private-founding-turn".to_string(),
+                    turn_id: private_turn_id.to_string(),
                     conversation: ConversationScope {
                         channel: "p8.gate".to_string(),
                         chat_id: "chat-a".to_string(),
@@ -902,7 +926,7 @@ pub(crate) fn run_p8_gate_contract() -> Result<(), String> {
                     external_content_used: false,
                     candidate_ids: Vec::new(),
                 },
-                learning: bm_sdk::PostTurnLearningInputV2::empty(),
+                learning,
                 pressure: PressureLevel::Normal,
                 mode_input: RuntimeLifecycleModeInput::default(),
             },
@@ -963,15 +987,21 @@ pub(crate) fn run_p8_gate_contract() -> Result<(), String> {
         .cloned()
         .collect::<Vec<_>>();
 
-    assert_safe_surfaces(&project(&runtime)?, &[private_procedure, soul_procedure])?;
+    assert_safe_surfaces(
+        &project(&runtime, bm_sdk::ProceduralProjectionBindingV1::Preview)?,
+        &[private_procedure, soul_procedure],
+    )?;
     let cross_subject = build_runtime(platform.clone(), "owner-default", Some("p8-other-subject"))?;
     assert_safe_surfaces(
-        &project(&cross_subject)?,
+        &project(
+            &cross_subject,
+            bm_sdk::ProceduralProjectionBindingV1::Preview,
+        )?,
         &[cross_scope_procedure, soul_content, private_garden_content],
     )?;
     let cross_space = build_runtime(platform.clone(), "owner-other", None)?;
     assert_safe_surfaces(
-        &project(&cross_space)?,
+        &project(&cross_space, bm_sdk::ProceduralProjectionBindingV1::Preview)?,
         &[cross_scope_procedure, soul_content, private_garden_content],
     )?;
 

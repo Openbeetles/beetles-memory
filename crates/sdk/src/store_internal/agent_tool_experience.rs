@@ -8,7 +8,7 @@ use bm_core::memory::{
 use bm_core::skills::{
     validate_agent_tool_experience_owner_history, validate_agent_tool_experience_scope_closure,
     AgentToolExperienceHeadStateV3, AgentToolExperienceOwnerHeadV3,
-    AgentToolExperienceRevisionMaterialV3, AgentToolExperienceScopeManifestV1,
+    AgentToolExperienceRevisionMaterialV4, AgentToolExperienceScopeManifestV1,
 };
 use bm_core::skills::{AgentToolExperienceHeadBindingV1, AgentToolExperienceOwningScopeV1};
 use bm_core::{Error, Result};
@@ -61,7 +61,7 @@ pub struct AgentToolExperienceStoreMutationPlanV1 {
     scope: StoreEventScope,
     previous_head: Option<AgentToolExperienceOwnerHeadV3>,
     previous_manifest: Option<AgentToolExperienceScopeManifestV1>,
-    material: AgentToolExperienceRevisionMaterialV3,
+    material: AgentToolExperienceRevisionMaterialV4,
     head: AgentToolExperienceOwnerHeadV3,
     manifest: AgentToolExperienceScopeManifestV1,
     committed_at_unix_secs: u64,
@@ -75,7 +75,7 @@ impl AgentToolExperienceStoreMutationPlanV1 {
         scope: StoreEventScope,
         previous_head: Option<AgentToolExperienceOwnerHeadV3>,
         previous_manifest: Option<AgentToolExperienceScopeManifestV1>,
-        material: AgentToolExperienceRevisionMaterialV3,
+        material: AgentToolExperienceRevisionMaterialV4,
         head: AgentToolExperienceOwnerHeadV3,
         manifest: AgentToolExperienceScopeManifestV1,
         committed_at_unix_secs: u64,
@@ -247,7 +247,7 @@ impl AgentToolExperienceStoreMutationPlanV1 {
             scope: &'a StoreEventScope,
             previous_head: &'a Option<AgentToolExperienceOwnerHeadV3>,
             previous_manifest: &'a Option<AgentToolExperienceScopeManifestV1>,
-            material: &'a AgentToolExperienceRevisionMaterialV3,
+            material: &'a AgentToolExperienceRevisionMaterialV4,
             head: &'a AgentToolExperienceOwnerHeadV3,
             manifest: &'a AgentToolExperienceScopeManifestV1,
         }
@@ -492,7 +492,7 @@ pub(crate) fn validate_agent_tool_experience_transition_preconditions(
                     .ok_or_else(|| {
                         Error::config(stage, "material deletion requires exact prior material CAS")
                     })?;
-                let before: AgentToolExperienceRevisionMaterialV3 = decode(before, stage)?;
+                let before: AgentToolExperienceRevisionMaterialV4 = decode(before, stage)?;
                 if before.physical_key != *key
                     || before.memory_space_id != batch.scope.memory_space_id
                     || before.owning_scope.mounted_subject_id() != batch.scope.subject_id
@@ -575,6 +575,7 @@ pub(crate) fn validate_agent_tool_experience_transition_preconditions(
 
 pub(crate) fn validate_agent_tool_experience_transaction_post_image(
     batch: &StoreMutationBatch,
+    before: &BackendTransactionState,
     after: &BackendTransactionState,
     budget: Option<AgentToolExperienceStoreBudget>,
 ) -> Result<()> {
@@ -610,7 +611,7 @@ pub(crate) fn validate_agent_tool_experience_transaction_post_image(
                 *counts.entry(namespace.as_str()).or_default() += 1;
                 let exact_scope = match namespace.as_str() {
                     AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE => {
-                        let material: AgentToolExperienceRevisionMaterialV3 =
+                        let material: AgentToolExperienceRevisionMaterialV4 =
                             decode(value, "agent_tool_experience_store_post_image")?;
                         material.memory_space_id == batch.scope.memory_space_id
                             && material.owning_scope.mounted_subject_id() == batch.scope.subject_id
@@ -690,15 +691,18 @@ pub(crate) fn validate_agent_tool_experience_transaction_post_image(
         .map_err(|error| {
             Error::config("agent_tool_experience_store_post_image", error.to_string())
         })?;
-    if receipt.len() != 1
-        || receipt[0].identity.operation_kind()
-            != if lifecycle {
-                MemoryMutationOperationKind::ProceduralLifecycle
-            } else {
-                MemoryMutationOperationKind::ProceduralLearning
-            }
-        || receipt[0].identity.memory_space_id() != batch.scope.memory_space_id
-        || receipt[0].identity.mounted_subject_id() != batch.scope.subject_id
+    let semantic_completion =
+        super::post_turn_governance::validate_semantic_method_completion(batch, before, after)?;
+    if (!semantic_completion
+        && (receipt.len() != 1
+            || receipt[0].identity.operation_kind()
+                != if lifecycle {
+                    MemoryMutationOperationKind::ProceduralLifecycle
+                } else {
+                    MemoryMutationOperationKind::ProceduralLearning
+                }
+            || receipt[0].identity.memory_space_id() != batch.scope.memory_space_id
+            || receipt[0].identity.mounted_subject_id() != batch.scope.subject_id))
         || batch.scope.physical_owning_scope
             != (StorePhysicalOwningScope::Subject {
                 mounted_subject_id: batch.scope.subject_id.clone(),
@@ -737,7 +741,7 @@ pub(crate) fn validate_agent_tool_experience_store_image(
     for ((namespace, key), value) in &state.json {
         match namespace.as_str() {
             AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE => {
-                let material: AgentToolExperienceRevisionMaterialV3 = decode(value, stage)?;
+                let material: AgentToolExperienceRevisionMaterialV4 = decode(value, stage)?;
                 if material.physical_key != *key
                     || !material.validate_contract().accepted
                     || material.body.contribution_count() > budget.max_evidence_refs_per_owner
@@ -782,6 +786,53 @@ pub(crate) fn validate_agent_tool_experience_store_image(
                 manifests.push(manifest);
             }
             _ => {}
+        }
+    }
+    // A deleted method has no raw material left to discover its producing job.
+    // Validate retained Applied receipts directly as well, including tombstones.
+    for ((namespace, _), value) in &state.json {
+        if namespace != bm_core::memory::POST_TURN_GOVERNANCE_JOB_NAMESPACE {
+            continue;
+        }
+        let job: bm_core::memory::PostTurnGovernanceJobV4 = decode(value, stage)?;
+        if job.status == bm_core::memory::PostTurnGovernanceJobStatusV2::Succeeded
+            && job.receipt.as_ref().is_some_and(|receipt| {
+                matches!(
+                    receipt.method_application,
+                    bm_core::memory::PostTurnGovernanceMethodApplicationV1::Applied { .. }
+                )
+            })
+        {
+            super::post_turn_governance::verify_semantic_method_application(
+                &job,
+                |namespace, key| {
+                    Ok(state
+                        .json
+                        .get(&(namespace.into(), key.into()))
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null))
+                },
+            )?;
+        }
+    }
+    for material in &materials {
+        for source in material
+            .body
+            .method_sources()
+            .iter()
+            .filter_map(|source| source.governance_extraction())
+        {
+            super::post_turn_governance::verify_semantic_method_source(
+                source,
+                material,
+                |namespace, key| {
+                    Ok(state
+                        .json
+                        .get(&(namespace.into(), key.into()))
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null))
+                },
+            )?;
         }
     }
     for (memory_space_id, owning_scope) in scopes {
@@ -897,8 +948,8 @@ mod lifecycle_tests {
         AgentToolRegistryScope,
     };
 
-    fn material(subject: &str) -> AgentToolExperienceRevisionMaterialV3 {
-        AgentToolExperienceRevisionMaterialV3::build(
+    fn material(subject: &str) -> AgentToolExperienceRevisionMaterialV4 {
+        AgentToolExperienceRevisionMaterialV4::build(
             "space",
             AgentToolExperienceOwningScopeV1::Subject {
                 mounted_subject_id: subject.to_string(),

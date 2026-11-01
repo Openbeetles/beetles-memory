@@ -177,12 +177,13 @@ fn dispatch_adapter_command_with_services_in_lease(
         }
         AdapterCommand::FinalizeTurn(request) => {
             let turn_id = request.turn.turn_id.clone();
-            let report = match procedural_submission.filter(|_| request.learning.has_feedback()) {
-                Some(capability) => {
-                    runtime.finalize_turn_with_procedural_evidence(capability, *request)?
-                }
-                None => runtime.finalize_turn(*request)?,
-            };
+            let report =
+                match procedural_submission.filter(|_| request.learning.has_authorized_content()) {
+                    Some(capability) => {
+                        runtime.finalize_turn_with_procedural_evidence(capability, *request)?
+                    }
+                    None => runtime.finalize_turn(*request)?,
+                };
             AdapterSdkReport::FinalizeTurn(Box::new(AdapterTurnFinalizeReport::from_sdk(
                 turn_id, report,
             )))

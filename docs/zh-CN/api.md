@@ -2,12 +2,23 @@
 
 SDK API 是主要入口。宿主项目应通过 `bm-sdk` 进入，或通过 `bm-entry` 加协议 adapter 进入；不应自行实现记忆 schema、store envelope、replay 格式或 adapter dispatch 规则。
 
-## 0.9.0 主体投影
+## 0.10.0：生产学习与本地时间
+
+0.10.0 源码使用 Store v15；历史 0.9.0 使用 Store v14。没有兼容读取或自动迁移，所有 Beetle crate 必须来自同一源码 tag。
+
+- `PostTurnLearningInputV3` 接受有来源的 `MethodLearningInputV1`、`MethodAdoptionEvidenceV1` 和 `MethodTaskEvaluationV1`。可信 producer 的 claims 与 evaluator revision 必须匹配；宿主提交真实事实，Memory 负责提炼、治理、落库和晋升。
+- `MemoryRuntime::discover_method_trials(MemoryMethodTrialRequest)` 返回有界 `MemoryMethodTrialReport`，其中候选携带 exact `MethodContentRefV1`。Candidate 可用于显式试用，不作为成熟方法进入普通投影。看到方法、调用成功和任务成功是不同事实；晋升需要真实采用与独立任务评价。
+- 已成熟方法通过 `project` 的 `Turn` binding 消费。`projection.report().selection_receipt()` 提供实际交付方法的 `agent_tool_experiences`；调用 `MethodContentRefV1::from_selection(receipt, selection)` 得到与回执主体、空间和精确版本绑定的引用，在真正采用后提交 adoption，并随回合携带同一 `selection_receipt`。无需保留旧 Candidate ID 或构造 SDK 私有 Store owner 类型；引用与投影回执本身均不证明采用或任务成功。
+- 人格观察由已签名投影对应的 canonical turn 自动进入官方 `MemoryLearningEngine`，保持主体、generation、来源与矛盾证据。宿主不能提交伪造人格 ledger 或用任务/工具习惯替代人格。合法独立观察进入既有 Soul revision 治理；没有证据则保持 unseeded。
+- 来源撤回会拒绝相关方法及派生技能；Soul 使用 `SubjectSoulSourceReadAvailabilityV1` 明确返回来源复审状态。下一真实回合可授予 typed `SoulTurnSourcePurposeV1::SourceReview`，只有合规 correction 才解除当前限制，旧 revision 仍不可读。OperatorSafe 报告不提供私域正文。
+- `UserLocalTimeProvider` 提供用户设备时间与时区。模型可见时间必须带时区；来源返回 `None` 时整项省略，不推测 UTC 或沿用旧值。具体配置见[接入文档](integration.md)。
+
+## 主体投影（0.9.0 引入）
 
 `LLMRuntimeProjectionEnvelope.expression_guidance` 承载仅供模型运行时消费的 `SubjectExpressionDiscipline`。
 `runtime_constraints` 现为 `Vec<RuntimeProjectionSourceBlock>`，保留内容来源和保护标记。
 显式构造 envelope、Core `InhabitedSubjectProjection` 或 `SubjectSoulRelationshipRuntimeViewV1` 的调用方
-必须补齐新字段；后者运行时 view 的序列化形状也改变。Store v14 和持久 material 不变。
+必须补齐新字段；后者运行时 view 的序列化形状也改变。0.9.0 当时保留 Store v14；0.10.0 要求 Store v15。
 模型使用 `projection.provider_payload().system_memory_block()`；UI/operator/Gateway 展示与诊断使用
 `projection.report()` 的对应安全方法，不记录 raw envelope、不重建第二份 renderer。
 见 [0.9.0 API 变更与 Store 边界](release-notes-0.9.0.md)。
@@ -74,7 +85,7 @@ Status read 与 recovery control 必须携带 SDK 铸造的 opaque capability。
 
 ## 程序性证据声明权
 
-0.9.0 源码使用 `PostTurnLearningInputV2`，不能与已发布 0.7.0 API 混用。普通回合使用 `PostTurnLearningInputV2::empty()` 或 `with_tool_call_count(n)`，通过 `finalize_turn` 提交；不要求注册 producer，空反馈不创建 procedural job。Selection receipt 证明的是精确投影，不是执行事实声明权。
+0.10.0 源码使用 `PostTurnLearningInputV3`；已发布 0.9.0 的 `PostTurnLearningInputV2` 是历史合同，不保留别名或兼容路径。普通回合使用 `PostTurnLearningInputV3::empty()` 或 `with_tool_call_count(n)`，通过 `finalize_turn` 提交；不要求注册 producer，空反馈不创建 procedural job。Selection receipt 证明的是精确投影，不是执行事实声明权。
 
 有反馈时，受信初始化代码使用同 Store、SubjectRegistry、MemorySpace 和 mounted scope 的 active governing `SystemGovernor` runtime：
 
@@ -98,7 +109,7 @@ Producer 收窄／撤权及受治理来源撤回，会立即阻断受影响的 c
 
 ## Subject Soul Provisioning
 
-`bm-sdk` 0.9.0 提供宿主无关的 Subject Soul 建档与生命周期公共合同。宿主只能提交 typed intent；Soul revision、generation、material、manifest、ledger、审计、事件和 durable operation receipt 由 Core、SDK 与 Store 在同一事务中拥有。Adapter、HTTP、MCP、Console 或宿主数据库不得维护第二套 Soul 状态，也不得先写默认人格再覆盖。
+`bm-sdk` 0.10.0 提供宿主无关的 Subject Soul 建档与生命周期公共合同。宿主只能提交 typed intent；Soul revision、generation、material、manifest、ledger、审计、事件和 durable operation receipt 由 Core、SDK 与 Store 在同一事务中拥有。Adapter、HTTP、MCP、Console 或宿主数据库不得维护第二套 Soul 状态，也不得先写默认人格再覆盖。
 
 | 操作 | SDK surface | 合同 |
 | --- | --- | --- |
@@ -147,11 +158,11 @@ CTQ1 query surface 统一使用 Store-owned `TranscriptQueryCursor`。调用方�
 
 `HostUi` 只是 **host-presentable redacted disclosure view**。它不是聊天窗口 API、分页方向、宿主产品名、transcript index owner 或 authorization token。Catalog、timeline、search、activity 只返回 Runtime hydration 后仍能通过请求 view 脱敏规则的结果。Search hit 携带受治理的 Unicode-safe excerpt 和 durable `TranscriptAnchor`；宿主应把 anchor 交给 `TranscriptTimelineAnchor::Around`，不得在 UI 内扫描或二次匹配 transcript 正文。
 
-0.9.0 只接受 Store v14；0.7.0 使用 Store v13。不提供 public Store migration API、compatibility reader、双写或 automatic migration。旧代、partial 与 foreign schema payload 都会 fail closed。旧代开发数据只能由其 owner 明确删除并重建；archive export/import 不是 schema migration。
+0.10.0 只接受 Store v15；0.9.0 使用 Store v14，0.7.0 使用 Store v13。不提供 public Store migration API、compatibility reader、双写或 automatic migration。旧代、partial 与 foreign schema payload 都会 fail closed。旧代开发数据只能由其 owner 明确删除并重建；archive export/import 不是 schema migration。
 
-Timeline 支持 latest、before、after、around-anchor、around-sequence、around-time 与 first-visible-in-range；页内 turn 始终按 sequence 正序，report 可返回 opaque older/newer cursor。日历换算归宿主：按用户 IANA timezone 把本地日期转换为 canonical UTC `[start_inclusive, end_exclusive)` 后再调用 Memory。不得假设每天都是 86400 秒，DST 当天可以是 23 或 25 小时；Beetle Memory 不保存也不猜宿主时区。
+Timeline 支持 latest、before、after、around-anchor、around-sequence、around-time 与 first-visible-in-range；页内 turn 始终按 sequence 正序，report 可返回 opaque older/newer cursor。日历换算归宿主：按用户 IANA timezone 把本地日期转换为 canonical UTC `[start_inclusive, end_exclusive)` 后再调用 Memory。不得假设每天都是 86400 秒，DST 当天可以是 23 或 25 小时；Transcript 查询消费显式 UTC 区间，不持久保存日历时区；模型上下文的本地时间 provider 是独立展示输入。
 
-当前工作源码保留 CTQ1 public query shape 与 capability snapshot v5。Store v14 加强程序性证据声明权和贡献／重算闭包，不新增第二套 Transcript 查询模型。本地自动化合同不能充当真实数据、Provider、GUI/UAT、crates.io 或托管 Release 证据。
+0.10.0 源码保留 CTQ1 public query shape 与 capability snapshot v5。Store v15 增加必填方法／任务 provenance 与 Soul 来源复审闭包，不新增第二套 Transcript 查询模型。本地自动化合同不能充当真实数据、Provider、GUI/UAT、crates.io 或托管 Release 证据。
 
 Transcript attrs 是 Memory-owned transcript metadata，不是宿主业务对象库。每条 attr 都必须有 `TranscriptAttrTarget`、命名空间化 key、`TranscriptAttrValueKind`、JSON value、`HostRefVisibility`、`TranscriptAttrSource`、`TranscriptAttrGovernance` 和可选 `TranscriptAttrLink`。`HostUi` replay 只返回 HostUi-visible attrs，`ModelContext` 只返回 model-context attrs，`OperatorAudit` 返回审计可见 attrs，`Export` 只返回 export-visible 且 `export_allowed=true` 的 attrs；`RawOwnerOnly` 仍是内部视图。Repair report 会把 target turn/message 缺失、attr source key 不匹配、非法 key、超限 value、corrupt attr record 作为 fail-closed issue。`DeleteRaw` 默认隐藏 attrs；`OperatorAuditOnlyAfterMask` 最多保留脱敏后的审计 metadata，raw deletion 后绝不返回原始 attr value。
 
@@ -199,7 +210,7 @@ Transcript attrs 是 Memory-owned transcript metadata，不是宿主业务对象
 | `MemoryWriteRequest::GovernedEvidenceDocuments` | `mutations` | 在同一事务中创建、修订或删除 governed evidence owner、source claim 和派生索引。`Upsert` 携带有界 `GovernedEvidenceDocumentDraft`；`Delete` 必须携带 expected owner revision。 |
 | `MemoryRecallRequest` | `temporal_operation`, `query`, `limit`, `structured_query_facets`, `tool_registry_refs` | 返回运行时 Skill hits、标准 Agent Skill hits、working recall inspection 和经验型 `agent_tool_hints`；structured facets 是 typed query constraint，无治理经验时 `agent_tool_hints=[]`。 |
 | `MemoryProjectionRequest` | `binding`, `temporal_operation`, `user_query`, `system_max_len`, `recent_messages_limit`, `pressure`, `mode_input`, `structured_query_facets`, `tool_registry_refs` | `Preview` 只读投影；`Turn { turn_id }` 把 current execution projection 及其签名 selection receipt 绑定到之后交给 `finalize_turn` 的 exact turn。 |
-| `MemoryTurnFinalizeRequest` | `turn`, `learning`, `pressure`, `mode_input` | 原子提交 canonical turn 与 durable post-turn intent。`learning: PostTurnLearningInputV2` 携带 optional signed selection receipt 和 typed feedback；声明权是独立的非 wire capability，caller 不能直接写 procedural owner。 |
+| `MemoryTurnFinalizeRequest` | `turn`, `learning`, `pressure`, `mode_input` | 原子提交 canonical turn 与 durable post-turn intent。`learning: PostTurnLearningInputV3` 携带 optional signed selection receipt 和 typed feedback；声明权是独立的非 wire capability，caller 不能直接写 procedural owner。 |
 | `MemoryEvidenceDocumentReadRequest` | `memory_space_id`, `document_ids` | 通过 `MemoryRuntime::read_governed_evidence_documents(request)` 精确、有界地读取 governed evidence documents。runtime 会拒绝 memory-space 不一致、空/重复 document id 和超过当前 profile read budget 的请求；结果经过 privacy filter，并携带 typed owner identity、revision、canonical evidence binding、安全 source metadata 与有界 body/chunks。 |
 | `MemoryInspectionRequest` | `query`, `system_max_len`, `pressure`, `mode_input` | 返回 capability、lifecycle、operator inspection 数据、Agent Skill 目录扫描报告和 Agent Tool registry 报告。 |
 | `RuntimeSkillListRequest` | `owning_scope`, `query`, `include_disabled`, `include_retired`, `limit` | 只列出显式 Subject 或 SharedProgram scope manifest 中的 exact typed owners。 |

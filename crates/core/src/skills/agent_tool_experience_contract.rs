@@ -15,7 +15,7 @@ use crate::memory::{
 
 use super::{AgentToolExperienceStatus, AgentToolRegistryScope};
 
-pub const AGENT_TOOL_EXPERIENCE_MATERIAL_SCHEMA_VERSION: u32 = 3;
+pub const AGENT_TOOL_EXPERIENCE_MATERIAL_SCHEMA_VERSION: u32 = 4;
 pub const AGENT_TOOL_EXPERIENCE_HEAD_SCHEMA_VERSION: u32 = 3;
 pub const AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
@@ -26,16 +26,38 @@ pub struct AgentToolExperienceReadProjectionV1 {
     memory_space_id: String,
     owning_scope: AgentToolExperienceOwningScopeV1,
     as_of_time: Option<u64>,
-    selected: Option<AgentToolExperienceRevisionMaterialV3>,
+    selected: Option<AgentToolExperienceRevisionMaterialV4>,
     rejection: Option<&'static str>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentToolExperienceReadPurposeV1 {
+    GovernedRecall,
+    CandidateTrial,
 }
 
 impl AgentToolExperienceReadProjectionV1 {
     pub fn try_new(
         head: &AgentToolExperienceOwnerHeadV3,
-        history: &[AgentToolExperienceRevisionMaterialV3],
+        history: &[AgentToolExperienceRevisionMaterialV4],
         authority: &crate::memory::ProceduralReadAuthorityV1<'_>,
         as_of_time: Option<u64>,
+    ) -> Result<Self> {
+        Self::try_new_for_purpose(
+            head,
+            history,
+            authority,
+            as_of_time,
+            AgentToolExperienceReadPurposeV1::GovernedRecall,
+        )
+    }
+
+    pub fn try_new_for_purpose(
+        head: &AgentToolExperienceOwnerHeadV3,
+        history: &[AgentToolExperienceRevisionMaterialV4],
+        authority: &crate::memory::ProceduralReadAuthorityV1<'_>,
+        as_of_time: Option<u64>,
+        purpose: AgentToolExperienceReadPurposeV1,
     ) -> Result<Self> {
         let invalid = || {
             Error::config(
@@ -78,15 +100,24 @@ impl AgentToolExperienceReadProjectionV1 {
             return Err(invalid());
         }
         let current = history.last().ok_or_else(invalid)?;
-        let binding = |material: &AgentToolExperienceRevisionMaterialV3| {
+        let binding = |material: &AgentToolExperienceRevisionMaterialV4| {
             crate::memory::ProceduralAppliedOwnerBindingV1::AgentToolExperience {
                 owner_revision: material.owner_revision_ref(),
                 content_digest: material.content_digest.clone(),
             }
         };
+        let eligible = |material: &AgentToolExperienceRevisionMaterialV4| match purpose {
+            AgentToolExperienceReadPurposeV1::GovernedRecall => {
+                material.status == AgentToolExperienceStatus::Active
+            }
+            AgentToolExperienceReadPurposeV1::CandidateTrial => {
+                material.status == AgentToolExperienceStatus::Candidate
+                    && matches!(material.body, AgentToolExperienceBodyV1::Method { .. })
+            }
+        };
         if !authority.permits_exact(&binding(current))? {
             projection.rejection = Some("agent_tool_experience_authority_withdrawn");
-        } else if current.status != AgentToolExperienceStatus::Active {
+        } else if !eligible(current) {
             projection.rejection = Some("agent_tool_experience_status_ineligible");
         } else if let Some(selected) = history
             .iter()
@@ -95,7 +126,7 @@ impl AgentToolExperienceReadProjectionV1 {
         {
             // Select first, authorize second. Never fall back to older allowed
             // content when the exact revision at this anchor has been withdrawn.
-            if authority.permits_exact(&binding(selected))? {
+            if authority.permits_exact(&binding(selected))? && eligible(selected) {
                 projection.selected = Some(selected.clone());
             } else {
                 projection.rejection = Some("agent_tool_experience_authority_withdrawn");
@@ -104,6 +135,14 @@ impl AgentToolExperienceReadProjectionV1 {
             projection.rejection = Some("agent_tool_experience_no_revision_at_anchor");
         }
         Ok(projection)
+    }
+
+    /// A verified current source denial may only remove content, never grant
+    /// read authority or select a different historical revision.
+    pub fn without_source_authority(mut self) -> Self {
+        self.selected = None;
+        self.rejection = Some("agent_tool_experience_source_withdrawn");
+        self
     }
 
     pub fn memory_space_id(&self) -> &str {
@@ -115,7 +154,7 @@ impl AgentToolExperienceReadProjectionV1 {
     pub fn as_of_time(&self) -> Option<u64> {
         self.as_of_time
     }
-    pub fn material(&self) -> Option<&AgentToolExperienceRevisionMaterialV3> {
+    pub fn material(&self) -> Option<&AgentToolExperienceRevisionMaterialV4> {
         self.selected.as_ref()
     }
     pub fn rejection(&self) -> Option<&'static str> {
@@ -127,7 +166,7 @@ const OWNER_ID_DOMAIN: &str = "agent_tool_experience_owner_id_v3";
 const MATERIAL_KEY_DOMAIN: &str = "agent_tool_experience_material_key_v3";
 const HEAD_KEY_DOMAIN: &str = "agent_tool_experience_head_key_v3";
 const MANIFEST_KEY_DOMAIN: &str = "agent_tool_experience_scope_manifest_key_v1";
-const MATERIAL_DIGEST_DOMAIN: &str = "agent_tool_experience_material_digest_v3";
+const MATERIAL_DIGEST_DOMAIN: &str = "agent_tool_experience_material_digest_v4";
 const HEAD_DIGEST_DOMAIN: &str = "agent_tool_experience_head_digest_v3";
 const MANIFEST_DIGEST_DOMAIN: &str = "agent_tool_experience_manifest_digest_v1";
 
@@ -139,25 +178,147 @@ pub enum AgentToolExperienceFocusV1<'a> {
     Method { task_signature: &'a str },
 }
 
+/// Authorship is independent of later adoption and task evaluation evidence.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AgentToolMethodSourceRefV1 {
-    pub source_job_id: String,
-    pub method_id: String,
-    pub method_digest: String,
-    pub execution_refs: Vec<crate::memory::ProceduralContributionRefV1>,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentToolMethodSourceRefV2 {
+    ProducerDeclaration {
+        source_job_id: String,
+        method_id: String,
+        method_digest: String,
+        execution_refs: Vec<crate::memory::ProceduralContributionRefV1>,
+    },
+    GovernanceExtraction {
+        source: Box<crate::memory::GovernanceMethodExtractionSourceV1>,
+    },
 }
 
-impl AgentToolMethodSourceRefV1 {
+/// Borrowed declaration view; it grants no producer authority.
+#[derive(Clone, Copy, Debug)]
+pub struct AgentToolProducerDeclarationRefV1<'a> {
+    pub source_job_id: &'a str,
+    pub method_id: &'a str,
+    pub method_digest: &'a str,
+    pub execution_refs: &'a [crate::memory::ProceduralContributionRefV1],
+}
+
+impl AgentToolMethodSourceRefV2 {
+    pub fn source_job_id(&self) -> &str {
+        match self {
+            Self::ProducerDeclaration { source_job_id, .. } => source_job_id,
+            Self::GovernanceExtraction { source } => &source.source_job_id,
+        }
+    }
+
+    pub fn method_digest(&self) -> &str {
+        match self {
+            Self::ProducerDeclaration { method_digest, .. } => method_digest,
+            Self::GovernanceExtraction { source } => &source.method_digest,
+        }
+    }
+
+    /// Extraction never fabricates producer execution witnesses.
+    pub fn execution_refs(&self) -> &[crate::memory::ProceduralContributionRefV1] {
+        match self {
+            Self::ProducerDeclaration { execution_refs, .. } => execution_refs,
+            Self::GovernanceExtraction { .. } => &[],
+        }
+    }
+
+    pub fn reference_count(&self) -> usize {
+        match self {
+            Self::ProducerDeclaration { execution_refs, .. } => {
+                execution_refs.len().saturating_add(1)
+            }
+            Self::GovernanceExtraction { source } => source.materials.len().saturating_add(1),
+        }
+    }
+
+    pub fn producer_declaration(&self) -> Option<AgentToolProducerDeclarationRefV1<'_>> {
+        match self {
+            Self::ProducerDeclaration {
+                source_job_id,
+                method_id,
+                method_digest,
+                execution_refs,
+            } => Some(AgentToolProducerDeclarationRefV1 {
+                source_job_id,
+                method_id,
+                method_digest,
+                execution_refs,
+            }),
+            _ => None,
+        }
+    }
+
+    pub fn governance_extraction(
+        &self,
+    ) -> Option<&crate::memory::GovernanceMethodExtractionSourceV1> {
+        match self {
+            Self::GovernanceExtraction { source } => Some(source),
+            _ => None,
+        }
+    }
+
+    pub fn canonical_identity(&self) -> String {
+        match self {
+            Self::ProducerDeclaration {
+                source_job_id,
+                method_id,
+                ..
+            } => format!(
+                "declaration:{}:{}:{}",
+                source_job_id.len(),
+                source_job_id,
+                method_id
+            ),
+            Self::GovernanceExtraction { source } => format!(
+                "extraction:{}:{}:{}",
+                source.source_job_id.len(),
+                source.source_job_id,
+                source.proposal_ordinal
+            ),
+        }
+    }
+
+    pub fn canonicalize(sources: &mut Vec<Self>) -> Result<()> {
+        if sources.iter().any(|source| !source.validate_contract()) {
+            return Err(Error::invalid_input(
+                "agent_tool_method_source",
+                "source is invalid",
+            ));
+        }
+        sources.sort_by_key(Self::canonical_identity);
+        if sources.windows(2).any(|pair| {
+            pair[0].canonical_identity() == pair[1].canonical_identity() && pair[0] != pair[1]
+        }) {
+            return Err(Error::invalid_input(
+                "agent_tool_method_source",
+                "source identity conflicts",
+            ));
+        }
+        sources.dedup();
+        Ok(())
+    }
+
     pub fn validate_contract(&self) -> bool {
-        bounded_identifier(&self.source_job_id)
-            && bounded_identifier(&self.method_id)
-            && is_digest(&self.method_digest)
-            && canonical_contribution_refs(&self.execution_refs)
-            && self
-                .execution_refs
-                .iter()
-                .all(|reference| reference.source_job_id == self.source_job_id)
+        match self {
+            Self::ProducerDeclaration {
+                source_job_id,
+                method_id,
+                method_digest,
+                execution_refs,
+            } => {
+                bounded_identifier(source_job_id)
+                    && bounded_identifier(method_id)
+                    && is_digest(method_digest)
+                    && canonical_contribution_refs(execution_refs)
+                    && execution_refs
+                        .iter()
+                        .all(|reference| &reference.source_job_id == source_job_id)
+            }
+            Self::GovernanceExtraction { source } => source.validate_contract(),
+        }
     }
 }
 
@@ -174,8 +335,35 @@ pub enum AgentToolExperienceBodyV1 {
         task_signature: String,
         procedure: String,
         constraints: Vec<String>,
-        sources: Vec<AgentToolMethodSourceRefV1>,
+        sources: Vec<AgentToolMethodSourceRefV2>,
+        usage_contributions: Vec<crate::memory::MethodTaskContributionRefV1>,
     },
+}
+
+/// Method content identity is shared by extraction, adoption and immutable
+/// material. Sources are provenance; constraints are part of the method.
+pub fn canonical_agent_tool_method_content_digest(
+    task_signature: &str,
+    procedure: &str,
+    constraints: &[String],
+) -> Result<String> {
+    if !bounded_identifier(task_signature)
+        || procedure.len() > crate::memory::MAX_PROCEDURAL_METHOD_BYTES
+        || !is_canonical_text(procedure)
+        || !constraints.iter().all(|value| bounded_identifier(value))
+        || !canonical_unique(constraints)
+    {
+        return Err(Error::invalid_input(
+            "agent_tool_method_digest",
+            "method content is not canonical",
+        ));
+    }
+    let encoded = serde_json::to_vec(&(task_signature, procedure, constraints))
+        .map_err(|_| Error::config("agent_tool_method_digest", "method digest encoding failed"))?;
+    Ok(domain_digest(
+        "agent_tool_method_content_digest_v2",
+        &[&encoded],
+    ))
 }
 
 impl AgentToolExperienceBodyV1 {
@@ -188,32 +376,47 @@ impl AgentToolExperienceBodyV1 {
         }
     }
 
+    pub fn method_sources(&self) -> &[AgentToolMethodSourceRefV2] {
+        match self {
+            Self::Method { sources, .. } => sources,
+            _ => &[],
+        }
+    }
+
+    pub fn method_usage_contributions(&self) -> &[crate::memory::MethodTaskContributionRefV1] {
+        match self {
+            Self::Method {
+                usage_contributions,
+                ..
+            } => usage_contributions,
+            _ => &[],
+        }
+    }
+
     pub fn method_content_digest(&self) -> Result<Option<String>> {
         match self {
             Self::Execution { .. } => Ok(None),
             Self::Method {
                 task_signature,
                 procedure,
+                constraints,
                 ..
-            } => {
-                let encoded = serde_json::to_vec(&(task_signature, procedure)).map_err(|_| {
-                    Error::config("agent_tool_method_digest", "method digest encoding failed")
-                })?;
-                Ok(Some(domain_digest(
-                    "agent_tool_method_content_digest_v1",
-                    &[&encoded],
-                )))
-            }
+            } => canonical_agent_tool_method_content_digest(task_signature, procedure, constraints)
+                .map(Some),
         }
     }
 
     pub fn contribution_count(&self) -> usize {
         match self {
             Self::Execution { contributions, .. } => contributions.len(),
-            Self::Method { sources, .. } => sources
+            Self::Method {
+                sources,
+                usage_contributions,
+                ..
+            } => sources
                 .iter()
-                .map(|source| source.execution_refs.len().saturating_add(1))
-                .fold(0, usize::saturating_add),
+                .map(AgentToolMethodSourceRefV2::reference_count)
+                .fold(usage_contributions.len(), usize::saturating_add),
         }
     }
 
@@ -231,6 +434,7 @@ impl AgentToolExperienceBodyV1 {
                 procedure,
                 constraints,
                 sources,
+                usage_contributions,
             } => {
                 bounded_identifier(task_signature)
                     && procedure.len() <= crate::memory::MAX_PROCEDURAL_METHOD_BYTES
@@ -241,16 +445,23 @@ impl AgentToolExperienceBodyV1 {
                     && !sources.is_empty()
                     && sources
                         .iter()
-                        .all(AgentToolMethodSourceRefV1::validate_contract)
-                    && sources.windows(2).all(|pair| {
-                        (&pair[0].source_job_id, &pair[0].method_id)
-                            < (&pair[1].source_job_id, &pair[1].method_id)
-                    })
+                        .all(AgentToolMethodSourceRefV2::validate_contract)
+                    && sources
+                        .windows(2)
+                        .all(|pair| pair[0].canonical_identity() < pair[1].canonical_identity())
                     && self.method_content_digest().is_ok_and(|digest| {
                         sources
                             .iter()
-                            .all(|source| Some(&source.method_digest) == digest.as_ref())
+                            .all(|source| Some(source.method_digest()) == digest.as_deref())
+                            && usage_contributions.iter().all(|reference| {
+                                reference.validate_contract()
+                                    && Some(reference.method_content_digest.as_str())
+                                        == digest.as_deref()
+                            })
                     })
+                    && usage_contributions
+                        .windows(2)
+                        .all(|pair| pair[0].contribution_id < pair[1].contribution_id)
             }
         }
     }
@@ -325,7 +536,7 @@ impl AgentToolExperienceOwnerLocatorV3 {
         })
     }
 
-    pub fn from_material(material: &AgentToolExperienceRevisionMaterialV3) -> Self {
+    pub fn from_material(material: &AgentToolExperienceRevisionMaterialV4) -> Self {
         Self {
             memory_space_id: material.memory_space_id.clone(),
             owning_scope: material.owning_scope.clone(),
@@ -398,7 +609,7 @@ pub struct AgentToolExperienceRetainedRevisionDigestV3 {
 }
 
 impl AgentToolExperienceRetainedRevisionDigestV3 {
-    pub fn from_material(material: &AgentToolExperienceRevisionMaterialV3) -> Result<Self> {
+    pub fn from_material(material: &AgentToolExperienceRevisionMaterialV4) -> Result<Self> {
         if !material.validate_contract().accepted {
             return Err(Error::config(
                 "agent_tool_experience_retained_revision",
@@ -434,7 +645,7 @@ impl AgentToolExperienceRetainedRevisionDigestV3 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AgentToolExperienceRevisionMaterialV3 {
+pub struct AgentToolExperienceRevisionMaterialV4 {
     pub schema_version: u32,
     pub physical_key: String,
     pub memory_space_id: String,
@@ -454,7 +665,7 @@ pub struct AgentToolExperienceRevisionMaterialV3 {
     pub content_digest: String,
 }
 
-impl AgentToolExperienceRevisionMaterialV3 {
+impl AgentToolExperienceRevisionMaterialV4 {
     #[allow(clippy::too_many_arguments)]
     pub fn build(
         memory_space_id: &str,
@@ -623,6 +834,40 @@ impl AgentToolExperienceRevisionMaterialV3 {
         {
             failures.push(AgentToolExperienceContractFailure::ContentInvalid);
         }
+        if self
+            .body
+            .method_sources()
+            .iter()
+            .filter_map(AgentToolMethodSourceRefV2::governance_extraction)
+            .any(|source| {
+                source.identity.memory_space_id != self.memory_space_id
+                    || source.identity.mounted_subject_id != self.owning_scope.mounted_subject_id()
+                    || source.tool.registry_ref.registry_id != self.registry_id
+                    || source.tool.registry_ref.scope != self.registry_scope
+                    || source.tool.tool_id != self.tool_id
+                    || source.tool.schema_fingerprint != self.schema_fingerprint
+            })
+        {
+            failures.push(AgentToolExperienceContractFailure::ScopeInvalid);
+        }
+        if self
+            .body
+            .method_usage_contributions()
+            .iter()
+            .any(|reference| {
+                let method = &reference.method;
+                method.memory_space_id != self.memory_space_id
+                    || method.mounted_subject_id != self.owning_scope.mounted_subject_id()
+                    || method.owner_revision.owner_ref != self.owner_ref
+                    || method.owner_revision.owner_revision >= self.owner_revision
+                    || method.registry_ref.registry_id != self.registry_id
+                    || method.registry_ref.scope != self.registry_scope
+                    || method.tool_id != self.tool_id
+                    || method.schema_fingerprint != self.schema_fingerprint
+            })
+        {
+            failures.push(AgentToolExperienceContractFailure::ContentInvalid);
+        }
         if !self
             .canonical_content_digest()
             .is_ok_and(|value| value == self.content_digest)
@@ -780,7 +1025,7 @@ impl AgentToolExperienceHeadBindingV1 {
 
     pub fn from_head_and_material(
         head: &AgentToolExperienceOwnerHeadV3,
-        material: &AgentToolExperienceRevisionMaterialV3,
+        material: &AgentToolExperienceRevisionMaterialV4,
     ) -> Result<Self> {
         if !head.validate_contract().accepted
             || head.state != AgentToolExperienceHeadStateV3::Active
@@ -1011,7 +1256,7 @@ pub fn agent_tool_experience_scope_manifest_key(
 }
 
 pub fn validate_agent_tool_experience_owner_history(
-    materials: &[AgentToolExperienceRevisionMaterialV3],
+    materials: &[AgentToolExperienceRevisionMaterialV4],
 ) -> Result<()> {
     let Some(first) = materials.first() else {
         return Err(Error::config(
@@ -1050,7 +1295,7 @@ pub fn validate_agent_tool_experience_owner_history(
 pub fn validate_agent_tool_experience_scope_closure(
     manifest: &AgentToolExperienceScopeManifestV1,
     heads: &[AgentToolExperienceOwnerHeadV3],
-    materials: &[AgentToolExperienceRevisionMaterialV3],
+    materials: &[AgentToolExperienceRevisionMaterialV4],
     max_entries: usize,
 ) -> Result<()> {
     let head_by_owner = heads
@@ -1256,28 +1501,29 @@ fn hash_field(hasher: &mut Sha256, value: &[u8]) {
 mod lifecycle_tests {
     use super::*;
 
-    fn material() -> AgentToolExperienceRevisionMaterialV3 {
+    fn material() -> AgentToolExperienceRevisionMaterialV4 {
         material_with_guidance("1. Read the report.\n2. Verify the governed result.")
     }
 
-    fn material_with_guidance(guidance: &str) -> AgentToolExperienceRevisionMaterialV3 {
+    fn material_with_guidance(guidance: &str) -> AgentToolExperienceRevisionMaterialV4 {
         let mut body = AgentToolExperienceBodyV1::Method {
             task_signature: "read-report".into(),
             procedure: guidance.into(),
             constraints: vec![],
             sources: vec![],
+            usage_contributions: vec![],
         };
         let method_digest = body.method_content_digest().unwrap().unwrap();
         let AgentToolExperienceBodyV1::Method { sources, .. } = &mut body else {
             unreachable!()
         };
-        sources.push(AgentToolMethodSourceRefV1 {
+        sources.push(AgentToolMethodSourceRefV2::ProducerDeclaration {
             source_job_id: "synthetic-source".into(),
             method_id: "method-a".into(),
             method_digest,
             execution_refs: vec![],
         });
-        AgentToolExperienceRevisionMaterialV3::build(
+        AgentToolExperienceRevisionMaterialV4::build(
             "space-a",
             AgentToolExperienceOwningScopeV1::Subject {
                 mounted_subject_id: "agent-a".to_string(),

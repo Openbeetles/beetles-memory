@@ -8,7 +8,7 @@ use super::transcript::TranscriptTurnRecordAttachments;
 use super::{
     default_session_speaker_for_role, ActorAttribution, CanonicalTurnAppendIntent,
     CanonicalTurnTranscriptCommitReport, ConversationKey, ConversationTranscriptStore,
-    HostOpaqueRef, PostTurnLearningEvidenceV2, SessionMessage, SessionMessageRecord, SessionStore,
+    HostOpaqueRef, PostTurnLearningEvidenceV3, SessionMessage, SessionMessageRecord, SessionStore,
     SubjectId, TranscriptAppendIntent, TranscriptCommitReport, TranscriptConversationAlias,
     TranscriptTurnRecord, MAX_SESSION_ENTRIES,
 };
@@ -285,7 +285,7 @@ pub struct CommittedSessionMessage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanonicalTurnTranscriptCommitOptions {
     pub host_refs: Vec<HostOpaqueRef>,
-    pub learning_evidence: Option<PostTurnLearningEvidenceV2>,
+    pub learning_evidence: Option<PostTurnLearningEvidenceV3>,
     pub conversation_alias: Option<TranscriptConversationAlias>,
     pub now_secs: u64,
 }

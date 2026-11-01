@@ -63,7 +63,7 @@ fn finalize_request(user: &str, assistant: &str) -> MemoryTurnFinalizeRequest {
             external_content_used: false,
             candidate_ids: Vec::new(),
         },
-        learning: bm_sdk::PostTurnLearningInputV2::empty(),
+        learning: bm_sdk::PostTurnLearningInputV3::empty(),
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     }

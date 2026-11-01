@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::store_internal::agent_tool_experience::{
     combine_agent_tool_experience_plans, AgentToolExperienceStoreMutationPlanV1,
 };
+use crate::store_internal::merge_json_preconditions;
 use crate::store_internal::recall_index::{
     decode_typed_recall_index, ActiveTaskRunByChatIndex, ArchiveRecallManifest,
     ContinuityCapsuleScopeIndex, ConversationRecallManifest, ConversationTranscriptAuxManifest,
@@ -138,8 +139,8 @@ use bm_core::memory::{
     PostReplyMemoryMaintenanceInput, PostTurnGovernanceAttemptAuthorityV3,
     PostTurnGovernanceBindingSnapshotV1, PostTurnGovernanceDecisionSummaryV1,
     PostTurnGovernanceExecutionBindingV1, PostTurnGovernanceIdentityV2,
-    PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV3, PostTurnGovernancePrivacyAuthorityV1,
-    PostTurnLearningEvidenceV2, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
+    PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV4, PostTurnGovernancePrivacyAuthorityV1,
+    PostTurnLearningEvidenceV3, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
     PremiseTypedSource, PrivateDocStore, PrivateDocWorkspace, PrivateGardenDoc,
     PrivateGardenDocRecord, PrivateGardenGovernanceContext, PrivateGardenGovernanceInput,
     PrivateGardenGovernanceManifestEntry, PrivateGardenGovernanceOutcome, PrivateGardenStore,
@@ -219,7 +220,7 @@ use bm_core::skills::{
     validate_agent_tool_registry_snapshot, AgentSkillDirConfig, AgentSkillProjectionAudit,
     AgentSkillRegistrySnapshot, AgentToolExperienceHeadBindingV1, AgentToolExperienceOwnerHeadV3,
     AgentToolExperienceOwningScopeV1, AgentToolExperienceRetainedRevisionDigestV3,
-    AgentToolExperienceRevisionMaterialV3, AgentToolExperienceScopeManifestV1,
+    AgentToolExperienceRevisionMaterialV4, AgentToolExperienceScopeManifestV1,
     AgentToolExperienceSelectionInput, AgentToolProjectionAudit, AgentToolRegistryReport,
     AgentToolRegistrySnapshot, AgentToolSelectionReport, RuntimeSkillApplicabilityContext,
     RuntimeSkillAvailability, RuntimeSkillCreationRef, RuntimeSkillDeliveryDropReason,
@@ -1266,36 +1267,6 @@ impl MemoryStoreMutationPlan {
     }
 }
 
-fn merge_json_preconditions(
-    target: &mut Vec<StoreJsonPrecondition>,
-    incoming: impl IntoIterator<Item = StoreJsonPrecondition>,
-) -> Result<()> {
-    let mut by_address = BTreeMap::<(String, String), StoreJsonPrecondition>::new();
-    for precondition in target.drain(..).chain(incoming) {
-        let address = match &precondition {
-            StoreJsonPrecondition::Absent { namespace, key }
-            | StoreJsonPrecondition::Exact { namespace, key, .. } => {
-                (namespace.clone(), key.clone())
-            }
-        };
-        if let Some(existing) = by_address.get(&address) {
-            if existing != &precondition {
-                return Err(Error::config(
-                    "memory_write_transaction_precondition_conflict",
-                    format!(
-                        "conflicting JSON preconditions for namespace {}, key {}",
-                        address.0, address.1
-                    ),
-                ));
-            }
-        } else {
-            by_address.insert(address, precondition);
-        }
-    }
-    target.extend(by_address.into_values());
-    Ok(())
-}
-
 fn merge_blob_preconditions(
     target: &mut Vec<StoreBlobPrecondition>,
     incoming: impl IntoIterator<Item = StoreBlobPrecondition>,
@@ -1551,6 +1522,7 @@ pub struct MemoryRuntimeConfig {
         Option<crate::store_internal::procedural_selection::ProceduralSelectionSigner>,
     pub llm: Option<Arc<dyn LlmClient>>,
     pub clock: Arc<dyn MemoryClock>,
+    pub user_local_time_provider: Arc<dyn crate::UserLocalTimeProvider>,
     pub capability_policy: MemoryCapabilityPolicy,
     pub privacy_policy: MemoryPrivacyPolicy,
     pub audit_sink: Arc<dyn MemoryAuditSink>,
@@ -2304,7 +2276,9 @@ fn subject_soul_error_disposition(
         | SubjectSoulLifecycleErrorKey::TargetMustBeActiveAgentPersona => {
             SoulGovernanceSdkErrorDisposition::RegistryRejected
         }
-        SubjectSoulLifecycleErrorKey::AuthorityDenied => {
+        SubjectSoulLifecycleErrorKey::AuthorityDenied
+        | SubjectSoulLifecycleErrorKey::SourceReviewRequired
+        | SubjectSoulLifecycleErrorKey::RevisionSourceWithdrawn => {
             SoulGovernanceSdkErrorDisposition::AuthorityRejected
         }
         SubjectSoulLifecycleErrorKey::GenerationConflict
@@ -3307,7 +3281,9 @@ struct VerifiedSubjectSoulProjectionStores {
     mounted_subject_id: String,
     core: Option<SelfAuthoredCore>,
     ledger: Option<CoreRevisionLedger>,
+    ledger_source_redacted: bool,
     documents: BTreeMap<(String, String), SubjectSoulOwnedDocumentV1>,
+    persona: persona_learning::VerifiedPersonaEvidenceView,
 }
 
 struct SubjectSoulGenerationLayerMutationRequestV1 {
@@ -3321,12 +3297,16 @@ struct SubjectSoulAutonomousPlanningBase {
     revision: Option<u64>,
     include_current_generation_layers: bool,
     selected_core: Option<SelfAuthoredCore>,
+    turn_transcript: Option<TranscriptTurnRecord>,
+    persona_evidence: Option<bm_core::memory::GovernedTurnPersonaEvidenceV1>,
+    inherited_sources: Vec<bm_core::memory::SubjectSoulSourceRefV1>,
 }
 
 struct SubjectSoulAutonomousStoreMutationInput<'a> {
     base: &'a SubjectSoulAutonomousPlanningBase,
     operation_id: &'a str,
     layer_mutations: Vec<SubjectSoulGenerationLayerMutationV1>,
+    source_lineage: Vec<bm_core::memory::SubjectSoulSourceRefV1>,
     refresh_plan: &'a SelfAuthoredCoreRefreshPlanV1,
     additional_plan: MemoryStoreMutationPlan,
     scope: StoreEventScope,
@@ -3338,9 +3318,24 @@ struct PostTurnPrivateGardenPlanningInput<'a> {
     http: &'a mut (dyn LlmHttpClient + 'a),
     governance_llm: &'a (dyn CoreLlmClient + Send + Sync + 'a),
     request: &'a MemoryTurnFinalizeRequest,
-    session_store: &'a dyn SessionStore,
-    session_summary_store: &'a dyn SessionSummaryStore,
     strict_model_contract: bool,
+}
+
+struct ProjectionContextInput<'a> {
+    request: &'a MemoryProjectionRequest,
+    lifecycle: &'a RuntimeLifecycleReport,
+    runtime_budget: &'a RuntimeBudgetReport,
+    operation_time: u64,
+    user_local_time: Option<&'a crate::UserLocalTimeContext>,
+    subject_soul_selector: Option<&'a SubjectSoulReadSelectorV1>,
+    subject_soul_read: Option<&'a SubjectSoulVerifiedStoreRead>,
+}
+
+struct PostTurnSelfRuntimePlan {
+    refresh_plan: SelfAuthoredCoreRefreshPlanV1,
+    layer_mutations: Vec<SubjectSoulGenerationLayerMutationV1>,
+    planned_effects: Vec<SelfRuntimePlannedEffectV1>,
+    source_lineage: Vec<bm_core::memory::SubjectSoulSourceRefV1>,
 }
 
 struct PostTurnSelfRuntimePlanningInput<'a> {
@@ -3350,8 +3345,6 @@ struct PostTurnSelfRuntimePlanningInput<'a> {
     http: &'a mut (dyn LlmHttpClient + 'a),
     governance_llm: &'a (dyn CoreLlmClient + Send + Sync + 'a),
     request: &'a MemoryTurnFinalizeRequest,
-    session_store: &'a dyn SessionStore,
-    session_summary_store: &'a dyn SessionSummaryStore,
 }
 
 struct VerifiedSubjectSoulRelationshipRuntimeStore<'a> {
@@ -3374,9 +3367,25 @@ impl SubjectSoulRelationshipRuntimeReadStore for VerifiedSubjectSoulRelationship
         let Some(verified) = self.verified else {
             return Ok(None);
         };
-        verified
+        let mut input = verified
             .relationship_runtime_input(relationship_id)
-            .map_err(SubjectSoulStoreFailure::into_store_error)
+            .map_err(SubjectSoulStoreFailure::into_store_error)?;
+        let source_available = match &verified.outcome {
+            SubjectSoulReadOutcomeV1::Verified { view } => {
+                view.source_read_availability.permits_content()
+            }
+            SubjectSoulReadOutcomeV1::ImplicitUnseeded { .. } => true,
+            _ => false,
+        };
+        if !source_available {
+            if let Some(input) = &mut input {
+                // The independently governed relationship constitution remains
+                // authoritative; withdrawn Soul material cannot mediate it.
+                input.current_material = None;
+                input.stored_projection = None;
+            }
+        }
+        Ok(input)
     }
 }
 
@@ -3386,7 +3395,9 @@ impl VerifiedSubjectSoulProjectionStores {
             mounted_subject_id: mounted_subject_id.to_string(),
             core: None,
             ledger: None,
+            ledger_source_redacted: false,
             documents: BTreeMap::new(),
+            persona: persona_learning::VerifiedPersonaEvidenceView::empty(mounted_subject_id),
         }
     }
 
@@ -3439,9 +3450,30 @@ impl VerifiedSubjectSoulProjectionStores {
             mounted_subject_id: mounted_subject_id.to_string(),
             core: selected_core,
             ledger: include_current_generation_layers
-                .then(|| read.current_ledger.clone())
+                .then(|| {
+                    read.current_ledger.as_ref().map(|ledger| {
+                        read.manifest.as_ref().map_or_else(
+                            || ledger.clone(),
+                            |manifest| {
+                                bm_core::memory::source_governance_ledger_view_v1(
+                                    ledger,
+                                    &manifest.source_review,
+                                )
+                            },
+                        )
+                    })
+                })
                 .flatten(),
+            ledger_source_redacted: read
+                .manifest
+                .as_ref()
+                .is_some_and(|manifest| !manifest.source_review.withdrawn_sources.is_empty()),
             documents,
+            persona: persona_learning::VerifiedPersonaEvidenceView::from_read(
+                owner,
+                read,
+                include_current_generation_layers,
+            )?,
         })
     }
 
@@ -3449,6 +3481,7 @@ impl VerifiedSubjectSoulProjectionStores {
         self.documents
             .get(&(namespace.to_string(), key.to_string()))
             .map(|document| {
+                self.persona.mark_sources(&document.source_lineage)?;
                 serde_json::from_value(document.body.clone()).map_err(|error| {
                     Error::config(
                         "subject_soul_projection_read",
@@ -3485,6 +3518,7 @@ fn is_subject_soul_generation_layer_namespace(namespace: &str) -> bool {
             | "private_doc"
             | "private_garden"
             | "outer_voice"
+            | "soul_turn_persona_evidence"
     )
 }
 
@@ -3503,6 +3537,16 @@ fn validate_subject_soul_generation_layer_document_body(
             })
     }
     match layer {
+        SubjectSoulGenerationLayerKindV1::TurnPersonaEvidence => {
+            let evidence: bm_core::memory::GovernedTurnPersonaEvidenceV1 =
+                serde_json::from_value(document.body.clone()).map_err(|_| {
+                    Error::config(
+                        "subject_soul_generation_layer_body",
+                        "invalid governed turn evidence",
+                    )
+                })?;
+            evidence.validate_contract()
+        }
         SubjectSoulGenerationLayerKindV1::SelfModel => decode::<SelfModel>(document),
         SubjectSoulGenerationLayerKindV1::SelfContinuity => decode::<SelfContinuity>(document),
         SubjectSoulGenerationLayerKindV1::RelationshipPortfolio => {
@@ -3599,6 +3643,7 @@ impl PlanningSubjectSoulGenerationStores {
         generation: u64,
         revision: Option<u64>,
     ) -> Result<Vec<SubjectSoulGenerationLayerMutationV1>> {
+        let input_sources = self.base.persona.read_sources()?;
         let changes = self
             .changes
             .into_inner()
@@ -3618,6 +3663,41 @@ impl PlanningSubjectSoulGenerationStores {
                     )
                     .map_err(|error| {
                         Error::config("subject_soul_generation_layer_plan", error.to_string())
+                    })?;
+                    let sources = if layer == SubjectSoulGenerationLayerKindV1::TurnPersonaEvidence
+                    {
+                        let evidence: bm_core::memory::GovernedTurnPersonaEvidenceV1 =
+                            serde_json::from_value(body.clone()).map_err(|_| {
+                                Error::config(
+                                    "post_turn.persona_evidence",
+                                    "invalid pending observation",
+                                )
+                            })?;
+                        vec![bm_core::memory::SubjectSoulSourceRefV1 {
+                            memory_space_id: evidence.source.memory_space_id,
+                            subject_id: evidence.source.mounted_subject_id,
+                            channel_id: evidence.source.channel_id,
+                            conversation_id: evidence.source.conversation_id,
+                            turn_id: evidence.source.turn_id,
+                            sequence: evidence.source_sequence,
+                            canonical_turn_digest: evidence.canonical_turn_digest,
+                            transcript_content_digest: evidence.source_transcript_digest,
+                        }]
+                    } else {
+                        bm_core::memory::merge_subject_soul_source_lineage_v1(
+                            owner,
+                            [
+                                prior
+                                    .map_or(&[][..], |document| document.source_lineage.as_slice()),
+                                input_sources.as_slice(),
+                            ],
+                        )
+                        .map_err(|error| {
+                            Error::config("post_turn.persona_evidence", error.to_string())
+                        })?
+                    };
+                    let document = document.with_source_lineage(sources).map_err(|error| {
+                        Error::config("post_turn.persona_evidence", error.to_string())
                     })?;
                     validate_subject_soul_generation_layer_document_body(layer, &document)?;
                     if prior.is_some_and(|prior| prior.content_digest == document.content_digest) {
@@ -4104,6 +4184,13 @@ impl SelfAuthoredCoreStore for VerifiedSubjectSoulProjectionStores {
                 "Self-Authored Core read escaped the verified mounted Soul owner",
             ));
         }
+        for document in self
+            .documents
+            .values()
+            .filter(|document| document.namespace == "self_authored_core")
+        {
+            self.persona.mark_sources(&document.source_lineage)?;
+        }
         Ok(self.core.clone())
     }
 
@@ -4129,6 +4216,15 @@ impl CoreRevisionLedgerStore for VerifiedSubjectSoulProjectionStores {
                 "subject_soul_projection_read",
                 "Core revision ledger read escaped the verified mounted Soul owner",
             ));
+        }
+        if !self.ledger_source_redacted {
+            for document in self
+                .documents
+                .values()
+                .filter(|document| document.namespace == "core_revision_ledger")
+            {
+                self.persona.mark_sources(&document.source_lineage)?;
+            }
         }
         Ok(self.ledger.clone())
     }
@@ -4209,6 +4305,7 @@ impl PrivateGardenStore for VerifiedSubjectSoulProjectionStores {
                 namespace == "private_garden" && key.starts_with(&prefix)
             })
             .map(|(_, document)| {
+                self.persona.mark_sources(&document.source_lineage)?;
                 serde_json::from_value::<PrivateGardenDoc>(document.body.clone())
                     .map(|doc| private_garden_doc_record(&doc))
                     .map_err(|error| {
@@ -5295,6 +5392,7 @@ impl MemoryRuntime {
             operation_id,
             layer_mutations,
             refresh_plan,
+            source_lineage,
             additional_plan,
             scope,
             planned_at,
@@ -5385,6 +5483,23 @@ impl MemoryRuntime {
             operation_id: operation_id.to_string(),
             actor_subject_id: owner.subject_id.clone(),
             layer_mutations,
+            evidence: bm_core::memory::SubjectSoulRevisionEvidenceV1 {
+                source_lineage,
+                source_review: base
+                    .verified
+                    .manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.source_review.pending_basis()),
+                lawful_founding: persona_learning::lawful_founding_for_review(base).map_err(
+                    |_| {
+                        subject_soul_sdk_error(
+                            operation,
+                            SubjectSoulLifecycleErrorKey::RepairRequired,
+                            SoulGovernanceSdkErrorDisposition::RepairRequired,
+                        )
+                    },
+                )?,
+            },
         };
         let plan = plan_subject_soul_autonomous_cycle_v1(
             owner,
@@ -5595,6 +5710,19 @@ impl MemoryRuntime {
             (&left.namespace, &left.physical_key).cmp(&(&right.namespace, &right.physical_key))
         });
         delete_addresses.dedup();
+        if delete_addresses
+            .iter()
+            .any(|address| address.namespace == SUBJECT_SOUL_RELATIONSHIP_PROJECTION_NAMESPACE)
+        {
+            // A Core revision purges stale relationship projections. Their
+            // independent source roots must remain the same exact read image
+            // until this atomic revision commits, just as in lifecycle purges.
+            preconditions.extend(
+                current
+                    .relationship_projection_purge_preconditions(&delete_addresses)
+                    .map_err(|error| map_subject_soul_store_failure(operation, error))?,
+            );
+        }
         for address in delete_addresses {
             let prior = current
                 .closure_documents
@@ -16844,14 +16972,19 @@ impl MemoryRuntime {
         let graph_read_path_mutation_delta =
             recall_report.graph_index_report.read_path_mutation_delta;
         let mut recall_delivery_report = recall_report.delivery_report;
-        let context = self.load_projection_context(
-            &request,
-            &lifecycle,
-            &runtime_budget,
+        let user_local_time = crate::local_time::resolve(
+            self.config.user_local_time_provider.as_ref(),
             authority.operation_time,
-            effective_soul_selector.as_ref(),
-            subject_soul.as_ref(),
         )?;
+        let context = self.load_projection_context(ProjectionContextInput {
+            request: &request,
+            lifecycle: &lifecycle,
+            runtime_budget: &runtime_budget,
+            operation_time: authority.operation_time,
+            user_local_time: user_local_time.as_ref(),
+            subject_soul_selector: effective_soul_selector.as_ref(),
+            subject_soul_read: subject_soul.as_ref(),
+        })?;
         let render_max_chars =
             runtime_budget.projection_render_chars_for_request(request.system_max_len, None);
         let runtime_awareness = render_runtime_awareness_block(
@@ -16894,6 +17027,7 @@ impl MemoryRuntime {
             projection_id(self, &request),
             &context,
             &runtime_awareness,
+            user_local_time.as_ref(),
             &inhabited_subject_projection,
             render_max_chars,
         );
@@ -16971,10 +17105,18 @@ impl MemoryRuntime {
             bm_core::memory::ProceduralProjectionBindingV1::Preview => None,
             bm_core::memory::ProceduralProjectionBindingV1::Turn { turn_id } => {
                 use bm_core::memory::{
-                    ProceduralProjectionIdentityV1, ProceduralSelectionReceiptV1,
+                    MemoryTurnProjectionReceiptV2, ProceduralProjectionIdentityV1,
                     RuntimeSkillSelectionV1, StandardAgentSkillSelectionV1,
                 };
-                let mut receipt = ProceduralSelectionReceiptV1 {
+                let mut receipt = MemoryTurnProjectionReceiptV2 {
+                    soul_source_admission: subject_soul
+                        .as_ref()
+                        .map(SubjectSoulVerifiedStoreRead::turn_source_admission)
+                        .transpose()
+                        .map_err(|error| {
+                            Error::config("turn_projection_soul_admission", error.to_string())
+                        })?
+                        .flatten(),
                     schema_version: bm_core::memory::PROCEDURAL_SELECTION_RECEIPT_SCHEMA_VERSION,
                     receipt_ref: String::new(),
                     signing_key_id: String::new(),
@@ -17193,13 +17335,17 @@ impl MemoryRuntime {
 
     fn load_projection_context(
         &self,
-        request: &MemoryProjectionRequest,
-        lifecycle: &RuntimeLifecycleReport,
-        runtime_budget: &RuntimeBudgetReport,
-        operation_time: u64,
-        subject_soul_selector: Option<&SubjectSoulReadSelectorV1>,
-        subject_soul_read: Option<&SubjectSoulVerifiedStoreRead>,
+        input: ProjectionContextInput<'_>,
     ) -> Result<crate::PromptMemoryContext> {
+        let ProjectionContextInput {
+            request,
+            lifecycle,
+            runtime_budget,
+            operation_time,
+            user_local_time,
+            subject_soul_selector,
+            subject_soul_read,
+        } = input;
         let platform = self.config.platform.as_ref();
         let session_store = self.transcript_backed_session_store(
             platform.session_store(),
@@ -17213,7 +17359,6 @@ impl MemoryRuntime {
         let task_run_store = platform.task_run_store();
         let task_artifact_store = platform.task_artifact_store();
         let task_learning_store = platform.task_learning_store();
-        let mut subject_soul_current_projection_allowed = false;
         let verified_soul_stores = if let Some(selector) = subject_soul_selector {
             let owner = self
                 .subject_soul_owner_for_mounted(SubjectSoulSdkOperation::Project)
@@ -17237,12 +17382,18 @@ impl MemoryRuntime {
                     "verified Subject Soul read has no immutable-session receipt",
                 ));
             }
-            subject_soul_current_projection_allowed = read.head.as_ref().is_none_or(|head| {
+            let subject_soul_current_projection_allowed = read.head.as_ref().is_none_or(|head| {
                 matches!(
                     head.state,
                     SubjectSoulLifecycleStateV1::Unseeded | SubjectSoulLifecycleStateV1::Active
                 )
-            });
+            }) && match &read.outcome {
+                SubjectSoulReadOutcomeV1::Verified { view } => {
+                    view.source_read_availability.permits_content()
+                }
+                SubjectSoulReadOutcomeV1::ImplicitUnseeded { .. } => true,
+                _ => false,
+            };
             let core = match &read.outcome {
                 SubjectSoulReadOutcomeV1::Verified { view }
                     if subject_soul_current_projection_allowed
@@ -17277,14 +17428,30 @@ impl MemoryRuntime {
         };
         let relationship_constitution_store = VerifiedSubjectSoulRelationshipRuntimeStore {
             mounted_subject_id: &self.config.scoped_runtime.mounted_subject_id,
-            verified: subject_soul_read.filter(|_| {
-                subject_soul_selector.is_some() && subject_soul_current_projection_allowed
+            verified: subject_soul_read.filter(|read| {
+                // Relationship source authority is independent of the Soul's
+                // source-review hold. The verified wrapper suppresses held Soul
+                // material while retaining these HumanUser boundary floors.
+                // This seam reads current relationship roots, so an exact Soul
+                // revision cannot authorize them for a historical projection.
+                matches!(
+                    request.temporal_operation,
+                    crate::MemoryRecallTemporalOperation::Current
+                ) && matches!(
+                    subject_soul_selector,
+                    Some(SubjectSoulReadSelectorV1::Current)
+                ) && read.head.as_ref().is_none_or(|head| {
+                    matches!(
+                        head.state,
+                        SubjectSoulLifecycleStateV1::Unseeded | SubjectSoulLifecycleStateV1::Active
+                    )
+                })
             }),
         };
         let world_sense_store = platform.world_sense_store();
         let remind_store = platform.remind_at_store();
         let task_store = platform.task_store();
-        let turn_continuity_evidence_store = platform.turn_continuity_evidence_store();
+        let turn_continuity_evidence_store = &verified_soul_stores.persona;
         let turn_ledger_store = platform.turn_ledger_store();
         let runtime_skill_storage = P8UnavailableRuntimeSkillStorage;
         let continuity_capsule_store = platform.continuity_capsule_store();
@@ -17308,6 +17475,7 @@ impl MemoryRuntime {
                 .projection_source_budget
                 .context_assembly_max_chars,
             now_secs: operation_time,
+            user_local_time,
             participation_plan: self.prompt_participation_plan(),
             recent_messages_limit: request.recent_messages_limit.min(
                 runtime_budget
@@ -17346,7 +17514,7 @@ impl MemoryRuntime {
             mental_privacy_store: &verified_soul_stores,
             remind_store: remind_store.as_ref(),
             task_store: task_store.as_ref(),
-            turn_continuity_evidence_store: turn_continuity_evidence_store.as_ref(),
+            turn_continuity_evidence_store,
             turn_ledger_store: turn_ledger_store.as_ref(),
             skill_storage: &runtime_skill_storage,
             continuity_capsule_store: continuity_capsule_store.as_ref(),
@@ -17583,8 +17751,13 @@ impl MemoryRuntime {
         let transcript_store = platform.conversation_transcript_store();
         let learning_evidence = self.build_post_turn_learning_evidence(&request, producer)?;
         let intake_authority = producer
-            .filter(|_| request.learning.has_feedback())
+            .filter(|_| request.learning.has_authorized_content())
             .map(|context| -> Result<_> {
+                let mut source_preconditions = context.source_preconditions.clone();
+                merge_json_preconditions(
+                    &mut source_preconditions,
+                    self.resolve_production_learning_input_sources(&request)?,
+                )?;
                 Ok(crate::learning::ProceduralIntakeAuthorization {
                     store_authority_digest: self
                         .config
@@ -17600,7 +17773,7 @@ impl MemoryRuntime {
                         .procedural_store_incarnation(&self.config.memory_space_id)?,
                     current_head: context.head.clone(),
                     evidence: learning_evidence.clone(),
-                    source_preconditions: context.source_preconditions.clone(),
+                    source_preconditions,
                 })
             })
             .transpose()?;
@@ -17792,10 +17965,14 @@ impl MemoryRuntime {
                     )
                 }
                 _ => {
-                    return Err(Error::conflict(
-                        stage,
-                        "archived/deleted/terminated Soul cannot run autonomous governance",
-                    ));
+                    // A closed Soul is not authority to run Soul work, but must
+                    // not block the independent shared-memory lane of a valid
+                    // delivered turn. turn_permits_soul_learning rejects its
+                    // missing current admission before either Soul planner runs.
+                    let head = verified.head.as_ref().ok_or_else(|| {
+                        Error::config(stage, "verified closed Soul is missing its head")
+                    })?;
+                    (head.generation, head.current_revision, false, None)
                 }
             };
         Ok(SubjectSoulAutonomousPlanningBase {
@@ -17805,7 +17982,54 @@ impl MemoryRuntime {
             revision,
             include_current_generation_layers,
             selected_core,
+            turn_transcript: None,
+            persona_evidence: None,
+            inherited_sources: Vec::new(),
         })
+    }
+
+    /// The source execution keeps its original signed generation across retries
+    /// and reopen. A newer head cannot grant an older turn a new Soul identity.
+    fn turn_permits_soul_learning(
+        &self,
+        base: &SubjectSoulAutonomousPlanningBase,
+        request: &MemoryTurnFinalizeRequest,
+    ) -> Result<bool> {
+        let Some(receipt) = &request.learning.selection_receipt else {
+            return Ok(false);
+        };
+        let Some(source) = &receipt.soul_source_admission else {
+            return Ok(false);
+        };
+        let store = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config("post_turn.soul_source", "Store authority is unavailable")
+        })?;
+        store.verify_procedural_selection_receipt(receipt)?;
+        if receipt.identity.memory_space_id != self.config.memory_space_id
+            || receipt.identity.mounted_subject_id != request.turn.subject
+            || receipt.identity.channel != request.turn.conversation.channel
+            || receipt.identity.chat_id != request.turn.conversation.chat_id
+            || receipt.identity.conversation_id
+                != request
+                    .turn
+                    .conversation
+                    .conversation_id
+                    .as_deref()
+                    .unwrap_or(&request.turn.conversation.chat_id)
+            || receipt.identity.turn_id != request.turn.turn_id
+        {
+            return Err(Error::invalid_input(
+                "post_turn.soul_source",
+                "signed source scope differs from canonical turn",
+            ));
+        }
+        let current = base
+            .verified
+            .turn_source_admission()
+            .map_err(SubjectSoulStoreFailure::into_store_error)?;
+        Ok(current
+            .as_ref()
+            .is_some_and(|current| source.permits_current(current)))
     }
 
     fn plan_post_turn_private_garden(
@@ -17821,25 +18045,47 @@ impl MemoryRuntime {
             http,
             governance_llm,
             request,
-            session_store,
-            session_summary_store,
             strict_model_contract,
         } = input;
+        if base
+            .verified
+            .manifest
+            .as_ref()
+            .is_some_and(|manifest| manifest.source_review.requires_review())
+        {
+            return Ok((
+                PostTurnPrivateGardenReport::skipped("soul_source_review_pending"),
+                None,
+                MemoryStoreMutationPlan::default(),
+            ));
+        }
+        if !self.turn_permits_soul_learning(base, request)? {
+            return Ok((
+                PostTurnPrivateGardenReport::skipped("soul_source_not_current"),
+                None,
+                MemoryStoreMutationPlan::default(),
+            ));
+        }
         let platform = self.config.platform.as_ref();
         let execution_state_store = platform.execution_state_store();
-        let verified_stores = VerifiedSubjectSoulProjectionStores::from_verified_read(
+        let mut verified_stores = VerifiedSubjectSoulProjectionStores::from_verified_read(
             &base.owner.subject_id,
             &base.owner,
             &base.verified,
             base.include_current_generation_layers,
             base.selected_core.clone(),
         )?;
+        verified_stores.persona = verified_stores
+            .persona
+            .with_current(base.turn_transcript.as_ref(), None)?;
+        let persona_context = verified_stores.persona.clone();
+        let proven_session = persona_context.session(&self.config.scope.chat_id);
         let planning_soul_stores = PlanningSubjectSoulGenerationStores::new(verified_stores);
         let user_content = latest_user_content(&request.turn);
         let reply_content = assistant_content(&request.turn).unwrap_or_default();
         let context = PrivateGardenGovernanceContext {
-            session_store,
-            session_summary_store,
+            session_store: &proven_session,
+            session_summary_store: &proven_session,
             execution_state_store: execution_state_store.as_ref(),
             self_model_store: &planning_soul_stores,
             private_doc_store: &planning_soul_stores,
@@ -17916,11 +18162,7 @@ impl MemoryRuntime {
     fn plan_post_turn_self_runtime_cycle(
         &self,
         input: PostTurnSelfRuntimePlanningInput<'_>,
-    ) -> Result<(
-        SelfAuthoredCoreRefreshPlanV1,
-        Vec<SubjectSoulGenerationLayerMutationV1>,
-        Vec<SelfRuntimePlannedEffectV1>,
-    )> {
+    ) -> Result<PostTurnSelfRuntimePlan> {
         let PostTurnSelfRuntimePlanningInput {
             base,
             operation_id,
@@ -17928,16 +18170,43 @@ impl MemoryRuntime {
             http,
             governance_llm,
             request,
-            session_store,
-            session_summary_store,
         } = input;
-        let verified_stores = VerifiedSubjectSoulProjectionStores::from_verified_read(
+        if !self.turn_permits_soul_learning(base, request)? {
+            return Ok(PostTurnSelfRuntimePlan {
+                refresh_plan: SelfAuthoredCoreRefreshPlanV1::Skipped,
+                layer_mutations: Vec::new(),
+                planned_effects: Vec::new(),
+                source_lineage: Vec::new(),
+            });
+        }
+        let mut verified_stores = VerifiedSubjectSoulProjectionStores::from_verified_read(
             &base.owner.subject_id,
             &base.owner,
             &base.verified,
             base.include_current_generation_layers,
             base.selected_core.clone(),
         )?;
+        let review_basis = base
+            .verified
+            .manifest
+            .as_ref()
+            .and_then(|manifest| manifest.source_review.pending_basis());
+        if review_basis.is_some() {
+            verified_stores.core = None;
+            verified_stores.ledger = None;
+            verified_stores
+                .documents
+                .retain(|(namespace, _), _| namespace == "soul_turn_persona_evidence");
+        }
+        verified_stores.persona = verified_stores.persona.with_current(
+            base.turn_transcript.as_ref(),
+            base.persona_evidence.as_ref(),
+        )?;
+        verified_stores
+            .persona
+            .mark_sources(&base.inherited_sources)?;
+        let persona_context = verified_stores.persona.clone();
+        let proven_session = persona_context.session(&self.config.scope.chat_id);
         let verified_relationship_store = VerifiedSubjectSoulRelationshipRuntimeStore {
             mounted_subject_id: &base.owner.subject_id,
             verified: Some(&base.verified),
@@ -17953,9 +18222,11 @@ impl MemoryRuntime {
         let task_run_store = platform.task_run_store();
         let task_artifact_store = platform.task_artifact_store();
         let task_learning_store = platform.task_learning_store();
-        let turn_continuity_evidence_store = platform.turn_continuity_evidence_store();
         let turn_ledger_store = platform.turn_ledger_store();
         let skill_storage = platform.skill_storage();
+        let now_secs = self.config.clock.now_secs();
+        let user_local_time =
+            crate::local_time::resolve(self.config.user_local_time_provider.as_ref(), now_secs)?;
         let payload = SelfRuntimeJobPayload {
             trigger: SelfRuntimeTrigger::PostReply,
             source_channel: request.turn.source.channel.clone(),
@@ -17968,7 +18239,8 @@ impl MemoryRuntime {
                     .tool_observations
                     .iter()
                     .any(|observation| observation.external_content),
-            now_secs: self.config.clock.now_secs(),
+            now_secs,
+            user_local_time,
         };
         let plan = plan_self_runtime(
             operation_id,
@@ -17987,9 +18259,9 @@ impl MemoryRuntime {
                     .as_ref()
                     .map(|scope| scope.relationship_id.as_str()),
                 memory_system_kind: self.memory_profile().memory_system_kind(),
-                session_store,
+                session_store: &proven_session,
                 memory_store: memory_store.as_ref(),
-                session_summary_store,
+                session_summary_store: &proven_session,
                 execution_state_store: execution_state_store.as_ref(),
                 long_term_memory_store: long_term_memory_store.as_ref(),
                 continuity_capsule_store: continuity_capsule_store.as_ref(),
@@ -18015,7 +18287,7 @@ impl MemoryRuntime {
                 task_run_store: task_run_store.as_ref(),
                 task_artifact_store: task_artifact_store.as_ref(),
                 task_learning_store: task_learning_store.as_ref(),
-                turn_continuity_evidence_store: turn_continuity_evidence_store.as_ref(),
+                turn_continuity_evidence_store: &persona_context,
                 turn_ledger_store: turn_ledger_store.as_ref(),
                 skill_storage: skill_storage.as_ref(),
             },
@@ -18029,23 +18301,123 @@ impl MemoryRuntime {
             ));
         }
         let outcome = plan.outcome;
-        let refresh_plan = outcome
+        let mut refresh_plan = outcome
             .self_authored_core_result
             .map_err(|error| Error::config("post_turn.subject_soul", error.to_string()))?;
+        if let Some(review) = &review_basis {
+            let snapshot = self
+                .subject_soul_snapshot_from_read(
+                    &base.verified,
+                    SubjectSoulSdkOperation::EvidenceUpdate,
+                )
+                .map_err(|error| {
+                    Error::config("post_turn.soul_source_review", error.to_string())
+                })?;
+            let evidence = bm_core::memory::SubjectSoulRevisionEvidenceV1 {
+                source_lineage: persona_context.read_sources()?,
+                source_review: Some(review.clone()),
+                lawful_founding: persona_learning::lawful_founding_for_review(base)?,
+            };
+            refresh_plan = bm_core::memory::rebase_subject_soul_source_review_plan_v1(
+                &base.owner,
+                &snapshot,
+                &evidence,
+                &refresh_plan,
+                now_secs,
+            )
+            .map_err(|error| Error::config("post_turn.soul_source_review", error.to_string()))?;
+        } else if base
+            .verified
+            .manifest
+            .as_ref()
+            .is_some_and(|manifest| !manifest.source_review.withdrawn_sources.is_empty())
+        {
+            let snapshot = self
+                .subject_soul_snapshot_from_read(
+                    &base.verified,
+                    SubjectSoulSdkOperation::EvidenceUpdate,
+                )
+                .map_err(|error| Error::config("post_turn.soul_safe_history", error.to_string()))?;
+            refresh_plan = bm_core::memory::rebase_subject_soul_safe_history_plan_v1(
+                &base.owner,
+                &snapshot,
+                &refresh_plan,
+                now_secs,
+            )
+            .map_err(|error| Error::config("post_turn.soul_safe_history", error.to_string()))?;
+        }
         let planning_soul_stores = PlanningSubjectSoulGenerationStores::new(verified_stores);
+        if let Some(evidence) = &base.persona_evidence {
+            planning_soul_stores.set_typed(
+                SubjectSoulGenerationLayerKindV1::TurnPersonaEvidence,
+                &evidence.evidence_id,
+                evidence,
+            )?;
+            let mut retained = planning_soul_stores
+                .base
+                .documents
+                .iter()
+                .filter(|((namespace, _), _)| namespace == "soul_turn_persona_evidence")
+                .map(|((_, key), document)| {
+                    serde_json::from_value::<bm_core::memory::GovernedTurnPersonaEvidenceV1>(
+                        document.body.clone(),
+                    )
+                    .map(|value| (value.observed_at, value.evidence_id, key.clone()))
+                    .map_err(|_| {
+                        Error::config("post_turn.persona_evidence", "invalid retained evidence")
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            retained.retain(|(_, id, _)| id != &evidence.evidence_id);
+            retained.push((
+                evidence.observed_at,
+                evidence.evidence_id.clone(),
+                evidence.evidence_id.clone(),
+            ));
+            retained.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+            if review_basis.is_some()
+                && !matches!(refresh_plan, SelfAuthoredCoreRefreshPlanV1::Adopt { .. })
+                && retained.len() > bm_core::memory::TURN_CONTINUITY_EVIDENCE_HISTORY_MAX_ITEMS
+            {
+                return Err(Error::config(
+                    "post_turn.soul_source_review",
+                    "pending review evidence capacity exhausted",
+                ));
+            }
+            for (_, _, key) in retained
+                .into_iter()
+                .skip(bm_core::memory::TURN_CONTINUITY_EVIDENCE_HISTORY_MAX_ITEMS)
+            {
+                planning_soul_stores
+                    .clear_typed(SubjectSoulGenerationLayerKindV1::TurnPersonaEvidence, &key)?;
+            }
+        }
         let relationship_scope_id = self_runtime_relationship_scope_id(
             &self.config.scoped_runtime,
             &request.turn.source.channel,
             &self.config.scope.chat_id,
         );
+        let planned_effects = if review_basis.is_some()
+            && !matches!(refresh_plan, SelfAuthoredCoreRefreshPlanV1::Adopt { .. })
+        {
+            Vec::new()
+        } else {
+            plan.planned_effects
+        };
         planning_soul_stores
-            .apply_self_runtime_effects(&plan.planned_effects, &relationship_scope_id)?;
+            .apply_self_runtime_effects(&planned_effects, &relationship_scope_id)?;
+        let source_lineage = persona_context.read_sources()?;
         let layer_mutations = planning_soul_stores.into_layer_mutations(
             &base.owner,
             base.generation,
             base.revision,
         )?;
-        Ok((refresh_plan, layer_mutations, plan.planned_effects))
+        Ok(PostTurnSelfRuntimePlan {
+            refresh_plan,
+            layer_mutations,
+            planned_effects,
+            source_lineage,
+        })
     }
 
     fn plan_self_runtime_non_soul_effects(
@@ -18166,38 +18538,79 @@ impl MemoryRuntime {
                 mode_input: request.mode_input,
             },
         )?;
-        let subject_soul_base =
+        let mut subject_soul_base =
             self.read_subject_soul_autonomous_planning_base("post_turn.subject_soul_snapshot")?;
+        if self.turn_permits_soul_learning(&subject_soul_base, request)? {
+            let key = ConversationKey::new(
+                &self.config.memory_space_id,
+                &request.turn.conversation.channel,
+                request
+                    .turn
+                    .conversation
+                    .conversation_id
+                    .as_deref()
+                    .unwrap_or(&request.turn.conversation.chat_id),
+            )?;
+            let transcript = platform
+                .conversation_transcript_store()
+                .get_turn(&key, &request.turn.subject, &request.turn.turn_id)?
+                .ok_or_else(|| {
+                    Error::config(
+                        "post_turn.persona_evidence",
+                        "signed source transcript is missing",
+                    )
+                })?;
+            if !transcript.permits_post_turn_learning() {
+                return Err(Error::conflict(
+                    "post_turn.persona_evidence",
+                    "signed source is no longer available",
+                ));
+            }
+            subject_soul_base.turn_transcript = Some(transcript);
+        }
         let (private_garden_self_work, private_garden_soul, private_garden_additional) = self
             .plan_post_turn_private_garden(PostTurnPrivateGardenPlanningInput {
                 base: &subject_soul_base,
                 http,
                 governance_llm,
                 request,
-                session_store: session_store.as_ref(),
-                session_summary_store: session_summary_store.as_ref(),
                 strict_model_contract: false,
             })?;
         let private_garden_layer_mutations = private_garden_soul
             .map(|request| request.mutations)
             .unwrap_or_default();
+        subject_soul_base.inherited_sources =
+            bm_core::memory::merge_subject_soul_source_lineage_v1(
+                &subject_soul_base.owner,
+                private_garden_layer_mutations
+                    .iter()
+                    .filter_map(|mutation| match mutation {
+                        SubjectSoulGenerationLayerMutationV1::Upsert { document, .. } => {
+                            Some(document.source_lineage.as_slice())
+                        }
+                        _ => None,
+                    }),
+            )
+            .map_err(|error| Error::config("post_turn.persona_evidence", error.to_string()))?;
         let initial_effects = self_runtime_initial_effects_from_private_garden_mutations(
             &subject_soul_base.owner.subject_id,
             &private_garden_layer_mutations,
         )?;
         let autonomous_operation_id = format!("post-turn-autonomous:{}", request.turn.turn_id);
         let planned_at = self.config.clock.now_secs();
-        let (refresh_plan, layer_mutations, planned_effects) = self
-            .plan_post_turn_self_runtime_cycle(PostTurnSelfRuntimePlanningInput {
-                base: &subject_soul_base,
-                operation_id: &autonomous_operation_id,
-                initial_effects,
-                http,
-                governance_llm,
-                request,
-                session_store: session_store.as_ref(),
-                session_summary_store: session_summary_store.as_ref(),
-            })?;
+        let PostTurnSelfRuntimePlan {
+            refresh_plan,
+            layer_mutations,
+            planned_effects,
+            source_lineage,
+        } = self.plan_post_turn_self_runtime_cycle(PostTurnSelfRuntimePlanningInput {
+            base: &subject_soul_base,
+            operation_id: &autonomous_operation_id,
+            initial_effects,
+            http,
+            governance_llm,
+            request,
+        })?;
         let mut autonomous_additional = private_garden_additional;
         autonomous_additional
             .merge(self.plan_self_runtime_non_soul_effects(&planned_effects, planned_at)?)?;
@@ -18211,6 +18624,7 @@ impl MemoryRuntime {
                         operation_id: &autonomous_operation_id,
                         layer_mutations,
                         refresh_plan: &refresh_plan,
+                        source_lineage,
                         additional_plan: autonomous_additional,
                         scope: self.memory_write_transaction_scope(),
                         planned_at,
@@ -18460,15 +18874,7 @@ impl MemoryRuntime {
         let Some(evidence) = record.learning_evidence.as_ref() else {
             return Ok(None);
         };
-        let submitted_count = u32::try_from(
-            evidence
-                .runtime_skill_feedback
-                .len()
-                .saturating_add(evidence.agent_skill_feedback.len())
-                .saturating_add(evidence.task_learning_feedback.len())
-                .saturating_add(evidence.agent_tool_feedback.len()),
-        )
-        .map_err(|_| {
+        let submitted_count = evidence.procedural_submission_count().ok_or_else(|| {
             Error::config(
                 "procedural_feedback_intent",
                 "procedural feedback group count exceeds durable contract",
@@ -18617,7 +19023,7 @@ impl MemoryRuntime {
         tool_calls: u32,
         blocking_reason: &str,
         now_secs: u64,
-    ) -> Result<PostTurnGovernanceJobV3> {
+    ) -> Result<PostTurnGovernanceJobV4> {
         if record.key.memory_space_id != self.config.memory_space_id
             || record.key.channel_id != self.config.scope.channel
             || record.subject != self.config.subject_id
@@ -18643,7 +19049,7 @@ impl MemoryRuntime {
             .expect("governance current binding lock")
             .clone()
             .unwrap_or(PostTurnGovernanceExecutionBindingV1::Unbound);
-        let job = PostTurnGovernanceJobV3::pending(
+        let job = PostTurnGovernanceJobV4::pending(
             identity,
             record.sequence,
             post_turn_governance_transcript_digest(record)?,
@@ -18734,7 +19140,7 @@ impl MemoryRuntime {
 
     pub(crate) fn governance_binding_snapshot_for_job(
         &self,
-        job: &PostTurnGovernanceJobV3,
+        job: &PostTurnGovernanceJobV4,
     ) -> Result<PostTurnGovernanceBindingSnapshotV1> {
         let binding = match &job.execution_binding {
             PostTurnGovernanceExecutionBindingV1::Bound {
@@ -19816,9 +20222,18 @@ impl MemoryRuntime {
         let turn = canonical_turn_delta_from_transcript(&leased, &transcript)?;
         let finalize_request = MemoryTurnFinalizeRequest {
             turn,
-            learning: bm_core::memory::PostTurnLearningInputV2::with_tool_call_count(
-                leased.tool_call_count,
-            ),
+            learning: bm_core::memory::PostTurnLearningInputV3 {
+                method_learning_inputs: Vec::new(),
+                method_adoptions: Vec::new(),
+                method_task_evaluations: Vec::new(),
+                selection_receipt: transcript
+                    .learning_evidence
+                    .as_ref()
+                    .and_then(|evidence| evidence.selection_receipt.clone()),
+                ..bm_core::memory::PostTurnLearningInputV3::with_tool_call_count(
+                    leased.tool_call_count,
+                )
+            },
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
         };
@@ -19833,24 +20248,49 @@ impl MemoryRuntime {
             job_id: leased.job_id.clone(),
             lease_owner: request.lease_owner.clone(),
             lease_epoch: request.lease_epoch,
+            soul_expected: None,
             inner: http,
         };
 
-        let subject_soul_base =
+        let mut subject_soul_base =
             self.read_subject_soul_autonomous_planning_base("post_turn.subject_soul_snapshot")?;
+        disclosure_http.soul_expected = subject_soul_base
+            .verified
+            .turn_source_admission()
+            .map_err(SubjectSoulStoreFailure::into_store_error)?
+            .map(|admission| admission.basis);
+        self.prepare_persona_learning(
+            &mut subject_soul_base,
+            &finalize_request,
+            &transcript,
+            &leased.identity,
+            &mut disclosure_http,
+            governance_llm,
+        )?;
         let (private_garden_self_work, private_garden_soul, mut autonomous_additional) = self
             .plan_post_turn_private_garden(PostTurnPrivateGardenPlanningInput {
                 base: &subject_soul_base,
                 http: &mut disclosure_http,
                 governance_llm,
                 request: &finalize_request,
-                session_store: session_store.as_ref(),
-                session_summary_store: session_summary_store.as_ref(),
                 strict_model_contract: true,
             })?;
         let private_garden_layer_mutations = private_garden_soul
             .map(|request| request.mutations)
             .unwrap_or_default();
+        subject_soul_base.inherited_sources =
+            bm_core::memory::merge_subject_soul_source_lineage_v1(
+                &subject_soul_base.owner,
+                private_garden_layer_mutations
+                    .iter()
+                    .filter_map(|mutation| match mutation {
+                        SubjectSoulGenerationLayerMutationV1::Upsert { document, .. } => {
+                            Some(document.source_lineage.as_slice())
+                        }
+                        _ => None,
+                    }),
+            )
+            .map_err(|error| Error::config("post_turn.persona_evidence", error.to_string()))?;
         let autonomous_operation_id = format!(
             "post-turn-autonomous:{}:{}",
             leased.job_id, leased.lease_epoch
@@ -19860,20 +20300,28 @@ impl MemoryRuntime {
             &subject_soul_base.owner.subject_id,
             &private_garden_layer_mutations,
         )?;
-        let (refresh_plan, layer_mutations, planned_effects) = self
-            .plan_post_turn_self_runtime_cycle(PostTurnSelfRuntimePlanningInput {
-                base: &subject_soul_base,
-                operation_id: &autonomous_operation_id,
-                initial_effects,
-                http: &mut disclosure_http,
-                governance_llm,
-                request: &finalize_request,
-                session_store: session_store.as_ref(),
-                session_summary_store: session_summary_store.as_ref(),
-            })?;
+        let PostTurnSelfRuntimePlan {
+            refresh_plan,
+            layer_mutations,
+            planned_effects,
+            source_lineage,
+        } = self.plan_post_turn_self_runtime_cycle(PostTurnSelfRuntimePlanningInput {
+            base: &subject_soul_base,
+            operation_id: &autonomous_operation_id,
+            initial_effects,
+            http: &mut disclosure_http,
+            governance_llm,
+            request: &finalize_request,
+        })?;
         autonomous_additional
             .merge(self.plan_self_runtime_non_soul_effects(&planned_effects, planned_at)?)?;
-        let mut mutation_plan = MemoryStoreMutationPlan::default();
+        let mut mutation_plan = self.plan_governance_method_extractions(
+            &leased,
+            &transcript,
+            &mut disclosure_http,
+            governance_llm,
+            planned_at,
+        )?;
         let semantic_refresh_allowed = finalize_request.turn.source.ingress == IngressKind::User
             && finalize_request.turn.source.channel != "cron"
             && !finalize_request.turn.external_content_used
@@ -19934,6 +20382,7 @@ impl MemoryRuntime {
                     operation_id: &autonomous_operation_id,
                     layer_mutations,
                     refresh_plan: &refresh_plan,
+                    source_lineage,
                     additional_plan: autonomous_additional,
                     scope: completion_scope.clone(),
                     planned_at,
@@ -19986,7 +20435,7 @@ impl MemoryRuntime {
         })
     }
 
-    fn validate_governance_job_runtime_scope(&self, job: &PostTurnGovernanceJobV3) -> Result<()> {
+    fn validate_governance_job_runtime_scope(&self, job: &PostTurnGovernanceJobV4) -> Result<()> {
         if job.identity.memory_space_id != self.config.memory_space_id
             || job.identity.mounted_subject_id != self.config.subject_id
             || job.identity.channel_id != self.config.scope.channel
@@ -20154,7 +20603,7 @@ impl MemoryRuntime {
 
     fn load_governance_transcript(
         &self,
-        job: &PostTurnGovernanceJobV3,
+        job: &PostTurnGovernanceJobV4,
     ) -> Result<TranscriptTurnRecord> {
         let key = ConversationKey::new(
             &job.identity.memory_space_id,
@@ -20180,7 +20629,7 @@ impl MemoryRuntime {
     fn ensure_governance_disclosure_authority(
         &self,
         store_platform: &StorePlatform,
-        leased: &PostTurnGovernanceJobV3,
+        leased: &PostTurnGovernanceJobV4,
     ) -> Result<()> {
         let current = read_governance_job(store_platform, &leased.job_id)?.ok_or_else(|| {
             Error::not_found(
@@ -20225,7 +20674,7 @@ impl MemoryRuntime {
     fn ensure_governance_transcript_claimable(
         &self,
         store_platform: &StorePlatform,
-        job: &PostTurnGovernanceJobV3,
+        job: &PostTurnGovernanceJobV4,
     ) -> Result<()> {
         let key = ConversationKey::new(
             &job.identity.memory_space_id,
@@ -22167,6 +22616,7 @@ struct GovernanceDisclosureHttpClient<'a> {
     job_id: String,
     lease_owner: String,
     lease_epoch: u64,
+    soul_expected: Option<SubjectSoulExpectedStateV1>,
     inner: &'a mut dyn LlmHttpClient,
 }
 
@@ -22193,7 +22643,24 @@ impl GovernanceDisclosureHttpClient<'_> {
             ));
         }
         self.runtime
-            .ensure_governance_disclosure_authority(store, &job)
+            .ensure_governance_disclosure_authority(store, &job)?;
+        self.runtime.revalidate_method_extraction_egress(&job)?;
+        if let Some(expected) = &self.soul_expected {
+            let current = self
+                .runtime
+                .read_subject_soul_autonomous_planning_base("post_turn.soul_egress")?;
+            let actual = current
+                .verified
+                .turn_source_admission()
+                .map_err(SubjectSoulStoreFailure::into_store_error)?;
+            if actual.as_ref().map(|admission| &admission.basis) != Some(expected) {
+                return Err(Error::conflict(
+                    "post_turn.soul_egress",
+                    "Soul source read changed before disclosure",
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -22227,10 +22694,11 @@ impl LlmHttpClient for GovernanceDisclosureHttpClient<'_> {
 }
 
 fn canonical_turn_delta_from_transcript(
-    job: &PostTurnGovernanceJobV3,
+    job: &PostTurnGovernanceJobV4,
     record: &TranscriptTurnRecord,
 ) -> Result<CanonicalTurnDelta> {
-    if record.key.memory_space_id != job.identity.memory_space_id
+    if !record.permits_post_turn_learning()
+        || record.key.memory_space_id != job.identity.memory_space_id
         || record.key.channel_id != job.identity.channel_id
         || record.key.conversation_id != job.identity.conversation_id
         || record.turn_id != job.identity.turn_id
@@ -22622,6 +23090,7 @@ fn build_llm_runtime_projection_envelope(
     projection_id: String,
     context: &crate::PromptMemoryContext,
     runtime_awareness: &str,
+    user_local_time: Option<&crate::UserLocalTimeContext>,
     inhabited_subject_projection: &InhabitedSubjectProjection,
     max_len: usize,
 ) -> LLMRuntimeProjectionEnvelope {
@@ -22683,6 +23152,9 @@ fn build_llm_runtime_projection_envelope(
         "procedural_evidence".to_string(),
         "protected_private_runtime_context".to_string(),
     ];
+    if user_local_time.is_some() {
+        section_names.push("user_local_time".into());
+    }
     section_names.sort();
     section_names.dedup();
 
@@ -22714,6 +23186,7 @@ fn build_llm_runtime_projection_envelope(
     }
     let mut envelope = LLMRuntimeProjectionEnvelope {
         projection_id,
+        user_local_time: user_local_time.cloned(),
         runtime_awareness: compact_runtime_projection_content(runtime_awareness, 700),
         subject_mount,
         expression_guidance: inhabited_subject_projection.expression_guidance.clone(),
@@ -23227,7 +23700,10 @@ fn runtime_projection_source_blocks(
 }
 
 fn render_llm_runtime_projection_envelope(envelope: &LLMRuntimeProjectionEnvelope) -> String {
-    let mut out = String::new();
+    let mut out = render_user_local_time_line(envelope.user_local_time.as_ref());
+    if !out.is_empty() {
+        out.push('\n');
+    }
     let _ = writeln!(out, "## LLM Runtime Projection Envelope");
     let _ = writeln!(out, "- Projection: {}", envelope.projection_id);
 
@@ -23441,9 +23917,18 @@ fn render_bounded_llm_runtime_projection_envelope(
     envelope: &LLMRuntimeProjectionEnvelope,
     max_len: usize,
 ) -> String {
+    let mut bounded = envelope.clone();
+    // The clock is an atomic presentation unit: never emit a local date/time
+    // without its offset/zone when the final delivery budget is too small.
+    if max_len
+        < render_user_local_time_line(envelope.user_local_time.as_ref())
+            .chars()
+            .count()
+    {
+        bounded.user_local_time = None;
+    }
     // Keep optional Soul units whole. Omit them before truncating the required scaffold
     // or evidence; this also makes source disposition observable from the exact final block.
-    let mut bounded = envelope.clone();
     let mut rendered = render_llm_runtime_projection_envelope(&bounded);
     while rendered.trim().chars().count() > max_len
         && !bounded.protected_private_runtime_context.is_empty()
@@ -27680,7 +28165,7 @@ mod procedural_final_delivery_tests {
 }
 
 fn canonicalize_procedural_selections(
-    receipt: &mut bm_core::memory::ProceduralSelectionReceiptV1,
+    receipt: &mut bm_core::memory::MemoryTurnProjectionReceiptV2,
 ) -> Result<()> {
     fn sort<T: Serialize + Clone>(values: &mut Vec<T>) -> Result<()> {
         let mut encoded = values
@@ -27823,8 +28308,12 @@ fn projection_section_audits(
         .map(|name| MemoryProjectionSectionAudit {
             name: name.clone(),
             chars: runtime_projection_section_chars(runtime_projection, name),
-            included: !["expression_guidance", "protected_private_runtime_context"]
-                .contains(&name.as_str())
+            included: ![
+                "expression_guidance",
+                "protected_private_runtime_context",
+                "user_local_time",
+            ]
+            .contains(&name.as_str())
                 || runtime_projection_section_chars(runtime_projection, name) > 0,
         })
         .collect()
@@ -27835,6 +28324,19 @@ fn runtime_projection_section_chars(
     name: &str,
 ) -> usize {
     match name {
+        "user_local_time" => {
+            let line = render_user_local_time_line(runtime_projection.user_local_time.as_ref());
+            if !line.is_empty()
+                && runtime_projection
+                    .rendered_block
+                    .lines()
+                    .any(|actual| actual == line)
+            {
+                line.chars().count()
+            } else {
+                0
+            }
+        }
         "expression_guidance" => {
             runtime_projection
                 .expression_guidance
@@ -27912,6 +28414,17 @@ fn runtime_projection_section_chars(
             .map(|hint| hint.prompt_snippet.chars().count())
             .sum(),
         _ => 0,
+    }
+}
+
+fn render_user_local_time_line(local_time: Option<&crate::UserLocalTimeContext>) -> String {
+    match local_time {
+        Some(local) => format!(
+            "User device local time: {} ({}).",
+            local.format_local_datetime(),
+            local.local_weekday()
+        ),
+        None => String::new(),
     }
 }
 
@@ -31837,6 +32350,7 @@ pub struct MemoryRuntimeBuilder {
     platform: Option<Arc<dyn Platform>>,
     llm: Option<Arc<dyn LlmClient>>,
     clock: Option<Arc<dyn MemoryClock>>,
+    user_local_time_provider: Option<Arc<dyn crate::UserLocalTimeProvider>>,
     capability_policy: MemoryCapabilityPolicy,
     privacy_policy: MemoryPrivacyPolicy,
     audit_sink: Option<Arc<dyn MemoryAuditSink>>,
@@ -31860,6 +32374,7 @@ impl Default for MemoryRuntimeBuilder {
             platform: None,
             llm: None,
             clock: Some(Arc::new(SystemMemoryClock)),
+            user_local_time_provider: None,
             capability_policy: MemoryCapabilityPolicy::strict_profile(),
             privacy_policy: MemoryPrivacyPolicy::standard_private_boundary(),
             audit_sink: Some(Arc::new(NoopMemoryAuditSink)),
@@ -31918,6 +32433,16 @@ impl MemoryRuntimeBuilder {
 
     pub fn llm(mut self, llm: Arc<dyn LlmClient>) -> Self {
         self.llm = Some(llm);
+        self
+    }
+
+    /// Supplies the user's device time zone for each instant. Servers must use
+    /// a user-scoped provider; their own OS zone is not a user time zone.
+    pub fn user_local_time_provider(
+        mut self,
+        provider: Arc<dyn crate::UserLocalTimeProvider>,
+    ) -> Self {
+        self.user_local_time_provider = Some(provider);
         self
     }
 
@@ -32216,6 +32741,9 @@ impl MemoryRuntimeBuilder {
             procedural_selection_signer,
             llm: self.llm,
             clock,
+            user_local_time_provider: self
+                .user_local_time_provider
+                .unwrap_or_else(|| crate::local_time::default_provider(profile)),
             capability_policy: self.capability_policy,
             privacy_policy: self.privacy_policy,
             audit_sink,
@@ -34504,14 +35032,15 @@ mod projection_budget_truncation_tests {
         );
         for selected in 0..3 {
             let mut context = runtime
-                .load_projection_context(
-                    &request,
-                    &lifecycle,
-                    &runtime.runtime_budget(),
-                    42,
-                    None,
-                    None,
-                )
+                .load_projection_context(ProjectionContextInput {
+                    request: &request,
+                    lifecycle: &lifecycle,
+                    runtime_budget: &runtime.runtime_budget(),
+                    operation_time: 42,
+                    user_local_time: None,
+                    subject_soul_selector: None,
+                    subject_soul_read: None,
+                })
                 .unwrap();
             match selected {
                 0 => {
@@ -34560,6 +35089,7 @@ mod projection_budget_truncation_tests {
                     "chain".into(),
                     &context,
                     "synthetic",
+                    None,
                     &projection,
                     16000,
                 );
@@ -34684,14 +35214,15 @@ mod projection_budget_truncation_tests {
         );
         let budget = runtime.runtime_budget();
         let context = runtime
-            .load_projection_context(
-                &request,
-                &lifecycle,
-                &budget,
-                runtime.config.clock.now_secs(),
-                None,
-                None,
-            )
+            .load_projection_context(ProjectionContextInput {
+                request: &request,
+                lifecycle: &lifecycle,
+                runtime_budget: &budget,
+                operation_time: runtime.config.clock.now_secs(),
+                user_local_time: None,
+                subject_soul_selector: None,
+                subject_soul_read: None,
+            })
             .unwrap();
         let audit = build_projection_audit(ProjectionAuditInput {
             runtime: &runtime,
@@ -35400,4 +35931,45 @@ mod concurrent_memory_plan_tests {
         assert_eq!(policies[0].reason, "first policy");
     }
 }
+mod persona_learning;
 mod procedural;
+
+#[cfg(test)]
+mod user_local_time_render_tests {
+    use super::*;
+
+    #[test]
+    fn insufficient_clock_budget_preserves_other_projection_content() {
+        let without = LLMRuntimeProjectionEnvelope::default();
+        let mut with = without.clone();
+        with.user_local_time =
+            Some(crate::UserLocalTimeContext::new(1_793_254_440, 28_800, "Asia/Shanghai").unwrap());
+        let clock_len = render_user_local_time_line(with.user_local_time.as_ref())
+            .chars()
+            .count();
+        for budget in 1..clock_len {
+            let rendered = render_bounded_llm_runtime_projection_envelope(&with, budget);
+            assert_eq!(
+                rendered,
+                render_bounded_llm_runtime_projection_envelope(&without, budget)
+            );
+            assert!(!rendered.is_empty());
+            assert!(!rendered.contains("14:14"));
+        }
+        assert!(
+            render_bounded_llm_runtime_projection_envelope(&with, clock_len)
+                .contains("14:14:00 UTC+08:00 [Asia/Shanghai]")
+        );
+    }
+
+    #[test]
+    fn missing_clock_omits_entire_field_and_placeholder() {
+        let rendered = render_bounded_llm_runtime_projection_envelope(
+            &LLMRuntimeProjectionEnvelope::default(),
+            4096,
+        );
+        assert!(rendered.contains("LLM Runtime Projection Envelope"));
+        assert!(!rendered.contains("User device local time"));
+        assert!(!rendered.contains("time zone: unavailable"));
+    }
+}

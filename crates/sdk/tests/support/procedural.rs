@@ -45,6 +45,7 @@ pub fn runtime_observer_spec(
     tools.sort_by_cached_key(|tool| serde_json::to_vec(tool).expect("canonical synthetic tool"));
     let declares_tools = !tools.is_empty();
     ProceduralProducerSpecV1 {
+        method_evaluators: Vec::new(),
         binding_id: binding_id.into(),
         scope: ProceduralProducerScopeV1 {
             memory_space_id: runtime.memory_space_id().into(),
@@ -57,6 +58,9 @@ pub fn runtime_observer_spec(
         },
         source_authority: ProceduralProducerSourceAuthorityV1::RuntimeObservation,
         claims: ProceduralProducerClaimsV1 {
+            method_learning_materials: false,
+            method_adoptions: false,
+            method_task_evaluations: false,
             execution_facts: declares_tools,
             method_declarations: declares_tools,
             usage_feedback: true,

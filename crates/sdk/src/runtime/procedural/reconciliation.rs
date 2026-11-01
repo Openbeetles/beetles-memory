@@ -12,7 +12,7 @@ use crate::store_internal::schema::{
 };
 use bm_core::memory::{GovernedOwnerRevisionRef, ProceduralFeedbackJobStatusV1};
 use bm_core::memory::{
-    ProceduralAppliedOwnerBindingV1 as Binding, ProceduralFeedbackApplicationLedgerV2,
+    ProceduralAppliedOwnerBindingV1 as Binding, ProceduralFeedbackApplicationLedgerV3,
     ProceduralLearningWorkV1, ProceduralProducerStateV1, ProceduralProducerToolV1,
     ProceduralReconciliationCheckpointV1, ProceduralReconciliationCursorV1 as Cursor,
     ProceduralReconciliationDependencyPinV1 as Dependency,
@@ -26,10 +26,17 @@ use bm_core::skills::{
 };
 
 struct Source {
-    ledger: ProceduralFeedbackApplicationLedgerV2,
-    evidence: Option<PostTurnLearningEvidenceV2>,
+    ledger: ProceduralFeedbackApplicationLedgerV3,
+    evidence: Option<PostTurnLearningEvidenceV3>,
     producer: Option<owner::VerifiedProceduralProducer>,
     permitted: bool,
+}
+
+/// Read availability and task history are separate: losing a method author
+/// does not erase independent, still-authorized task outcomes.
+pub(super) struct ReconciledToolMaterial {
+    pub body: Option<(Body, AgentToolExperienceStatus)>,
+    pub retained_tasks: Vec<bm_core::memory::MethodTaskContributionRefV1>,
 }
 
 fn repair() -> Error {
@@ -41,8 +48,8 @@ fn repair() -> Error {
 /// Counters here are deliberately not reused; the Core reducer rebuilds them
 /// after current authority has selected the valid subset.
 fn complete_applied_tool_body(
-    current: &AgentToolExperienceRevisionMaterialV3,
-    history: &[AgentToolExperienceRevisionMaterialV3],
+    current: &AgentToolExperienceRevisionMaterialV4,
+    history: &[AgentToolExperienceRevisionMaterialV4],
     max_references: usize,
 ) -> Result<Body> {
     let mut body = current.body.clone();
@@ -84,12 +91,14 @@ fn complete_applied_tool_body(
                     task_signature,
                     procedure,
                     sources,
+                    usage_contributions,
                     ..
                 },
                 Body::Method {
                     task_signature: old_task,
                     procedure: old_procedure,
                     sources: old_sources,
+                    usage_contributions: old_usage,
                     ..
                 },
             ) => {
@@ -98,20 +107,43 @@ fn complete_applied_tool_body(
                 }
                 for source in old_sources {
                     if let Some(retained) = sources.iter_mut().find(|retained| {
-                        retained.source_job_id == source.source_job_id
-                            && retained.method_id == source.method_id
+                        retained.canonical_identity() == source.canonical_identity()
                     }) {
-                        if retained.method_digest != source.method_digest {
+                        if retained.method_digest() != source.method_digest() {
                             return Err(repair());
                         }
-                        merge_refs(&mut retained.execution_refs, &source.execution_refs)?;
+                        match (retained, source) {
+                            (
+                                bm_core::skills::AgentToolMethodSourceRefV2::ProducerDeclaration {
+                                    execution_refs,
+                                    ..
+                                },
+                                bm_core::skills::AgentToolMethodSourceRefV2::ProducerDeclaration {
+                                    execution_refs: old_refs,
+                                    ..
+                                },
+                            ) => merge_refs(execution_refs, old_refs)?,
+                            (left, right) if left == right => {}
+                            _ => return Err(repair()),
+                        }
                     } else {
                         sources.push(source.clone());
                     }
                 }
-                sources.sort_by(|a, b| {
-                    (&a.source_job_id, &a.method_id).cmp(&(&b.source_job_id, &b.method_id))
-                });
+                bm_core::skills::AgentToolMethodSourceRefV2::canonicalize(sources)?;
+                for reference in old_usage {
+                    if let Some(existing) = usage_contributions
+                        .iter()
+                        .find(|existing| existing.contribution_id == reference.contribution_id)
+                    {
+                        if existing != reference {
+                            return Err(repair());
+                        }
+                    } else {
+                        usage_contributions.push(reference.clone());
+                    }
+                }
+                usage_contributions.sort_by(|a, b| a.contribution_id.cmp(&b.contribution_id));
             }
             _ => return Err(repair()),
         }
@@ -500,47 +532,61 @@ impl MemoryRuntime {
                             )?,
                             content_digest: retained.content_digest.clone(),
                         };
-                        let disposition =
-                            if head.state == AgentToolExperienceHeadStateV3::Tombstoned {
-                                Disposition::Withdrawn
-                            } else {
-                                let material: AgentToolExperienceRevisionMaterialV3 = read(
+                        let mut withdrawn_task_refs = Vec::new();
+                        let disposition = if head.state
+                            == AgentToolExperienceHeadStateV3::Tombstoned
+                        {
+                            Disposition::Withdrawn
+                        } else {
+                            let material: AgentToolExperienceRevisionMaterialV4 = read(
+                                store,
+                                AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE,
+                                &retained.material_key,
+                                &mut conditions,
+                            )?
+                            .ok_or_else(repair)?;
+                            if !material.validate_contract().accepted
+                                || material.content_digest != retained.content_digest
+                                || material.owner_ref != head.owner_ref
+                                || material.owner_revision != retained.owner_revision
+                            {
+                                return Err(repair());
+                            }
+                            let reduced = self.reconcile_tool_material(
+                                &material,
+                                &material.body,
+                                &mut sources,
+                                &mut checkpoint.dependencies,
+                                &mut conditions,
+                            )?;
+                            let permitted = reduced.body.as_ref().is_some_and(|(body, status)| {
+                                body == &material.body && status == &material.status
+                            });
+                            let (withdrawn, task_conditions) =
+                                owner::reconciliation_withdrawn_task_refs(
                                     store,
-                                    AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE,
-                                    &retained.material_key,
-                                    &mut conditions,
-                                )?
-                                .ok_or_else(repair)?;
-                                if !material.validate_contract().accepted
-                                    || material.content_digest != retained.content_digest
-                                    || material.owner_ref != head.owner_ref
-                                    || material.owner_revision != retained.owner_revision
-                                {
-                                    return Err(repair());
-                                }
-                                let reduced = self.reconcile_tool_material(
+                                    &work.scope,
                                     &material,
-                                    &material.body,
-                                    &mut sources,
-                                    &mut checkpoint.dependencies,
-                                    &mut conditions,
+                                    &checkpoint,
+                                    &conditions,
+                                    &budget,
                                 )?;
-                                let permitted = reduced.as_ref().is_some_and(|(body, status)| {
-                                    body == &material.body && status == &material.status
-                                });
-                                if material.owner_revision == head.current_revision {
-                                    current_material = Some(material.clone());
-                                }
-                                applied_materials.push(material);
-                                if permitted {
-                                    Disposition::Visible
-                                } else {
-                                    Disposition::Withdrawn
-                                }
-                            };
+                            withdrawn_task_refs = withdrawn;
+                            merge_json_preconditions(&mut conditions, task_conditions)?;
+                            if material.owner_revision == head.current_revision {
+                                current_material = Some(material.clone());
+                            }
+                            applied_materials.push(material);
+                            if permitted {
+                                Disposition::Visible
+                            } else {
+                                Disposition::Withdrawn
+                            }
+                        };
                         checkpoint.verified_owners.push(Proof {
                             binding: exact,
                             disposition,
+                            withdrawn_task_refs,
                         });
                     }
                     let current_reduction = if let Some(material) = current_material {
@@ -558,7 +604,7 @@ impl MemoryRuntime {
                             &mut checkpoint.dependencies,
                             &mut conditions,
                         )?;
-                        Some((material, reduced))
+                        Some((material, reduced.body))
                     } else {
                         None
                     };
@@ -576,7 +622,7 @@ impl MemoryRuntime {
                                     crate::ProceduralLearningErrorKeyV1::BudgetExceeded,
                                 ));
                             }
-                            let next_material = AgentToolExperienceRevisionMaterialV3::build(
+                            let next_material = AgentToolExperienceRevisionMaterialV4::build(
                                 &material.memory_space_id,
                                 material.owning_scope.clone(),
                                 &material.registry_id,
@@ -652,6 +698,7 @@ impl MemoryRuntime {
                             checkpoint.verified_owners.push(Proof {
                                 binding: proof,
                                 disposition: Disposition::Visible,
+                                withdrawn_task_refs: Vec::new(),
                             });
                         }
                     }
@@ -712,7 +759,7 @@ impl MemoryRuntime {
                             .ok_or_else(repair)?;
                         allowed = method_proof.disposition == Disposition::Visible;
                         if allowed {
-                            let method: AgentToolExperienceRevisionMaterialV3 = read(
+                            let method: AgentToolExperienceRevisionMaterialV4 = read(
                                 store,
                                 AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE,
                                 &tool_binding.material_key,
@@ -806,6 +853,7 @@ impl MemoryRuntime {
                         )?);
                     }
                     checkpoint.verified_owners.push(Proof {
+                        withdrawn_task_refs: Vec::new(),
                         binding: Binding::RuntimeSkill {
                             binding: RuntimeSkillOwnerBinding::from_record(&next)?,
                         },
@@ -847,6 +895,15 @@ impl MemoryRuntime {
         }
         let mut exact_conditions = Vec::new();
         merge_json_preconditions(&mut exact_conditions, conditions)?;
+        let method_conditions = owner::reconciliation_method_preconditions(
+            store,
+            &job.work.subject_scope(),
+            &checkpoint,
+            &mutations,
+            &exact_conditions,
+            &budget,
+        )?;
+        merge_json_preconditions(&mut exact_conditions, method_conditions)?;
         owner::commit_reconciliation_page(
             store,
             self.memory_write_transaction_scope(),
@@ -879,7 +936,7 @@ impl MemoryRuntime {
             return Ok(());
         }
         let store = self.config.store_platform.as_ref().ok_or_else(repair)?;
-        let ledger: ProceduralFeedbackApplicationLedgerV2 = read(
+        let ledger: ProceduralFeedbackApplicationLedgerV3 = read(
             store,
             PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE,
             job_id,
@@ -1016,9 +1073,18 @@ impl MemoryRuntime {
     /// current authority boundary. Historical material is not a read grant.
     pub(super) fn authorized_retained_tool_body(
         &self,
-        material: &AgentToolExperienceRevisionMaterialV3,
+        material: &AgentToolExperienceRevisionMaterialV4,
         conditions: &mut Vec<StoreJsonPrecondition>,
     ) -> Result<Option<Body>> {
+        self.authorized_retained_tool_material(material, conditions)
+            .map(|reduced| reduced.body.map(|(body, _)| body))
+    }
+
+    pub(super) fn authorized_retained_tool_material(
+        &self,
+        material: &AgentToolExperienceRevisionMaterialV4,
+        conditions: &mut Vec<StoreJsonPrecondition>,
+    ) -> Result<ReconciledToolMaterial> {
         self.reconcile_tool_material(
             material,
             &material.body,
@@ -1026,25 +1092,193 @@ impl MemoryRuntime {
             &mut Vec::new(),
             conditions,
         )
-        .map(|reduced| reduced.map(|(body, _)| body))
+    }
+
+    fn reconciliation_governance_source(
+        &self,
+        source: &bm_core::memory::GovernanceMethodExtractionSourceV1,
+        dependencies: &mut Vec<Dependency>,
+        conditions: &mut Vec<StoreJsonPrecondition>,
+    ) -> Result<bool> {
+        use bm_core::memory::{
+            PostTurnGovernanceBindingSnapshotV1, PostTurnGovernanceExecutionBindingV1,
+            PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV4,
+            POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE, POST_TURN_GOVERNANCE_JOB_NAMESPACE,
+        };
+        let store = self.config.store_platform.as_ref().ok_or_else(repair)?;
+        let job: PostTurnGovernanceJobV4 = read(
+            store,
+            POST_TURN_GOVERNANCE_JOB_NAMESPACE,
+            &source.source_job_id,
+            conditions,
+        )?
+        .ok_or_else(repair)?;
+        job.validate()?;
+        if job.status != PostTurnGovernanceJobStatusV2::Succeeded
+            || job.identity != source.identity
+            || source.identity.memory_space_id != self.config.memory_space_id
+            || source.identity.mounted_subject_id != self.config.scoped_runtime.mounted_subject_id
+        {
+            return Err(repair());
+        }
+        let PostTurnGovernanceExecutionBindingV1::Bound {
+            binding_id,
+            binding_revision,
+        } = &job.execution_binding
+        else {
+            return Err(repair());
+        };
+        let binding: PostTurnGovernanceBindingSnapshotV1 = read(
+            store,
+            POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE,
+            &format!("{binding_id}:{binding_revision}"),
+            conditions,
+        )?
+        .ok_or_else(repair)?;
+        let key = ConversationKey::new(
+            &source.identity.memory_space_id,
+            &source.identity.channel_id,
+            &source.identity.conversation_id,
+        )?;
+        let physical = crate::store_internal::transcript_turn_storage_key(
+            &key,
+            &source.identity.mounted_subject_id,
+            &source.identity.turn_id,
+        );
+        let record: bm_core::memory::TranscriptTurnRecord =
+            read(store, "conversation_transcript", &physical, conditions)?.ok_or_else(repair)?;
+        dependencies.push(Dependency::SemanticTranscript {
+            identity: source.identity.clone(),
+            sequence: record.sequence,
+            content_digest: bm_core::memory::procedural_transcript_state_digest(&record)?,
+            lifecycle: record.lifecycle_state,
+        });
+        if !record.permits_post_turn_learning() {
+            return Ok(false);
+        }
+        source.validate_against(&job, &binding, &record)?;
+        let evidence = record.learning_evidence.as_ref().ok_or_else(repair)?;
+        let reference = evidence.authority.producer_revision().ok_or_else(repair)?;
+        let producer = owner::read_verified_procedural_producer(store, reference)?;
+        let producer_scope = bm_core::memory::ProceduralProducerScopeV1 {
+            memory_space_id: source.identity.memory_space_id.clone(),
+            mounted_subject_id: source.identity.mounted_subject_id.clone(),
+            channel_id: source.identity.channel_id.clone(),
+            chat_id: source.identity.chat_id.clone(),
+        };
+        producer
+            .historical
+            .authorize_evidence_with_current(&producer.historical, &producer_scope, evidence)
+            .map_err(|_| repair())?;
+        let producer_permitted = self.reconciliation_producer_permitted(&producer, conditions)?;
+        let mut permitted = producer_permitted
+            && producer
+                .historical
+                .authorize_evidence_with_current(&producer.current, &producer_scope, evidence)
+                .is_ok();
+        conditions.push(StoreJsonPrecondition::Exact {
+            namespace: PROCEDURAL_PRODUCER_HEAD_NAMESPACE.into(),
+            key: producer.head.binding_key.clone(),
+            value: serde_json::to_value(&producer.head).map_err(|_| repair())?,
+        });
+        dependencies.push(Dependency::Producer {
+            original_revision: reference.clone(),
+            current_revision: producer.head.current.clone(),
+            permitted: producer_permitted,
+        });
+        for material in &source.materials {
+            let bm_core::memory::MethodLearningMaterialSourceV1::GovernedRevision {
+                revision, ..
+            } = &material.source
+            else {
+                continue;
+            };
+            match self.resolve_procedural_source_authority(
+                &bm_core::memory::ProceduralProducerSourceAuthorityV1::GovernedSource {
+                    source_revision: revision.clone(),
+                },
+                crate::ProceduralLearningSdkOperation::ApplyFeedback,
+            ) {
+                Ok(expected) => merge_json_preconditions(conditions, expected)?,
+                Err(Error::Other { source, .. })
+                    if source
+                        .downcast_ref::<crate::ProceduralLearningSdkError>()
+                        .is_some_and(|error| {
+                            error.disposition
+                                == crate::ProceduralLearningSdkErrorDisposition::AuthorityRejected
+                        }) =>
+                {
+                    permitted = false
+                }
+                Err(error) => return Err(error),
+            }
+            let (root, expected) = owner::source_dependents::read_verified(
+                store,
+                &self.config.memory_space_id,
+                &revision.owner_ref,
+                crate::store_internal::StoreCapacityBudget::from_runtime_budget(
+                    self.runtime_budget().store_budget,
+                ),
+            )?;
+            let root = root.ok_or_else(repair)?;
+            merge_json_preconditions(conditions, expected)?;
+            dependencies.push(Dependency::Source {
+                owner_ref: root.owner_ref,
+                post_image: root.current,
+                owner_state_digest: root.content_digest,
+            });
+        }
+        Ok(permitted)
     }
 
     fn reconcile_tool_material(
         &self,
-        material: &AgentToolExperienceRevisionMaterialV3,
+        material: &AgentToolExperienceRevisionMaterialV4,
         applied_body: &Body,
         sources: &mut BTreeMap<String, Source>,
         dependencies: &mut Vec<Dependency>,
         conditions: &mut Vec<StoreJsonPrecondition>,
-    ) -> Result<Option<(Body, AgentToolExperienceStatus)>> {
+    ) -> Result<ReconciledToolMaterial> {
         let mut body = applied_body.clone();
-        let references = match &body {
+        let mut references = match &body {
             Body::Execution { contributions, .. } => contributions.clone(),
             Body::Method { sources, .. } => sources
                 .iter()
-                .flat_map(|source| source.execution_refs.clone())
+                .flat_map(|source| source.execution_refs().iter().cloned())
                 .collect(),
         };
+        let mut valid_tasks = Vec::new();
+        for reference in body.method_usage_contributions() {
+            self.reconciliation_source(
+                &reference.source_job_id,
+                sources,
+                dependencies,
+                conditions,
+            )?;
+            let source = sources.get(&reference.source_job_id).ok_or_else(repair)?;
+            let task = source
+                .ledger
+                .method_task_contributions
+                .iter()
+                .find(|task| task.reference().ok().as_ref() == Some(reference))
+                .ok_or_else(repair)?;
+            references.extend(task.execution_refs.clone());
+            valid_tasks.push(task.clone());
+        }
+        let (retained_tasks, task_conditions) = owner::reconciliation_retained_task_refs(
+            self.config.store_platform.as_ref().ok_or_else(repair)?,
+            material,
+            applied_body,
+            dependencies,
+            conditions,
+            &self.runtime_budget(),
+        )?;
+        merge_json_preconditions(conditions, task_conditions)?;
+        valid_tasks.retain(|task| {
+            retained_tasks
+                .iter()
+                .any(|reference| reference.contribution_id == task.contribution_id)
+        });
         // Registry fingerprints belong to immutable producer evidence, not to
         // the experience's asset identity. Never synthesize one from the owner.
         let mut tool = None;
@@ -1071,14 +1305,18 @@ impl MemoryRuntime {
         } = &body
         {
             for method in method_sources {
+                if let Some(extraction) = method.governance_extraction() {
+                    tool = Some(extraction.tool.clone());
+                    break;
+                }
                 self.reconciliation_source(
-                    &method.source_job_id,
+                    method.source_job_id(),
                     sources,
                     dependencies,
                     conditions,
                 )?;
                 tool = sources
-                    .get(&method.source_job_id)
+                    .get(method.source_job_id())
                     .and_then(|source| source.evidence.as_ref())
                     .and_then(|evidence| {
                         evidence.agent_tool_feedback.iter().find(|feedback| {
@@ -1098,10 +1336,16 @@ impl MemoryRuntime {
                 }
             }
         } else {
-            return Ok(Some((body, material.status)));
+            return Ok(ReconciledToolMaterial {
+                body: Some((body, material.status)),
+                retained_tasks,
+            });
         }
         let Some(tool) = tool else {
-            return Ok(None);
+            return Ok(ReconciledToolMaterial {
+                body: None,
+                retained_tasks,
+            });
         };
         if tool.registry_ref.registry_id != material.registry_id
             || tool.registry_ref.scope != material.registry_scope
@@ -1128,27 +1372,30 @@ impl MemoryRuntime {
             if fact.tool != tool {
                 return Err(repair());
             }
-            if source.permitted
-                && source.producer.as_ref().is_some_and(|producer| {
-                    let feedback = bm_core::memory::AgentToolUsageFeedbackV3 {
-                        registry_ref: tool.registry_ref.clone(),
-                        tool_id: tool.tool_id.clone(),
-                        schema_fingerprint: tool.schema_fingerprint.clone(),
-                        execution_facts: vec![fact.fact.clone()],
-                        method_evidence: Vec::new(),
-                    };
-                    [&producer.historical, &producer.current]
-                        .into_iter()
-                        .all(|binding| {
-                            binding
-                                .authorize_tool_feedback(
-                                    &producer.historical.spec.principal,
-                                    &source.ledger.identity.producer_scope(),
-                                    &feedback,
-                                )
-                                .is_ok()
-                        })
-                })
+            if valid_tasks
+                .iter()
+                .any(|task| task.execution_refs.contains(&reference))
+                || source.permitted
+                    && source.producer.as_ref().is_some_and(|producer| {
+                        let feedback = bm_core::memory::AgentToolUsageFeedbackV3 {
+                            registry_ref: tool.registry_ref.clone(),
+                            tool_id: tool.tool_id.clone(),
+                            schema_fingerprint: tool.schema_fingerprint.clone(),
+                            execution_facts: vec![fact.fact.clone()],
+                            method_evidence: Vec::new(),
+                        };
+                        [&producer.historical, &producer.current]
+                            .into_iter()
+                            .all(|binding| {
+                                binding
+                                    .authorize_tool_feedback(
+                                        &producer.historical.spec.principal,
+                                        &source.ledger.identity.producer_scope(),
+                                        &feedback,
+                                    )
+                                    .is_ok()
+                            })
+                    })
             {
                 valid_facts.insert(reference.contribution_id, fact.clone());
             }
@@ -1162,14 +1409,26 @@ impl MemoryRuntime {
             } => {
                 let mut retained = Vec::new();
                 for mut method_source in method_sources.clone() {
+                    if let Some(extraction) = method_source.governance_extraction() {
+                        if self.reconciliation_governance_source(
+                            extraction,
+                            dependencies,
+                            conditions,
+                        )? {
+                            retained.push(method_source);
+                        }
+                        continue;
+                    }
+                    let declaration_ref =
+                        method_source.producer_declaration().ok_or_else(repair)?;
                     self.reconciliation_source(
-                        &method_source.source_job_id,
+                        declaration_ref.source_job_id,
                         sources,
                         dependencies,
                         conditions,
                     )?;
                     let source = sources
-                        .get(&method_source.source_job_id)
+                        .get(declaration_ref.source_job_id)
                         .ok_or_else(repair)?;
                     let declaration = source
                         .evidence
@@ -1185,7 +1444,7 @@ impl MemoryRuntime {
                             feedback
                                 .method_evidence
                                 .iter()
-                                .find(|method| method.method_id == method_source.method_id)
+                                .find(|method| method.method_id == declaration_ref.method_id)
                         });
                     let allowed = source.permitted
                         && declaration.is_some_and(|method| {
@@ -1211,15 +1470,24 @@ impl MemoryRuntime {
                             })
                         });
                     if allowed {
-                        method_source.execution_refs.retain(|reference| {
-                            valid_facts.contains_key(&reference.contribution_id)
-                        });
+                        if let bm_core::skills::AgentToolMethodSourceRefV2::ProducerDeclaration {
+                            execution_refs,
+                            ..
+                        } = &mut method_source
+                        {
+                            execution_refs.retain(|reference| {
+                                valid_facts.contains_key(&reference.contribution_id)
+                            });
+                        }
                         retained.push(method_source);
                     }
                 }
                 *method_sources = retained;
                 if method_sources.is_empty() {
-                    return Ok(None);
+                    return Ok(ReconciledToolMaterial {
+                        body: None,
+                        retained_tasks,
+                    });
                 }
             }
         }
@@ -1232,12 +1500,16 @@ impl MemoryRuntime {
             &tool,
             &body,
             &contributions,
+            &valid_tasks,
             Some(material.status),
             self.runtime_budget()
                 .governed_state_budget
                 .max_agent_tool_experience_evidence_refs_per_owner,
         )
-        .map(Some)
+        .map(|body| ReconciledToolMaterial {
+            body: Some(body),
+            retained_tasks,
+        })
         .map_err(|_| repair())
     }
 
@@ -1302,6 +1574,36 @@ impl MemoryRuntime {
                         return Err(Error::conflict(
                             "procedural_reconciliation",
                             "transcript pin changed",
+                        ));
+                    }
+                }
+                Dependency::SemanticTranscript {
+                    identity,
+                    sequence,
+                    content_digest,
+                    lifecycle,
+                } => {
+                    let key = ConversationKey::new(
+                        &identity.memory_space_id,
+                        &identity.channel_id,
+                        &identity.conversation_id,
+                    )?;
+                    let physical = crate::store_internal::transcript_turn_storage_key(
+                        &key,
+                        &identity.mounted_subject_id,
+                        &identity.turn_id,
+                    );
+                    let record: bm_core::memory::TranscriptTurnRecord =
+                        read(store, "conversation_transcript", &physical, conditions)?
+                            .ok_or_else(repair)?;
+                    if record.sequence != *sequence
+                        || record.lifecycle_state != *lifecycle
+                        || bm_core::memory::procedural_transcript_state_digest(&record)?
+                            != *content_digest
+                    {
+                        return Err(Error::conflict(
+                            "procedural_reconciliation",
+                            "semantic transcript pin changed",
                         ));
                     }
                 }

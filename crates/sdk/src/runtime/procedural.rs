@@ -1,5 +1,6 @@
 use super::*;
 
+mod extraction;
 mod reconciliation;
 
 /// Constructed only after validating a sealed caller capability against the
@@ -15,7 +16,7 @@ pub(super) struct ProceduralSubmissionContext {
 /// One staged revision per experience owner, even when several input groups
 /// contribute to it. This is an in-transaction plan, never another state store.
 struct ProceduralExperienceUpdate {
-    feedback: bm_core::memory::AdmittedAgentToolEvidenceV1,
+    tool: bm_core::memory::ProceduralProducerToolV1,
     body: bm_core::skills::AgentToolExperienceBodyV1,
     method_inputs: Vec<(u32, u32)>,
 }
@@ -51,6 +52,359 @@ fn procedural_error(
 }
 
 impl MemoryRuntime {
+    /// Reused by the sealed intake proof: all mutable roots checked while
+    /// resolving a bounded source remain exact transaction preconditions.
+    pub(super) fn resolve_production_learning_input_sources(
+        &self,
+        request: &MemoryTurnFinalizeRequest,
+    ) -> Result<Vec<StoreJsonPrecondition>> {
+        self.resolve_production_learning_inputs(request)
+            .map(|(_, conditions)| conditions)
+    }
+
+    fn resolve_production_learning_inputs(
+        &self,
+        request: &MemoryTurnFinalizeRequest,
+    ) -> Result<(
+        Vec<bm_core::memory::AdmittedMethodLearningInputV1>,
+        Vec<StoreJsonPrecondition>,
+    )> {
+        use crate::ProceduralLearningErrorKeyV1 as Key;
+        use bm_core::memory::{
+            MethodLearningMaterialSourceV1 as Source,
+            ProceduralProducerSourceAuthorityV1 as Authority, ProceduralSourceSensitivity,
+        };
+        if !request.learning.validate_production_contract() {
+            return Err(feedback_error(Key::EvidenceConflict));
+        }
+        let mut admitted = Vec::new();
+        let mut conditions = Vec::new();
+        for group in &request.learning.method_learning_inputs {
+            self.validate_production_tool(
+                &group.registry_ref,
+                &group.tool_id,
+                &group.schema_fingerprint,
+            )?;
+            let mut resolved = group.clone();
+            for material in &mut resolved.materials {
+                material.external_content |= request.turn.external_content_used;
+                // Rejected content never causes a private/raw source fetch.
+                if material.sensitivity != ProceduralSourceSensitivity::NonPrivate
+                    || material.external_content
+                {
+                    continue;
+                }
+                match &material.source {
+                    Source::CanonicalInputMessage { input_index } => {
+                        let source = request
+                            .turn
+                            .input_messages
+                            .get(*input_index as usize)
+                            .ok_or_else(|| feedback_error(Key::EvidenceConflict))?;
+                        if !source.content.contains(&material.text) {
+                            return Err(feedback_error(Key::EvidenceConflict));
+                        }
+                        Self::tighten_method_material_authority(material, source.authority);
+                    }
+                    Source::CanonicalAssistantMessage => {
+                        let source = request
+                            .turn
+                            .assistant_message
+                            .as_ref()
+                            .ok_or_else(|| feedback_error(Key::EvidenceConflict))?;
+                        if !source.content.contains(&material.text) {
+                            return Err(feedback_error(Key::EvidenceConflict));
+                        }
+                        Self::tighten_method_material_authority(material, source.authority);
+                    }
+                    Source::ToolObservation { observation_id } => {
+                        let observation = request
+                            .turn
+                            .tool_observations
+                            .iter()
+                            .find(|observation| &observation.observation_id == observation_id)
+                            .ok_or_else(|| feedback_error(Key::EvidenceConflict))?;
+                        if observation.tool_name != group.tool_id
+                            || !observation.summary.contains(&material.text)
+                        {
+                            return Err(feedback_error(Key::EvidenceConflict));
+                        }
+                        material.external_content |= observation.external_content;
+                    }
+                    Source::GovernedRevision {
+                        revision,
+                        content_digest,
+                    } => {
+                        let source_conditions = self.resolve_procedural_source_authority(
+                            &Authority::GovernedSource {
+                                source_revision: revision.clone(),
+                            },
+                            crate::ProceduralLearningSdkOperation::FinalizeTurn,
+                        )?;
+                        let mut exact_fragment = false;
+                        for condition in &source_conditions {
+                            let StoreJsonPrecondition::Exact {
+                                namespace, value, ..
+                            } = condition
+                            else {
+                                continue;
+                            };
+                            if namespace
+                                == crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE
+                            {
+                                let source: bm_core::memory::LongTermMemoryVersionMaterial =
+                                    serde_json::from_value(value.clone())
+                                        .map_err(|_| feedback_error(Key::RepairRequired))?;
+                                if source.owner_revision_ref() == *revision {
+                                    exact_fragment = source.content_digest == *content_digest
+                                        && source.governed_content.content.contains(&material.text);
+                                }
+                            } else if namespace == GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE {
+                                let source: GovernedEvidenceDocument =
+                                    serde_json::from_value(value.clone())
+                                        .map_err(|_| feedback_error(Key::RepairRequired))?;
+                                if source.owner_revision == revision.owner_revision {
+                                    exact_fragment = source.content_digest == *content_digest
+                                        && source.body.contains(&material.text);
+                                }
+                            }
+                        }
+                        if !exact_fragment {
+                            return Err(feedback_error(Key::EvidenceConflict));
+                        }
+                        merge_json_preconditions(&mut conditions, source_conditions)?;
+                    }
+                }
+            }
+            let mut result = bm_core::memory::AdmittedMethodLearningInputV1::admit(&resolved)?;
+            result.submitted_classifications = group
+                .materials
+                .iter()
+                .map(|item| item.sensitivity)
+                .collect();
+            result.submitted_classifications.sort();
+            result.submitted_classifications.dedup();
+            admitted.push(result);
+        }
+        for adoption in &request.learning.method_adoptions {
+            self.resolve_production_method_reference(&adoption.method, &mut conditions)?;
+            for reference in &adoption.observation_refs {
+                if !request.turn.tool_observations.iter().any(|observation| {
+                    &observation.observation_id == reference
+                        && observation.tool_name == adoption.method.tool_id
+                        && !observation.external_content
+                }) {
+                    return Err(feedback_error(Key::EvidenceConflict));
+                }
+            }
+        }
+        for evaluation in &request.learning.method_task_evaluations {
+            self.resolve_production_method_reference(&evaluation.method, &mut conditions)?;
+            if evaluation.observation_refs.iter().any(|reference| {
+                !request.turn.tool_observations.iter().any(|observation| {
+                    &observation.observation_id == reference && !observation.external_content
+                })
+            }) {
+                return Err(feedback_error(Key::EvidenceConflict));
+            }
+        }
+        Ok((admitted, conditions))
+    }
+
+    fn tighten_method_material_authority(
+        material: &mut bm_core::memory::MethodLearningMaterialV1,
+        authority: bm_core::memory::MemoryEvidenceAuthority,
+    ) {
+        use bm_core::memory::{
+            MemoryEvidenceAuthority as Authority, ProceduralSourceSensitivity as Sensitivity,
+        };
+        match authority {
+            Authority::PrivateGardenInternal => material.sensitivity = Sensitivity::Private,
+            Authority::ExternalContent => material.external_content = true,
+            Authority::SubjectProjection
+            | Authority::SoulGovernance
+            | Authority::OperatorDiagnostic
+            | Authority::LegacyTranscript
+            | Authority::AssistantSelfClaim => {
+                material.sensitivity = material.sensitivity.ceiling(Sensitivity::Unknown)
+            }
+            _ => {}
+        }
+    }
+
+    fn validate_production_tool(
+        &self,
+        registry: &bm_core::skills::AgentToolRegistryRef,
+        tool_id: &str,
+        schema: &str,
+    ) -> Result<()> {
+        if !self
+            .procedural_applicability_for_conversation(
+                self.config.scope.conversation_id_or_chat_id(),
+            )?
+            .permits_registry_scope(&registry.scope)
+            || !self.agent_tool_registries().iter().any(|candidate| {
+                candidate.registry_ref() == *registry
+                    && candidate.tools.iter().any(|tool| {
+                        !tool.disabled
+                            && tool.tool_id == tool_id
+                            && tool.schema_fingerprint == schema
+                    })
+            })
+        {
+            return Err(feedback_error(
+                crate::ProceduralLearningErrorKeyV1::EvidenceConflict,
+            ));
+        }
+        Ok(())
+    }
+
+    fn resolve_production_method_reference(
+        &self,
+        reference: &bm_core::memory::MethodContentRefV1,
+        conditions: &mut Vec<StoreJsonPrecondition>,
+    ) -> Result<()> {
+        use crate::ProceduralLearningErrorKeyV1 as Key;
+        if !reference.validate_contract()
+            || reference.memory_space_id != self.config.memory_space_id
+            || reference.mounted_subject_id != self.config.scoped_runtime.mounted_subject_id
+        {
+            return Err(feedback_error(Key::ScopeMismatch));
+        }
+        self.validate_production_tool(
+            &reference.registry_ref,
+            &reference.tool_id,
+            &reference.schema_fingerprint,
+        )?;
+        let store = self
+            .config
+            .store_platform
+            .as_ref()
+            .ok_or_else(|| feedback_error(Key::RepairRequired))?;
+        let scope = AgentToolExperienceOwningScopeV1::Subject {
+            mounted_subject_id: reference.mounted_subject_id.clone(),
+        };
+        let key = agent_tool_experience_head_key(
+            &reference.memory_space_id,
+            &scope,
+            &reference.owner_revision.owner_ref,
+        )?;
+        let head_doc = store
+            .read_json_docs_by_keys(
+                AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE,
+                std::slice::from_ref(&key),
+            )?
+            .pop()
+            .ok_or_else(|| feedback_error(Key::EvidenceConflict))?;
+        let head: AgentToolExperienceOwnerHeadV3 =
+            serde_json::from_value(head_doc.value.clone())
+                .map_err(|_| feedback_error(Key::RepairRequired))?;
+        if !head.validate_contract().accepted
+            || head.state == bm_core::skills::AgentToolExperienceHeadStateV3::Tombstoned
+            || head.memory_space_id != reference.memory_space_id
+            || head.owning_scope != scope
+            || head.owner_ref != reference.owner_revision.owner_ref
+        {
+            return Err(feedback_error(Key::EvidenceConflict));
+        }
+        let exact = head
+            .retained_revisions
+            .iter()
+            .find(|item| {
+                item.owner_revision == reference.owner_revision.owner_revision
+                    && item.content_digest == reference.content_digest
+            })
+            .ok_or_else(|| feedback_error(Key::EvidenceConflict))?;
+        let material_doc = store
+            .read_json_docs_by_keys(
+                AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE,
+                std::slice::from_ref(&exact.material_key),
+            )?
+            .pop()
+            .ok_or_else(|| feedback_error(Key::RepairRequired))?;
+        let material: AgentToolExperienceRevisionMaterialV4 =
+            serde_json::from_value(material_doc.value.clone())
+                .map_err(|_| feedback_error(Key::RepairRequired))?;
+        if !material.validate_contract().accepted
+            || material.memory_space_id != reference.memory_space_id
+            || material.owning_scope != scope
+            || material.owner_ref != reference.owner_revision.owner_ref
+            || material.owner_revision != reference.owner_revision.owner_revision
+            || material.content_digest != reference.content_digest
+            || material.registry_id != reference.registry_ref.registry_id
+            || material.registry_scope != reference.registry_ref.scope
+            || material.tool_id != reference.tool_id
+            || material.schema_fingerprint != reference.schema_fingerprint
+            || !material.privacy_class.projection_content_allowed()
+            || !matches!(
+                &material.body,
+                bm_core::skills::AgentToolExperienceBodyV1::Method { .. }
+            )
+        {
+            return Err(feedback_error(Key::EvidenceConflict));
+        }
+        let current_ref = head
+            .retained_revisions
+            .last()
+            .ok_or_else(|| feedback_error(Key::RepairRequired))?;
+        let current_doc = store
+            .read_json_docs_by_keys(
+                AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE,
+                std::slice::from_ref(&current_ref.material_key),
+            )?
+            .pop()
+            .ok_or_else(|| feedback_error(Key::RepairRequired))?;
+        let current: AgentToolExperienceRevisionMaterialV4 =
+            serde_json::from_value(current_doc.value.clone())
+                .map_err(|_| feedback_error(Key::RepairRequired))?;
+        AgentToolExperienceHeadBindingV1::from_head_and_material(&head, &current)?;
+        if !current.privacy_class.projection_content_allowed()
+            || matches!(
+                current.status,
+                bm_core::skills::AgentToolExperienceStatus::Stale
+                    | bm_core::skills::AgentToolExperienceStatus::Rejected
+            )
+            || matches!(
+                material.status,
+                bm_core::skills::AgentToolExperienceStatus::Stale
+                    | bm_core::skills::AgentToolExperienceStatus::Rejected
+            )
+            || self
+                .authorized_retained_tool_body(&current, conditions)?
+                .is_none()
+        {
+            return Err(feedback_error(Key::ProducerAuthorityDenied));
+        }
+        // Current source revocation applies even to an exact retained revision.
+        if self
+            .authorized_retained_tool_body(&material, conditions)?
+            .is_none()
+        {
+            return Err(feedback_error(Key::ProducerAuthorityDenied));
+        }
+        merge_json_preconditions(
+            conditions,
+            vec![
+                StoreJsonPrecondition::Exact {
+                    namespace: AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE.into(),
+                    key,
+                    value: head_doc.value,
+                },
+                StoreJsonPrecondition::Exact {
+                    namespace: AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE.into(),
+                    key: exact.material_key.clone(),
+                    value: material_doc.value,
+                },
+                StoreJsonPrecondition::Exact {
+                    namespace: AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE.into(),
+                    key: current_ref.material_key.clone(),
+                    value: current_doc.value,
+                },
+            ],
+        )?;
+        Ok(())
+    }
+
     fn validate_procedural_current_governance(
         &self,
         historical: &bm_core::memory::ProceduralProducerBindingV1,
@@ -492,13 +846,9 @@ impl MemoryRuntime {
         &self,
         request: &MemoryTurnFinalizeRequest,
         producer: Option<&ProceduralSubmissionContext>,
-    ) -> Result<PostTurnLearningEvidenceV2> {
+    ) -> Result<PostTurnLearningEvidenceV3> {
         let learning = &request.learning;
-        let has_feedback = learning.selection_receipt.is_some()
-            || !learning.runtime_skill_feedback.is_empty()
-            || !learning.agent_skill_feedback.is_empty()
-            || !learning.task_learning_feedback.is_empty()
-            || !learning.agent_tool_feedback.is_empty();
+        let has_feedback = learning.has_signed_turn_context() || learning.has_authorized_content();
         if (has_feedback
             && !self
                 .capabilities
@@ -525,6 +875,9 @@ impl MemoryRuntime {
             .to_string();
         use crate::ProceduralLearningErrorKeyV1 as Key;
         let input = &request.learning;
+        if !input.validate_production_contract() {
+            return Err(feedback_error(Key::EvidenceConflict));
+        }
         if request.turn.subject != self.config.scoped_runtime.mounted_subject_id
             || request.turn.conversation.channel != self.config.scope.channel
             || request.turn.conversation.chat_id != self.config.scope.chat_id
@@ -539,7 +892,7 @@ impl MemoryRuntime {
             return Err(feedback_error(Key::ScopeMismatch));
         }
         let mut agent_tool_feedback = Vec::new();
-        let authority = if input.has_feedback() {
+        let authority = if input.has_authorized_content() {
             let producer =
                 producer.ok_or_else(|| feedback_error(Key::ProducerAuthorityRequired))?;
             let binding = &producer.binding;
@@ -560,6 +913,13 @@ impl MemoryRuntime {
             {
                 return Err(feedback_error(Key::ProducerAuthorityDenied));
             }
+            binding
+                .authorize_production_input(input)
+                .map_err(|_| feedback_error(Key::ProducerAuthorityDenied))?;
+            producer
+                .current
+                .authorize_production_input(input)
+                .map_err(|_| feedback_error(Key::ProducerAuthorityDenied))?;
             for feedback in &input.agent_tool_feedback {
                 binding
                     .authorize_tool_feedback(&producer.principal, &scope, feedback)
@@ -613,7 +973,23 @@ impl MemoryRuntime {
             }
             ProceduralFeedbackAuthorityV2::Empty
         };
-        let mut evidence = PostTurnLearningEvidenceV2 {
+        let (method_learning_inputs, _) = self.resolve_production_learning_inputs(request)?;
+        let submitted_input_commitment = if input.has_authorized_content() {
+            Some(
+                self.config
+                    .store_platform
+                    .as_ref()
+                    .ok_or_else(|| feedback_error(Key::RepairRequired))?
+                    .post_turn_learning_input_commitment(
+                        &self.config.memory_space_id,
+                        &request.turn,
+                        input,
+                    )?,
+            )
+        } else {
+            None
+        };
+        let mut evidence = PostTurnLearningEvidenceV3 {
             schema_version: POST_TURN_LEARNING_EVIDENCE_SCHEMA_VERSION,
             memory_space_id: self.config.memory_space_id.clone(),
             mounted_subject_id: self.config.scoped_runtime.mounted_subject_id.clone(),
@@ -626,6 +1002,10 @@ impl MemoryRuntime {
             agent_skill_feedback: input.agent_skill_feedback.clone(),
             task_learning_feedback: input.task_learning_feedback.clone(),
             agent_tool_feedback,
+            method_learning_inputs,
+            method_adoptions: input.method_adoptions.clone(),
+            method_task_evaluations: input.method_task_evaluations.clone(),
+            submitted_input_commitment,
             authority,
             learning_evidence_digest: String::new(),
         };
@@ -641,7 +1021,7 @@ impl MemoryRuntime {
         if !evidence.validate_contract() {
             return Err(feedback_error(Key::ReceiptInvalid));
         }
-        if let Some(producer) = producer.filter(|_| input.has_feedback()) {
+        if let Some(producer) = producer.filter(|_| input.has_authorized_content()) {
             producer
                 .binding
                 .authorize_evidence_with_current(
@@ -752,7 +1132,7 @@ impl MemoryRuntime {
         Ok(())
     }
 
-    fn validate_feedback_sources(&self, evidence: &PostTurnLearningEvidenceV2) -> Result<()> {
+    fn validate_feedback_sources(&self, evidence: &PostTurnLearningEvidenceV3) -> Result<()> {
         use crate::ProceduralLearningErrorKeyV1 as Key;
         for feedback in &evidence.agent_tool_feedback {
             self.normalize_agent_tool_learning_feedback(feedback, &evidence.conversation_id)
@@ -1053,6 +1433,17 @@ impl MemoryRuntime {
                 "durable procedural completion requires StorePlatform",
             )
         })?;
+        let method_preconditions =
+            crate::store_internal::procedural_feedback::method_application_preconditions(
+                store,
+                job,
+                &planned.mutations,
+                &planned.owner_bindings,
+                &planned.preconditions,
+                &self.runtime_budget(),
+                now_secs,
+            )?;
+        merge_json_preconditions(&mut planned.preconditions, method_preconditions)?;
         complete_procedural_feedback_job(
             store,
             self.memory_write_transaction_scope(),
@@ -1091,7 +1482,7 @@ impl MemoryRuntime {
         &self,
         job: &ProceduralFeedbackJobV2,
         source_record: &bm_core::memory::TranscriptTurnRecord,
-        evidence: &PostTurnLearningEvidenceV2,
+        evidence: &PostTurnLearningEvidenceV3,
         now_secs: u64,
     ) -> Result<ProceduralFeedbackApplicationPlan> {
         let runtime_budget = self.runtime_budget();
@@ -1125,7 +1516,7 @@ impl MemoryRuntime {
             ProceduralEvidenceRejection, ProceduralFeedbackMethodDispositionV1,
             ProceduralMethodDispositionPhaseV1, ToolExecutionContributionV1, ToolExecutionCountsV1,
         };
-        use bm_core::skills::{AgentToolExperienceBodyV1 as Body, AgentToolMethodSourceRefV1};
+        use bm_core::skills::{AgentToolExperienceBodyV1 as Body, AgentToolMethodSourceRefV2};
         let registries = self.agent_tool_registries();
         self.validate_feedback_sources(evidence)?;
         let current_contributions = evidence.execution_contributions_for_job(job)?;
@@ -1134,6 +1525,42 @@ impl MemoryRuntime {
             .map(|value| (value.contribution_id.clone(), value.clone()))
             .collect::<BTreeMap<_, _>>();
         let mut source_preconditions = Vec::new();
+        let mut adopted_materials = BTreeMap::new();
+        let current_tasks =
+            evidence.method_task_contributions_for_job(job, source_record, |reference| {
+                self.validate_production_tool(
+                    &reference.registry_ref,
+                    &reference.tool_id,
+                    &reference.schema_fingerprint,
+                )?;
+                let key = bm_core::skills::agent_tool_experience_material_key(
+                    &reference.memory_space_id,
+                    &owning_scope,
+                    &reference.owner_revision.owner_ref,
+                    reference.owner_revision.owner_revision,
+                )?;
+                let document = store
+                    .read_json_docs_by_keys(AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE, &[key])?
+                    .pop()
+                    .ok_or_else(|| {
+                        feedback_error(crate::ProceduralLearningErrorKeyV1::RepairRequired)
+                    })?;
+                let material: AgentToolExperienceRevisionMaterialV4 =
+                    serde_json::from_value(document.value.clone()).map_err(|_| {
+                        feedback_error(crate::ProceduralLearningErrorKeyV1::RepairRequired)
+                    })?;
+                source_preconditions.push(StoreJsonPrecondition::Exact {
+                    namespace: document.namespace,
+                    key: document.key,
+                    value: document.value,
+                });
+                adopted_materials.insert(material.owner_ref.owner_id.clone(), material.clone());
+                Ok(material)
+            })?;
+        let mut task_contributions = current_tasks
+            .iter()
+            .map(|task| (task.contribution_id.clone(), task.clone()))
+            .collect::<BTreeMap<_, _>>();
         let mut updates = BTreeMap::<String, ProceduralExperienceUpdate>::new();
         let mut method_dispositions = Vec::new();
         let mut group_has_accepted_item = vec![false; evidence.agent_tool_feedback.len()];
@@ -1209,6 +1636,7 @@ impl MemoryRuntime {
                     .collect::<Result<Vec<_>>>()?;
                 refs.sort_by(|a, b| a.contribution_id.cmp(&b.contribution_id));
                 let mut body = Body::Method {
+                    usage_contributions: Vec::new(),
                     task_signature: method.task_signature.clone(),
                     procedure: method.body.clone(),
                     constraints: Vec::new(),
@@ -1218,7 +1646,7 @@ impl MemoryRuntime {
                     feedback_error(crate::ProceduralLearningErrorKeyV1::RepairRequired)
                 })?;
                 if let Body::Method { sources, .. } = &mut body {
-                    sources.push(AgentToolMethodSourceRefV1 {
+                    sources.push(AgentToolMethodSourceRefV2::ProducerDeclaration {
                         source_job_id: job.job_id.clone(),
                         method_id: method.method_id.clone(),
                         method_digest,
@@ -1241,7 +1669,11 @@ impl MemoryRuntime {
                     updates
                         .entry(owner_id)
                         .or_insert_with(|| ProceduralExperienceUpdate {
-                            feedback: feedback.clone(),
+                            tool: bm_core::memory::ProceduralProducerToolV1 {
+                                registry_ref: feedback.registry_ref.clone(),
+                                tool_id: feedback.tool_id.clone(),
+                                schema_fingerprint: feedback.schema_fingerprint.clone(),
+                            },
                             body: body.clone(),
                             method_inputs: Vec::new(),
                         });
@@ -1281,10 +1713,7 @@ impl MemoryRuntime {
                             ));
                         }
                         sources.extend(added);
-                        sources.sort_by(|a, b| {
-                            (&a.source_job_id, &a.method_id).cmp(&(&b.source_job_id, &b.method_id))
-                        });
-                        sources.dedup();
+                        AgentToolMethodSourceRefV2::canonicalize(sources)?;
                     }
                     _ => {
                         return Err(feedback_error(
@@ -1294,12 +1723,56 @@ impl MemoryRuntime {
                 }
             }
         }
+        for task in &current_tasks {
+            let reference = &task.adoption.method;
+            let material = adopted_materials
+                .get(&reference.owner_revision.owner_ref.owner_id)
+                .ok_or_else(|| {
+                    feedback_error(crate::ProceduralLearningErrorKeyV1::RepairRequired)
+                })?;
+            let update = updates
+                .entry(material.owner_ref.owner_id.clone())
+                .or_insert_with(|| {
+                    let mut body = material.body.clone();
+                    if let Body::Method {
+                        usage_contributions,
+                        ..
+                    } = &mut body
+                    {
+                        usage_contributions.clear();
+                    }
+                    ProceduralExperienceUpdate {
+                        tool: bm_core::memory::ProceduralProducerToolV1 {
+                            registry_ref: reference.registry_ref.clone(),
+                            tool_id: reference.tool_id.clone(),
+                            schema_fingerprint: reference.schema_fingerprint.clone(),
+                        },
+                        body,
+                        method_inputs: Vec::new(),
+                    }
+                });
+            if update.body.method_content_digest()? != Some(task.method_content_digest.clone()) {
+                return Err(feedback_error(
+                    crate::ProceduralLearningErrorKeyV1::EvidenceConflict,
+                ));
+            }
+            let Body::Method {
+                usage_contributions,
+                ..
+            } = &mut update.body
+            else {
+                return Err(feedback_error(
+                    crate::ProceduralLearningErrorKeyV1::EvidenceConflict,
+                ));
+            };
+            usage_contributions.push(task.reference()?);
+        }
         let mut plans = Vec::new();
         for (owner_id, mut update) in updates {
-            let feedback = &update.feedback;
+            let tool = &update.tool;
             let registry = registries
                 .iter()
-                .find(|registry| registry.registry_ref() == feedback.registry_ref)
+                .find(|registry| registry.registry_ref() == tool.registry_ref)
                 .ok_or_else(|| {
                     feedback_error(crate::ProceduralLearningErrorKeyV1::EvidenceConflict)
                 })?;
@@ -1343,7 +1816,7 @@ impl MemoryRuntime {
                         .ok_or_else(|| {
                             feedback_error(crate::ProceduralLearningErrorKeyV1::RepairRequired)
                         })?;
-                    let material: AgentToolExperienceRevisionMaterialV3 =
+                    let material: AgentToolExperienceRevisionMaterialV4 =
                         serde_json::from_value(doc.value).map_err(|_| {
                             feedback_error(crate::ProceduralLearningErrorKeyV1::RepairRequired)
                         })?;
@@ -1353,13 +1826,16 @@ impl MemoryRuntime {
                 .transpose()?;
             if let Some(previous) = &previous_material {
                 let authorized =
-                    self.authorized_retained_tool_body(previous, &mut source_preconditions)?;
+                    self.authorized_retained_tool_material(previous, &mut source_preconditions)?;
+                let authorized_body = authorized.body.as_ref().map(|(body, _)| body);
+                let method_content_conflict = update.body.method_content_digest()?
+                    != previous.body.method_content_digest()?;
                 match (&mut update.body, &previous.body) {
                     (Body::Execution { contributions, .. }, Body::Execution { .. }) => {
                         if let Some(Body::Execution {
                             contributions: retained,
                             ..
-                        }) = &authorized
+                        }) = authorized_body
                         {
                             contributions.extend(retained.clone());
                         }
@@ -1368,18 +1844,13 @@ impl MemoryRuntime {
                     }
                     (
                         Body::Method {
-                            procedure,
                             sources,
-                            constraints,
+                            usage_contributions,
                             ..
                         },
-                        Body::Method {
-                            procedure: retained_procedure,
-                            constraints: retained_constraints,
-                            ..
-                        },
+                        Body::Method { .. },
                     ) => {
-                        if procedure != retained_procedure {
+                        if method_content_conflict {
                             for (group, ordinal) in &update.method_inputs {
                                 method_dispositions.push(ProceduralFeedbackMethodDispositionV1 {
                                     feedback_group_ordinal: *group,
@@ -1405,15 +1876,15 @@ impl MemoryRuntime {
                         }
                         if let Some(Body::Method {
                             sources: retained, ..
-                        }) = &authorized
+                        }) = authorized_body
                         {
                             sources.extend(retained.clone());
                         }
-                        sources.sort_by(|a, b| {
-                            (&a.source_job_id, &a.method_id).cmp(&(&b.source_job_id, &b.method_id))
-                        });
-                        sources.dedup();
-                        *constraints = retained_constraints.clone();
+                        usage_contributions.extend(authorized.retained_tasks);
+                        AgentToolMethodSourceRefV2::canonicalize(sources)?;
+                        usage_contributions
+                            .sort_by(|a, b| a.contribution_id.cmp(&b.contribution_id));
+                        usage_contributions.dedup();
                     }
                     _ => {
                         return Err(feedback_error(
@@ -1429,13 +1900,76 @@ impl MemoryRuntime {
                     crate::ProceduralLearningErrorKeyV1::BudgetExceeded,
                 ));
             }
-            let refs = match &update.body {
+            let mut task_execution_refs = Vec::new();
+            let mut exact_tasks = Vec::new();
+            for reference in update.body.method_usage_contributions() {
+                if !task_contributions.contains_key(&reference.contribution_id) {
+                    let document = store.read_json_docs_by_keys(
+                        crate::store_internal::schema::PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE,
+                        std::slice::from_ref(&reference.source_job_id),
+                    )?.pop().ok_or_else(|| feedback_error(crate::ProceduralLearningErrorKeyV1::RepairRequired))?;
+                    let ledger: bm_core::memory::ProceduralFeedbackApplicationLedgerV3 =
+                        serde_json::from_value(document.value.clone()).map_err(|_| {
+                            feedback_error(crate::ProceduralLearningErrorKeyV1::RepairRequired)
+                        })?;
+                    ledger.validate()?;
+                    if ledger.job_id != reference.source_job_id
+                        || ledger.identity.memory_space_id
+                            != job.feedback_source()?.identity.memory_space_id
+                        || ledger.identity.mounted_subject_id
+                            != job.feedback_source()?.identity.mounted_subject_id
+                    {
+                        return Err(feedback_error(
+                            crate::ProceduralLearningErrorKeyV1::RepairRequired,
+                        ));
+                    }
+                    for task in ledger.method_task_contributions {
+                        if task_contributions
+                            .insert(task.contribution_id.clone(), task.clone())
+                            .is_some_and(|old| old != task)
+                        {
+                            return Err(feedback_error(
+                                crate::ProceduralLearningErrorKeyV1::EvidenceConflict,
+                            ));
+                        }
+                    }
+                    for fact in ledger.execution_contributions {
+                        if contributions
+                            .insert(fact.contribution_id.clone(), fact.clone())
+                            .is_some_and(|old| old != fact)
+                        {
+                            return Err(feedback_error(
+                                crate::ProceduralLearningErrorKeyV1::EvidenceConflict,
+                            ));
+                        }
+                    }
+                    source_preconditions.push(StoreJsonPrecondition::Exact {
+                        namespace: document.namespace,
+                        key: document.key,
+                        value: document.value,
+                    });
+                }
+                let task = task_contributions
+                    .get(&reference.contribution_id)
+                    .ok_or_else(|| {
+                        feedback_error(crate::ProceduralLearningErrorKeyV1::RepairRequired)
+                    })?;
+                if task.reference()? != *reference {
+                    return Err(feedback_error(
+                        crate::ProceduralLearningErrorKeyV1::EvidenceConflict,
+                    ));
+                }
+                task_execution_refs.extend(task.execution_refs.clone());
+                exact_tasks.push(task.clone());
+            }
+            let mut refs = match &update.body {
                 Body::Execution { contributions, .. } => contributions.iter().collect::<Vec<_>>(),
                 Body::Method { sources, .. } => sources
                     .iter()
-                    .flat_map(|source| &source.execution_refs)
+                    .flat_map(|source| source.execution_refs())
                     .collect(),
             };
+            refs.extend(task_execution_refs.iter());
             // Follow only this owner's retained contribution roots. Unrelated
             // subjects/tools must not consume this operation's read budget.
             for reference in refs {
@@ -1446,7 +1980,7 @@ impl MemoryRuntime {
                     crate::store_internal::schema::PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE,
                     std::slice::from_ref(&reference.source_job_id))?.pop().ok_or_else(||
                         feedback_error(crate::ProceduralLearningErrorKeyV1::RepairRequired))?;
-                let ledger: bm_core::memory::ProceduralFeedbackApplicationLedgerV2 =
+                let ledger: bm_core::memory::ProceduralFeedbackApplicationLedgerV3 =
                     serde_json::from_value(document.value.clone()).map_err(|_| {
                         feedback_error(crate::ProceduralLearningErrorKeyV1::RepairRequired)
                     })?;
@@ -1484,19 +2018,20 @@ impl MemoryRuntime {
                 if fact.reference().ok().as_ref() != Some(reference)
                     || fact.source.memory_space_id != job.feedback_source()?.identity.memory_space_id
                     || fact.source.mounted_subject_id != job.feedback_source()?.identity.mounted_subject_id
-                    || fact.tool.registry_ref != feedback.registry_ref || fact.tool.tool_id != feedback.tool_id
-                    || fact.tool.schema_fingerprint != feedback.schema_fingerprint {
+                    || fact.tool.registry_ref != tool.registry_ref || fact.tool.tool_id != tool.tool_id
+                    || fact.tool.schema_fingerprint != tool.schema_fingerprint {
                     return Err(feedback_error(crate::ProceduralLearningErrorKeyV1::RepairRequired));
                 }
                 Ok(fact)
             };
-            let references = match &update.body {
+            let mut references = match &update.body {
                 Body::Execution { contributions, .. } => contributions.iter().collect::<Vec<_>>(),
                 Body::Method { sources, .. } => sources
                     .iter()
-                    .flat_map(|source| &source.execution_refs)
+                    .flat_map(|source| source.execution_refs())
                     .collect(),
             };
+            references.extend(task_execution_refs.iter());
             let exact_contributions = references
                 .into_iter()
                 .map(|reference| exact_fact(reference).cloned())
@@ -1504,12 +2039,13 @@ impl MemoryRuntime {
             let (body, status) = bm_core::memory::reduce_agent_tool_experience_contributions(
                 &job.work.subject_scope(),
                 &bm_core::memory::ProceduralProducerToolV1 {
-                    registry_ref: feedback.registry_ref.clone(),
-                    tool_id: feedback.tool_id.clone(),
-                    schema_fingerprint: feedback.schema_fingerprint.clone(),
+                    registry_ref: tool.registry_ref.clone(),
+                    tool_id: tool.tool_id.clone(),
+                    schema_fingerprint: tool.schema_fingerprint.clone(),
                 },
                 &update.body,
                 &exact_contributions,
+                &exact_tasks,
                 previous_material.as_ref().map(|material| material.status),
                 limits.max_agent_tool_experience_evidence_refs_per_owner,
             )
@@ -1536,13 +2072,13 @@ impl MemoryRuntime {
                 .as_ref()
                 .map(AgentToolExperienceRetainedRevisionDigestV3::from_material)
                 .transpose()?;
-            let material = AgentToolExperienceRevisionMaterialV3::build(
+            let material = AgentToolExperienceRevisionMaterialV4::build(
                 &job.feedback_source()?.identity.memory_space_id,
                 owning_scope.clone(),
                 &registry.registry_id,
                 registry.scope.clone(),
-                &feedback.tool_id,
-                &feedback.schema_fingerprint,
+                &tool.tool_id,
+                &tool.schema_fingerprint,
                 revision,
                 update.body,
                 status,
@@ -1609,7 +2145,9 @@ impl MemoryRuntime {
                 .runtime_skill_feedback
                 .len()
                 .saturating_add(evidence.agent_skill_feedback.len())
-                .saturating_add(evidence.task_learning_feedback.len()),
+                .saturating_add(evidence.task_learning_feedback.len())
+                .saturating_add(evidence.method_adoptions.len())
+                .saturating_add(evidence.method_task_evaluations.len()),
         )
         .map_err(|_| feedback_error(crate::ProceduralLearningErrorKeyV1::EvidenceConflict))?;
         let mut partially_accepted_count = 0_u32;
@@ -1643,7 +2181,7 @@ impl MemoryRuntime {
                         StoreMutation::PutJson {
                             namespace, value, ..
                         } if namespace == AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE => {
-                            serde_json::from_value::<AgentToolExperienceRevisionMaterialV3>(
+                            serde_json::from_value::<AgentToolExperienceRevisionMaterialV4>(
                                 value.clone(),
                             )
                             .ok()
@@ -1729,7 +2267,7 @@ impl MemoryRuntime {
                 let document = store.read_json_docs_by_keys(crate::store_internal::schema::PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE,
                     std::slice::from_ref(&reference.source_job_id))?.pop()
                     .ok_or_else(|| feedback_error(crate::ProceduralLearningErrorKeyV1::RepairRequired))?;
-                let ledger: bm_core::memory::ProceduralFeedbackApplicationLedgerV2 =
+                let ledger: bm_core::memory::ProceduralFeedbackApplicationLedgerV3 =
                     serde_json::from_value(document.value.clone()).map_err(|_| {
                         feedback_error(crate::ProceduralLearningErrorKeyV1::RepairRequired)
                     })?;
@@ -1843,7 +2381,7 @@ impl MemoryRuntime {
             PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE, PROCEDURAL_FEEDBACK_JOB_NAMESPACE,
         };
         use bm_core::memory::{
-            ProceduralAppliedOwnerBindingV1, ProceduralFeedbackApplicationLedgerV2,
+            ProceduralAppliedOwnerBindingV1, ProceduralFeedbackApplicationLedgerV3,
         };
         use bm_core::skills::{
             plan_runtime_skill_promotion_from_tool_evidence, RuntimeSkillToolPromotionDecision,
@@ -1858,7 +2396,7 @@ impl MemoryRuntime {
                 _ => None,
             })
             .map(|value| {
-                serde_json::from_value::<AgentToolExperienceRevisionMaterialV3>(value.clone())
+                serde_json::from_value::<AgentToolExperienceRevisionMaterialV4>(value.clone())
                     .map_err(|_| {
                         feedback_error(crate::ProceduralLearningErrorKeyV1::RepairRequired)
                     })
@@ -1929,17 +2467,15 @@ impl MemoryRuntime {
             // Core owns that decision; historical raw evidence need not be reread.
             if existing.is_none() {
                 let bm_core::skills::AgentToolExperienceBodyV1::Method {
-                    sources: method_sources,
+                    usage_contributions,
                     ..
                 } = &material.body
                 else {
                     unreachable!()
                 };
-                let source_keys = method_sources
+                let source_keys = usage_contributions
                     .iter()
-                    .filter(|source| {
-                        !source.execution_refs.is_empty() && source.source_job_id != job.job_id
-                    })
+                    .filter(|source| source.source_job_id != job.job_id)
                     .map(|source| source.source_job_id.clone())
                     .collect::<BTreeSet<_>>();
                 let head = mutations
@@ -1962,7 +2498,7 @@ impl MemoryRuntime {
                     let document = store.read_json_docs_by_keys(
                         crate::store_internal::schema::PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE,
                         std::slice::from_ref(&source_key))?.pop().ok_or_else(|| feedback_error(crate::ProceduralLearningErrorKeyV1::RepairRequired))?;
-                    let ledger: ProceduralFeedbackApplicationLedgerV2 =
+                    let ledger: ProceduralFeedbackApplicationLedgerV3 =
                         serde_json::from_value(document.value.clone()).map_err(|_| {
                             feedback_error(crate::ProceduralLearningErrorKeyV1::RepairRequired)
                         })?;
@@ -2017,7 +2553,7 @@ impl MemoryRuntime {
                         .ok_or_else(|| {
                             feedback_error(crate::ProceduralLearningErrorKeyV1::RepairRequired)
                         })?;
-                    let historical: AgentToolExperienceRevisionMaterialV3 =
+                    let historical: AgentToolExperienceRevisionMaterialV4 =
                         serde_json::from_value(source_material_doc.value.clone()).map_err(
                             |_| feedback_error(crate::ProceduralLearningErrorKeyV1::RepairRequired),
                         )?;
@@ -2117,22 +2653,6 @@ impl MemoryRuntime {
                     if source_evidence.authority.is_model_inferred() {
                         continue;
                     }
-                    let mut execution_backed = false;
-                    for feedback in &source_evidence.agent_tool_feedback {
-                        execution_backed |=
-                            bm_core::skills::agent_tool_method_execution_matches_source(
-                                &historical,
-                                &source_job,
-                                &transcript,
-                                feedback,
-                            )
-                            .map_err(|_| {
-                                feedback_error(crate::ProceduralLearningErrorKeyV1::RepairRequired)
-                            })?;
-                    }
-                    if !execution_backed {
-                        continue;
-                    }
                     if !source_ids.insert(source_job.job_id.clone()) {
                         return Err(feedback_error(
                             crate::ProceduralLearningErrorKeyV1::RepairRequired,
@@ -2175,9 +2695,43 @@ impl MemoryRuntime {
                     sources.push((source_job, transcript));
                 }
             }
+            let adopted = sources
+                .iter()
+                .map(|(_, transcript)| {
+                    crate::store_internal::procedural_feedback::read_method_adopted_materials(
+                        transcript,
+                        |namespace, key| {
+                            let document = store
+                                .read_json_docs_by_keys(namespace, &[key.into()])?
+                                .pop()
+                                .ok_or_else(|| {
+                                    feedback_error(
+                                        crate::ProceduralLearningErrorKeyV1::RepairRequired,
+                                    )
+                                })?;
+                            merge_json_preconditions(
+                                &mut source_preconditions,
+                                [StoreJsonPrecondition::Exact {
+                                    namespace: document.namespace,
+                                    key: document.key,
+                                    value: document.value.clone(),
+                                }],
+                            )?;
+                            Ok(document.value)
+                        },
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
             let sources = sources
                 .iter()
-                .map(|(job, transcript)| RuntimeSkillToolPromotionSource { job, transcript })
+                .zip(&adopted)
+                .map(
+                    |((job, transcript), adopted_materials)| RuntimeSkillToolPromotionSource {
+                        job,
+                        transcript,
+                        adopted_materials,
+                    },
+                )
                 .collect::<Vec<_>>();
             match plan_runtime_skill_promotion_from_tool_evidence(
                 &RuntimeSkillToolPromotionInput {

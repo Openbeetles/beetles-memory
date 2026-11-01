@@ -673,7 +673,7 @@ fn normalize_priority_order(priority_order: Vec<String>) -> Vec<String> {
     normalized
 }
 
-fn canonical_priority_token(raw: &str) -> Option<String> {
+pub(super) fn canonical_priority_token(raw: &str) -> Option<String> {
     let normalized = raw.trim().to_ascii_lowercase();
     if normalized.is_empty() {
         None

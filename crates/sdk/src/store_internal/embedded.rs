@@ -253,6 +253,17 @@ impl StoreEngine for EmbeddedStoreEngine {
                     .map(|(address, value)| (address.clone(), value.clone())),
             );
         }
+        super::transaction::expand_owner_transaction_dependencies(
+            request,
+            admission.operation_capacity(),
+            &mut touched,
+            |namespace, key, _remaining| {
+                Ok(state
+                    .json
+                    .get(&(namespace.to_owned(), key.to_owned()))
+                    .cloned())
+            },
+        )?;
         let existing_event_ids = request
             .mutations
             .iter()

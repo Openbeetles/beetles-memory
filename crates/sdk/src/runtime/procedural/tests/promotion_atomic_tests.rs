@@ -1,11 +1,74 @@
 use super::*;
 use crate::{
     CanonicalTurnDelta, ConversationScope, MemoryTurnDeliveryStatus, MemoryTurnProtocol,
-    MemoryTurnSource, PostTurnLearningInputV2, StoreBackendConfig, ToolObservationDigest,
+    MemoryTurnSource, PostTurnLearningInputV3, StoreBackendConfig, ToolObservationDigest,
     TranscriptInputMessage,
 };
 
 struct Clock;
+
+#[test]
+fn primitive_method_material_delete_requires_governed_transaction() {
+    let root = std::env::temp_dir().join(format!(
+        "bm-method-primitive-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let profile = ProfileId::native_dev_full().unwrap();
+    let configs = vec![
+        StoreBackendConfig::in_memory(profile).unwrap(),
+        StoreBackendConfig::file(root.join("file"), profile).unwrap(),
+        #[cfg(feature = "sqlite-store")]
+        StoreBackendConfig::sqlite(root.join("sqlite.db"), profile).unwrap(),
+    ];
+    for config in configs {
+        let (platform, memory, input) = fixture(config);
+        complete(&platform, &memory, input).unwrap();
+        let before = platform.export_store_snapshot().unwrap();
+        let material = before
+            .json_docs
+            .iter()
+            .find(|document| {
+                document.namespace
+                    == crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE
+            })
+            .expect("real production method material positive control");
+        for metadata in [
+            None,
+            Some(Box::new(crate::StoreMutationBatch {
+                transaction_id: "primitive-method-delete-without-governance".into(),
+                operation: "unrelated.empty.metadata".into(),
+                scope: memory.memory_write_transaction_scope(),
+                mutations: Vec::new(),
+            })),
+        ] {
+            let request = crate::store_internal::StoreTransactionRequest::new(
+                "primitive-method-delete-without-governance",
+                vec![StoreJsonPrecondition::Exact {
+                    namespace: material.namespace.clone(),
+                    key: material.key.clone(),
+                    value: material.value.clone(),
+                }],
+                vec![crate::store_internal::StoreEngineMutation::DeleteJson {
+                    namespace: material.namespace.clone(),
+                    key: material.key.clone(),
+                }],
+                metadata,
+            );
+            let error = platform
+                .engine_for_test()
+                .commit_transaction(&request)
+                .unwrap_err();
+            assert_eq!(error.stage(), "method_transaction_authority");
+            assert_eq!(platform.export_store_snapshot().unwrap(), before);
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 impl crate::MemoryClock for Clock {
     fn now_secs(&self) -> u64 {
         1_800_000_000
@@ -74,7 +137,7 @@ fn request(memory: &MemoryRuntime, turn: &str) -> MemoryTurnFinalizeRequest {
                 external_content_used: false,
                 candidate_ids: vec![],
             },
-            learning: PostTurnLearningInputV2 {
+            learning: PostTurnLearningInputV3 {
                 tool_call_count: 2,
                 agent_tool_feedback: vec![bm_core::memory::AgentToolUsageFeedbackV3 {
                     registry_ref: registry().registry_ref(),
@@ -88,11 +151,66 @@ fn request(memory: &MemoryRuntime, turn: &str) -> MemoryTurnFinalizeRequest {
                     }],
                     execution_facts: observations,
                 }],
-                ..PostTurnLearningInputV2::empty()
+                ..PostTurnLearningInputV3::empty()
             },
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
         }
+}
+
+// A declaration only establishes a Candidate. Promotion requires actual
+// adoption of that retained method plus independent, registered task results.
+fn task_request(memory: &MemoryRuntime, turn: &str) -> MemoryTurnFinalizeRequest {
+    use bm_core::memory::{
+        MethodAdoptionEvidenceV1, MethodAdoptionStatusV1, MethodTaskEvaluationV1,
+        MethodTaskOutcomeV1, ProceduralProducerToolV1,
+    };
+    let mut input = request(memory, turn);
+    let method = memory
+        .discover_method_trials(crate::MemoryMethodTrialRequest {
+            tool: ProceduralProducerToolV1 {
+                registry_ref: registry().registry_ref(),
+                tool_id: "archive.unpack".into(),
+                schema_fingerprint: "schema-v1".into(),
+            },
+            max_candidates: 8,
+        })
+        .unwrap()
+        .candidates
+        .into_iter()
+        .find(|candidate| {
+            candidate.procedure == input.learning.agent_tool_feedback[0].method_evidence[0].body
+        })
+        .expect("the real declaration must expose an exact Candidate before task adoption")
+        .method;
+    let observations = input.learning.agent_tool_feedback[0]
+        .execution_facts
+        .iter()
+        .map(|fact| fact.observation_id.clone())
+        .collect::<Vec<_>>();
+    input
+        .learning
+        .method_adoptions
+        .push(MethodAdoptionEvidenceV1 {
+            method: method.clone(),
+            task_id: turn.into(),
+            adoption: MethodAdoptionStatusV1::Adopted,
+            observation_refs: observations.clone(),
+        });
+    input
+        .learning
+        .method_task_evaluations
+        .push(MethodTaskEvaluationV1 {
+            method,
+            task_id: turn.into(),
+            task_root_id: format!("archive-task-{turn}"),
+            independence_group: format!("independent-archive-scenario-{turn}"),
+            evaluator_id: "archive-checksum-verifier".into(),
+            evaluator_revision: 1,
+            outcome: MethodTaskOutcomeV1::Passed,
+            observation_refs: observations,
+        });
+    input
 }
 
 fn fixture(
@@ -135,8 +253,31 @@ fn fixture_at_times(
         .build()
         .unwrap();
     let capability = submission_capability(&platform, &memory, false);
+    let declared = memory
+        .finalize_turn_with_procedural_evidence(
+            &capability,
+            request(&memory, "candidate-declaration"),
+        )
+        .unwrap();
+    let declaration = memory
+        .claim_due_procedural_feedback_job(
+            &declared.procedural_learning.job_id.unwrap(),
+            "atomic-worker",
+            1_800_000_060,
+        )
+        .unwrap();
+    memory
+        .run_claimed_procedural_feedback_job(&declaration, "atomic-worker")
+        .unwrap();
+    assert!(
+        platform
+            .read_json_namespace(crate::store_internal::RUNTIME_SKILL_RECORD_NAMESPACE)
+            .unwrap()
+            .is_empty(),
+        "a real method declaration must not invent task success or promote a skill"
+    );
     let first = memory
-        .finalize_turn_with_procedural_evidence(&capability, request(&memory, "first-source"))
+        .finalize_turn_with_procedural_evidence(&capability, task_request(&memory, "first-source"))
         .unwrap();
     let first = memory
         .claim_due_procedural_feedback_job(
@@ -152,7 +293,7 @@ fn fixture_at_times(
         .0
         .store(second_time, std::sync::atomic::Ordering::SeqCst);
     let second = memory
-        .finalize_turn_with_procedural_evidence(&capability, request(&memory, "second-source"))
+        .finalize_turn_with_procedural_evidence(&capability, task_request(&memory, "second-source"))
         .unwrap();
     let job = memory
         .claim_due_procedural_feedback_job(
@@ -199,6 +340,20 @@ fn completion_input(
         ),
         value: serde_json::to_value(record).unwrap(),
     });
+    // Retain the same exact method/task proof read set as the production
+    // run_claimed path before injecting Store failures below.
+    let method_preconditions =
+        crate::store_internal::procedural_feedback::method_application_preconditions(
+            platform,
+            job,
+            &planned.mutations,
+            &planned.owner_bindings,
+            &planned.preconditions,
+            &memory.runtime_budget(),
+            memory.config.clock.now_secs(),
+        )
+        .unwrap();
+    merge_json_preconditions(&mut planned.preconditions, method_preconditions).unwrap();
     ProceduralFeedbackCompletionInput {
         job_id: job.job_id.clone(),
         lease_owner: "atomic-worker".into(),
@@ -232,12 +387,7 @@ fn complete(
     )
 }
 
-fn submission_capability(
-    platform: &StorePlatform,
-    memory: &MemoryRuntime,
-    model: bool,
-) -> crate::MemoryProceduralSubmissionCapability {
-    use bm_core::memory::*;
+fn task_test_governor(platform: &StorePlatform, memory: &MemoryRuntime) -> MemoryRuntime {
     let mut scoped = memory.scoped_runtime().clone();
     scoped.actor_subject_id = memory
         .subject_registry()
@@ -257,6 +407,16 @@ fn submission_capability(
         .privacy_policy(MemoryPrivacyPolicy::standard_private_boundary())
         .build()
         .unwrap();
+    governor
+}
+
+fn submission_capability(
+    platform: &StorePlatform,
+    memory: &MemoryRuntime,
+    model: bool,
+) -> crate::MemoryProceduralSubmissionCapability {
+    use bm_core::memory::*;
+    let governor = task_test_governor(platform, memory);
     let id = if model {
         "synthetic-model"
     } else {
@@ -279,6 +439,9 @@ fn submission_capability(
             execution_facts: !model,
             method_declarations: true,
             usage_feedback: false,
+            method_learning_materials: false,
+            method_adoptions: !model,
+            method_task_evaluations: !model,
             source_classifications: vec![ProceduralSourceSensitivity::NonPrivate],
         },
         tools: vec![ProceduralProducerToolV1 {
@@ -286,6 +449,14 @@ fn submission_capability(
             tool_id: "archive.unpack".into(),
             schema_fingerprint: "schema-v1".into(),
         }],
+        method_evaluators: if model {
+            Vec::new()
+        } else {
+            vec![MethodTaskEvaluatorV1 {
+                id: "archive-checksum-verifier".into(),
+                revision: 1,
+            }]
+        },
         source_config_ref: id.into(),
     };
     let binding = governor
@@ -1161,4 +1332,358 @@ fn pfi2_reconciliation_retry_exhaustion_is_a_valid_discoverable_block() {
         }
     }
     std::fs::remove_dir_all(root).unwrap();
+}
+
+fn real_failed_method_fixture() -> (
+    StorePlatform,
+    MemoryRuntime,
+    bm_core::memory::MethodTaskContributionRefV1,
+    bm_core::skills::AgentToolExperienceRevisionMaterialV4,
+) {
+    use crate::store_internal::schema::{
+        AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE, PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE,
+    };
+    use bm_core::memory::MethodTaskOutcomeV1;
+    use bm_core::skills::{AgentToolExperienceRevisionMaterialV4, AgentToolExperienceStatus};
+    let (platform, memory, second) =
+        fixture(StoreBackendConfig::in_memory(ProfileId::native_dev_full().unwrap()).unwrap());
+    // Select the real Candidate while it is still a trial, then retain this
+    // exact adopted revision when the independently evaluated task finishes.
+    let mut failure = task_request(&memory, "still-valid-failed-task");
+    let key = ConversationKey::new(
+        memory.memory_space_id(),
+        "sdk.direct",
+        "atomic-promotion-chat",
+    )
+    .unwrap();
+    let second_turn = platform
+        .get_turn(&key, memory.subject_id(), "second-source")
+        .unwrap()
+        .unwrap();
+    let method = second_turn
+        .learning_evidence
+        .as_ref()
+        .unwrap()
+        .method_adoptions[0]
+        .method
+        .clone();
+    failure.learning.method_adoptions[0].method = method.clone();
+    failure.learning.method_task_evaluations[0].method = method.clone();
+    failure.learning.method_task_evaluations[0].outcome = MethodTaskOutcomeV1::Failed;
+    complete(&platform, &memory, second).unwrap();
+    assert!(platform.export_store_snapshot().unwrap().json_docs.iter()
+        .filter(|doc| doc.namespace == AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE)
+        .map(|doc| serde_json::from_value::<AgentToolExperienceRevisionMaterialV4>(doc.value.clone()).unwrap())
+        .any(|material| material.owner_ref == method.owner_revision.owner_ref && material.status == AgentToolExperienceStatus::Active),
+        "the failed task must evaluate the exact owner promoted by the two preceding real passed tasks");
+    let original = crate::store_internal::procedural_feedback::read_verified_procedural_producer(
+        &platform,
+        second_turn
+            .learning_evidence
+            .as_ref()
+            .unwrap()
+            .authority
+            .producer_revision()
+            .unwrap(),
+    )
+    .unwrap();
+    let mut spec = original.current.spec.clone();
+    spec.binding_id = "independent-failed-task-producer".into();
+    spec.principal = bm_core::memory::ProceduralProducerPrincipalV1::LocalCapability {
+        capability_id: "independent-failed-task-producer".into(),
+    };
+    spec.source_config_ref = "independent-failed-task-producer".into();
+    let governor = task_test_governor(&platform, &memory);
+    let registered = governor
+        .control_procedural_producer(crate::MemoryProceduralProducerControlRequest {
+            operation_id: "register-independent-failed-task-producer".into(),
+            spec,
+            state: bm_core::memory::ProceduralProducerStateV1::Active,
+            expected_revision: None,
+        })
+        .unwrap();
+    let capability = governor
+        .procedural_submission_capability(&registered.binding.revision_ref().unwrap())
+        .unwrap();
+    let finalized = memory
+        .finalize_turn_with_procedural_evidence(&capability, failure)
+        .unwrap();
+    let failure_job_id = finalized.procedural_learning.job_id.unwrap();
+    let claimed = memory
+        .claim_due_procedural_feedback_job(&failure_job_id, "failed-task-worker", 1_800_000_060)
+        .unwrap();
+    memory
+        .run_claimed_procedural_feedback_job(&claimed, "failed-task-worker")
+        .unwrap();
+    let before_reconcile = platform.export_store_snapshot().unwrap();
+    let ledger: bm_core::memory::ProceduralFeedbackApplicationLedgerV3 = serde_json::from_value(
+        before_reconcile
+            .json_docs
+            .iter()
+            .find(|doc| {
+                doc.namespace == PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE
+                    && doc.key == failure_job_id
+            })
+            .expect("real failed task application was durably committed")
+            .value
+            .clone(),
+    )
+    .unwrap();
+    let failed_task = ledger
+        .method_task_contributions
+        .iter()
+        .find(|task| task.evaluation.outcome == MethodTaskOutcomeV1::Failed)
+        .expect("positive control includes a real independently failed task")
+        .reference()
+        .unwrap();
+    let material = before_reconcile
+        .json_docs
+        .iter()
+        .filter(|doc| doc.namespace == AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE)
+        .map(|doc| {
+            serde_json::from_value::<AgentToolExperienceRevisionMaterialV4>(doc.value.clone())
+                .unwrap()
+        })
+        .find(|material| {
+            material.status == AgentToolExperienceStatus::Stale
+                && material
+                    .body
+                    .method_usage_contributions()
+                    .contains(&failed_task)
+        })
+        .expect("the real failure demotes the previously active method");
+    (platform, memory, failed_task, material)
+}
+
+fn finish_actual_task_reconciliation(
+    platform: &StorePlatform,
+    memory: &MemoryRuntime,
+) -> bm_core::memory::ProceduralFeedbackJobV2 {
+    use bm_core::memory::{ProceduralFeedbackJobStatusV1, ProceduralLearningWorkV1};
+    let job_id = memory
+        .due_procedural_feedback_jobs(32)
+        .unwrap()
+        .into_iter()
+        .find(|job| matches!(job.work, ProceduralLearningWorkV1::Reconcile { .. }))
+        .unwrap()
+        .job_id;
+    for _ in 0..64 {
+        let job = crate::store_internal::procedural_feedback::read_job(platform, &job_id)
+            .unwrap()
+            .unwrap();
+        if job.status == ProceduralFeedbackJobStatusV1::Succeeded {
+            return job;
+        }
+        let claimed = memory
+            .claim_due_procedural_feedback_job(&job_id, "real-reconcile-worker", 1_800_000_060)
+            .unwrap();
+        memory
+            .run_claimed_procedural_reconciliation_job(&claimed, "real-reconcile-worker")
+            .unwrap();
+    }
+    panic!("bounded real reconciliation must complete");
+}
+
+#[test]
+fn reconciliation_cannot_forge_withdrawal_of_a_still_valid_failed_task() {
+    use crate::store_internal::procedural_feedback as owner;
+    use bm_core::memory::{ProceduralAppliedOwnerBindingV1, ProceduralLearningWorkV1};
+    let (platform, memory, failed_task, material) = real_failed_method_fixture();
+    let key = ConversationKey::new(
+        memory.memory_space_id(),
+        "sdk.direct",
+        "atomic-promotion-chat",
+    )
+    .unwrap();
+    let first_turn = platform
+        .get_turn(&key, memory.subject_id(), "first-source")
+        .unwrap()
+        .unwrap();
+    let producer = owner::read_verified_procedural_producer(
+        &platform,
+        first_turn
+            .learning_evidence
+            .as_ref()
+            .unwrap()
+            .authority
+            .producer_revision()
+            .unwrap(),
+    )
+    .unwrap();
+    task_test_governor(&platform, &memory)
+        .control_procedural_producer(crate::MemoryProceduralProducerControlRequest {
+            operation_id: "withdraw-passed-task-producer-only".into(),
+            spec: producer.current.spec.clone(),
+            state: bm_core::memory::ProceduralProducerStateV1::Revoked,
+            expected_revision: Some(producer.current.revision_ref().unwrap()),
+        })
+        .unwrap();
+    let completed = finish_actual_task_reconciliation(&platform, &memory);
+    let work = match &completed.work {
+        ProceduralLearningWorkV1::Reconcile { source } => source,
+        _ => unreachable!(),
+    };
+    let checkpoint = completed.checkpoint.as_ref().unwrap();
+    // Exercise the same factual validator that the locked Store publication
+    // uses. The unmodified official checkpoint is a nonempty positive control.
+    owner::reconciliation_method_preconditions(
+        &platform,
+        &work.scope,
+        checkpoint,
+        &[],
+        &[],
+        &memory.runtime_budget(),
+    )
+    .unwrap();
+    let mut forged = checkpoint.clone();
+    let proof = forged
+        .verified_owners
+        .iter_mut()
+        .find(|proof| {
+            proof.binding
+                == (ProceduralAppliedOwnerBindingV1::AgentToolExperience {
+                    owner_revision: material.owner_revision_ref(),
+                    content_digest: material.content_digest.clone(),
+                })
+        })
+        .expect("the official reconciliation certifies this exact retained revision");
+    assert!(
+        !proof.withdrawn_task_refs.is_empty(),
+        "the other real passed source was withdrawn"
+    );
+    assert!(
+        !proof.withdrawn_task_refs.contains(&failed_task),
+        "the failed source is still valid"
+    );
+    proof.withdrawn_task_refs.push(failed_task);
+    proof
+        .withdrawn_task_refs
+        .sort_by(|left, right| left.contribution_id.cmp(&right.contribution_id));
+    forged.content_digest = forged.canonical_digest().unwrap();
+    forged.validate_for(work).unwrap();
+    let before = platform.export_store_snapshot().unwrap();
+    let error = owner::reconciliation_method_preconditions(
+        &platform,
+        &work.scope,
+        &forged,
+        &[],
+        &[],
+        &memory.runtime_budget(),
+    )
+    .expect_err("a canonical resealed proof cannot erase a still-valid failed task");
+    assert_eq!(error.stage(), "method_reconciliation_proof");
+    assert_eq!(
+        platform.export_store_snapshot().unwrap(),
+        before,
+        "forged task withdrawal changes nothing"
+    );
+}
+
+#[test]
+fn declaration_claim_narrowing_cannot_withdraw_a_valid_failed_task() {
+    use crate::store_internal::procedural_feedback as owner;
+    use bm_core::memory::{ProceduralAppliedOwnerBindingV1, ProceduralProducerStateV1};
+    let (platform, memory, failed_task, material) = real_failed_method_fixture();
+    let snapshot = platform.export_store_snapshot().unwrap();
+    let ledger: bm_core::memory::ProceduralFeedbackApplicationLedgerV3 = serde_json::from_value(
+        snapshot
+            .json_docs
+            .iter()
+            .find(|doc| {
+                doc.namespace ==
+            crate::store_internal::schema::PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE
+            && doc.key == failed_task.source_job_id
+            })
+            .unwrap()
+            .value
+            .clone(),
+    )
+    .unwrap();
+    let task = ledger
+        .method_task_contributions
+        .iter()
+        .find(|task| task.contribution_id == failed_task.contribution_id)
+        .unwrap();
+    let producer = owner::read_verified_procedural_producer(&platform, &task.producer).unwrap();
+    let mut spec = producer.current.spec.clone();
+    assert!(
+        spec.claims.method_declarations
+            && spec.claims.method_adoptions
+            && spec.claims.method_task_evaluations
+            && spec.claims.execution_facts
+    );
+    spec.claims.method_declarations = false;
+    let mut scoped = memory.scoped_runtime().clone();
+    scoped.actor_subject_id = memory
+        .subject_registry()
+        .system_governor()
+        .unwrap()
+        .subject_id
+        .clone();
+    let governor = MemoryRuntime::builder()
+        .identity(memory.identity().clone())
+        .scope(memory.scope().clone())
+        .store(crate::MemoryStoreHandle::from_platform(platform.clone()))
+        .clock(Arc::new(Clock))
+        .subject_registry(memory.subject_registry().clone())
+        .scoped_runtime(scoped)
+        .agent_tool_registry(registry())
+        .capability_policy(MemoryCapabilityPolicy::strict_profile())
+        .privacy_policy(MemoryPrivacyPolicy::standard_private_boundary())
+        .build()
+        .unwrap();
+    governor
+        .control_procedural_producer(crate::MemoryProceduralProducerControlRequest {
+            operation_id: "narrow-only-method-declarations".into(),
+            spec,
+            state: ProceduralProducerStateV1::Active,
+            expected_revision: Some(producer.current.revision_ref().unwrap()),
+        })
+        .unwrap();
+    let completed = finish_actual_task_reconciliation(&platform, &memory);
+    let proof = completed
+        .checkpoint
+        .as_ref()
+        .unwrap()
+        .verified_owners
+        .iter()
+        .find(|proof| {
+            proof.binding
+                == (ProceduralAppliedOwnerBindingV1::AgentToolExperience {
+                    owner_revision: material.owner_revision_ref(),
+                    content_digest: material.content_digest.clone(),
+                })
+        })
+        .expect("official reconciliation has the exact retained failed method");
+    assert!(!proof.withdrawn_task_refs.contains(&failed_task),
+        "withdrawing declaration authority must not erase a still-authorized failed adoption/evaluation from the same actual turn");
+    let current = owner::read_verified_procedural_producer(&platform, &task.producer).unwrap();
+    let mut spec = current.current.spec.clone();
+    spec.claims.method_task_evaluations = false;
+    spec.method_evaluators.clear();
+    governor
+        .control_procedural_producer(crate::MemoryProceduralProducerControlRequest {
+            operation_id: "withdraw-actual-task-evaluator-authority".into(),
+            spec,
+            state: ProceduralProducerStateV1::Active,
+            expected_revision: Some(current.current.revision_ref().unwrap()),
+        })
+        .unwrap();
+    let completed = finish_actual_task_reconciliation(&platform, &memory);
+    let proof = completed
+        .checkpoint
+        .as_ref()
+        .unwrap()
+        .verified_owners
+        .iter()
+        .find(|proof| {
+            proof.binding
+                == (ProceduralAppliedOwnerBindingV1::AgentToolExperience {
+                    owner_revision: material.owner_revision_ref(),
+                    content_digest: material.content_digest.clone(),
+                })
+        })
+        .unwrap();
+    assert!(proof.withdrawn_task_refs.contains(&failed_task),
+        "withdrawing the actual evaluator authority must withdraw that task, unlike unrelated declaration narrowing");
 }

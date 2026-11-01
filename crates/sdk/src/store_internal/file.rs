@@ -2006,6 +2006,15 @@ impl FileStoreEngine {
                 }
             }
         }
+        super::transaction::expand_owner_transaction_dependencies(
+            request,
+            capacity,
+            &mut touched,
+            |namespace, key, remaining| {
+                self.get_json_value_unlocked_bounded(namespace, key, remaining)
+                    .map(|value| value.map(|(value, _)| value))
+            },
+        )?;
         let mut touched_blob_bytes = 0_usize;
         for (namespace, key) in &request.read_set().blobs {
             let remaining = capacity.blob_max_bytes.saturating_sub(touched_blob_bytes);

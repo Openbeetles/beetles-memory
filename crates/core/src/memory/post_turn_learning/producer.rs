@@ -142,19 +142,29 @@ pub struct ProceduralProducerClaimsV1 {
     pub execution_facts: bool,
     pub method_declarations: bool,
     pub usage_feedback: bool,
+    pub method_learning_materials: bool,
+    pub method_adoptions: bool,
+    pub method_task_evaluations: bool,
     pub source_classifications: Vec<ProceduralSourceSensitivity>,
 }
 
 impl ProceduralProducerClaimsV1 {
     pub fn validate_contract(&self) -> bool {
-        (self.execution_facts || self.method_declarations || self.usage_feedback)
+        (self.execution_facts
+            || self.method_declarations
+            || self.usage_feedback
+            || self.method_learning_materials
+            || self.method_adoptions
+            || self.method_task_evaluations)
             && self.source_classifications.len() <= 3
             && self
                 .source_classifications
                 .windows(2)
                 .all(|pair| pair[0] < pair[1])
             && (self.source_classifications.is_empty()
-                != (self.execution_facts || self.method_declarations))
+                != (self.execution_facts
+                    || self.method_declarations
+                    || self.method_learning_materials))
     }
 }
 
@@ -168,9 +178,7 @@ pub struct ProceduralProducerToolV1 {
 
 impl ProceduralProducerToolV1 {
     pub fn validate_contract(&self) -> bool {
-        identifier(&self.registry_ref.registry_id)
-            && identifier(&self.registry_ref.fingerprint)
-            && self.registry_ref.scope.validate_contract()
+        self.registry_ref.validate_contract()
             && identifier(&self.tool_id)
             && identifier(&self.schema_fingerprint)
     }
@@ -191,6 +199,7 @@ pub struct ProceduralProducerSpecV1 {
     pub source_authority: ProceduralProducerSourceAuthorityV1,
     pub claims: ProceduralProducerClaimsV1,
     pub tools: Vec<ProceduralProducerToolV1>,
+    pub method_evaluators: Vec<super::MethodTaskEvaluatorV1>,
     pub source_config_ref: String,
 }
 
@@ -209,8 +218,25 @@ impl ProceduralProducerSpecV1 {
                 .all(ProceduralProducerToolV1::validate_contract)
             && canonical_order(&self.tools)
             && (self.tools.is_empty()
-                != (self.claims.execution_facts || self.claims.method_declarations))
-            && (!(self.claims.execution_facts || self.claims.usage_feedback)
+                != (self.claims.execution_facts
+                    || self.claims.method_declarations
+                    || self.claims.method_learning_materials
+                    || self.claims.method_adoptions
+                    || self.claims.method_task_evaluations))
+            && self.method_evaluators.len() <= super::MAX_METHOD_LEARNING_SOURCE_REFS
+            && self
+                .method_evaluators
+                .iter()
+                .all(super::MethodTaskEvaluatorV1::validate_contract)
+            && self
+                .method_evaluators
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            && (self.method_evaluators.is_empty() != self.claims.method_task_evaluations)
+            && (!(self.claims.execution_facts
+                || self.claims.usage_feedback
+                || self.claims.method_adoptions
+                || self.claims.method_task_evaluations)
                 || self.source_authority.can_witness_execution())
     }
 
@@ -281,13 +307,266 @@ pub struct ProceduralProducerBindingV1 {
 }
 
 impl ProceduralProducerBindingV1 {
+    pub fn authorize_production_input(
+        &self,
+        input: &super::PostTurnLearningInputV3,
+    ) -> std::result::Result<(), ProceduralProducerErrorV1> {
+        use ProceduralProducerErrorV1 as E;
+        if !self.validate_contract() || !input.validate_production_contract() {
+            return Err(E::RepairRequired);
+        }
+        if self.state != ProceduralProducerStateV1::Active {
+            return Err(E::Revoked);
+        }
+        if !input.method_learning_inputs.is_empty() && !self.spec.claims.method_learning_materials {
+            return Err(E::ClaimForbidden);
+        }
+        for group in &input.method_learning_inputs {
+            self.authorize_production_tool(
+                &group.registry_ref,
+                &group.tool_id,
+                &group.schema_fingerprint,
+            )?;
+            if group.materials.iter().any(|material| {
+                !self
+                    .spec
+                    .claims
+                    .source_classifications
+                    .contains(&material.sensitivity)
+            }) {
+                return Err(E::SourceClassificationForbidden);
+            }
+        }
+        self.authorize_production_witnesses(&input.method_adoptions, &input.method_task_evaluations)
+    }
+
+    fn authorize_production_evidence(
+        &self,
+        evidence: &super::PostTurnLearningEvidenceV3,
+    ) -> std::result::Result<(), ProceduralProducerErrorV1> {
+        use ProceduralProducerErrorV1 as E;
+        if !evidence.method_learning_inputs.is_empty()
+            && !self.spec.claims.method_learning_materials
+        {
+            return Err(E::ClaimForbidden);
+        }
+        for group in &evidence.method_learning_inputs {
+            self.authorize_production_tool(
+                &group.registry_ref,
+                &group.tool_id,
+                &group.schema_fingerprint,
+            )?;
+            if group
+                .submitted_classifications
+                .iter()
+                .any(|class| !self.spec.claims.source_classifications.contains(class))
+            {
+                return Err(E::SourceClassificationForbidden);
+            }
+        }
+        self.authorize_production_witnesses(
+            &evidence.method_adoptions,
+            &evidence.method_task_evaluations,
+        )
+    }
+
+    fn authorize_production_tool(
+        &self,
+        registry: &AgentToolRegistryRef,
+        tool_id: &str,
+        schema: &str,
+    ) -> std::result::Result<(), ProceduralProducerErrorV1> {
+        if self.spec.tools.iter().any(|tool| {
+            &tool.registry_ref == registry
+                && tool.tool_id == tool_id
+                && tool.schema_fingerprint == schema
+        }) {
+            Ok(())
+        } else {
+            Err(ProceduralProducerErrorV1::ToolForbidden)
+        }
+    }
+
+    fn authorize_production_witnesses(
+        &self,
+        adoptions: &[super::MethodAdoptionEvidenceV1],
+        evaluations: &[super::MethodTaskEvaluationV1],
+    ) -> std::result::Result<(), ProceduralProducerErrorV1> {
+        use ProceduralProducerErrorV1 as E;
+        if (!adoptions.is_empty() && !self.spec.claims.method_adoptions)
+            || (!evaluations.is_empty() && !self.spec.claims.method_task_evaluations)
+            || ((!adoptions.is_empty() || !evaluations.is_empty())
+                && !self.spec.source_authority.can_witness_execution())
+        {
+            return Err(E::ClaimForbidden);
+        }
+        for method in adoptions
+            .iter()
+            .map(|item| &item.method)
+            .chain(evaluations.iter().map(|item| &item.method))
+        {
+            if method.memory_space_id != self.spec.scope.memory_space_id
+                || method.mounted_subject_id != self.spec.scope.mounted_subject_id
+            {
+                return Err(E::ScopeMismatch);
+            }
+            self.authorize_production_tool(
+                &method.registry_ref,
+                &method.tool_id,
+                &method.schema_fingerprint,
+            )?;
+        }
+        for evaluation in evaluations {
+            if !self.spec.method_evaluators.iter().any(|allowed| {
+                allowed.id == evaluation.evaluator_id
+                    && allowed.revision == evaluation.evaluator_revision
+            }) {
+                return Err(E::AuthorityMismatch);
+            }
+        }
+        Ok(())
+    }
+
     /// A historical declaration never grants current use. Store supplies the
     /// exact retained material and current head material from one fenced image.
     pub fn authorize_evidence_with_current(
         &self,
         current: &Self,
         scope: &ProceduralProducerScopeV1,
-        evidence: &super::PostTurnLearningEvidenceV2,
+        evidence: &super::PostTurnLearningEvidenceV3,
+    ) -> std::result::Result<(), ProceduralProducerErrorV1> {
+        use ProceduralProducerErrorV1 as E;
+        self.authorize_evidence_identity_with_current(current, scope, evidence)?;
+        for binding in [self, current] {
+            if binding.state != ProceduralProducerStateV1::Active {
+                return Err(E::Revoked);
+            }
+            if (!evidence.runtime_skill_feedback.is_empty()
+                || !evidence.agent_skill_feedback.is_empty()
+                || !evidence.task_learning_feedback.is_empty())
+                && !binding.spec.claims.usage_feedback
+            {
+                return Err(E::ClaimForbidden);
+            }
+            binding.authorize_production_evidence(evidence)?;
+            for feedback in &evidence.agent_tool_feedback {
+                if feedback.submitted_method_count > 0 && !binding.spec.claims.method_declarations {
+                    return Err(E::ClaimForbidden);
+                }
+                // Reuse the same declaration authority owner after privacy has
+                // removed rejected bodies; this view is never persisted.
+                binding.authorize_tool_feedback(
+                    &self.spec.principal,
+                    scope,
+                    &AgentToolUsageFeedbackV3 {
+                        registry_ref: feedback.registry_ref.clone(),
+                        tool_id: feedback.tool_id.clone(),
+                        schema_fingerprint: feedback.schema_fingerprint.clone(),
+                        execution_facts: feedback.execution_facts.clone(),
+                        method_evidence: feedback.method_evidence.clone(),
+                    },
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Check only the authority required by one retained task. Narrowing an
+    /// unrelated declaration or usage claim must not erase a failed task.
+    /// Historical intake remains fully checked; current authorization is never
+    /// obtained by accepting a caller-created, filtered evidence bundle.
+    pub fn authorize_task_with_current(
+        &self,
+        current: &Self,
+        evidence: &super::PostTurnLearningEvidenceV3,
+        task: &super::MethodTaskContributionV1,
+        job: &super::ProceduralFeedbackJobV2,
+    ) -> std::result::Result<(), ProceduralProducerErrorV1> {
+        use ProceduralProducerErrorV1 as E;
+        let source = job.feedback_source().map_err(|_| E::RepairRequired)?;
+        let scope = source.identity.producer_scope();
+        self.authorize_evidence_with_current(self, &scope, evidence)?;
+        self.authorize_evidence_identity_with_current(current, &scope, evidence)?;
+        evidence
+            .validate_job_source(job)
+            .map_err(|_| E::RepairRequired)?;
+        if !task.validate_contract()
+            || task.source != source.identity
+            || task.source_job_id != job.job_id
+            || task.source_transcript_digest != source.transcript_digest
+            || task.learning_evidence_digest != evidence.learning_evidence_digest
+            || self.revision_ref().map_err(|_| E::RepairRequired)? != task.producer
+            || evidence
+                .method_adoptions
+                .get(task.adoption_ordinal as usize)
+                != Some(&task.adoption)
+            || evidence
+                .method_task_evaluations
+                .get(task.evaluation_ordinal as usize)
+                != Some(&task.evaluation)
+        {
+            return Err(E::RepairRequired);
+        }
+        if current.state != ProceduralProducerStateV1::Active {
+            return Err(E::Revoked);
+        }
+        current.authorize_production_witnesses(
+            std::slice::from_ref(&task.adoption),
+            std::slice::from_ref(&task.evaluation),
+        )?;
+        let executions = evidence
+            .execution_contributions_for_job(job)
+            .map_err(|_| E::RepairRequired)?;
+        let mut adoption_observations = Vec::new();
+        for reference in &task.execution_refs {
+            let execution = executions
+                .iter()
+                .find(|execution| {
+                    execution
+                        .reference()
+                        .is_ok_and(|actual| actual == *reference)
+                })
+                .ok_or(E::RepairRequired)?;
+            let method = &task.adoption.method;
+            if execution.tool.registry_ref != method.registry_ref
+                || execution.tool.tool_id != method.tool_id
+                || execution.tool.schema_fingerprint != method.schema_fingerprint
+            {
+                return Err(E::RepairRequired);
+            }
+            adoption_observations.push(execution.fact.observation_id.clone());
+        }
+        adoption_observations.sort();
+        if adoption_observations != task.adoption.observation_refs {
+            return Err(E::RepairRequired);
+        }
+        for execution in executions.iter().filter(|execution| {
+            adoption_observations.contains(&execution.fact.observation_id)
+                || task
+                    .evaluation
+                    .observation_refs
+                    .contains(&execution.fact.observation_id)
+        }) {
+            current.authorize_tool_feedback(
+                &self.spec.principal,
+                &scope,
+                &AgentToolUsageFeedbackV3 {
+                    registry_ref: execution.tool.registry_ref.clone(),
+                    tool_id: execution.tool.tool_id.clone(),
+                    schema_fingerprint: execution.tool.schema_fingerprint.clone(),
+                    execution_facts: vec![execution.fact.clone()],
+                    method_evidence: Vec::new(),
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    fn authorize_evidence_identity_with_current(
+        &self,
+        current: &Self,
+        scope: &ProceduralProducerScopeV1,
+        evidence: &super::PostTurnLearningEvidenceV3,
     ) -> std::result::Result<(), ProceduralProducerErrorV1> {
         use ProceduralProducerErrorV1 as E;
         if !self.validate_contract()
@@ -325,37 +604,6 @@ impl ProceduralProducerBindingV1 {
             || evidence.mounted_subject_id != scope.mounted_subject_id
         {
             return Err(E::ScopeMismatch);
-        }
-        for binding in [self, current] {
-            if binding.state != ProceduralProducerStateV1::Active {
-                return Err(E::Revoked);
-            }
-            if (!evidence.runtime_skill_feedback.is_empty()
-                || !evidence.agent_skill_feedback.is_empty()
-                || !evidence.task_learning_feedback.is_empty()
-                || evidence.selection_receipt.is_some())
-                && !binding.spec.claims.usage_feedback
-            {
-                return Err(E::ClaimForbidden);
-            }
-            for feedback in &evidence.agent_tool_feedback {
-                if feedback.submitted_method_count > 0 && !binding.spec.claims.method_declarations {
-                    return Err(E::ClaimForbidden);
-                }
-                // Reuse the same declaration authority owner after privacy has
-                // removed rejected bodies; this view is never persisted.
-                binding.authorize_tool_feedback(
-                    &self.spec.principal,
-                    scope,
-                    &AgentToolUsageFeedbackV3 {
-                        registry_ref: feedback.registry_ref.clone(),
-                        tool_id: feedback.tool_id.clone(),
-                        schema_fingerprint: feedback.schema_fingerprint.clone(),
-                        execution_facts: feedback.execution_facts.clone(),
-                        method_evidence: feedback.method_evidence.clone(),
-                    },
-                )?;
-            }
         }
         Ok(())
     }

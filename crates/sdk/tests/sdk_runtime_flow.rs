@@ -74,13 +74,36 @@ fn seed_private_garden_with_production_owner(
     content: &str,
     turn_id: &str,
 ) {
+    let projected = runtime
+        .project(MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Turn {
+                turn_id: turn_id.to_string(),
+            },
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
+            structured_query_facets: Vec::new(),
+            user_query: "Retain this protected inward note for governed self-work.".to_string(),
+            system_max_len: 8192,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
+        })
+        .expect("project the actual turn before private self-work");
+    let mut learning = bm_sdk::PostTurnLearningInputV3::empty();
+    learning.selection_receipt = Some(projected.report().selection_receipt().unwrap().clone());
+    assert!(learning
+        .selection_receipt
+        .as_ref()
+        .unwrap()
+        .soul_source_admission
+        .is_some());
     let request = MemoryTurnFinalizeRequest {
         turn: CanonicalTurnDelta {
             turn_id: turn_id.to_string(),
             conversation: ConversationScope {
                 channel: "local".to_string(),
                 chat_id: "chat-1".to_string(),
-                conversation_id: Some("private-projection-contract".to_string()),
+                conversation_id: Some(runtime.scope().chat_id.clone()),
             },
             subject: runtime.subject_id().to_string(),
             delivery_status: MemoryTurnDeliveryStatus::Delivered,
@@ -106,7 +129,7 @@ fn seed_private_garden_with_production_owner(
             external_content_used: false,
             candidate_ids: Vec::new(),
         },
-        learning: bm_sdk::PostTurnLearningInputV2::empty(),
+        learning,
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     };

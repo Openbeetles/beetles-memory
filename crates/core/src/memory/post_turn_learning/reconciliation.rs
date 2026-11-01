@@ -563,6 +563,33 @@ pub enum ProceduralReconciliationReadDispositionV1 {
 pub struct ProceduralReconciliationOwnerProofV1 {
     pub binding: super::ProceduralAppliedOwnerBindingV1,
     pub disposition: ProceduralReconciliationReadDispositionV1,
+    /// Exact task witnesses independently proven withdrawn in this checkpoint
+    /// epoch. A conservative whole-owner Withdrawn decision grants no right to
+    /// discard task evidence, especially a still-lawful negative evaluation.
+    pub withdrawn_task_refs: Vec<super::MethodTaskContributionRefV1>,
+}
+
+impl ProceduralReconciliationOwnerProofV1 {
+    pub fn validates_for(&self, scope: &ProceduralSubjectScopeV1) -> bool {
+        if !self.binding.validate_for_subject(scope) {
+            return false;
+        }
+        let super::ProceduralAppliedOwnerBindingV1::AgentToolExperience { owner_revision, .. } =
+            &self.binding
+        else {
+            return self.withdrawn_task_refs.is_empty();
+        };
+        self.withdrawn_task_refs.iter().all(|reference| {
+            reference.validate_contract()
+                && reference.method.memory_space_id == scope.memory_space_id
+                && reference.method.mounted_subject_id == scope.mounted_subject_id
+                && reference.method.owner_revision.owner_ref == owner_revision.owner_ref
+                && reference.method.owner_revision.owner_revision <= owner_revision.owner_revision
+        }) && self
+            .withdrawn_task_refs
+            .windows(2)
+            .all(|pair| pair[0].contribution_id < pair[1].contribution_id)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -580,6 +607,12 @@ pub enum ProceduralReconciliationDependencyPinV1 {
     },
     Transcript {
         identity: super::ProceduralFeedbackIdentityV1,
+        sequence: u64,
+        content_digest: String,
+        lifecycle: TranscriptLifecycleState,
+    },
+    SemanticTranscript {
+        identity: crate::memory::PostTurnGovernanceIdentityV2,
         sequence: u64,
         content_digest: String,
         lifecycle: TranscriptLifecycleState,
@@ -616,6 +649,18 @@ impl ProceduralReconciliationDependencyPinV1 {
                     && post_image.validates_owner(owner_ref)
             }
             Self::Transcript {
+                identity,
+                sequence,
+                content_digest,
+                ..
+            } => {
+                identity.validate().is_ok()
+                    && identity.memory_space_id == scope.memory_space_id
+                    && identity.mounted_subject_id == scope.mounted_subject_id
+                    && *sequence > 0
+                    && is_digest(content_digest)
+            }
+            Self::SemanticTranscript {
                 identity,
                 sequence,
                 content_digest,
@@ -671,7 +716,7 @@ impl ProceduralReconciliationCheckpointV1 {
     ) -> Result<Self> {
         root.require_active_work(work, MAX_PROCEDURAL_SUBJECT_SCOPES)?;
         let mut checkpoint = Self {
-            schema_version: 1,
+            schema_version: 2,
             work_digest: work.reference()?.content_digest,
             root_revision: root.revision,
             root_digest: root.content_digest.clone(),
@@ -693,7 +738,7 @@ impl ProceduralReconciliationCheckpointV1 {
         let mut canonical = self.clone();
         canonical.content_digest.clear();
         Ok(domain_digest(
-            "procedural_reconciliation_checkpoint_v1",
+            "procedural_reconciliation_checkpoint_v2",
             &[&serde_json::to_vec(&canonical).map_err(|_| invalid())?],
         ))
     }
@@ -728,6 +773,9 @@ impl ProceduralReconciliationCheckpointV1 {
                 ProceduralReconciliationDependencyPinV1::Transcript { identity, .. } => {
                     serde_json::to_vec(&("transcript", identity))
                 }
+                ProceduralReconciliationDependencyPinV1::SemanticTranscript {
+                    identity, ..
+                } => serde_json::to_vec(&("semantic_transcript", identity)),
             }
             .map_err(|_| invalid())?;
             if !identities.insert(identity) {
@@ -751,7 +799,7 @@ impl ProceduralReconciliationCheckpointV1 {
             }
             ProceduralReconciliationCursorV1::Complete => self.page_number > 0,
         };
-        if self.schema_version != 1
+        if self.schema_version != 2
             || self.work_digest != work.reference()?.content_digest
             || self.root_revision < work.target_epoch
             || !is_digest(&self.root_digest)
@@ -768,7 +816,7 @@ impl ProceduralReconciliationCheckpointV1 {
             || self
                 .verified_owners
                 .iter()
-                .any(|proof| !proof.binding.validate_for_subject(&work.scope))
+                .any(|proof| !proof.validates_for(&work.scope))
             || !self.verified_owners.windows(2).all(|pair| {
                 pair[0].binding.owner_revision_ref() < pair[1].binding.owner_revision_ref()
             })
@@ -967,14 +1015,16 @@ pub struct ProceduralSubjectValidityRootV1 {
 pub struct ProceduralReadAuthorityV1<'a> {
     root: &'a ProceduralSubjectValidityRootV1,
     completion: Option<&'a super::ProceduralFeedbackJobV2>,
-    applications: &'a [super::ProceduralFeedbackApplicationLedgerV2],
+    applications: &'a [super::ProceduralFeedbackApplicationLedgerV3],
+    semantic_applications: &'a [crate::memory::PostTurnGovernanceJobV4],
 }
 
 impl<'a> ProceduralReadAuthorityV1<'a> {
     pub fn try_new(
         root: &'a ProceduralSubjectValidityRootV1,
         completion: Option<&'a super::ProceduralFeedbackJobV2>,
-        applications: &'a [super::ProceduralFeedbackApplicationLedgerV2],
+        applications: &'a [super::ProceduralFeedbackApplicationLedgerV3],
+        semantic_applications: &'a [crate::memory::PostTurnGovernanceJobV4],
     ) -> Result<Self> {
         root.validate(MAX_PROCEDURAL_SUBJECT_SCOPES)?;
         match (&root.state, completion) {
@@ -1022,10 +1072,35 @@ impl<'a> ProceduralReadAuthorityV1<'a> {
                 return Err(invalid());
             }
         }
+        for job in semantic_applications {
+            job.validate()?;
+            let Some(receipt) = &job.receipt else {
+                return Err(invalid());
+            };
+            let crate::memory::PostTurnGovernanceMethodApplicationV1::Applied {
+                validity_epoch,
+                owner_bindings,
+                ..
+            } = &receipt.method_application
+            else {
+                return Err(invalid());
+            };
+            if job.status != crate::memory::PostTurnGovernanceJobStatusV2::Succeeded
+                || job.identity.memory_space_id != root.scope.memory_space_id
+                || job.identity.mounted_subject_id != root.scope.mounted_subject_id
+                || *validity_epoch > root.validity_epoch
+                || !owner_bindings
+                    .iter()
+                    .all(|binding| binding.validate_for_subject(&root.scope))
+            {
+                return Err(invalid());
+            }
+        }
         Ok(Self {
             root,
             completion,
             applications,
+            semantic_applications,
         })
     }
 
@@ -1056,6 +1131,10 @@ impl<'a> ProceduralReadAuthorityV1<'a> {
         Ok(self.applications.iter().any(|application| {
             application.validity_epoch == self.root.validity_epoch
                 && application.applied_owner_bindings.contains(binding)
+        }) || self.semantic_applications.iter().any(|job| {
+            job.receipt.as_ref().is_some_and(|receipt| matches!(&receipt.method_application,
+                crate::memory::PostTurnGovernanceMethodApplicationV1::Applied { validity_epoch, owner_bindings, .. }
+                if *validity_epoch == self.root.validity_epoch && owner_bindings.contains(binding)))
         }))
     }
 }

@@ -61,6 +61,10 @@ fn fixture() -> (
             expected_revision: None,
             state: ProceduralProducerStateV1::Active,
             spec: ProceduralProducerSpecV1 {
+                method_evaluators: vec![MethodTaskEvaluatorV1 {
+                    id: "artifact-inspection".into(),
+                    revision: 1,
+                }],
                 binding_id: "entry-executor".into(),
                 scope: ProceduralProducerScopeV1 {
                     memory_space_id: entry.runtime.memory_space_id().into(),
@@ -74,6 +78,9 @@ fn fixture() -> (
                 },
                 source_authority: ProceduralProducerSourceAuthorityV1::RuntimeObservation,
                 claims: ProceduralProducerClaimsV1 {
+                    method_learning_materials: false,
+                    method_adoptions: true,
+                    method_task_evaluations: true,
                     execution_facts: true,
                     method_declarations: true,
                     usage_feedback: false,
@@ -99,7 +106,7 @@ fn fixture() -> (
 
 fn request(entry: &EntryRuntime, id: &str, feedback: bool) -> AdapterCommand {
     let now = entry.runtime.config().clock.now_secs();
-    let mut learning = PostTurnLearningInputV2::empty();
+    let mut learning = PostTurnLearningInputV3::empty();
     learning.tool_call_count = 1;
     if feedback {
         learning.agent_tool_feedback.push(AgentToolUsageFeedbackV3 {
@@ -319,9 +326,103 @@ mod additional_boundaries {
         };
         assert_eq!(applied.job.job_id, job_id);
         assert!(applied.receipt.changed_count > 0);
+        // Tool successes establish execution facts, not method quality. Consume
+        // the actual candidate and report two independently evaluated tasks.
+        let candidate = entry
+            .runtime
+            .discover_method_trials(MemoryMethodTrialRequest {
+                tool: ProceduralProducerToolV1 {
+                    registry_ref: entry.runtime.agent_tool_registries()[0].registry_ref(),
+                    tool_id: "inspect".into(),
+                    schema_fingerprint: "schema-1".into(),
+                },
+                max_candidates: 1,
+            })
+            .unwrap()
+            .candidates
+            .into_iter()
+            .next()
+            .expect("real method candidate");
+        for index in 0..2 {
+            let task_id = format!("selection-independent-task-{index}");
+            let mut command = request(entry, &task_id, true);
+            let AdapterCommand::FinalizeTurn(input) = &mut command else {
+                unreachable!()
+            };
+            let group = &mut input.learning.agent_tool_feedback[0];
+            group.method_evidence.clear();
+            group.execution_facts[0].outcome = ToolExecutionOutcome::Succeeded;
+            group.execution_facts[0].source_sensitivity = ProceduralSourceSensitivity::NonPrivate;
+            let observation_refs = vec![group.execution_facts[0].observation_id.clone()];
+            input
+                .learning
+                .method_adoptions
+                .push(MethodAdoptionEvidenceV1 {
+                    method: candidate.method.clone(),
+                    task_id: task_id.clone(),
+                    adoption: MethodAdoptionStatusV1::Adopted,
+                    observation_refs: observation_refs.clone(),
+                });
+            input
+                .learning
+                .method_task_evaluations
+                .push(MethodTaskEvaluationV1 {
+                    method: candidate.method.clone(),
+                    task_id: task_id.clone(),
+                    task_root_id: format!("artifact-root-{index}"),
+                    independence_group: format!("artifact-scenario-{index}"),
+                    evaluator_id: "artifact-inspection".into(),
+                    evaluator_revision: 1,
+                    outcome: MethodTaskOutcomeV1::Passed,
+                    observation_refs,
+                });
+            let response = entry
+                .handle_with_services(
+                    context(entry, &task_id),
+                    command,
+                    AdapterRuntimeServices {
+                        http: None,
+                        llm: None,
+                        procedural_submission: Some(capability),
+                    },
+                )
+                .unwrap();
+            let bm_adapter::AdapterResponse::Accepted {
+                report: bm_adapter::AdapterSdkReport::FinalizeTurn(report),
+                ..
+            } = response.adapter
+            else {
+                panic!("actual adopted task must commit")
+            };
+            let expected = report.procedural_learning.job_id.unwrap();
+            let mut applied = false;
+            // The official scheduler fairly services both lanes. A missing
+            // semantic binding is a durable block, not task-application failure.
+            for _ in 0..4 {
+                let outcome = engine
+                    .run_due_cycle(
+                        MemoryLearningCycleRequest {
+                            lease_owner: "entry-synthetic-worker".into(),
+                            lease_duration_secs: 60,
+                        },
+                        &mut NoProvider,
+                    )
+                    .unwrap();
+                match outcome {
+                    MemoryLearningCycleOutcome::ProceduralCompleted(report) => {
+                        assert_eq!(report.job.job_id, expected);
+                        applied = true;
+                        break;
+                    }
+                    MemoryLearningCycleOutcome::Blocked(_) => {}
+                    other => panic!("expected actual procedural task completion: {other:?}"),
+                }
+            }
+            assert!(applied, "official scheduler must complete the adopted task");
+        }
     }
 
-    fn signed_selection(memory: &MemoryRuntime, turn_id: &str) -> ProceduralSelectionReceiptV1 {
+    fn signed_selection(memory: &MemoryRuntime, turn_id: &str) -> MemoryTurnProjectionReceiptV2 {
         let output = memory
             .project(MemoryProjectionRequest {
                 binding: ProceduralProjectionBindingV1::Turn {
@@ -353,7 +454,7 @@ mod additional_boundaries {
     fn selection_only(
         entry: &EntryRuntime,
         id: &str,
-        receipt: ProceduralSelectionReceiptV1,
+        receipt: MemoryTurnProjectionReceiptV2,
     ) -> AdapterCommand {
         let mut command = request(entry, id, false);
         let AdapterCommand::FinalizeTurn(input) = &mut command else {
@@ -362,7 +463,7 @@ mod additional_boundaries {
         input.turn.tool_observations.clear();
         input.learning.tool_call_count = 0;
         input.learning.selection_receipt = Some(receipt);
-        assert!(!input.learning.has_feedback());
+        assert!(!input.learning.has_authorized_content());
         command
     }
 
@@ -433,7 +534,7 @@ mod additional_boundaries {
                     doc.namespace == "conversation_transcript" && doc.value["turn_id"] == id
                 })
                 .unwrap();
-            let evidence: PostTurnLearningEvidenceV2 =
+            let evidence: PostTurnLearningEvidenceV3 =
                 serde_json::from_value(turn.value["learning_evidence"].clone()).unwrap();
             assert!(matches!(
                 evidence.authority,

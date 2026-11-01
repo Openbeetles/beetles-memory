@@ -14,7 +14,7 @@ use crate::error::{Error, Result};
 use super::{
     synthesize_session_message_id, CanonicalTurnDelta, CommittedSessionMessage,
     MemoryEvidenceAuthority, MemoryTurnDeliveryStatus, MemoryTurnSource,
-    PostTurnLearningEvidenceV2, SessionMessage, SessionTurnCommitReport, SubjectId,
+    PostTurnLearningEvidenceV3, SessionMessage, SessionTurnCommitReport, SubjectId,
     ToolObservationDigest, TranscriptInputMessage, MAX_SESSION_MESSAGE_LEN,
 };
 use crate::util::{collect_retrieval_terms, is_cjk, normalize_retrieval_text};
@@ -703,7 +703,7 @@ pub struct TranscriptTurnRecord {
     pub tool_observations: Vec<ToolObservationDigest>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub host_refs: Vec<HostOpaqueRef>,
-    pub learning_evidence: Option<PostTurnLearningEvidenceV2>,
+    pub learning_evidence: Option<PostTurnLearningEvidenceV3>,
     pub external_content_used: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidate_ids: Vec<String>,
@@ -716,7 +716,7 @@ pub struct TranscriptTurnRecord {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct TranscriptTurnRecordAttachments {
     pub host_refs: Vec<HostOpaqueRef>,
-    pub learning_evidence: Option<PostTurnLearningEvidenceV2>,
+    pub learning_evidence: Option<PostTurnLearningEvidenceV3>,
 }
 
 impl TranscriptTurnRecord {
@@ -735,7 +735,7 @@ impl TranscriptTurnRecord {
         sequence: u64,
         delta: &CanonicalTurnDelta,
         host_refs: Vec<HostOpaqueRef>,
-        learning_evidence: Option<PostTurnLearningEvidenceV2>,
+        learning_evidence: Option<PostTurnLearningEvidenceV3>,
         now_secs: u64,
     ) -> Result<Self> {
         validate_key_matches_delta(key, delta)?;

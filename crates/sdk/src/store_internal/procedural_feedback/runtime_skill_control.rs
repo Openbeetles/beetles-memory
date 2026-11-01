@@ -110,7 +110,7 @@ fn feedback_owns(
         if before.contains_key(key) {
             continue;
         }
-        let ledger: ProceduralFeedbackApplicationLedgerV2 = parse(value)?;
+        let ledger: ProceduralFeedbackApplicationLedgerV3 = parse(value)?;
         if !ledger.applied_owner_bindings.contains(&expected) {
             continue;
         }
@@ -370,7 +370,7 @@ pub(crate) fn append(
         if namespace != PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE {
             continue;
         }
-        let ledger: ProceduralFeedbackApplicationLedgerV2 = parse(value)?;
+        let ledger: ProceduralFeedbackApplicationLedgerV3 = parse(value)?;
         if !changed.iter().any(|(_, change)| {
             change.after.as_ref().is_some_and(|binding| {
                 ledger.applied_owner_bindings.contains(

@@ -50,7 +50,7 @@ fn finalize_request(user: &str, assistant: Option<&str>) -> MemoryTurnFinalizeRe
             external_content_used: false,
             candidate_ids: Vec::new(),
         },
-        learning: bm_sdk::PostTurnLearningInputV2::empty(),
+        learning: bm_sdk::PostTurnLearningInputV3::empty(),
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     }
@@ -356,11 +356,14 @@ fn finalize_turn_runs_private_garden_self_work_without_counting_it_as_semantic_m
         .finalize_turn_with_inline_governance(
             Some(&mut http),
             Some(&llm),
-            finalize_request_with_tools(
-                "叫我青川，后续称呼要自然一些",
-                Some("我会记住这个称呼。"),
-                1,
-                false,
+            admit_soul_turn(
+                &runtime,
+                finalize_request_with_tools(
+                    "叫我青川，后续称呼要自然一些",
+                    Some("我会记住这个称呼。"),
+                    1,
+                    false,
+                ),
             ),
         )
         .expect("finalize turn");
@@ -697,4 +700,49 @@ fn finalize_turn_uses_canonical_delta_external_content_boundary() {
         .provider_payload()
         .system_memory_block()
         .contains("External delta content"));
+}
+
+fn admit_soul_turn(
+    runtime: &bm_sdk::MemoryRuntime,
+    mut request: MemoryTurnFinalizeRequest,
+) -> MemoryTurnFinalizeRequest {
+    request.turn.conversation.channel = runtime.scope().channel.clone();
+    request.turn.conversation.chat_id = runtime.scope().chat_id.clone();
+    request.turn.conversation.conversation_id = Some(
+        runtime
+            .scope()
+            .conversation_id
+            .clone()
+            .unwrap_or_else(|| runtime.scope().chat_id.clone()),
+    );
+    let projection = runtime
+        .project(bm_sdk::MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Turn {
+                turn_id: request.turn.turn_id.clone(),
+            },
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
+            user_query: request.turn.input_messages[0].content.clone(),
+            system_max_len: 16000,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+            structured_query_facets: vec![],
+            tool_registry_refs: vec![],
+        })
+        .expect("public turn-bound projection");
+    request.learning.selection_receipt = Some(
+        projection
+            .report()
+            .selection_receipt()
+            .expect("signed turn admission")
+            .clone(),
+    );
+    assert!(request
+        .learning
+        .selection_receipt
+        .as_ref()
+        .unwrap()
+        .soul_source_admission
+        .is_some());
+    request
 }

@@ -18,7 +18,13 @@ impl std::ops::Deref for TestRuntime {
 }
 fn authorized_runtime(memory: MemoryRuntime, store: MemoryStoreHandle) -> Arc<TestRuntime> {
     let governor = support::procedural::governor(&memory, store);
-    let spec = support::procedural::runtime_observer_spec(&memory, "security-executor");
+    let mut spec = support::procedural::runtime_observer_spec(&memory, "security-executor");
+    spec.claims.method_adoptions = true;
+    spec.claims.method_task_evaluations = true;
+    spec.method_evaluators = vec![MethodTaskEvaluatorV1 {
+        id: "security-task-verifier".into(),
+        revision: 1,
+    }];
     let capability = support::procedural::register_and_issue(
         &governor,
         spec,
@@ -178,7 +184,10 @@ fn finalize_request(
             external_content_used: false,
             candidate_ids: Vec::new(),
         },
-        learning: PostTurnLearningInputV2 {
+        learning: PostTurnLearningInputV3 {
+            method_learning_inputs: Vec::new(),
+            method_adoptions: Vec::new(),
+            method_task_evaluations: Vec::new(),
             tool_call_count,
             selection_receipt: None,
             runtime_skill_feedback: Vec::new(),
@@ -221,17 +230,72 @@ fn learn(
     turn_id: &str,
     feedback: AgentToolUsageFeedbackV3,
 ) {
-    let report = runtime
-        .finalize_turn_with_procedural_evidence(
-            &runtime.capability,
-            finalize_request(&runtime, turn_id, registry, feedback),
-        )
-        .expect("production finalize");
-    let job_id = report
-        .procedural_learning
-        .job_id
-        .expect("durable procedural job");
-    finish_procedural_learning(runtime, &job_id);
+    for stage in ["declaration", "independent-task-a", "independent-task-b"] {
+        let task_id = format!("{turn_id}-{stage}");
+        let mut task_feedback = feedback.clone();
+        for fact in &mut task_feedback.execution_facts {
+            fact.observation_id = format!("{task_id}-{}", fact.observation_id);
+            fact.call_id = format!("{task_id}-{}", fact.call_id);
+        }
+        let observations = task_feedback
+            .execution_facts
+            .iter()
+            .map(|fact| fact.observation_id.clone())
+            .collect::<Vec<_>>();
+        for method in &mut task_feedback.method_evidence {
+            method.execution_refs = observations.clone();
+        }
+        let mut input = finalize_request(&runtime, &task_id, registry, task_feedback);
+        if stage != "declaration" {
+            let method = runtime
+                .discover_method_trials(MemoryMethodTrialRequest {
+                    tool: ProceduralProducerToolV1 {
+                        registry_ref: registry.registry_ref(),
+                        tool_id: feedback.tool_id.clone(),
+                        schema_fingerprint: feedback.schema_fingerprint.clone(),
+                    },
+                    max_candidates: 8,
+                })
+                .expect("real Candidate discovery")
+                .candidates
+                .into_iter()
+                .find(|candidate| candidate.procedure == feedback.method_evidence[0].body)
+                .expect("declared exact method is available for a task trial")
+                .method;
+            input
+                .learning
+                .method_adoptions
+                .push(MethodAdoptionEvidenceV1 {
+                    method: method.clone(),
+                    task_id: task_id.clone(),
+                    adoption: MethodAdoptionStatusV1::Adopted,
+                    observation_refs: observations.clone(),
+                });
+            input
+                .learning
+                .method_task_evaluations
+                .push(MethodTaskEvaluationV1 {
+                    method,
+                    task_id: task_id.clone(),
+                    task_root_id: format!("root-{task_id}"),
+                    independence_group: format!("scenario-{task_id}"),
+                    evaluator_id: "security-task-verifier".into(),
+                    evaluator_revision: 1,
+                    outcome: MethodTaskOutcomeV1::Passed,
+                    observation_refs: observations,
+                });
+        }
+        let report = runtime
+            .finalize_turn_with_procedural_evidence(&runtime.capability, input)
+            .expect("production finalize");
+        finish_procedural_learning(
+            runtime.clone(),
+            &report
+                .procedural_learning
+                .job_id
+                .expect("durable procedural job"),
+        );
+    }
 }
 
 fn projection(

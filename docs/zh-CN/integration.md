@@ -1,6 +1,6 @@
 # 集成文档
 
-本文描述如何通过 `bm-sdk` 把 Beetle Memory 内嵌到 Rust 项目里。
+本文描述如何通过 `bm-sdk` 接入0.10.0 源码：post-turn input V3、semantic Job V4、Store v15。已发布 0.9.0 源码使用 input V2 与 Store v14，不提供本文的新合同。当前没有兼容读取或自动迁移；发布源码身份由对应 Git tag 确定。
 
 ## 1. 选择 Profile
 
@@ -26,11 +26,11 @@
 bm-sdk = { path = "crates/sdk", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
-crates 发布后：
+所有 Beetle crate 必须来自同一源码 tag。源码发布不代表 crates.io 上传；外部项目可以这样接入：
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.9.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.10.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.10.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 每次构建只使用一个 profile feature。Linux desktop、Linux device 与 Linux server 是三个不同部署目标，禁止相互替代。
@@ -83,6 +83,14 @@ let runtime = MemoryRuntime::builder()
 
 `add_agent_skill_dir` 是可选只读挂载。标准 Agent Skill 的添加、编辑、导入、删除和执行仍归宿主；Beetle Memory 只扫描 `SKILL.md` 摘要参与召回和投影。
 
+### 用户本地时间（0.10.0）
+
+桌面 profile 默认读取用户设备的系统时区，并在每次投影中输出完整本地日期、时间、UTC 偏移和时区。Store 时间仍是 UTC；修改设备时区无需重建 Runtime。拿不到时区时省略整个模型可见时间字段，不显示“未知”，也不退回 UTC。
+
+服务端和受限设备默认不假定用户时区。宿主可通过 `MemoryRuntime::builder().user_local_time_provider(Arc<dyn UserLocalTimeProvider>)` 注入可信、按用户隔离的来源。`local_time_at(unix_secs)` 返回该精确 instant 的 `UserLocalTimeContext::new(unix_secs, utc_offset_seconds, time_zone)`；临时不可用返回 `Ok(None)`。必须按 instant 处理夏令时，不缓存启动时的固定偏移，也不把 LLM 推断当时区来源。此接口不改变 `MemoryClock` 的持久化时钟职责。
+
+官方 Entry 对应入口是 `EntryRuntimeFactory::open_with_user_local_time_provider` 和 `EntryRuntime::open_with_user_local_time_provider`；Manager 可通过 `from_factory` 复用已绑定来源的 Factory。不同用户的时间来源应使用各自的 Factory。该接口由 0.10.0 引入，v0.9.0 不提供。
+
 ## 5. 提交受治理的记忆输入
 
 宿主可以提交 typed long-term candidate 或 canonical extraction 结果。Runtime Skill
@@ -123,15 +131,15 @@ let preview_block = projection.provider_payload().system_memory_block();
 `Preview` 只用于检查，不返回 selection receipt。真实 model/tool turn 必须由宿主在请求入口
 一次性选择稳定 turn id，再用 `ProceduralProjectionBindingV1::Turn { turn_id }` 投影并把
 该 memory block 放入模型上下文。完成同一个 canonical turn 时，要在
-`PostTurnLearningInputV2` 中原样提交完整 `selection_receipt`。同一 turn 的重试复用 id 与
+`PostTurnLearningInputV3` 中原样提交完整 `selection_receipt`。同一 turn 的重试复用 id 与
 receipt；即使输入正文相同，另一个 turn 也必须使用新 id。禁止从 selected ids 或 digest
 重建 receipt。
 
-0.9.0 中，有反馈的提交还必须使用显式签发的
+有反馈的提交还必须使用显式签发的
 `MemoryProceduralSubmissionCapability` 和 `finalize_turn_with_procedural_evidence`。
 无反馈普通回合仍直接使用 `finalize_turn`，不要求 producer grant。
 受信初始化、部分接受、撤权与容量恢复见 [程序性证据声明权](api.md#程序性证据声明权)。
-这不是与已发布 0.7.0 feedback input 兼容的合同。
+当前使用 V3 input，不能照搬已发布 0.9.0 源码的 V2 input。
 
 重开后通过 `MemoryRuntime::procedural_reconciliation_status` 或官方服务 attachment 的
 `status().procedural_reconciliation` 发现当前重算状态。容量阻断返回绑定主体范围的
@@ -166,7 +174,7 @@ Linux/Windows 配置分别增加 `--no-default-features --features desktop-linux
 示例的 `expected_revision: None` 只用于本次新建的易失 Store。持久宿主应保存/查询既有 binding 引用并显式管理其 revision，
 不能在每次启动或每个回合自动重授权限。真实模型配置与凭证分别通过既有 `GovernanceBindingSource`、
 `GovernanceCredentialResolver` 接入产品的同一配置真源；本示例刻意不配置它们。
-行为变更与发布边界见 [0.9.0 源码发布说明](release-notes-0.9.0.md)。
+当前 API 与 Store 边界见 [0.10.0 源码发布说明](release-notes-0.10.0.md)。
 
 system、developer、user、tool message 的最终排序仍归宿主 prompt assembly。
 
@@ -221,8 +229,16 @@ runtime.write(MemoryWriteRequest::Candidates {
 })?;
 ```
 
-如果 post-turn LLM 服务暂时不可用，`finalize_turn` 仍会先提交会话，并原子建立 exact Job V3
+如果 post-turn LLM 服务暂时不可用，`finalize_turn` 仍会先提交会话，并原子建立 exact Job V4
 governance intent。durable intent 是恢复真源，wake signal 只是一条可丢失提示。
+
+生产宿主使用官方网络模型执行器时，必须为 `bm-entry` 启用 `governance-model-client-std`，并与 `bm-sdk` 使用同一 profile。例如同仓桌面嵌入接入：
+
+```toml
+bm-entry = { path = "crates/entry", default-features = false, features = ["profile-desktop-macos-embedded-sdk", "governance-model-client-std"] }
+```
+
+`bm_entry::entry_governance_model_client_compiled()` 可核对编译能力。只配置 endpoint/model/Key 不会补上缺失的编译能力；未编译执行器时，官方服务返回能力不可用并保留任务，不向 Provider 发请求。前面的离线示例刻意没有启用或调用模型，不代表已完成语义学习。生产仍复用宿主唯一的 `GovernanceBindingSource` / `GovernanceCredentialResolver`，不创建第二套模型配置。
 
 生产宿主应把官方 `bm-entry::MemoryLearningService` attach 到已有
 `Arc<MemoryRuntime>`。service 只消费 SDK-owned `MemoryLearningEngine`；bounded discovery、
@@ -234,8 +250,8 @@ raw credential 永不持久化。
 
 宿主不得自行 claim job、运行 governance transition、拼装 memory mutation，也不得维护第二套
 queue/worker/retry policy。Operator 与 attachment status read 必须携带 SDK 铸造的 typed inspection authority；
-无权或跨主体请求必须在返回 job identity 或 reason detail 前失败。Store v13 及更早 schema
-直接拒绝；可丢弃的开发 Store 由 owner 明确重建。v0.9.0 不自动删除真实数据，也不提供自动迁移或兼容 reader。
+无权或跨主体请求必须在返回 job identity 或 reason detail 前失败。0.10.0 源码只接受 Store v15，对 v14 及更早 schema
+只读拒绝；可丢弃的开发 Store 由 owner 明确重建。Runtime 不自动删除真实数据，也不提供自动迁移或兼容 reader。
 
 `project()` 返回的 `MemoryProjectionReport.audit` 是投影诊断真源，包含 source plane、selected ids、
 section chars、source/render budget、scope 和 private gate decision。宿主可以展示这些字段，
@@ -411,4 +427,4 @@ if catalog.adapter.http.visible {
 8. 导出 opaque archive，将其导入具有完全相同 typed scope 与 policy 的 runtime，并检查 governed archive root。
 9. 对替换后的 scope 运行 operator inspect 和 replay。
 
-0.9.0 的投影 API 变更要求更新显式 struct literal 和 typed constraint 消费代码，详见[源码候选说明](release-notes-0.9.0.md)。仅因本次升级，不需要重建既有 Store v14 数据。
+历史 [0.9.0 源码说明](release-notes-0.9.0.md)记录了保留 Store v14 的投影变更。0.10.0 源码要求 Store v15，不能把历史“不必重建”结论套用到本次 clean break。

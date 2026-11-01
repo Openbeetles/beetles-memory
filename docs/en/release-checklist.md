@@ -113,6 +113,6 @@ Run staged `cargo publish --dry-run -p <crate>` through `scripts/check_release_s
 - Adapter crates keep memory write, recall, projection, and store semantics inside `MemoryRuntime`.
 - Standalone deployment covers memory runtime entry points. Product-specific surfaces and deployment infrastructure are supplied by the host deployment.
 
-## 0.9.0 candidate scope
+## 0.10.0 candidate scope
 
-Verify the source-read proof repair and subject projection API changes together. Store v14 and material v5 remain unchanged. Require the explicit Gateway `client-reqwest,nonproduction-replay-harness` OpenAI and audit contracts, including local HTTP capture, in addition to the suites above. Keep 0.8.0 notes/tags unchanged; exclude comparative-learning implementation and real Provider/GUI claims.
+Verify production method extraction/adoption/independent task evaluation, governed persona growth and user-device local time together. Require Store v15; long-term material v5 and Adapter V2 remain unchanged. Run the formal SDK method/persona/time suites without `nonproduction-replay-harness`, plus the official Entry learning service with `governance-model-client-std`. Keep the full File/SQLite reopen, withdrawal, current/as-of and privacy matrices. Run strict target gates and all package dry-runs. Preserve previous notes/tags; no compatibility reader, automatic migration, real-data deletion, comparative-learning implementation, real Provider or GUI claims.

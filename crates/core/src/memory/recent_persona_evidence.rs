@@ -18,12 +18,15 @@ const PERSONA_EVIDENCE_TEXT_MAX_CHARS: usize = 120;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RecentPersonaEvidence {
+    pub counterevidence_turns: usize,
     #[serde(default)]
     pub sampled_turns: usize,
     #[serde(default)]
     pub meaningful_turns: usize,
     #[serde(default)]
     pub repeated_priority_order: Vec<String>,
+    /// Repeated subject meaning-frame observations, distinct from governance order.
+    pub repeated_value_orientation: String,
     #[serde(default)]
     pub repeated_response_mode: String,
     #[serde(default)]
@@ -52,6 +55,7 @@ impl RecentPersonaEvidence {
     pub fn execution_continuity_signal_count(&self) -> usize {
         [
             !self.repeated_priority_order.is_empty(),
+            !self.repeated_value_orientation.trim().is_empty(),
             !self.repeated_response_mode.trim().is_empty(),
             !self.repeated_task_scope.trim().is_empty(),
             !self.repeated_initiative_posture.trim().is_empty(),
@@ -98,8 +102,12 @@ impl RecentPersonaEvidence {
     }
 
     pub fn promotable_growth_signal_count(&self) -> usize {
+        if self.counterevidence_turns > 0 {
+            return 0;
+        }
         [
             !self.repeated_priority_order.is_empty(),
+            !self.repeated_value_orientation.trim().is_empty(),
             !self.repeated_relationship_posture.trim().is_empty(),
             !self.repeated_disclosure_action.trim().is_empty(),
         ]
@@ -162,13 +170,17 @@ pub fn derive_recent_persona_evidence_from_continuity_evidence(
         return None;
     }
     relevant.truncate(max_meaningful_turns);
+    let counterevidence_turns = relevant
+        .iter()
+        .filter(|item| item.growth_counterevidence)
+        .count();
     let promotable_growth = relevant
         .iter()
         .copied()
         .filter(|ledger| ledger_supports_promotable_persona_growth(ledger))
         .collect::<Vec<_>>();
     let sampled_turns = relevant.len();
-    let meaningful_turns = sampled_turns;
+    let meaningful_turns = sampled_turns.saturating_sub(counterevidence_turns);
     let updated_at = relevant
         .iter()
         .map(|evidence| evidence.observed_at_ms)
@@ -181,6 +193,11 @@ pub fn derive_recent_persona_evidence_from_continuity_evidence(
             .filter_map(|ledger| ledger.persona.as_ref()?.priority.as_ref())
             .map(|priority| priority.priority_order.as_slice())
             .filter(|order| !order.is_empty()),
+    );
+    let repeated_value_orientation = most_common_text(
+        promotable_growth
+            .iter()
+            .map(|evidence| evidence.subject_value_orientation.as_str()),
     );
     let repeated_response_mode = most_common_text(
         relevant
@@ -225,10 +242,12 @@ pub fn derive_recent_persona_evidence_from_continuity_evidence(
     let pressure_pattern = summarize_pressure_pattern(&relevant);
     let tool_usage_pattern = summarize_tool_usage_pattern(&relevant);
     let volatility_flags = collect_volatility_flags(&relevant);
-    let evidence = RecentPersonaEvidence {
+    let mut evidence = RecentPersonaEvidence {
+        counterevidence_turns,
         sampled_turns,
         meaningful_turns,
         repeated_priority_order,
+        repeated_value_orientation,
         repeated_response_mode,
         repeated_task_scope,
         repeated_initiative_posture,
@@ -240,11 +259,18 @@ pub fn derive_recent_persona_evidence_from_continuity_evidence(
         volatility_flags,
         updated_at,
     };
+    if counterevidence_turns > 0 {
+        evidence.repeated_priority_order.clear();
+        evidence.repeated_value_orientation.clear();
+        evidence.repeated_relationship_posture.clear();
+        evidence.repeated_disclosure_action.clear();
+    }
     evidence.is_meaningful().then_some(evidence)
 }
 
 fn ledger_supports_promotable_persona_growth(evidence: &TurnContinuityEvidence) -> bool {
-    evidence.ingress == IngressKind::User
+    !evidence.growth_counterevidence
+        && evidence.ingress == IngressKind::User
         && evidence.status == super::TurnLedgerStatus::Answered
         && evidence.final_reply_delivered
         && !evidence.canonical_reply_source.trim().is_empty()
@@ -278,6 +304,13 @@ pub fn render_recent_persona_evidence_block(
             out,
             "Repeated priority order: {}",
             evidence.repeated_priority_order.join(" > ")
+        );
+    }
+    if !evidence.repeated_value_orientation.trim().is_empty() {
+        let _ = writeln!(
+            out,
+            "Repeated subject value orientation: {}",
+            evidence.repeated_value_orientation.trim()
         );
     }
     if !evidence.repeated_response_mode.trim().is_empty() {
@@ -418,6 +451,14 @@ fn summarize_tool_usage_pattern(ledgers: &[&TurnContinuityEvidence]) -> String {
 
 fn collect_volatility_flags(ledgers: &[&TurnContinuityEvidence]) -> Vec<String> {
     let mut flags = Vec::new();
+    if distinct_count(
+        ledgers
+            .iter()
+            .map(|evidence| evidence.subject_value_orientation.clone()),
+    ) > 1
+    {
+        flags.push("value_orientation_mixed".to_string());
+    }
     if distinct_count(
         ledgers
             .iter()
@@ -695,6 +736,35 @@ mod tests {
                 "user_contract".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn newest_counterevidence_cannot_be_replaced_by_older_positive_turns() {
+        let ledger = build_persona_ledger("brief", TurnPersonaPressureLevel::Normal);
+        let positive = TurnContinuityEvidence::from_turn_ledger(&ledger).expect("terminal");
+        let mut records = (1..=4)
+            .map(|index| {
+                let mut item = positive.clone();
+                item.observed_at_ms = index * 1000;
+                item
+            })
+            .collect::<Vec<_>>();
+        let before = derive_recent_persona_evidence_from_continuity_evidence(&records, 4)
+            .expect("positive control");
+        assert!(before.has_promotable_growth_signals());
+        let mut counter = positive;
+        counter.observed_at_ms = 5000;
+        counter.growth_counterevidence = true;
+        records.push(counter);
+        let after = derive_recent_persona_evidence_from_continuity_evidence(&records, 4)
+            .expect("retained counterevidence");
+        assert_eq!(after.sampled_turns, 4);
+        assert_eq!(after.meaningful_turns, 3);
+        assert_eq!(after.counterevidence_turns, 1);
+        assert_eq!(after.updated_at, 5);
+        assert!(!after.has_promotable_growth_signals());
+        assert!(after.repeated_priority_order.is_empty());
+        assert!(after.repeated_relationship_posture.is_empty());
     }
 
     struct FastPathStore {

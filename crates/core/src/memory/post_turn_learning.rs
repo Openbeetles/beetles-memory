@@ -16,6 +16,8 @@ mod reconciliation;
 pub use reconciliation::*;
 mod source_dependents;
 pub use source_dependents::*;
+mod production;
+pub use production::*;
 
 use crate::error::{Error, Result};
 use crate::memory::{GovernedMemoryOwnerPlane, GovernedOwnerRevisionRef};
@@ -25,23 +27,23 @@ use crate::skills::{
 };
 
 pub const PROCEDURAL_APPLICABILITY_CONTEXT_SCHEMA_VERSION: u32 = 1;
-pub const PROCEDURAL_SELECTION_RECEIPT_SCHEMA_VERSION: u32 = 1;
-pub const POST_TURN_LEARNING_EVIDENCE_SCHEMA_VERSION: u32 = 2;
+pub const PROCEDURAL_SELECTION_RECEIPT_SCHEMA_VERSION: u32 = 2;
+pub const POST_TURN_LEARNING_EVIDENCE_SCHEMA_VERSION: u32 = 3;
 pub const PROCEDURAL_FEEDBACK_JOB_SCHEMA_VERSION: u32 = 2;
 pub const PROCEDURAL_FEEDBACK_RECEIPT_SCHEMA_VERSION: u32 = 2;
 pub const PROCEDURAL_FEEDBACK_SCOPE_INDEX_SCHEMA_VERSION: u32 = 2;
-pub const PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_SCHEMA_VERSION: u32 = 2;
+pub const PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_SCHEMA_VERSION: u32 = 3;
 pub const MAX_PROCEDURAL_FEEDBACK_ACTIVE_JOBS: usize = 256;
 pub const MAX_PROCEDURAL_FEEDBACK_RECENT_TERMINAL_JOBS: usize = 256;
 pub const MAX_PROCEDURAL_FEEDBACK_RECONCILIATION_CURSORS: usize = 256;
 
 const APPLICABILITY_DIGEST_DOMAIN: &str = "procedural_applicability_context_digest_v1";
-const SELECTION_DIGEST_DOMAIN: &str = "procedural_selection_digest_v1";
-const LEARNING_EVIDENCE_DIGEST_DOMAIN: &str = "post_turn_learning_evidence_digest_v2";
+const SELECTION_DIGEST_DOMAIN: &str = "turn_projection_selection_digest_v2";
+const LEARNING_EVIDENCE_DIGEST_DOMAIN: &str = "post_turn_learning_evidence_digest_v3";
 const PROCEDURAL_JOB_ID_DOMAIN: &str = "procedural_feedback_job_id_v1";
 const PROCEDURAL_SCOPE_ID_DOMAIN: &str = "procedural_feedback_scope_id_v1";
-const RECEIPT_DIGEST_DOMAIN: &str = "procedural_selection_receipt_ref_v1";
-const PROCEDURAL_APPLICATION_DIGEST_DOMAIN: &str = "procedural_feedback_application_digest_v2";
+const RECEIPT_DIGEST_DOMAIN: &str = "turn_projection_receipt_ref_v2";
+const PROCEDURAL_APPLICATION_DIGEST_DOMAIN: &str = "procedural_feedback_application_digest_v3";
 
 fn procedural_scope_id(scope: &ProceduralProducerScopeV1) -> String {
     format!(
@@ -67,17 +69,20 @@ pub enum ProceduralProjectionBindingV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PostTurnLearningInputV2 {
+pub struct PostTurnLearningInputV3 {
     pub tool_call_count: u32,
-    pub selection_receipt: Option<ProceduralSelectionReceiptV1>,
+    pub selection_receipt: Option<MemoryTurnProjectionReceiptV2>,
     pub runtime_skill_feedback: Vec<RuntimeSkillUsageFeedbackV1>,
     pub agent_skill_feedback: Vec<AgentSkillUsageFeedbackV1>,
     pub task_learning_feedback: Vec<TaskLearningUsageFeedbackV1>,
     pub agent_tool_feedback: Vec<AgentToolUsageFeedbackV3>,
+    pub method_learning_inputs: Vec<MethodLearningInputV1>,
+    pub method_adoptions: Vec<MethodAdoptionEvidenceV1>,
+    pub method_task_evaluations: Vec<MethodTaskEvaluationV1>,
     pub human_confirmation_operation_id: Option<String>,
 }
 
-impl PostTurnLearningInputV2 {
+impl PostTurnLearningInputV3 {
     pub fn empty() -> Self {
         Self::with_tool_call_count(0)
     }
@@ -90,15 +95,28 @@ impl PostTurnLearningInputV2 {
             agent_skill_feedback: Vec::new(),
             task_learning_feedback: Vec::new(),
             agent_tool_feedback: Vec::new(),
+            method_learning_inputs: Vec::new(),
+            method_adoptions: Vec::new(),
+            method_task_evaluations: Vec::new(),
             human_confirmation_operation_id: None,
         }
     }
 
-    pub fn has_feedback(&self) -> bool {
+    pub fn has_authorized_content(&self) -> bool {
+        self.has_procedural_work() || !self.method_learning_inputs.is_empty()
+    }
+
+    pub fn has_signed_turn_context(&self) -> bool {
+        self.selection_receipt.is_some()
+    }
+
+    pub fn has_procedural_work(&self) -> bool {
         !self.runtime_skill_feedback.is_empty()
             || !self.agent_skill_feedback.is_empty()
             || !self.task_learning_feedback.is_empty()
             || !self.agent_tool_feedback.is_empty()
+            || !self.method_adoptions.is_empty()
+            || !self.method_task_evaluations.is_empty()
     }
 }
 
@@ -259,7 +277,8 @@ pub struct AgentToolExperienceSelectionV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ProceduralSelectionReceiptV1 {
+pub struct MemoryTurnProjectionReceiptV2 {
+    pub soul_source_admission: Option<super::SoulTurnSourceAdmissionV1>,
     pub schema_version: u32,
     pub receipt_ref: String,
     pub signing_key_id: String,
@@ -276,7 +295,7 @@ pub struct ProceduralSelectionReceiptV1 {
     pub authority_tag: String,
 }
 
-impl ProceduralSelectionReceiptV1 {
+impl MemoryTurnProjectionReceiptV2 {
     pub fn validate_contract(&self) -> bool {
         self.schema_version == PROCEDURAL_SELECTION_RECEIPT_SCHEMA_VERSION
             && is_prefixed_digest(&self.receipt_ref, "procedural_selection_receipt:sha256:")
@@ -284,6 +303,11 @@ impl ProceduralSelectionReceiptV1 {
             && self.issued_at > 0
             && self.expires_at > self.issued_at
             && self.identity.validate_contract()
+            && self.soul_source_admission.as_ref().is_none_or(|admission| {
+                admission.generation().is_ok()
+                    && admission.owner.memory_space_id == self.identity.memory_space_id
+                    && admission.owner.subject_id == self.identity.mounted_subject_id
+            })
             && self.applicability.validate_contract()
             && is_digest(&self.selection_digest)
             && is_digest(&self.delivery_digest)
@@ -337,6 +361,7 @@ impl ProceduralSelectionReceiptV1 {
 
     pub fn canonical_selection_digest(&self) -> Result<String> {
         let encoded = serde_json::to_vec(&(
+            &self.soul_source_admission,
             &self.identity,
             &self.applicability,
             &self.standard_agent_skills,
@@ -473,7 +498,7 @@ pub struct TaskLearningUsageFeedbackV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PostTurnLearningEvidenceV2 {
+pub struct PostTurnLearningEvidenceV3 {
     pub schema_version: u32,
     pub memory_space_id: String,
     pub mounted_subject_id: String,
@@ -481,16 +506,21 @@ pub struct PostTurnLearningEvidenceV2 {
     pub turn_id: String,
     pub canonical_turn_digest: String,
     pub tool_call_count: u32,
-    pub selection_receipt: Option<ProceduralSelectionReceiptV1>,
+    pub selection_receipt: Option<MemoryTurnProjectionReceiptV2>,
     pub runtime_skill_feedback: Vec<RuntimeSkillUsageFeedbackV1>,
     pub agent_skill_feedback: Vec<AgentSkillUsageFeedbackV1>,
     pub task_learning_feedback: Vec<TaskLearningUsageFeedbackV1>,
     pub agent_tool_feedback: Vec<AdmittedAgentToolEvidenceV1>,
+    pub method_learning_inputs: Vec<AdmittedMethodLearningInputV1>,
+    pub method_adoptions: Vec<MethodAdoptionEvidenceV1>,
+    pub method_task_evaluations: Vec<MethodTaskEvaluationV1>,
+    /// Store-keyed commitment to the original submission, never a raw-content hash.
+    pub submitted_input_commitment: Option<String>,
     pub authority: ProceduralFeedbackAuthorityV2,
     pub learning_evidence_digest: String,
 }
 
-impl PostTurnLearningEvidenceV2 {
+impl PostTurnLearningEvidenceV3 {
     fn validate_job_source(&self, job: &ProceduralFeedbackJobV2) -> Result<()> {
         job.validate()?;
         if !self.validate_contract()
@@ -607,6 +637,12 @@ impl PostTurnLearningEvidenceV2 {
             &self.agent_skill_feedback,
             &self.task_learning_feedback,
             &self.agent_tool_feedback,
+            (
+                &self.method_learning_inputs,
+                &self.method_adoptions,
+                &self.method_task_evaluations,
+                &self.submitted_input_commitment,
+            ),
             &self.authority,
         ))
         .map_err(|error| Error::config("post_turn_learning_evidence_digest", error.to_string()))?;
@@ -640,11 +676,17 @@ impl PostTurnLearningEvidenceV2 {
             &self.agent_skill_feedback,
             &self.task_learning_feedback,
             &self.agent_tool_feedback,
+            (
+                &self.method_learning_inputs,
+                &self.method_adoptions,
+                &self.method_task_evaluations,
+                &self.submitted_input_commitment,
+            ),
             &producer_context,
         ))
         .map_err(|error| Error::config("procedural_confirmation_digest", error.to_string()))?;
         Ok(domain_digest(
-            "procedural_confirmation_payload_digest_v2",
+            "procedural_confirmation_payload_digest_v3",
             &[&encoded],
         ))
     }
@@ -704,6 +746,9 @@ impl PostTurnLearningEvidenceV2 {
             ]
             .into_iter()
             .all(|value| is_canonical(value))
+            && (self.has_authorized_content() == self.submitted_input_commitment.is_some())
+            && self.submitted_input_commitment.as_ref().is_none_or(|value| is_digest(value))
+            && self.production_payload_is_valid()
             && is_digest(&self.canonical_turn_digest)
             && self.selection_contains_feedback()
             && self.authority.validate_contract()
@@ -735,7 +780,9 @@ impl PostTurnLearningEvidenceV2 {
             && evidence::admitted_method_owners_are_consistent(&self.agent_tool_feedback)
             && (matches!(self.authority, ProceduralFeedbackAuthorityV2::Empty)
                 == (self.runtime_skill_feedback.is_empty() && self.agent_skill_feedback.is_empty()
-                    && self.task_learning_feedback.is_empty() && self.agent_tool_feedback.is_empty()))
+                    && self.task_learning_feedback.is_empty() && self.agent_tool_feedback.is_empty()
+                    && self.method_learning_inputs.is_empty() && self.method_adoptions.is_empty()
+                    && self.method_task_evaluations.is_empty()))
             && canonical_order(&self.runtime_skill_feedback)
             && canonical_order(&self.agent_skill_feedback)
             && canonical_order(&self.task_learning_feedback)
@@ -1706,7 +1753,7 @@ impl ProceduralAppliedOwnerBindingV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ProceduralFeedbackApplicationLedgerV2 {
+pub struct ProceduralFeedbackApplicationLedgerV3 {
     pub schema_version: u32,
     pub job_id: String,
     pub identity: ProceduralFeedbackIdentityV1,
@@ -1715,16 +1762,18 @@ pub struct ProceduralFeedbackApplicationLedgerV2 {
     pub applied_owner_bindings: Vec<ProceduralAppliedOwnerBindingV1>,
     pub execution_contributions: Vec<ToolExecutionContributionV1>,
     pub runtime_skill_contributions: Vec<RuntimeSkillUsageContributionV1>,
+    pub method_task_contributions: Vec<MethodTaskContributionV1>,
     pub application_digest: String,
     pub completed_at: u64,
 }
 
-impl ProceduralFeedbackApplicationLedgerV2 {
+impl ProceduralFeedbackApplicationLedgerV3 {
     pub fn build(
         job: &ProceduralFeedbackJobV2,
         mut applied_owner_bindings: Vec<ProceduralAppliedOwnerBindingV1>,
         mut execution_contributions: Vec<ToolExecutionContributionV1>,
         mut runtime_skill_contributions: Vec<RuntimeSkillUsageContributionV1>,
+        mut method_task_contributions: Vec<MethodTaskContributionV1>,
         validity_epoch: u64,
         completed_at: u64,
     ) -> Result<Self> {
@@ -1742,6 +1791,7 @@ impl ProceduralFeedbackApplicationLedgerV2 {
         }
         execution_contributions.sort_by(|a, b| a.contribution_id.cmp(&b.contribution_id));
         runtime_skill_contributions.sort_by(|a, b| a.contribution_id.cmp(&b.contribution_id));
+        method_task_contributions.sort_by(|a, b| a.contribution_id.cmp(&b.contribution_id));
         let mut ledger = Self {
             schema_version: PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_SCHEMA_VERSION,
             job_id: job.job_id.clone(),
@@ -1751,6 +1801,7 @@ impl ProceduralFeedbackApplicationLedgerV2 {
             applied_owner_bindings,
             execution_contributions,
             runtime_skill_contributions,
+            method_task_contributions,
             application_digest: String::new(),
             completed_at,
         };
@@ -1769,6 +1820,7 @@ impl ProceduralFeedbackApplicationLedgerV2 {
             &self.applied_owner_bindings,
             &self.execution_contributions,
             &self.runtime_skill_contributions,
+            &self.method_task_contributions,
             self.completed_at,
         ))
         .map_err(|error| Error::config("procedural_feedback_application", error.to_string()))?;
@@ -1791,6 +1843,24 @@ impl ProceduralFeedbackApplicationLedgerV2 {
             || !canonical_order(&self.applied_owner_bindings)
             || self.execution_contributions.len() > MAX_PROCEDURAL_EVIDENCE_ITEMS
             || self.runtime_skill_contributions.len() > MAX_PROCEDURAL_EVIDENCE_ITEMS
+            || self.method_task_contributions.len() > MAX_METHOD_LEARNING_SOURCE_REFS
+            || !self
+                .method_task_contributions
+                .windows(2)
+                .all(|pair| pair[0].contribution_id < pair[1].contribution_id)
+            || !self.method_task_contributions.iter().all(|contribution| {
+                contribution.validate_contract()
+                    && contribution.source == self.identity
+                    && contribution.source_job_id == self.job_id
+                    && contribution.learning_evidence_digest == self.learning_evidence_digest
+                    && contribution.observed_at <= self.completed_at
+                    && contribution.execution_refs.iter().all(|reference| {
+                        self.execution_contributions.iter().any(|execution| {
+                            execution.reference().ok().as_ref() == Some(reference)
+                                && execution.producer == contribution.producer
+                        })
+                    })
+            })
             || !self
                 .runtime_skill_contributions
                 .windows(2)
@@ -1899,15 +1969,11 @@ impl ProceduralFeedbackReceiptV2 {
     /// Counts and method ordinals are checked against the exact admitted source,
     /// not inferred from an aggregate or a mutable current method. Agent Tool
     /// groups occupy the first ordinal range; the other feedback planes follow.
-    pub fn validates_evidence(&self, evidence: &PostTurnLearningEvidenceV2) -> bool {
+    pub fn validates_evidence(&self, evidence: &PostTurnLearningEvidenceV3) -> bool {
         if !self.validate_contract()
             || !evidence.validate_contract()
             || self.learning_evidence_digest != evidence.learning_evidence_digest
-            || self.submitted_count as usize
-                != evidence.agent_tool_feedback.len()
-                    + evidence.runtime_skill_feedback.len()
-                    + evidence.agent_skill_feedback.len()
-                    + evidence.task_learning_feedback.len()
+            || Some(self.submitted_count) != evidence.procedural_submission_count()
         {
             return false;
         }

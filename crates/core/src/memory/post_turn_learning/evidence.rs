@@ -182,9 +182,7 @@ impl AgentToolUsageFeedbackV3 {
         if self.execution_facts.len() + self.method_evidence.len() > MAX_PROCEDURAL_EVIDENCE_ITEMS {
             return Err(Rejection::CapacityExceeded);
         }
-        if !identifier(&self.registry_ref.registry_id)
-            || !identifier(&self.registry_ref.fingerprint)
-            || !self.registry_ref.scope.validate_contract()
+        if !self.registry_ref.validate_contract()
             || !identifier(&self.tool_id)
             || !identifier(&self.schema_fingerprint)
             || (self.execution_facts.is_empty() && self.method_evidence.is_empty())

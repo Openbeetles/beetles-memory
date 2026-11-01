@@ -1,6 +1,6 @@
 # Integration Guide
 
-This guide describes how to embed Beetle Memory into a Rust project through `bm-sdk`.
+This guide describes how to embed Beetle Memory 0.10.0 source into a Rust project through `bm-sdk`: post-turn input V3, semantic Job V4 and Store v15. These contracts are not available in the published 0.9.0 source, which uses input V2 and Store v14. No compatibility reader or automatic migration is provided; the Git tag identifies the released source.
 
 ## 1. Choose A Profile
 
@@ -26,11 +26,11 @@ From this repository:
 bm-sdk = { path = "crates/sdk", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
-After the crates are published:
+Use the same source tag for every Beetle crate. Source release does not mean crates.io publication. For an external consumer:
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.9.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.10.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.10.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 Use exactly one profile feature for a build. Linux desktop, Linux device, and Linux server are distinct deployment targets; do not substitute one for another.
@@ -83,6 +83,14 @@ let runtime = MemoryRuntime::builder()
 
 `add_agent_skill_dir` is optional and read-only. The host still owns standard Agent Skill add/edit/import/delete/execute flows; Beetle Memory only scans `SKILL.md` summaries for recall and projection.
 
+### User-device local time (0.10.0)
+
+Desktop profiles resolve the device's OS time zone for each projection and render the local date/time together with its UTC offset and zone. Store timestamps remain UTC instants. Missing zone information omits the entire model-visible clock field; it does not produce an unknown placeholder or a UTC fallback.
+
+Server and constrained-device profiles do not assume a user's zone. Supply a trusted, user-scoped `Arc<dyn UserLocalTimeProvider>` through `MemoryRuntime::builder().user_local_time_provider(...)`. Its `local_time_at(unix_secs)` returns `UserLocalTimeContext::new(unix_secs, utc_offset_seconds, time_zone)` for that exact instant, or `Ok(None)` when unavailable. Resolve DST per instant rather than caching a startup offset. This presentation source does not replace the persistent `MemoryClock`.
+
+Entry exposes `EntryRuntimeFactory::open_with_user_local_time_provider` and `EntryRuntime::open_with_user_local_time_provider`; a Manager can reuse the configured factory through `from_factory`. Use separate factories for distinct users' time sources. This API is introduced in 0.10.0; it is not available in v0.9.0.
+
 ## 5. Submit Governed Memory Input
 
 Hosts may submit typed long-term candidates or a canonical extraction result.
@@ -125,16 +133,16 @@ let preview_block = projection.provider_payload().system_memory_block();
 turn, choose a stable turn id once at request ingress, project with
 `ProceduralProjectionBindingV1::Turn { turn_id }`, and use that projected block in
 model-context assembly. Pass the complete returned `selection_receipt` unchanged in
-`PostTurnLearningInputV2` when finalizing the same canonical turn. A retry of that
+`PostTurnLearningInputV3` when finalizing the same canonical turn. A retry of that
 turn reuses its id and receipt; a separate turn gets a new id even when the input
 text is identical. Never reconstruct a receipt from selected ids or digests.
 
-In 0.9.0, feedback additionally requires an explicitly issued
+Feedback additionally requires an explicitly issued
 `MemoryProceduralSubmissionCapability` and `finalize_turn_with_procedural_evidence`.
 Ordinary turns with no feedback still use `finalize_turn` without a producer grant.
 Follow [procedural evidence authority](api.md#procedural-evidence-authority)
 for trusted setup, partial acceptance, revocation and capacity recovery. This contract
-is not compatible with the published 0.7.0 feedback input.
+uses the current V3 input; do not copy the V2 input from the published 0.9.0 source.
 
 After reopening, discover current reconciliation state through
 `MemoryRuntime::procedural_reconciliation_status` or the attached official service's
@@ -176,7 +184,7 @@ Its `expected_revision: None` is only for this fresh ephemeral Store. Persistent
 existing binding references and manage revisions explicitly, never automatically regrant on each
 startup or turn. Adapt `GovernanceBindingSource` and `GovernanceCredentialResolver` to the product's
 one configuration owner for real model execution; they are deliberately unconfigured here.
-See the [0.9.0 source release notes](release-notes-0.9.0.md) for changes and release boundaries.
+See [0.10.0 source release notes](release-notes-0.10.0.md) for the current API and Store boundary.
 
 The host remains responsible for final ordering of system, developer, user, and
 tool messages.
@@ -234,8 +242,16 @@ runtime.write(MemoryWriteRequest::Candidates {
 ```
 
 If post-turn LLM services are unavailable, `finalize_turn` still commits the
-transcript and atomically creates an exact Job V3 governance intent. The durable
+transcript and atomically creates an exact Job V4 governance intent. The durable
 intent is the recovery truth; a wake signal is only a hint.
+
+To use the official network model executor, enable `governance-model-client-std` on `bm-entry` and use the same profile as `bm-sdk`. For an embedded desktop consumer in this checkout:
+
+```toml
+bm-entry = { path = "crates/entry", default-features = false, features = ["profile-desktop-macos-embedded-sdk", "governance-model-client-std"] }
+```
+
+`bm_entry::entry_governance_model_client_compiled()` reports the compiled capability. Configuring an endpoint/model/key cannot supply a missing compiled executor: the official service reports capability unavailable, retains the job, and sends no Provider request. The offline example above deliberately does not enable or call a model and does not prove semantic learning completion. Production still uses the host's single `GovernanceBindingSource` / `GovernanceCredentialResolver`; do not create a second model configuration.
 
 Production hosts attach the official `bm-entry::MemoryLearningService` to the
 existing `Arc<MemoryRuntime>`. The service consumes the SDK-owned
@@ -251,8 +267,8 @@ Hosts must not claim jobs, run governance transitions, assemble memory
 mutations, or implement a second queue/worker/retry policy. Operator and
 attachment status reads must use the SDK-minted typed inspection authority;
 unauthorized or cross-subject requests fail before job identity or reason detail
-is returned. Store v13 and earlier schemas are rejected. Owners may explicitly
-recreate disposable development stores; v0.9.0 neither deletes real data nor
+is returned. The 0.10.0 source accepts only Store v15 and rejects v14 and earlier without writing. Owners may explicitly
+recreate disposable development stores; the runtime neither deletes real data nor
 provides automatic migration or a compatibility reader.
 
 `project()` returns `MemoryProjectionReport.audit` as the projection diagnostic
@@ -438,4 +454,4 @@ Add a smoke test in the integrating project that:
 8. Exports an opaque archive, imports it into a runtime with the same exact typed scope and policy, and checks the governed archive root.
 9. Runs operator inspect and replay against the replaced scope.
 
-For the 0.9.0 projection API changes, update explicit struct literals and typed constraint consumers as described in the [source candidate notes](release-notes-0.9.0.md). Existing Store v14 data does not require a rebuild solely for this upgrade.
+The historical [0.9.0 source notes](release-notes-0.9.0.md) describe projection changes that retained Store v14. The 0.10.0 source instead requires Store v15; never apply the historical no-rebuild statement to this clean break.

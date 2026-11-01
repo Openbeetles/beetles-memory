@@ -366,6 +366,81 @@ pub(crate) fn run_self_model_refresh_with_state(
         recent,
         policy,
     );
+    run_self_model_refresh_prompt(
+        http,
+        llm,
+        ctx.self_model_store,
+        subject_id,
+        input.now_secs,
+        existing_model.as_ref(),
+        refresh_input,
+        SelfModelRefreshMode::Established,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum SelfModelRefreshMode {
+    Established,
+    InitialSubjectEvidence,
+}
+
+/// Internal Core path only: callers must already have admitted the generation-bound
+/// subject evidence through personality governance. No transcript, task, private
+/// workspace or shared-fact store is available to this initial distillation.
+pub(super) fn run_initial_self_model_from_subject_evidence(
+    http: &mut dyn LlmHttpClient,
+    llm: &(dyn LlmClient + Send + Sync),
+    store: &dyn SelfModelStore,
+    subject_id: &str,
+    now_secs: u64,
+    profile: MemoryProfile,
+    evidence: &RecentPersonaEvidence,
+) -> Result<SelfModelRefreshOutcome> {
+    if store.get(subject_id)?.is_some() {
+        return Ok(SelfModelRefreshOutcome::Skipped);
+    }
+    // Positive subject-growth fields only. Operational continuity and relationship
+    // signals cannot become an initial identity merely by appearing beside them.
+    let growth = RecentPersonaEvidence {
+        sampled_turns: evidence.sampled_turns,
+        meaningful_turns: evidence.meaningful_turns,
+        repeated_priority_order: evidence.repeated_priority_order.clone(),
+        repeated_value_orientation: evidence.repeated_value_orientation.clone(),
+        repeated_disclosure_action: evidence.repeated_disclosure_action.clone(),
+        updated_at: evidence.updated_at,
+        ..Default::default()
+    };
+    let Some(block) = render_recent_persona_evidence_block(
+        &growth,
+        memory_policy(profile).self_model.factual_grounding_max_len,
+    ) else {
+        return Ok(SelfModelRefreshOutcome::Skipped);
+    };
+    let prompt = format!(
+        "## Initial Subject Evidence\n{block}\n\nOnly infer durable subject continuity supported by these verified observations. No existing persona is presumed. Return null if an identity anchor is not supported. Do not invent default traits, relationship state, private notes, attachment style or relational ethic. Do not infer personality from task, tool, response-style or execution habits."
+    );
+    run_self_model_refresh_prompt(
+        http,
+        llm,
+        store,
+        subject_id,
+        now_secs,
+        None,
+        prompt,
+        SelfModelRefreshMode::InitialSubjectEvidence,
+    )
+}
+
+fn run_self_model_refresh_prompt(
+    http: &mut dyn LlmHttpClient,
+    llm: &(dyn LlmClient + Send + Sync),
+    store: &dyn SelfModelStore,
+    subject_id: &str,
+    now_secs: u64,
+    existing_model: Option<&SelfModel>,
+    refresh_input: String,
+    mode: SelfModelRefreshMode,
+) -> Result<SelfModelRefreshOutcome> {
     let messages = [Message {
         role: Cow::Borrowed("user"),
         content: refresh_input,
@@ -384,13 +459,34 @@ pub(crate) fn run_self_model_refresh_with_state(
             let Some(update) = parse_self_model_response(response.content.trim()) else {
                 return Ok(SelfModelRefreshOutcome::Skipped);
             };
+            if matches!(mode, SelfModelRefreshMode::InitialSubjectEvidence)
+                && (update
+                    .continuity_anchor
+                    .as_deref()
+                    .is_none_or(|value| value.trim().is_empty())
+                    || [
+                        &update.relationship_state,
+                        &update.private_notes,
+                        &update.attachment_style,
+                        &update.relational_ethic,
+                    ]
+                    .iter()
+                    .any(|value| value.as_deref().is_some_and(|text| !text.trim().is_empty())))
+            {
+                return Ok(SelfModelRefreshOutcome::Skipped);
+            }
             crate::platform::task_wdt::feed_current_task();
-            let latest_model = ctx.self_model_store.get(subject_id)?;
+            let latest_model = store.get(subject_id)?;
+            if matches!(mode, SelfModelRefreshMode::InitialSubjectEvidence)
+                && latest_model.is_some()
+            {
+                return Ok(SelfModelRefreshOutcome::Skipped);
+            }
             let Some(merged) = merge_self_model_with_lease(
-                existing_model.as_ref(),
+                existing_model,
                 latest_model.as_ref(),
                 &update,
-                input.now_secs,
+                now_secs,
             ) else {
                 return Ok(SelfModelRefreshOutcome::Skipped);
             };
@@ -398,13 +494,13 @@ pub(crate) fn run_self_model_refresh_with_state(
                 return Ok(SelfModelRefreshOutcome::Skipped);
             }
             crate::platform::task_wdt::feed_current_task();
-            ctx.self_model_store.set(subject_id, &merged)?;
+            store.set(subject_id, &merged)?;
             Ok(SelfModelRefreshOutcome::Updated)
         }
         Err(error) => {
             log::warn!(
-                "[agent_self_model] LLM refresh failed for chat_id={}: {}",
-                input.chat_id,
+                "[agent_self_model] LLM refresh failed for subject_id={}: {}",
+                subject_id,
                 error
             );
             Ok(SelfModelRefreshOutcome::Skipped)

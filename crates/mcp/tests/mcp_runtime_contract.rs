@@ -236,7 +236,7 @@ fn finalize_arguments() -> String {
             }],
             "external_content_used": false
         },
-        "learning": bm_sdk::PostTurnLearningInputV2::empty()
+        "learning": bm_sdk::PostTurnLearningInputV3::empty()
     })
     .to_string()
 }

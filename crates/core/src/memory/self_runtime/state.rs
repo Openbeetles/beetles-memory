@@ -167,39 +167,49 @@ pub(super) fn load_self_runtime_state(
     let autonomy_strategy = load_optional_store("autonomy_strategy", &mut load_health, || {
         ctx.autonomy_strategy_store.get(subject_id)
     });
-    let outer_voice = authority_plan
-        .allow_direct_outer_voice
-        .then(|| {
-            load_optional_store("outer_voice", &mut load_health, || {
-                ctx.outer_voice_store.get(&active_relationship_scope_id)
-            })
+    let outer_voice = (authority_plan.allow_direct_outer_voice
+        && ctx.active_relationship_id.is_some())
+    .then(|| {
+        load_optional_store("outer_voice", &mut load_health, || {
+            ctx.outer_voice_store.get(&active_relationship_scope_id)
         })
-        .flatten();
-    let mental_privacy_state = authority_plan
-        .allow_direct_boundary_persona
-        .then(|| {
-            load_optional_store("mental_privacy", &mut load_health, || {
-                ctx.mental_privacy_store.get(&active_relationship_scope_id)
-            })
+    })
+    .flatten();
+    let mental_privacy_state = (authority_plan.allow_direct_boundary_persona
+        && ctx.active_relationship_id.is_some())
+    .then(|| {
+        load_optional_store("mental_privacy", &mut load_health, || {
+            ctx.mental_privacy_store.get(&active_relationship_scope_id)
         })
-        .flatten();
+    })
+    .flatten();
     let recent_persona_evidence =
-        load_optional_store("recent_persona_evidence", &mut load_health, || {
-            load_recent_persona_evidence(
-                ctx.turn_continuity_evidence_store,
-                &active_relationship_scope_id,
-            )
+        if ctx.active_relationship_id == Some(active_relationship_scope_id.as_str()) {
+            load_optional_store("recent_persona_evidence", &mut load_health, || {
+                load_recent_persona_evidence(
+                    ctx.turn_continuity_evidence_store,
+                    &active_relationship_scope_id,
+                )
+            })
+        } else {
+            None
+        };
+    let subject_persona_evidence =
+        load_optional_store("subject_persona_evidence", &mut load_health, || {
+            ctx.turn_continuity_evidence_store
+                .recent_subject_persona_evidence(subject_id)
         });
     let sandbox_probe_text =
         load_self_runtime_sandbox_probe_text(ctx, &active_relationship_scope_id, profile);
-    let relationship_constitutional_input = if relationship_governance_enabled {
-        load_optional_store("relationship_constitutional_view", &mut load_health, || {
-            ctx.relationship_constitutional_read_store
-                .get(ctx.mounted_subject_id, &active_relationship_scope_id)
-        })
-    } else {
-        None
-    };
+    let relationship_constitutional_input =
+        if relationship_governance_enabled && ctx.active_relationship_id.is_some() {
+            load_optional_store("relationship_constitutional_view", &mut load_health, || {
+                ctx.relationship_constitutional_read_store
+                    .get(ctx.mounted_subject_id, &active_relationship_scope_id)
+            })
+        } else {
+            None
+        };
     let relationship_constitution = match compile_self_runtime_relationship_constitutional_input(
         ctx.mounted_subject_id,
         relationship_constitutional_input.as_ref(),
@@ -240,6 +250,7 @@ pub(super) fn load_self_runtime_state(
         chat_id,
         source_channel: &active_relationship_channel,
         now_secs: payload.now_secs,
+        user_local_time: payload.user_local_time.as_ref(),
         self_continuity: self_continuity.as_ref(),
         remind_store: ctx.remind_store,
         task_store: ctx.task_store,
@@ -258,11 +269,28 @@ pub(super) fn load_self_runtime_state(
             None
         }
     };
-    let world_snapshot = match (&world_snapshot_reminders, &world_snapshot_tasks) {
+    let world_snapshot_result = match (&world_snapshot_reminders, &world_snapshot_tasks) {
         (Some(reminders), Some(tasks)) => {
             build_world_snapshot_from_commitments(world_snapshot_ctx, reminders, tasks)
         }
         _ => build_world_snapshot_from_commitments(world_snapshot_ctx, &[], &[]),
+    };
+    let world_snapshot = match world_snapshot_result {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            load_health.record("world_snapshot_user_local_time", &error);
+            // Load health blocks governance on this error. The degraded
+            // non-clock snapshot retains no fabricated local-time claims.
+            build_world_snapshot_from_commitments(
+                WorldSnapshotContext {
+                    user_local_time: None,
+                    ..world_snapshot_ctx
+                },
+                &[],
+                &[],
+            )
+            .expect("an explicitly unavailable clock cannot fail time validation")
+        }
     };
     let recent = load_list_store("recent_transcript", &mut load_health, || {
         ctx.session_store.load_recent(
@@ -302,7 +330,6 @@ pub(super) fn load_self_runtime_state(
         .map(|issue| format!("{}@{}", issue.layer, issue.stage))
         .collect::<Vec<_>>();
     let subject_shell = compile_subject_shell(SubjectShellCompileInput {
-        now_secs: payload.now_secs,
         platform: "self_runtime",
         device_identity: "",
         relationship_scope: &active_relationship_scope_id,
@@ -349,6 +376,7 @@ pub(super) fn load_self_runtime_state(
         outer_voice,
         mental_privacy_state,
         recent_persona_evidence,
+        subject_persona_evidence,
         sandbox_probe_text,
         active_relationship_scope_id,
         active_relationship_channel,
@@ -499,6 +527,9 @@ pub(super) fn sync_self_runtime_relationship_topology(
     chat_id: &str,
     now_secs: u64,
 ) {
+    if ctx.active_relationship_id != Some(relationship_id) {
+        return;
+    }
     let relationship_channel = relationship_channel.trim();
     let chat_id = chat_id.trim();
     if relationship_channel.is_empty() || chat_id.is_empty() {

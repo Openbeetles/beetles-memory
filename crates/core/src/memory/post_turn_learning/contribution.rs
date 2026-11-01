@@ -264,6 +264,7 @@ pub fn reduce_agent_tool_experience_contributions(
     tool: &ProceduralProducerToolV1,
     body: &crate::skills::AgentToolExperienceBodyV1,
     contributions: &[ToolExecutionContributionV1],
+    task_contributions: &[super::MethodTaskContributionV1],
     previous_status: Option<crate::skills::AgentToolExperienceStatus>,
     max_references: usize,
 ) -> std::result::Result<
@@ -275,6 +276,18 @@ pub fn reduce_agent_tool_experience_contributions(
 > {
     use crate::skills::{AgentToolExperienceBodyV1 as Body, AgentToolExperienceStatus as Status};
     use ProceduralContributionErrorV1 as E;
+    if matches!(body, Body::Method { .. }) {
+        return super::reduce_agent_tool_method_task_contributions(
+            scope,
+            tool,
+            body,
+            task_contributions,
+            contributions,
+            previous_status,
+            max_references,
+        );
+    }
+
     if !scope.validate_contract() || !tool.validate_contract() {
         return Err(E::NonCanonical);
     }
@@ -317,31 +330,7 @@ pub fn reduce_agent_tool_experience_contributions(
             }
             Status::Active
         }
-        Body::Method { sources, .. } => {
-            let mut calls = std::collections::BTreeSet::new();
-            for source in sources {
-                for reference in &source.execution_refs {
-                    let contribution = get(reference)?;
-                    if contribution.fact.outcome == super::ToolExecutionOutcome::Succeeded
-                        && contribution.fact.source_sensitivity
-                            == super::ProceduralSourceSensitivity::NonPrivate
-                    {
-                        calls.insert((
-                            &contribution.source.channel_id,
-                            &contribution.source.chat_id,
-                            &contribution.source.conversation_id,
-                            &contribution.source.turn_id,
-                            &contribution.fact.call_id,
-                        ));
-                    }
-                }
-            }
-            if calls.len() >= 2 {
-                Status::Active
-            } else {
-                Status::Candidate
-            }
-        }
+        Body::Method { .. } => unreachable!("method bodies use the task-evaluation reducer"),
     };
     if !reduced.validate_contract() {
         return Err(E::NonCanonical);

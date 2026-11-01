@@ -35,7 +35,7 @@ use bm_sdk::{
     MemoryRecallRequest, MemoryScope, MemorySemanticJudgmentSource, MemoryStoreHandle,
     MemorySubjectVisibilityPolicy, MemoryTranscriptLifecycleRequest, MemoryTurnDeliveryStatus,
     MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteCandidate,
-    MemoryWriteRequest, ParsedLongTermMemoryExtraction, PostTurnLearningInputV2, PressureLevel,
+    MemoryWriteRequest, ParsedLongTermMemoryExtraction, PostTurnLearningInputV3, PressureLevel,
     RuntimeLifecycleModeInput, RuntimeSkillWrite, StoreBackendConfig, StoreRuntimeBudget,
     SubjectDescriptor, SubjectRegistry, TemporalMemoryGraphNodeOwnerRef,
     TemporalMemoryGraphWriteRequest, TemporalValidity, ToolExecutionFactV1, ToolExecutionOutcome,
@@ -582,7 +582,10 @@ fn feedback_finalize_request(
             external_content_used: true,
             candidate_ids: Vec::new(),
         },
-        learning: PostTurnLearningInputV2 {
+        learning: PostTurnLearningInputV3 {
+            method_learning_inputs: Vec::new(),
+            method_adoptions: Vec::new(),
+            method_task_evaluations: Vec::new(),
             tool_call_count,
             selection_receipt: None,
             runtime_skill_feedback: Vec::new(),

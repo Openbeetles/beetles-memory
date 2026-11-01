@@ -2,7 +2,7 @@
 //! Receipt TTL is an intake policy; durable evidence authentication has no wall clock.
 use std::collections::BTreeMap;
 
-use bm_core::memory::{ProceduralSelectionReceiptV1, TranscriptTurnRecord};
+use bm_core::memory::{MemoryTurnProjectionReceiptV2, TranscriptTurnRecord};
 use bm_core::{Error, Result};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub(crate) const NAMESPACE: &str = "procedural_selection_authorities_private";
-const DOMAIN: &[u8] = b"beetle.procedural-selection.authority.v1\0";
+const DOMAIN: &[u8] = b"beetle.turn-projection.authority.v2\0";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,7 +39,7 @@ impl ProceduralSelectionSigner {
         Self(authority)
     }
 
-    pub(crate) fn sign(&self, receipt: &mut ProceduralSelectionReceiptV1) -> Result<()> {
+    pub(crate) fn sign(&self, receipt: &mut MemoryTurnProjectionReceiptV2) -> Result<()> {
         self.0.sign(receipt)
     }
 }
@@ -66,6 +66,26 @@ pub(crate) fn authority_key(space: &str) -> String {
 }
 
 impl ProceduralSelectionAuthority {
+    /// Private equality commitment for the original submission, including
+    /// rejected material. Never expose raw-input hashes in reports or exports.
+    pub(crate) fn learning_input_commitment(
+        &self,
+        space: &str,
+        turn: &bm_core::memory::CanonicalTurnDelta,
+        input: &bm_core::memory::PostTurnLearningInputV3,
+    ) -> Result<String> {
+        self.validate(&authority_key(space))?;
+        if self.memory_space_id != space {
+            return Err(invalid());
+        }
+        let bytes = serde_json::to_vec(&(space, turn, input)).map_err(|_| invalid())?;
+        let mut mac = Hmac::<Sha256>::new_from_slice(&self.secret()?).map_err(|_| invalid())?;
+        mac.update(b"beetle.post-turn-learning.submission.v3\0");
+        mac.update(self.incarnation.as_bytes());
+        mac.update(&bytes);
+        Ok(format!("sha256:{:x}", mac.finalize().into_bytes()))
+    }
+
     pub(crate) fn incarnation(&self) -> &str {
         &self.incarnation
     }
@@ -120,7 +140,7 @@ impl ProceduralSelectionAuthority {
         Ok(())
     }
 
-    fn mac(&self, receipt: &ProceduralSelectionReceiptV1) -> Result<Hmac<Sha256>> {
+    fn mac(&self, receipt: &MemoryTurnProjectionReceiptV2) -> Result<Hmac<Sha256>> {
         self.validate(&authority_key(&receipt.identity.memory_space_id))?;
         if receipt.identity.memory_space_id != self.memory_space_id
             || receipt.signing_key_id != self.signing_key_id
@@ -140,7 +160,7 @@ impl ProceduralSelectionAuthority {
         Ok(mac)
     }
 
-    pub(crate) fn sign(&self, receipt: &mut ProceduralSelectionReceiptV1) -> Result<()> {
+    pub(crate) fn sign(&self, receipt: &mut MemoryTurnProjectionReceiptV2) -> Result<()> {
         receipt.signing_key_id = self.signing_key_id.clone();
         receipt.selection_digest = receipt.canonical_selection_digest()?;
         receipt.receipt_ref = receipt.canonical_receipt_ref()?;
@@ -148,7 +168,7 @@ impl ProceduralSelectionAuthority {
         self.verify(receipt)
     }
 
-    pub(crate) fn verify(&self, receipt: &ProceduralSelectionReceiptV1) -> Result<()> {
+    pub(crate) fn verify(&self, receipt: &MemoryTurnProjectionReceiptV2) -> Result<()> {
         if !receipt.validate_contract() {
             return Err(invalid());
         }
@@ -169,7 +189,7 @@ impl ProceduralSelectionAuthority {
 }
 
 pub(crate) fn verify_receipt_in_json(
-    receipt: &ProceduralSelectionReceiptV1,
+    receipt: &MemoryTurnProjectionReceiptV2,
     json: &BTreeMap<(String, String), Value>,
 ) -> Result<()> {
     let key = authority_key(&receipt.identity.memory_space_id);
@@ -270,6 +290,29 @@ pub(crate) fn intake_dependencies(record: &TranscriptTurnRecord) -> Result<Vec<(
         addresses.push(("task_learning".to_owned(), feedback.learning_id.clone()));
     }
     if let Some(receipt) = &evidence.selection_receipt {
+        // A signed projection is also used by runtime-owned Soul evidence.
+        // Its authority must be present in every bounded transaction snapshot,
+        // independently of whether a procedural producer supplied the turn.
+        addresses.push((
+            NAMESPACE.into(),
+            authority_key(&receipt.identity.memory_space_id),
+        ));
+        if let Some(admission) = &receipt.soul_source_admission {
+            let owner = &admission.owner;
+            let key = super::schema::subject_soul_scope_key(
+                &owner.memory_space_id,
+                &owner.subject_id,
+                &owner.soul_id,
+            )?;
+            addresses.push((
+                super::schema::SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE.into(),
+                key.clone(),
+            ));
+            addresses.push((
+                super::schema::SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE.into(),
+                key,
+            ));
+        }
         for selection in &receipt.agent_tool_experiences {
             if !evidence.agent_tool_feedback.iter().any(|feedback| {
                 feedback.registry_ref == selection.registry_ref
@@ -320,6 +363,14 @@ pub(crate) fn validate_new_intakes(
         }
         if !evidence.validate_contract() {
             return Err(invalid());
+        }
+        // A historical raw transcript cannot acquire learning authority later.
+        // Lifecycle removal is handled above by the None-evidence path.
+        if before.contains_key(address) {
+            return Err(invalid());
+        }
+        if let Some(receipt) = &evidence.selection_receipt {
+            validate_soul_turn_admission(receipt, before)?;
         }
         if let bm_core::memory::ProceduralFeedbackAuthorityV2::Producer {
             producer_revision, ..
@@ -524,14 +575,100 @@ pub(crate) fn validate_new_intakes(
     Ok(())
 }
 
+/// First-intake generation fence under the same backend lock as Transcript
+/// append. Historical receipts remain valid proofs of their original generation;
+/// they are not required to match the current head during Store-open validation.
+fn validate_soul_turn_admission(
+    receipt: &MemoryTurnProjectionReceiptV2,
+    before: &BTreeMap<(String, String), Value>,
+) -> Result<()> {
+    use super::schema::{
+        SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE as HEAD,
+        SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE as MANIFEST,
+    };
+    use bm_core::memory::{
+        SoulTurnSourceAdmissionV1, SubjectSoulExpectedStateV1, SubjectSoulLifecycleHeadV1,
+        SubjectSoulScopeManifestV1,
+    };
+    let Some(admission) = &receipt.soul_source_admission else {
+        return Ok(());
+    };
+    let owner = &admission.owner;
+    let key = super::schema::subject_soul_scope_key(
+        &owner.memory_space_id,
+        &owner.subject_id,
+        &owner.soul_id,
+    )?;
+    let current = match (
+        before.get(&(HEAD.into(), key.clone())),
+        before.get(&(MANIFEST.into(), key)),
+    ) {
+        (None, None)
+            if matches!(
+                &admission.basis,
+                SubjectSoulExpectedStateV1::PristineAbsent { .. }
+            ) =>
+        {
+            admission.clone()
+        }
+        (Some(head), Some(manifest)) => {
+            let head: SubjectSoulLifecycleHeadV1 =
+                serde_json::from_value(head.clone()).map_err(|_| invalid())?;
+            let manifest: SubjectSoulScopeManifestV1 =
+                serde_json::from_value(manifest.clone()).map_err(|_| invalid())?;
+            head.validate_contract().map_err(|_| invalid())?;
+            manifest.validate_contract().map_err(|_| invalid())?;
+            if head.memory_space_id != owner.memory_space_id
+                || head.subject_id != owner.subject_id
+                || head.soul_id != owner.soul_id
+                || manifest.memory_space_id != owner.memory_space_id
+                || manifest.subject_id != owner.subject_id
+                || manifest.soul_id != owner.soul_id
+                || manifest.generation != head.generation
+                || manifest.closure_digest != head.scope_manifest_digest
+            {
+                return Err(invalid());
+            }
+            SoulTurnSourceAdmissionV1 {
+                purpose: manifest
+                    .source_review
+                    .pending_basis()
+                    .map(|basis| bm_core::memory::SoulTurnSourcePurposeV1::SourceReview { basis })
+                    .unwrap_or(bm_core::memory::SoulTurnSourcePurposeV1::Growth),
+                owner: owner.clone(),
+                basis: SubjectSoulExpectedStateV1::Exact {
+                    generation: head.generation,
+                    revision: head.current_revision,
+                    lifecycle_state: head.state,
+                    head_digest: head.head_digest,
+                    manifest_digest: manifest.closure_digest,
+                },
+            }
+        }
+        _ => return Err(invalid()),
+    };
+    // Stale executions may still be retained as conversation history. Their
+    // original basis grants no current Soul-learning authority: consumption
+    // compares the generation again and the resulting Soul plan CASes its head.
+    let current_generation = match current.basis {
+        SubjectSoulExpectedStateV1::PristineAbsent { .. } => 1,
+        SubjectSoulExpectedStateV1::Exact { generation, .. } => generation,
+    };
+    if admission.generation()? > current_generation {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use bm_core::memory::{ProceduralApplicabilityContextV1, ProceduralProjectionIdentityV1};
 
-    pub(crate) fn receipt() -> ProceduralSelectionReceiptV1 {
-        ProceduralSelectionReceiptV1 {
-            schema_version: 1,
+    pub(crate) fn receipt() -> MemoryTurnProjectionReceiptV2 {
+        MemoryTurnProjectionReceiptV2 {
+            soul_source_admission: None,
+            schema_version: bm_core::memory::PROCEDURAL_SELECTION_RECEIPT_SCHEMA_VERSION,
             receipt_ref: String::new(),
             signing_key_id: String::new(),
             issued_at: 100,
@@ -555,6 +692,53 @@ pub(crate) mod tests {
             delivery_digest: format!("sha256:{}", "a".repeat(64)),
             authority_tag: String::new(),
         }
+    }
+
+    #[test]
+    fn soul_basis_is_authenticated_and_pristine_requires_both_roots_absent() {
+        use bm_core::memory::{
+            SoulTurnSourceAdmissionV1, SubjectSoulExpectedStateV1, SubjectSoulOwnerV1,
+        };
+        let authority = ProceduralSelectionAuthority::fresh("space-a", 10).expect("authority");
+        let mut receipt = receipt();
+        receipt.soul_source_admission = Some(SoulTurnSourceAdmissionV1 {
+            purpose: bm_core::memory::SoulTurnSourcePurposeV1::Growth,
+            owner: SubjectSoulOwnerV1 {
+                memory_space_id: "space-a".into(),
+                subject_id: "subject-a".into(),
+                soul_id: "soul-a".into(),
+            },
+            basis: SubjectSoulExpectedStateV1::PristineAbsent {
+                closure_certificate_digest: "a".repeat(64),
+            },
+        });
+        authority.sign(&mut receipt).expect("signed Soul basis");
+        authority.verify(&receipt).expect("authenticated");
+        validate_soul_turn_admission(&receipt, &BTreeMap::new()).expect("pristine");
+        let mut altered = receipt.clone();
+        altered
+            .soul_source_admission
+            .as_mut()
+            .expect("basis")
+            .owner
+            .soul_id = "soul-b".into();
+        altered.selection_digest = altered.canonical_selection_digest().expect("digest");
+        altered.receipt_ref = altered.canonical_receipt_ref().expect("ref");
+        authority
+            .verify(&altered)
+            .expect_err("canonical recomputation cannot change Soul identity");
+        let key = super::super::schema::subject_soul_scope_key("space-a", "subject-a", "soul-a")
+            .expect("key");
+        let mut partial = BTreeMap::new();
+        partial.insert(
+            (
+                super::super::schema::SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE.into(),
+                key,
+            ),
+            serde_json::json!({}),
+        );
+        validate_soul_turn_admission(&receipt, &partial)
+            .expect_err("half root cannot be interpreted as pristine");
     }
 
     #[test]
@@ -599,7 +783,7 @@ pub(crate) mod tests {
             } else {
                 Value::from(format!("sha256:{}", "b".repeat(64)))
             };
-            let altered: ProceduralSelectionReceiptV1 =
+            let altered: MemoryTurnProjectionReceiptV2 =
                 serde_json::from_value(changed).expect("changed receipt");
             authority
                 .verify(&altered)

@@ -1,11 +1,11 @@
 use bm_core::memory::{
     GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef, GovernedOwnerRevisionRef,
-    PostTurnLearningEvidenceV2, ProceduralApplicabilityContextV1,
-    ProceduralFeedbackApplicationLedgerV2, ProceduralFeedbackAuthorityV2,
+    MemoryTurnProjectionReceiptV2, PostTurnLearningEvidenceV3, ProceduralApplicabilityContextV1,
+    ProceduralFeedbackApplicationLedgerV3, ProceduralFeedbackAuthorityV2,
     ProceduralFeedbackIdentityV1, ProceduralFeedbackJobRefV2, ProceduralFeedbackJobStatusV1,
     ProceduralFeedbackJobV2, ProceduralFeedbackReceiptV2, ProceduralFeedbackScopeIndexV2,
-    ProceduralProjectionIdentityV1, ProceduralSelectionReceiptV1,
-    POST_TURN_LEARNING_EVIDENCE_SCHEMA_VERSION, PROCEDURAL_SELECTION_RECEIPT_SCHEMA_VERSION,
+    ProceduralProjectionIdentityV1, POST_TURN_LEARNING_EVIDENCE_SCHEMA_VERSION,
+    PROCEDURAL_SELECTION_RECEIPT_SCHEMA_VERSION,
 };
 use bm_core::skills::AgentToolRegistryScope;
 
@@ -173,6 +173,7 @@ fn pfi2_producer() -> bm_core::memory::ProceduralProducerBindingV1 {
     let feedback = pfi2_input(ProceduralSourceSensitivity::NonPrivate);
     ProceduralProducerBindingV1::build(
         ProceduralProducerSpecV1 {
+            method_evaluators: Vec::new(),
             binding_id: "execution-witness-a".into(),
             scope: ProceduralProducerScopeV1 {
                 memory_space_id: "space-a".into(),
@@ -185,6 +186,9 @@ fn pfi2_producer() -> bm_core::memory::ProceduralProducerBindingV1 {
             },
             source_authority: ProceduralProducerSourceAuthorityV1::RuntimeObservation,
             claims: ProceduralProducerClaimsV1 {
+                method_learning_materials: false,
+                method_adoptions: false,
+                method_task_evaluations: false,
                 execution_facts: true,
                 method_declarations: true,
                 usage_feedback: false,
@@ -904,12 +908,168 @@ fn pfi2_producer_revision_retains_its_exact_durable_operation_identity() {
 }
 
 #[test]
+fn retained_task_authority_ignores_unrelated_claims_but_preserves_exact_witness_checks() {
+    use bm_core::memory::*;
+    let mut spec = pfi2_producer().spec;
+    spec.claims.method_adoptions = true;
+    spec.claims.method_task_evaluations = true;
+    spec.method_evaluators = vec![MethodTaskEvaluatorV1 {
+        id: "independent-verifier".into(),
+        revision: 1,
+    }];
+    let historical = ProceduralProducerBindingV1::build(
+        spec,
+        ProceduralProducerStateV1::Active,
+        producer_operation("task-grant"),
+        100,
+        None,
+    )
+    .unwrap();
+    let tool = &historical.spec.tools[0];
+    let method = MethodContentRefV1 {
+        memory_space_id: "space-a".into(),
+        mounted_subject_id: "agent-a".into(),
+        registry_ref: tool.registry_ref.clone(),
+        tool_id: tool.tool_id.clone(),
+        schema_fingerprint: tool.schema_fingerprint.clone(),
+        owner_revision: GovernedOwnerRevisionRef::try_new(
+            GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::AgentToolExperience, "method-a"),
+            1,
+        )
+        .unwrap(),
+        content_digest: digest('d'),
+    };
+    let mut evidence =
+        tool_learning_evidence("1. Inspect the manifest.\n2. Extract into the workspace.");
+    evidence.authority = ProceduralFeedbackAuthorityV2::Producer {
+        producer_revision: historical.revision_ref().unwrap(),
+        source_authority: historical.spec.source_authority.clone(),
+        confirmation: None,
+    };
+    evidence.method_adoptions = vec![MethodAdoptionEvidenceV1 {
+        method: method.clone(),
+        task_id: "task-a".into(),
+        adoption: MethodAdoptionStatusV1::Adopted,
+        observation_refs: vec!["observation-a".into()],
+    }];
+    evidence.method_task_evaluations = vec![MethodTaskEvaluationV1 {
+        method,
+        task_id: "task-a".into(),
+        task_root_id: "root-a".into(),
+        independence_group: "scenario-a".into(),
+        evaluator_id: "independent-verifier".into(),
+        evaluator_revision: 1,
+        outcome: MethodTaskOutcomeV1::Failed,
+        observation_refs: vec!["observation-a".into()],
+    }];
+    evidence.learning_evidence_digest = evidence.canonical_digest().unwrap();
+    assert!(evidence.validate_contract());
+    let source = ProceduralFeedbackIdentityV1::new(
+        "space-a",
+        "agent-a",
+        "sdk.direct",
+        "chat-a",
+        "conversation-a",
+        "turn-a",
+    )
+    .unwrap();
+    let job = ProceduralFeedbackJobV2::pending(
+        source.clone(),
+        1,
+        digest('f'),
+        evidence.learning_evidence_digest.clone(),
+        3,
+        5,
+        100,
+    )
+    .unwrap();
+    let executions = evidence.execution_contributions_for_job(&job).unwrap();
+    let mut task = MethodTaskContributionV1 {
+        source,
+        source_job_id: job.job_id.clone(),
+        source_transcript_digest: digest('f'),
+        learning_evidence_digest: evidence.learning_evidence_digest.clone(),
+        producer: historical.revision_ref().unwrap(),
+        adoption_ordinal: 0,
+        evaluation_ordinal: 0,
+        adoption: evidence.method_adoptions[0].clone(),
+        evaluation: evidence.method_task_evaluations[0].clone(),
+        method_content_digest: digest('a'),
+        execution_refs: executions
+            .iter()
+            .map(|fact| fact.reference().unwrap())
+            .collect(),
+        delivery_status: MemoryTurnDeliveryStatus::Delivered,
+        observed_at: 100,
+        contribution_id: String::new(),
+        content_digest: String::new(),
+    };
+    task.contribution_id = task.identity_digest().unwrap();
+    task.content_digest = task.canonical_digest().unwrap();
+    assert!(task.validate_contract());
+    let build_current = |spec| {
+        ProceduralProducerBindingV1::build(
+            spec,
+            ProceduralProducerStateV1::Active,
+            producer_operation("task-current"),
+            101,
+            Some(&historical),
+        )
+        .unwrap()
+    };
+    let mut narrowed = historical.spec.clone();
+    narrowed.claims.method_declarations = false;
+    let current = build_current(narrowed);
+    assert!(historical
+        .authorize_evidence_with_current(&current, &historical.spec.scope, &evidence)
+        .is_err());
+    assert_eq!(
+        historical.authorize_task_with_current(&current, &evidence, &task, &job),
+        Ok(()),
+        "declaration narrowing does not erase an actual failed task"
+    );
+    for change in 0..4 {
+        let mut denied = current.spec.clone();
+        match change {
+            0 => denied.claims.method_adoptions = false,
+            1 => {
+                denied.claims.method_task_evaluations = false;
+                denied.method_evaluators.clear();
+            }
+            2 => {
+                denied.claims.execution_facts = false;
+                denied.claims.source_classifications.clear();
+            }
+            _ => denied.method_evaluators[0].revision = 2,
+        }
+        let denied = build_current(denied);
+        assert!(historical
+            .authorize_task_with_current(&denied, &evidence, &task, &job)
+            .is_err());
+    }
+    let mut detached = task.clone();
+    detached.adoption_ordinal = 1;
+    detached.content_digest = detached.canonical_digest().unwrap();
+    assert!(detached.validate_contract());
+    assert!(historical
+        .authorize_task_with_current(&current, &evidence, &detached, &job)
+        .is_err());
+    let mut detached = task;
+    detached.execution_refs[0].content_digest = digest('b');
+    detached.content_digest = detached.canonical_digest().unwrap();
+    assert!(detached.validate_contract());
+    assert!(historical
+        .authorize_task_with_current(&current, &evidence, &detached, &job)
+        .is_err());
+}
+
+#[test]
 fn pfi2_retained_evidence_is_intersected_with_current_producer_authority() {
     use bm_core::memory::*;
     let producer = pfi2_producer();
     let evidence =
         tool_learning_evidence("1. Inspect the manifest.\n2. Extract into the workspace.");
-    let check = |current: &ProceduralProducerBindingV1, evidence: &PostTurnLearningEvidenceV2| {
+    let check = |current: &ProceduralProducerBindingV1, evidence: &PostTurnLearningEvidenceV3| {
         producer.authorize_evidence_with_current(current, &producer.spec.scope, evidence)
     };
     assert_eq!(check(&producer, &evidence), Ok(()));
@@ -1091,7 +1251,7 @@ fn pfi2_execution_reduction_is_exact_deduplicated_and_scope_bound() {
 fn pfi2_experience_body_separates_counts_from_exact_method_sources() {
     use bm_core::memory::*;
     use bm_core::skills::{
-        AgentToolExperienceBodyV1, AgentToolExperienceFocusV1, AgentToolMethodSourceRefV1,
+        AgentToolExperienceBodyV1, AgentToolExperienceFocusV1, AgentToolMethodSourceRefV2,
     };
     let producer = pfi2_producer();
     let input = pfi2_input(ProceduralSourceSensitivity::NonPrivate);
@@ -1139,6 +1299,7 @@ fn pfi2_experience_body_separates_counts_from_exact_method_sources() {
     assert!(serde_json::from_value::<AgentToolExperienceBodyV1>(wire).is_err());
     let method = &input.method_evidence[0];
     let mut body = AgentToolExperienceBodyV1::Method {
+        usage_contributions: Vec::new(),
         task_signature: method.task_signature.clone(),
         procedure: method.body.clone(),
         constraints: Vec::new(),
@@ -1146,7 +1307,7 @@ fn pfi2_experience_body_separates_counts_from_exact_method_sources() {
     };
     let method_digest = body.method_content_digest().unwrap().unwrap();
     if let AgentToolExperienceBodyV1::Method { sources, .. } = &mut body {
-        sources.push(AgentToolMethodSourceRefV1 {
+        sources.push(AgentToolMethodSourceRefV2::ProducerDeclaration {
             source_job_id: reference.source_job_id.clone(),
             method_id: method.method_id.clone(),
             method_digest,
@@ -1377,7 +1538,7 @@ fn digest(byte: char) -> String {
     format!("sha256:{}", byte.to_string().repeat(64))
 }
 
-fn tool_learning_evidence(summary: &str) -> PostTurnLearningEvidenceV2 {
+fn tool_learning_evidence(summary: &str) -> PostTurnLearningEvidenceV3 {
     use bm_core::memory::*;
     let mut input = pfi2_input(ProceduralSourceSensitivity::NonPrivate);
     input.method_evidence[0].body = summary.into();
@@ -1392,7 +1553,11 @@ fn tool_learning_evidence(summary: &str) -> PostTurnLearningEvidenceV2 {
         method_evidence: input.method_evidence,
         rejected_methods: Vec::new(),
     };
-    let mut evidence = PostTurnLearningEvidenceV2 {
+    let mut evidence = PostTurnLearningEvidenceV3 {
+        method_learning_inputs: Vec::new(),
+        method_adoptions: Vec::new(),
+        method_task_evaluations: Vec::new(),
+        submitted_input_commitment: Some(format!("sha256:{}", "a".repeat(64))),
         schema_version: POST_TURN_LEARNING_EVIDENCE_SCHEMA_VERSION,
         memory_space_id: "space-a".into(),
         mounted_subject_id: "agent-a".into(),
@@ -1527,7 +1692,8 @@ fn selection_receipt_binds_projection_scope_and_delivery() {
     let applicability =
         ProceduralApplicabilityContextV1::try_new(None, None, Some("conversation-a".to_string()))
             .expect("context");
-    let mut receipt = ProceduralSelectionReceiptV1 {
+    let mut receipt = MemoryTurnProjectionReceiptV2 {
+        soul_source_admission: None,
         schema_version: PROCEDURAL_SELECTION_RECEIPT_SCHEMA_VERSION,
         receipt_ref: String::new(),
         signing_key_id: "selection-key-v1".to_string(),
@@ -1600,7 +1766,11 @@ fn confirmation_cannot_claim_an_unrelated_evidence_digest() {
 
 #[test]
 fn standard_skill_feedback_requires_the_actual_selection_receipt() {
-    let mut evidence = PostTurnLearningEvidenceV2 {
+    let mut evidence = PostTurnLearningEvidenceV3 {
+        method_learning_inputs: Vec::new(),
+        method_adoptions: Vec::new(),
+        method_task_evaluations: Vec::new(),
+        submitted_input_commitment: Some(format!("sha256:{}", "a".repeat(64))),
         schema_version: POST_TURN_LEARNING_EVIDENCE_SCHEMA_VERSION,
         memory_space_id: "space-a".into(),
         mounted_subject_id: "subject-a".into(),
@@ -1994,15 +2164,85 @@ fn pfi2_checkpoint_visibility_is_exact_material_not_owner_wide() {
         ProceduralReconciliationOwnerProofV1 {
             binding: first.clone(),
             disposition: ProceduralReconciliationReadDispositionV1::Withdrawn,
+            withdrawn_task_refs: Vec::new(),
         },
         ProceduralReconciliationOwnerProofV1 {
             binding: second.clone(),
             disposition: ProceduralReconciliationReadDispositionV1::Visible,
+            withdrawn_task_refs: Vec::new(),
         },
     ];
     checkpoint.content_digest = checkpoint.canonical_digest().unwrap();
     assert!(checkpoint.permits_exact_read(&work, &second).unwrap());
     assert!(!checkpoint.permits_exact_read(&work, &first).unwrap());
+    // A whole-owner read denial and exact per-task withdrawal are different
+    // claims. The latter is mandatory wire data and part of the epoch digest.
+    let reference = MethodTaskContributionRefV1 {
+        contribution_id: digest('a'),
+        content_digest: digest('b'),
+        source_job_id: "synthetic-task-job".into(),
+        method: MethodContentRefV1 {
+            memory_space_id: work.scope.memory_space_id.clone(),
+            mounted_subject_id: work.scope.mounted_subject_id.clone(),
+            registry_ref: producer.spec.tools[0].registry_ref.clone(),
+            tool_id: producer.spec.tools[0].tool_id.clone(),
+            schema_fingerprint: producer.spec.tools[0].schema_fingerprint.clone(),
+            owner_revision: GovernedOwnerRevisionRef::try_new(owner.clone(), 1).unwrap(),
+            content_digest: digest('c'),
+        },
+        method_content_digest: digest('d'),
+    };
+    let mut withdrawal = checkpoint.clone();
+    withdrawal.verified_owners[0].withdrawn_task_refs = vec![reference.clone()];
+    assert!(
+        withdrawal.validate_for(&work).is_err(),
+        "unsealed task withdrawal changes the checkpoint commitment"
+    );
+    withdrawal.content_digest = withdrawal.canonical_digest().unwrap();
+    assert_ne!(withdrawal.content_digest, checkpoint.content_digest);
+    withdrawal.validate_for(&work).unwrap();
+    for fault in ["duplicate", "subject", "owner", "future", "legacy_schema"] {
+        let mut invalid = withdrawal.clone();
+        match fault {
+            "duplicate" => invalid.verified_owners[0]
+                .withdrawn_task_refs
+                .push(reference.clone()),
+            "subject" => {
+                invalid.verified_owners[0].withdrawn_task_refs[0]
+                    .method
+                    .mounted_subject_id = "other-subject".into()
+            }
+            "owner" => {
+                invalid.verified_owners[0].withdrawn_task_refs[0]
+                    .method
+                    .owner_revision
+                    .owner_ref
+                    .owner_id = format!("agent_tool_experience:{}", digest('f'))
+            }
+            "future" => {
+                invalid.verified_owners[0].withdrawn_task_refs[0]
+                    .method
+                    .owner_revision
+                    .owner_revision = 2
+            }
+            _ => invalid.schema_version = 1,
+        }
+        invalid.content_digest = invalid.canonical_digest().unwrap();
+        assert!(
+            invalid.validate_for(&work).is_err(),
+            "invalid task withdrawal must fail closed: {fault}"
+        );
+    }
+    let mut legacy = serde_json::to_value(&withdrawal.verified_owners[0]).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("withdrawn_task_refs");
+    assert!(
+        serde_json::from_value::<ProceduralReconciliationOwnerProofV1>(legacy).is_err(),
+        "absent task withdrawal truth must never default to a compatibility path"
+    );
+
     let unknown = ProceduralAppliedOwnerBindingV1::AgentToolExperience {
         owner_revision: GovernedOwnerRevisionRef::try_new(owner, 3).unwrap(),
         content_digest: digest('3'),
@@ -2184,7 +2424,7 @@ fn application_ledger_binds_exact_job_evidence_and_owner_revision() {
         1,
     )
     .expect("owner revision");
-    let ledger = ProceduralFeedbackApplicationLedgerV2::build(
+    let ledger = ProceduralFeedbackApplicationLedgerV3::build(
         &job,
         vec![
             bm_core::memory::ProceduralAppliedOwnerBindingV1::AgentToolExperience {
@@ -2192,6 +2432,7 @@ fn application_ledger_binds_exact_job_evidence_and_owner_revision() {
                 content_digest: digest('e'),
             },
         ],
+        vec![],
         vec![],
         vec![],
         1,
@@ -2240,7 +2481,8 @@ fn pfi2_application_ledger_cannot_reseal_a_foreign_job() {
     let job =
         ProceduralFeedbackJobV2::pending(identity, 1, digest('1'), digest('2'), 1, 5, 100).unwrap();
     let mut ledger =
-        ProceduralFeedbackApplicationLedgerV2::build(&job, vec![], vec![], vec![], 1, 100).unwrap();
+        ProceduralFeedbackApplicationLedgerV3::build(&job, vec![], vec![], vec![], vec![], 1, 100)
+            .unwrap();
     assert!(ledger.validate().is_ok());
     ledger.identity.turn_id = "foreign-turn".into();
     ledger.application_digest = ledger.canonical_digest().unwrap();
@@ -2312,10 +2554,11 @@ fn pfi2_ledger_retains_failed_execution_and_rejects_foreign_or_duplicate_contrib
         fact,
     )
     .unwrap();
-    let ledger = ProceduralFeedbackApplicationLedgerV2::build(
+    let ledger = ProceduralFeedbackApplicationLedgerV3::build(
         &job,
         vec![],
         vec![contribution.clone()],
+        vec![],
         vec![],
         1,
         100,
@@ -2327,13 +2570,14 @@ fn pfi2_ledger_retains_failed_execution_and_rejects_foreign_or_duplicate_contrib
     );
     let encoded = serde_json::to_string(&ledger).unwrap();
     assert_eq!(
-        serde_json::from_str::<ProceduralFeedbackApplicationLedgerV2>(&encoded).unwrap(),
+        serde_json::from_str::<ProceduralFeedbackApplicationLedgerV3>(&encoded).unwrap(),
         ledger
     );
-    assert!(ProceduralFeedbackApplicationLedgerV2::build(
+    assert!(ProceduralFeedbackApplicationLedgerV3::build(
         &job,
         vec![],
         vec![contribution.clone(), contribution.clone()],
+        vec![],
         vec![],
         1,
         100
@@ -2343,10 +2587,11 @@ fn pfi2_ledger_retains_failed_execution_and_rejects_foreign_or_duplicate_contrib
     foreign.source.turn_id = "foreign-turn".into();
     foreign.contribution_id = foreign.canonical_identity().unwrap();
     foreign.content_digest = foreign.canonical_digest().unwrap();
-    assert!(ProceduralFeedbackApplicationLedgerV2::build(
+    assert!(ProceduralFeedbackApplicationLedgerV3::build(
         &job,
         vec![],
         vec![foreign],
+        vec![],
         vec![],
         1,
         100
@@ -2359,7 +2604,7 @@ fn pfi2_subject_tool_reduction_preserves_real_chat_identity_and_stale_decisions(
     use bm_core::memory::*;
     use bm_core::skills::{
         AgentToolExperienceBodyV1 as Body, AgentToolExperienceStatus as Status,
-        AgentToolMethodSourceRefV1,
+        AgentToolMethodSourceRefV2,
     };
     let producer = pfi2_producer();
     let tool = producer.spec.tools[0].clone();
@@ -2392,7 +2637,33 @@ fn pfi2_subject_tool_reduction_preserves_real_chat_identity_and_stale_decisions(
             .unwrap(),
         );
     }
+    let execution_body = Body::Execution {
+        counts: ToolExecutionCountsV1::default(),
+        contributions: facts.iter().map(|fact| fact.reference().unwrap()).collect(),
+    };
+    let (
+        Body::Execution {
+            counts: execution_counts,
+            ..
+        },
+        Status::Active,
+    ) = reduce_agent_tool_experience_contributions(
+        &scope,
+        &tool,
+        &execution_body,
+        &facts,
+        &[],
+        None,
+        8,
+    )
+    .unwrap()
+    else {
+        panic!("execution evidence must remain active");
+    };
+    assert_eq!(execution_counts.execution_success_sample(), Some((2, 2)),
+        "distinct real chats preserve both execution facts without manufacturing method qualification");
     let mut body = Body::Method {
+        usage_contributions: Vec::new(),
         task_signature: input.method_evidence[0].task_signature.clone(),
         procedure: input.method_evidence[0].body.clone(),
         constraints: Vec::new(),
@@ -2402,23 +2673,21 @@ fn pfi2_subject_tool_reduction_preserves_real_chat_identity_and_stale_decisions(
     if let Body::Method { sources, .. } = &mut body {
         *sources = facts
             .iter()
-            .map(|fact| AgentToolMethodSourceRefV1 {
+            .map(|fact| AgentToolMethodSourceRefV2::ProducerDeclaration {
                 source_job_id: fact.reference().unwrap().source_job_id,
                 method_id: "method-a".into(),
                 method_digest: method_digest.clone(),
                 execution_refs: vec![fact.reference().unwrap()],
             })
             .collect();
-        sources.sort_by(|a, b| {
-            (&a.source_job_id, &a.method_id).cmp(&(&b.source_job_id, &b.method_id))
-        });
+        sources.sort_by(|a, b| a.source_job_id().cmp(b.source_job_id()));
     }
     assert_eq!(
-        reduce_agent_tool_experience_contributions(&scope, &tool, &body, &facts, None, 8)
+        reduce_agent_tool_experience_contributions(&scope, &tool, &body, &facts, &[], None, 8)
             .unwrap()
             .1,
-        Status::Active,
-        "equal local turn/call IDs in distinct real chats remain independent evidence"
+        Status::Candidate,
+        "distinct execution chats alone do not prove method adoption or independent task success"
     );
     assert_eq!(
         reduce_agent_tool_experience_contributions(
@@ -2426,6 +2695,7 @@ fn pfi2_subject_tool_reduction_preserves_real_chat_identity_and_stale_decisions(
             &tool,
             &body,
             &facts,
+            &[],
             Some(Status::Stale),
             8
         )
@@ -2436,9 +2706,9 @@ fn pfi2_subject_tool_reduction_preserves_real_chat_identity_and_stale_decisions(
     let Body::Method { sources, .. } = &mut body else {
         unreachable!()
     };
-    sources.retain(|source| source.source_job_id == facts[0].reference().unwrap().source_job_id);
+    sources.retain(|source| source.source_job_id() == facts[0].reference().unwrap().source_job_id);
     assert_eq!(
-        reduce_agent_tool_experience_contributions(&scope, &tool, &body, &facts[..1], None, 8)
+        reduce_agent_tool_experience_contributions(&scope, &tool, &body, &facts[..1], &[], None, 8)
             .unwrap()
             .1,
         Status::Candidate
@@ -2452,6 +2722,7 @@ fn pfi2_subject_tool_reduction_preserves_real_chat_identity_and_stale_decisions(
         &tool,
         &body,
         &facts[..1],
+        &[],
         None,
         8
     )

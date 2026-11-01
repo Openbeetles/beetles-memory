@@ -48,6 +48,7 @@ pub(super) fn decide_self_runtime(
     relationship_topology: Option<&RelationshipTopology>,
     relationship_constitution: Option<&RelationshipConstitution>,
     current_relationship_scope_id: &str,
+    subject_persona_evidence: Option<&crate::memory::RecentPersonaEvidence>,
     recent_persona_evidence: Option<&crate::memory::RecentPersonaEvidence>,
     world_sense: Option<&crate::memory::WorldSense>,
     world_snapshot: &crate::memory::WorldSnapshot,
@@ -214,6 +215,9 @@ pub(super) fn decide_self_runtime(
         ),
         policy.grounding_max_len,
     );
+    let subject_persona_evidence_block = subject_persona_evidence.and_then(|evidence| {
+        render_recent_persona_evidence_block(evidence, policy.grounding_max_len)
+    });
     let recent_persona_evidence_block = recent_persona_evidence.and_then(|evidence| {
         render_recent_persona_evidence_block(evidence, policy.grounding_max_len)
     });
@@ -255,13 +259,22 @@ pub(super) fn decide_self_runtime(
             autonomy_strategy_block.as_deref(),
             private_memory_boundary_block.as_deref(),
             mental_privacy_boundary_block.as_deref(),
-            recent_persona_evidence_block.as_deref(),
             boundary_flush_line.as_deref(),
             factual_refresh_summary_line.as_deref(),
             external_content_line.as_deref(),
         ],
     );
-    input.push_str("Source ids you may reference for upward distillation: inner_life, private_docs, private_garden, self_model, self_authored_core, self_continuity, boundary_persona, outer_voice, world_sense, autonomy_strategy, recent_persona_evidence, relationship_constitution, recent_transcript.\n");
+    append_self_runtime_grounding_section(
+        &mut input,
+        "## Subject Growth Evidence (subject_persona_evidence; never relationship authority)",
+        &[subject_persona_evidence_block.as_deref()],
+    );
+    append_self_runtime_grounding_section(
+        &mut input,
+        "## Exact Relationship Evidence (recent_persona_evidence; never subject promotion)",
+        &[recent_persona_evidence_block.as_deref()],
+    );
+    input.push_str("Source ids you may reference for upward distillation: inner_life, private_docs, private_garden, self_model, self_authored_core, self_continuity, boundary_persona, outer_voice, world_sense, autonomy_strategy, subject_persona_evidence, recent_persona_evidence, relationship_constitution, recent_transcript.\n");
     input.push_str("Recent transcript:\n");
     for message in recent {
         let preview = truncate_content_to_max(&message.content, policy.transcript_preview_chars);

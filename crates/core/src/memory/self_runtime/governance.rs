@@ -7,6 +7,7 @@ pub(super) struct PersonaDistillationSnapshot {
     pub(super) world_context_at: u64,
     pub(super) world_sense_at: u64,
     pub(super) autonomy_strategy_at: u64,
+    pub(super) subject_persona_evidence_at: u64,
     pub(super) recent_persona_evidence_at: u64,
     pub(super) self_model_at: u64,
     pub(super) self_authored_core_at: u64,
@@ -15,6 +16,7 @@ pub(super) struct PersonaDistillationSnapshot {
     pub(super) has_inner_life: bool,
     pub(super) has_world_sense: bool,
     pub(super) has_autonomy_strategy: bool,
+    pub(super) has_subject_persona_evidence: bool,
     pub(super) has_recent_persona_evidence: bool,
 }
 
@@ -145,6 +147,7 @@ fn build_persona_distillation_snapshot_from_layers(
     mental_privacy_state: Option<&crate::memory::MentalPrivacyState>,
     world_sense: Option<&crate::memory::WorldSense>,
     autonomy_strategy: Option<&crate::memory::AutonomyStrategy>,
+    subject_persona_evidence: Option<&crate::memory::RecentPersonaEvidence>,
     recent_persona_evidence: Option<&crate::memory::RecentPersonaEvidence>,
 ) -> PersonaDistillationSnapshot {
     let private_docs_at = private_docs.map(|docs| docs.updated_at).unwrap_or(0);
@@ -170,6 +173,14 @@ fn build_persona_distillation_snapshot_from_layers(
     let autonomy_strategy_at = autonomy_strategy
         .map(|strategy| strategy.updated_at)
         .unwrap_or(0);
+    let subject_persona_evidence = subject_persona_evidence.filter(|evidence| {
+        evidence.counterevidence_turns == 0 && evidence.repeated_relationship_posture.is_empty()
+    });
+    let recent_persona_evidence =
+        recent_persona_evidence.filter(|evidence| evidence.counterevidence_turns == 0);
+    let subject_persona_evidence_at = subject_persona_evidence
+        .map(|evidence| evidence.promotable_growth_updated_at())
+        .unwrap_or(0);
     let recent_persona_evidence_at = recent_persona_evidence
         .map(|evidence| evidence.promotable_growth_updated_at())
         .unwrap_or(0);
@@ -179,6 +190,7 @@ fn build_persona_distillation_snapshot_from_layers(
         world_context_at: world_sense_at.max(autonomy_strategy_at),
         world_sense_at,
         autonomy_strategy_at,
+        subject_persona_evidence_at,
         recent_persona_evidence_at,
         self_model_at: self_model.map(|model| model.updated_at).unwrap_or(0),
         self_authored_core_at: self_authored_core.map(|core| core.updated_at).unwrap_or(0),
@@ -191,6 +203,8 @@ fn build_persona_distillation_snapshot_from_layers(
         has_inner_life: inner_life.is_some(),
         has_world_sense: world_sense.is_some(),
         has_autonomy_strategy: autonomy_strategy.is_some(),
+        has_subject_persona_evidence: subject_persona_evidence
+            .is_some_and(|evidence| evidence.has_promotable_growth_signals()),
         has_recent_persona_evidence: recent_persona_evidence
             .is_some_and(|evidence| evidence.has_promotable_growth_signals()),
     }
@@ -210,7 +224,6 @@ pub(super) fn re_finalize_staged_self_runtime_decision(
     refreshed_self_continuity: Option<&crate::memory::SelfContinuity>,
     refreshed_outer_voice: Option<&crate::memory::OuterVoice>,
     refreshed_mental_privacy: Option<&crate::memory::MentalPrivacyState>,
-    recent_persona_evidence: Option<&crate::memory::RecentPersonaEvidence>,
 ) {
     let Some(existing_decision) = decision.take() else {
         return;
@@ -232,7 +245,8 @@ pub(super) fn re_finalize_staged_self_runtime_decision(
             .refreshed_autonomy_strategy
             .as_ref()
             .or(state.autonomy_strategy.as_ref()),
-        recent_persona_evidence,
+        state.subject_persona_evidence.as_ref(),
+        state.recent_persona_evidence.as_ref(),
     );
     let mut finalized = finalize_self_runtime_decision(
         existing_decision,
@@ -260,7 +274,8 @@ pub(super) fn re_finalize_staged_self_runtime_decision(
         refreshed_mental_privacy.is_some(),
         prelude.refreshed_world_sense.is_some() || state.world_sense.is_some(),
         prelude.refreshed_autonomy_strategy.is_some() || state.autonomy_strategy.is_some(),
-        recent_persona_evidence.is_some(),
+        snapshot.has_subject_persona_evidence,
+        snapshot.has_recent_persona_evidence,
     );
     *decision = Some(finalized);
 }
@@ -418,6 +433,7 @@ fn finalize_self_runtime_decision(
         has_mental_privacy,
         distillation_snapshot.has_world_sense,
         distillation_snapshot.has_autonomy_strategy,
+        distillation_snapshot.has_subject_persona_evidence,
         distillation_snapshot.has_recent_persona_evidence,
     );
     decision
@@ -427,6 +443,35 @@ pub(super) fn apply_personality_runtime_governance_gate(
     decision: &mut SelfRuntimeDecision,
     gate: &crate::memory::PersonalityRuntimeGovernanceGate,
 ) {
+    // Relationship-local effects require their own verified source authority.
+    // Subject readiness must never bypass this check through the early return.
+    if !gate.relationship_authority_ready {
+        decision.refresh_boundary_persona = false;
+        decision.boundary_persona_intent.clear();
+        decision.refresh_outer_voice = false;
+        decision.outer_voice_intent.clear();
+        decision.outer_voice_sources.clear();
+    } else if !gate.allow_relationship_expression {
+        decision.refresh_boundary_persona = gate.repair_plan.repair_relationship_constitution;
+        if decision.refresh_boundary_persona {
+            if decision.boundary_persona_intent.trim().is_empty() {
+                decision.boundary_persona_intent = "Repair relation-local boundary drift so the relationship constitution can realign".to_string();
+            }
+        } else {
+            decision.boundary_persona_intent.clear();
+        }
+        decision.refresh_outer_voice = gate.repair_plan.repair_outer_voice;
+        if decision.refresh_outer_voice {
+            if decision.outer_voice_intent.trim().is_empty() {
+                decision.outer_voice_intent =
+                    "Repair outward expression drift without promoting new board-level persona"
+                        .to_string();
+            }
+        } else {
+            decision.outer_voice_intent.clear();
+            decision.outer_voice_sources.clear();
+        }
+    }
     if gate.allow_upward_distillation {
         return;
     }
@@ -434,12 +479,29 @@ pub(super) fn apply_personality_runtime_governance_gate(
     // Conservative runtime governance freezes generic upward promotion, but still allows the
     // already-inspected repair path to execute so governance debt can converge instead of only
     // accumulating.
-    decision.refresh_self_model = false;
-    decision.self_model_intent.clear();
-    decision.self_model_sources.clear();
+    decision.refresh_self_model = gate.allow_subject_bootstrap;
+    if gate.allow_subject_bootstrap {
+        decision.self_model_intent = "Form an initial self model only from verified stable subject evidence; abstain if no durable continuity is supported".to_string();
+        decision.self_model_sources = vec!["subject_persona_evidence".to_string()];
+    } else {
+        decision.self_model_intent.clear();
+        decision.self_model_sources.clear();
+    }
+    decision.refresh_self_continuity = false;
+    decision.self_continuity_intent.clear();
+    decision.self_continuity_sources.clear();
 
     if gate.repair_plan.repair_self_authored_core {
         decision.refresh_self_authored_core = true;
+        if gate.allow_subject_bootstrap {
+            decision.self_authored_core_intent =
+                "Bootstrap the first core from the evidence-governed initial self model"
+                    .to_string();
+            decision.self_authored_core_sources = vec![
+                "self_model".to_string(),
+                "subject_persona_evidence".to_string(),
+            ];
+        }
         if decision.self_authored_core_intent.trim().is_empty() {
             decision.self_authored_core_intent =
                 "Repair the board-level self core before unresolved governance debt hardens"
@@ -449,28 +511,6 @@ pub(super) fn apply_personality_runtime_governance_gate(
         decision.refresh_self_authored_core = false;
         decision.self_authored_core_intent.clear();
         decision.self_authored_core_sources.clear();
-    }
-
-    if gate.repair_plan.repair_relationship_constitution {
-        decision.refresh_boundary_persona = true;
-        if decision.boundary_persona_intent.trim().is_empty() {
-            decision.boundary_persona_intent =
-                "Repair relation-local boundary drift so the relationship constitution can realign"
-                    .to_string();
-        }
-    }
-
-    if gate.repair_plan.repair_outer_voice {
-        decision.refresh_outer_voice = true;
-        if decision.outer_voice_intent.trim().is_empty() {
-            decision.outer_voice_intent =
-                "Repair outward expression drift without promoting new board-level persona"
-                    .to_string();
-        }
-    } else {
-        decision.refresh_outer_voice = false;
-        decision.outer_voice_intent.clear();
-        decision.outer_voice_sources.clear();
     }
 }
 
@@ -604,9 +644,13 @@ fn normalize_persona_distillation_lag(
     let upstream_private_at = snapshot
         .private_material_at
         .max(snapshot.boundary_state_at)
-        .max(snapshot.recent_persona_evidence_at);
+        .max(snapshot.subject_persona_evidence_at);
     if upstream_private_at > snapshot.self_model_at
-        && (has_private_docs || has_private_garden_docs || has_inner_life || has_mental_privacy)
+        && (has_private_docs
+            || has_private_garden_docs
+            || has_inner_life
+            || has_mental_privacy
+            || snapshot.has_subject_persona_evidence)
     {
         decision.refresh_self_model = true;
         if decision.self_model_intent.trim().is_empty() {
@@ -634,9 +678,9 @@ fn normalize_persona_distillation_lag(
         );
         push_runtime_source_if(
             &mut decision.self_model_sources,
-            snapshot.has_recent_persona_evidence
-                && snapshot.recent_persona_evidence_at > snapshot.self_model_at,
-            "recent_persona_evidence",
+            snapshot.has_subject_persona_evidence
+                && snapshot.subject_persona_evidence_at > snapshot.self_model_at,
+            "subject_persona_evidence",
         );
     }
 
@@ -646,7 +690,7 @@ fn normalize_persona_distillation_lag(
         .max(snapshot.boundary_state_at);
     let volatile_self_authored_core_upstream_at = snapshot
         .outer_voice_at
-        .max(snapshot.recent_persona_evidence_at);
+        .max(snapshot.subject_persona_evidence_at);
     let review_due = core_revision_governance.review_due && has_self_authored_core;
     let observation_active = core_revision_governance.observation_active && has_self_authored_core;
     let stable_upstream_advanced =
@@ -708,11 +752,11 @@ fn normalize_persona_distillation_lag(
         );
         push_runtime_source_if(
             &mut decision.self_authored_core_sources,
-            snapshot.has_recent_persona_evidence
+            snapshot.has_subject_persona_evidence
                 && !observation_active
                 && !core_revision_governance.conservative_mode
-                && snapshot.recent_persona_evidence_at > snapshot.self_authored_core_at,
-            "recent_persona_evidence",
+                && snapshot.subject_persona_evidence_at > snapshot.self_authored_core_at,
+            "subject_persona_evidence",
         );
         if review_due && decision.self_authored_core_sources.is_empty() {
             push_runtime_source_if(
@@ -738,9 +782,13 @@ fn normalize_persona_distillation_lag(
         .max(snapshot.boundary_state_at)
         .max(snapshot.world_context_at)
         .max(snapshot.self_model_at)
-        .max(snapshot.recent_persona_evidence_at);
+        .max(snapshot.subject_persona_evidence_at);
     if continuity_upstream_at > snapshot.self_continuity_at
-        && (has_self_model || has_private_docs || has_private_garden_docs || has_inner_life)
+        && (has_self_model
+            || has_private_docs
+            || has_private_garden_docs
+            || has_inner_life
+            || snapshot.has_subject_persona_evidence)
     {
         decision.refresh_self_continuity = true;
         if decision.self_continuity_intent.trim().is_empty() {
@@ -785,9 +833,9 @@ fn normalize_persona_distillation_lag(
         );
         push_runtime_source_if(
             &mut decision.self_continuity_sources,
-            snapshot.has_recent_persona_evidence
-                && snapshot.recent_persona_evidence_at > snapshot.self_continuity_at,
-            "recent_persona_evidence",
+            snapshot.has_subject_persona_evidence
+                && snapshot.subject_persona_evidence_at > snapshot.self_continuity_at,
+            "subject_persona_evidence",
         );
     }
 
@@ -852,6 +900,7 @@ pub(super) fn normalize_runtime_distillation_decisions(
     has_mental_privacy: bool,
     has_world_sense: bool,
     has_autonomy_strategy: bool,
+    has_subject_persona_evidence: bool,
     has_recent_persona_evidence: bool,
 ) {
     if !decision.refresh_private_docs {
@@ -870,7 +919,7 @@ pub(super) fn normalize_runtime_distillation_decisions(
             (has_private_docs, "private_docs"),
             (has_private_garden_docs, "private_garden"),
             (has_mental_privacy, "boundary_persona"),
-            (has_recent_persona_evidence, "recent_persona_evidence"),
+            (has_subject_persona_evidence, "subject_persona_evidence"),
         ],
     );
     normalize_runtime_source_list(
@@ -881,7 +930,7 @@ pub(super) fn normalize_runtime_distillation_decisions(
             (has_self_continuity, "self_continuity"),
             (has_mental_privacy, "boundary_persona"),
             (has_outer_voice, "outer_voice"),
-            (has_recent_persona_evidence, "recent_persona_evidence"),
+            (has_subject_persona_evidence, "subject_persona_evidence"),
         ],
     );
     normalize_runtime_source_list(
@@ -895,7 +944,7 @@ pub(super) fn normalize_runtime_distillation_decisions(
             (has_mental_privacy, "boundary_persona"),
             (has_world_sense, "world_sense"),
             (has_autonomy_strategy, "autonomy_strategy"),
-            (has_recent_persona_evidence, "recent_persona_evidence"),
+            (has_subject_persona_evidence, "subject_persona_evidence"),
         ],
     );
     normalize_runtime_source_list(
@@ -955,7 +1004,11 @@ fn normalize_runtime_source_list(
         let Some(source) = normalize_runtime_source_id(&source) else {
             continue;
         };
-        if !normalized.contains(&source) {
+        if defaults
+            .iter()
+            .any(|(allowed, name)| *allowed && *name == source)
+            && !normalized.contains(&source)
+        {
             normalized.push(source);
         }
     }
@@ -999,6 +1052,7 @@ pub(super) fn normalize_runtime_source_id(raw: &str) -> Option<String> {
         "outer_voice" => Some("outer_voice".to_string()),
         "world_sense" => Some("world_sense".to_string()),
         "autonomy_strategy" => Some("autonomy_strategy".to_string()),
+        "subject_persona_evidence" => Some("subject_persona_evidence".to_string()),
         "recent_persona_evidence" | "latest_turn_persona" | "turn_persona" | "persona_outcome" => {
             Some("recent_persona_evidence".to_string())
         }
@@ -1197,6 +1251,160 @@ mod tests {
     use super::*;
 
     #[test]
+    fn evidence_clocks_and_sources_do_not_cross_subject_relationship_boundary() {
+        let subject = crate::memory::RecentPersonaEvidence {
+            meaningful_turns: 4,
+            repeated_value_orientation: "truth_before_comfort".into(),
+            updated_at: 20,
+            ..Default::default()
+        };
+        let relationship = crate::memory::RecentPersonaEvidence {
+            repeated_value_orientation: String::new(),
+            repeated_relationship_posture: "warm but bounded".into(),
+            ..subject.clone()
+        };
+        for (subject_input, relationship_input, subject_allowed, relationship_allowed) in [
+            (Some(&subject), None, true, false),
+            (None, Some(&relationship), false, true),
+            (Some(&subject), Some(&relationship), true, true),
+            (Some(&relationship), None, false, false),
+        ] {
+            let mut snapshot = build_persona_distillation_snapshot_from_layers(
+                None,
+                &[],
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                subject_input,
+                relationship_input,
+            );
+            assert_eq!(snapshot.has_subject_persona_evidence, subject_allowed);
+            assert_eq!(snapshot.has_recent_persona_evidence, relationship_allowed);
+            snapshot.self_model_at = 10;
+            snapshot.self_authored_core_at = 10;
+            snapshot.self_continuity_at = 10;
+            snapshot.outer_voice_at = 10;
+            let decision = finalize_self_runtime_decision(
+                SelfRuntimeDecision::default(),
+                &snapshot,
+                &CoreRevisionGovernanceDigest::default(),
+                false,
+                false,
+                false,
+                true,
+                true,
+                true,
+                true,
+                false,
+            );
+            assert_eq!(decision.refresh_self_model, subject_allowed);
+            assert_eq!(decision.refresh_self_authored_core, subject_allowed);
+            assert_eq!(decision.refresh_self_continuity, subject_allowed);
+            assert_eq!(decision.refresh_outer_voice, relationship_allowed);
+            assert!(!decision
+                .self_model_sources
+                .iter()
+                .any(|source| source == "recent_persona_evidence"));
+            assert!(!decision
+                .self_authored_core_sources
+                .iter()
+                .any(|source| source == "recent_persona_evidence"));
+            assert!(!decision
+                .self_continuity_sources
+                .iter()
+                .any(|source| source == "recent_persona_evidence"));
+            assert!(!decision
+                .outer_voice_sources
+                .iter()
+                .any(|source| source == "subject_persona_evidence"));
+        }
+    }
+
+    #[test]
+    fn model_supplied_sources_cannot_cross_evidence_authority() {
+        let sources = vec![
+            "subject_persona_evidence".into(),
+            "recent_persona_evidence".into(),
+        ];
+        let mut decision = SelfRuntimeDecision {
+            refresh_self_model: true,
+            refresh_self_authored_core: true,
+            refresh_self_continuity: true,
+            refresh_outer_voice: true,
+            self_model_sources: sources.clone(),
+            self_authored_core_sources: sources.clone(),
+            self_continuity_sources: sources.clone(),
+            outer_voice_sources: sources,
+            ..Default::default()
+        };
+        normalize_runtime_distillation_decisions(
+            &mut decision,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            true,
+        );
+        assert_eq!(
+            decision.self_model_sources,
+            vec!["subject_persona_evidence"]
+        );
+        assert_eq!(
+            decision.self_authored_core_sources,
+            vec!["subject_persona_evidence"]
+        );
+        assert_eq!(
+            decision.self_continuity_sources,
+            vec!["subject_persona_evidence"]
+        );
+        assert_eq!(
+            decision.outer_voice_sources,
+            vec!["recent_persona_evidence"]
+        );
+    }
+
+    #[test]
+    fn counterevidence_blocks_both_distillation_clocks_even_with_stale_positive_fields() {
+        let evidence = crate::memory::RecentPersonaEvidence {
+            counterevidence_turns: 1,
+            meaningful_turns: 8,
+            repeated_value_orientation: "truth_before_comfort".into(),
+            updated_at: 20,
+            ..Default::default()
+        };
+        let snapshot = build_persona_distillation_snapshot_from_layers(
+            None,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&evidence),
+            Some(&evidence),
+        );
+        assert!(!snapshot.has_subject_persona_evidence);
+        assert!(!snapshot.has_recent_persona_evidence);
+        assert_eq!(snapshot.subject_persona_evidence_at, 0);
+        assert_eq!(snapshot.recent_persona_evidence_at, 0);
+    }
+
+    #[test]
     fn distillation_snapshot_ignores_operational_only_recent_persona_evidence() {
         let operational_only = crate::memory::RecentPersonaEvidence {
             repeated_response_mode: "protective_brief".to_string(),
@@ -1210,6 +1418,7 @@ mod tests {
         let snapshot = build_persona_distillation_snapshot_from_layers(
             None,
             &[],
+            None,
             None,
             None,
             None,
@@ -1232,6 +1441,7 @@ mod tests {
         let snapshot = build_persona_distillation_snapshot_from_layers(
             None,
             &[],
+            None,
             None,
             None,
             None,

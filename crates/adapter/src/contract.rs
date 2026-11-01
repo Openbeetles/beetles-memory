@@ -673,7 +673,7 @@ pub struct AdapterProjectionReport {
     pub projection_block: String,
     pub chars: usize,
     pub agent_tool_hints: Vec<AgentToolHint>,
-    pub selection_receipt: Option<bm_sdk::ProceduralSelectionReceiptV1>,
+    pub selection_receipt: Option<bm_sdk::MemoryTurnProjectionReceiptV2>,
     pub audit: AdapterProjectionAuditSummary,
     pub governed_recall: GovernedRecallPublicReportV1,
 }
@@ -726,7 +726,7 @@ pub struct AdapterGovernedProjectSafeReportV1 {
     pub projection_block: String,
     pub chars: usize,
     pub agent_tool_hints: Vec<AgentToolHint>,
-    pub selection_receipt: Option<bm_sdk::ProceduralSelectionReceiptV1>,
+    pub selection_receipt: Option<bm_sdk::MemoryTurnProjectionReceiptV2>,
     pub audit: AdapterProjectionAuditSummary,
     pub governed_recall: GovernedRecallPublicReportV1,
 }
@@ -807,7 +807,7 @@ impl AdapterCommand {
 #[derive(Serialize)]
 struct AdapterTurnFinalizeFingerprint<'a> {
     turn: &'a bm_sdk::CanonicalTurnDelta,
-    learning: &'a bm_sdk::PostTurnLearningInputV2,
+    learning: &'a bm_sdk::PostTurnLearningInputV3,
     pressure: bm_sdk::PressureLevel,
     mode_input: bm_sdk::RuntimeLifecycleModeInput,
 }

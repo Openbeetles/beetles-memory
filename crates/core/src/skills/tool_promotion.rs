@@ -3,9 +3,9 @@
 use std::collections::BTreeMap;
 
 use crate::memory::{
-    post_turn_governance_transcript_digest, MemoryPrivacyClass, ProceduralFeedbackJobStatusV1,
-    ProceduralFeedbackJobV2, ProceduralProducerToolV1, ProceduralSourceSensitivity,
-    ToolExecutionContributionV1, ToolExecutionFactV1, ToolExecutionOutcome, TranscriptTurnRecord,
+    post_turn_governance_transcript_digest, MemoryPrivacyClass, MethodTaskContributionV1,
+    ProceduralFeedbackJobStatusV1, ProceduralFeedbackJobV2, ProceduralProducerToolV1,
+    ToolExecutionFactV1, TranscriptTurnRecord,
 };
 use crate::{Error, Result};
 
@@ -14,10 +14,12 @@ use super::*;
 pub struct RuntimeSkillToolPromotionSource<'a> {
     pub job: &'a ProceduralFeedbackJobV2,
     pub transcript: &'a TranscriptTurnRecord,
+    /// Exact immutable revisions actually adopted in this source turn.
+    pub adopted_materials: &'a [AgentToolExperienceRevisionMaterialV4],
 }
 
 pub struct RuntimeSkillToolPromotionInput<'a> {
-    pub experience: &'a AgentToolExperienceRevisionMaterialV3,
+    pub experience: &'a AgentToolExperienceRevisionMaterialV4,
     pub registry: &'a AgentToolRegistrySnapshot,
     pub sources: &'a [RuntimeSkillToolPromotionSource<'a>],
     pub existing_owner: Option<&'a RuntimeSkillOwnerRecord>,
@@ -27,7 +29,8 @@ pub struct RuntimeSkillToolPromotionInput<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeSkillToolPromotionReason {
     WeakProcedure,
-    InsufficientDistinctTurns,
+    InsufficientIndependentTasks,
+    ContradictoryTaskEvidence,
     SourceUnavailable,
     SourceMismatch,
     AuthorityDenied,
@@ -50,111 +53,99 @@ pub fn agent_tool_execution_matches_transcript(
     )
 }
 
-/// Shared method-to-execution proof for the planner and Store post-image
-/// closure. The caller separately authenticates the exact job/turn roots and
-/// current producer authority; this function grants neither permission.
-pub fn agent_tool_method_execution_matches_source(
-    material: &AgentToolExperienceRevisionMaterialV3,
+/// Rebuild task witnesses from canonical source records and exact adopted
+/// revisions. The caller authenticates current producer/evaluator authority and
+/// source visibility. Authorship declarations and tool success are not usage.
+pub fn agent_tool_method_task_contributions(
+    material: &AgentToolExperienceRevisionMaterialV4,
     job: &ProceduralFeedbackJobV2,
     turn: &TranscriptTurnRecord,
-    feedback: &crate::memory::AdmittedAgentToolEvidenceV1,
-) -> std::result::Result<bool, RuntimeSkillToolPromotionReason> {
+    adopted_materials: &[AgentToolExperienceRevisionMaterialV4],
+) -> std::result::Result<Vec<MethodTaskContributionV1>, RuntimeSkillToolPromotionReason> {
     use RuntimeSkillToolPromotionReason as Reason;
-    let AgentToolExperienceBodyV1::Method {
-        task_signature,
-        procedure,
-        sources,
-        ..
-    } = &material.body
-    else {
-        return Ok(false);
-    };
-    if feedback.registry_ref.registry_id != material.registry_id
-        || feedback.registry_ref.scope != material.registry_scope
-        || feedback.tool_id != material.tool_id
-        || feedback.schema_fingerprint != material.schema_fingerprint
-    {
-        return Ok(false);
+    let references = material.body.method_usage_contributions();
+    let relevant = references
+        .iter()
+        .filter(|reference| reference.source_job_id == job.job_id)
+        .collect::<Vec<_>>();
+    if relevant.is_empty() {
+        return Ok(Vec::new());
     }
     let evidence = turn
         .learning_evidence
         .as_ref()
         .ok_or(Reason::SourceMismatch)?;
     if evidence.authority.is_model_inferred() {
-        return if feedback.execution_facts.is_empty() {
-            Ok(false)
-        } else {
-            Err(Reason::AuthorityDenied)
-        };
+        return Err(Reason::AuthorityDenied);
     }
     if turn.external_content_used {
         return Err(Reason::PrivacyDenied);
     }
-    let producer = evidence
-        .authority
-        .producer_revision()
-        .ok_or(Reason::AuthorityDenied)?;
-    let mut matched = false;
-    for method in &feedback.method_evidence {
-        if method.task_signature != *task_signature || method.body != *procedure {
+    let mut rebuilt = Vec::new();
+    for (evaluation_ordinal, evaluation) in evidence.method_task_evaluations.iter().enumerate() {
+        if !relevant
+            .iter()
+            .any(|reference| reference.method == evaluation.method)
+        {
             continue;
         }
-        if method.source_sensitivity != ProceduralSourceSensitivity::NonPrivate
-            || method.external_content
-        {
-            return Err(Reason::PrivacyDenied);
-        }
-        let source = sources
+        let adoptions = evidence
+            .method_adoptions
             .iter()
-            .find(|source| {
-                source.source_job_id == job.job_id && source.method_id == method.method_id
+            .enumerate()
+            .filter(|(_, adoption)| {
+                adoption.method == evaluation.method && adoption.task_id == evaluation.task_id
             })
-            .ok_or(Reason::SourceMismatch)?;
-        for reference in &method.execution_refs {
-            let fact = feedback
-                .execution_facts
-                .iter()
-                .find(|fact| &fact.observation_id == reference)
-                .ok_or(Reason::SourceMismatch)?;
-            if fact.outcome != ToolExecutionOutcome::Succeeded {
-                continue;
-            }
-            if fact.source_sensitivity != ProceduralSourceSensitivity::NonPrivate
-                || turn.tool_observations.iter().any(|canonical| {
-                    canonical.observation_id == fact.observation_id && canonical.external_content
-                })
-            {
-                return Err(Reason::PrivacyDenied);
-            }
-            if !agent_tool_execution_matches_transcript(fact, &feedback.tool_id, turn) {
-                return Err(Reason::SourceMismatch);
-            }
-            let contribution = ToolExecutionContributionV1::build(
-                job.feedback_source()
-                    .map_err(|_| Reason::SourceMismatch)?
-                    .identity
-                    .clone(),
-                evidence.learning_evidence_digest.clone(),
-                producer.clone(),
-                ProceduralProducerToolV1 {
-                    registry_ref: feedback.registry_ref.clone(),
-                    tool_id: feedback.tool_id.clone(),
-                    schema_fingerprint: feedback.schema_fingerprint.clone(),
-                },
-                fact.clone(),
-            )
-            .map_err(|_| Reason::SourceMismatch)?;
-            if !source.execution_refs.contains(
-                &contribution
-                    .reference()
-                    .map_err(|_| Reason::SourceMismatch)?,
-            ) {
-                return Err(Reason::SourceMismatch);
-            }
-            matched = true;
+            .collect::<Vec<_>>();
+        let materials = adopted_materials
+            .iter()
+            .filter(|candidate| {
+                candidate.owner_revision_ref() == evaluation.method.owner_revision
+                    && candidate.content_digest == evaluation.method.content_digest
+                    && candidate.memory_space_id == evaluation.method.memory_space_id
+                    && candidate.owning_scope.mounted_subject_id()
+                        == evaluation.method.mounted_subject_id
+            })
+            .collect::<Vec<_>>();
+        if adoptions.len() != 1 || materials.len() != 1 {
+            return Err(Reason::SourceMismatch);
         }
+        rebuilt.push(
+            MethodTaskContributionV1::build(
+                job,
+                turn,
+                adoptions[0].0 as u32,
+                evaluation_ordinal as u32,
+                materials[0],
+            )
+            .map_err(|_| Reason::SourceMismatch)?,
+        );
     }
-    Ok(matched)
+    let mut result = Vec::new();
+    for reference in relevant {
+        let contribution = rebuilt
+            .iter()
+            .find(|contribution| contribution.contribution_id == reference.contribution_id)
+            .ok_or(Reason::SourceMismatch)?;
+        if contribution
+            .reference()
+            .map_err(|_| Reason::SourceMismatch)?
+            != *reference
+            || contribution.observed_at > material.updated_at
+            || contribution.adoption.method.owner_revision.owner_ref != material.owner_ref
+            || contribution.adoption.method.owner_revision.owner_revision >= material.owner_revision
+            || Some(contribution.method_content_digest.as_str())
+                != material
+                    .body
+                    .method_content_digest()
+                    .map_err(|_| Reason::SourceMismatch)?
+                    .as_deref()
+        {
+            return Err(Reason::SourceMismatch);
+        }
+        result.push(contribution.clone());
+    }
+    Ok(result)
 }
 
 pub fn runtime_skill_applicability_for_tool_scope(
@@ -292,7 +283,8 @@ pub fn plan_runtime_skill_promotion_from_tool_evidence(
             observe(Reason::WeakProcedure)
         };
     }
-    let mut runs = BTreeMap::new();
+    let mut tasks = BTreeMap::new();
+    let mut execution = BTreeMap::new();
     let mut sources = BTreeMap::new();
     for source in input.sources {
         let job = source.job;
@@ -355,39 +347,83 @@ pub fn plan_runtime_skill_promotion_from_tool_evidence(
         if turn.external_content_used {
             return reject(Reason::PrivacyDenied);
         }
-        let mut matched = false;
-        for feedback in &evidence.agent_tool_feedback {
-            if feedback.registry_ref != input.registry.registry_ref()
-                || feedback.tool_id != material.tool_id
-                || feedback.schema_fingerprint != material.schema_fingerprint
-            {
-                continue;
-            }
-            match agent_tool_method_execution_matches_source(material, job, turn, feedback) {
-                Ok(value) => matched |= value,
-                Err(reason) => return reject(reason),
-            }
+        let contributions = match agent_tool_method_task_contributions(
+            material,
+            job,
+            turn,
+            source.adopted_materials,
+        ) {
+            Ok(contributions) => contributions,
+            Err(reason) => return reject(reason),
+        };
+        if contributions.is_empty() {
+            continue;
         }
-        if matched {
-            let run_identity = (
-                turn.key.storage_key(),
-                turn.subject.clone(),
-                turn.turn_id.clone(),
-            );
-            if runs
-                .insert(run_identity, turn.canonical_turn_digest.clone())
-                .is_some_and(|previous| previous != turn.canonical_turn_digest)
+        for contribution in contributions {
+            if tasks
+                .insert(contribution.contribution_id.clone(), contribution.clone())
+                .is_some_and(|old| old != contribution)
             {
                 return reject(Reason::SourceMismatch);
             }
-            sources.insert(
-                job.job_id.clone(),
-                job.feedback_source()?.learning_evidence_digest.clone(),
-            );
         }
+        for fact in evidence.execution_contributions_for_job(job)? {
+            if fact.tool.registry_ref != input.registry.registry_ref()
+                || fact.tool.tool_id != material.tool_id
+                || fact.tool.schema_fingerprint != material.schema_fingerprint
+            {
+                continue;
+            }
+            if execution
+                .insert(fact.contribution_id.clone(), fact.clone())
+                .is_some_and(|old| old != fact)
+            {
+                return reject(Reason::SourceMismatch);
+            }
+        }
+        sources.insert(
+            job.job_id.clone(),
+            evidence.learning_evidence_digest.clone(),
+        );
     }
-    if !crate::reasoning::has_repeated_procedural_runs(runs.len()) {
-        return observe(Reason::InsufficientDistinctTurns);
+    let tasks = tasks.into_values().collect::<Vec<_>>();
+    let execution = execution.into_values().collect::<Vec<_>>();
+    let scope_basis = crate::memory::ProceduralSubjectScopeV1 {
+        memory_space_id: material.memory_space_id.clone(),
+        mounted_subject_id: mounted_subject_id.clone(),
+    };
+    let tool = ProceduralProducerToolV1 {
+        registry_ref: input.registry.registry_ref(),
+        tool_id: material.tool_id.clone(),
+        schema_fingerprint: material.schema_fingerprint.clone(),
+    };
+    // Reuse the method owner's exact positive/negative and independence policy.
+    // Profile capacity admission happens before this pure promotion planner.
+    let max_references = material
+        .body
+        .contribution_count()
+        .max(tasks.len())
+        .max(execution.len());
+    let (reduced, status) = match crate::memory::reduce_agent_tool_method_task_contributions(
+        &scope_basis,
+        &tool,
+        &material.body,
+        &tasks,
+        &execution,
+        None,
+        max_references,
+    ) {
+        Ok(result) => result,
+        Err(_) => return reject(Reason::SourceMismatch),
+    };
+    if reduced != material.body {
+        return reject(Reason::SourceUnavailable);
+    }
+    if status == AgentToolExperienceStatus::Stale {
+        return reject(Reason::ContradictoryTaskEvidence);
+    }
+    if status != AgentToolExperienceStatus::Active {
+        return observe(Reason::InsufficientIndependentTasks);
     }
     let applicability = runtime_skill_applicability_for_tool_scope(&material.registry_scope)?;
     let evidence_bindings = sources
@@ -461,9 +497,10 @@ mod tests {
 
     struct Fixture {
         registry: AgentToolRegistrySnapshot,
-        material: AgentToolExperienceRevisionMaterialV3,
+        material: AgentToolExperienceRevisionMaterialV4,
         turns: Vec<TranscriptTurnRecord>,
         jobs: Vec<ProceduralFeedbackJobV2>,
+        adopted_materials: Vec<AgentToolExperienceRevisionMaterialV4>,
     }
 
     impl Fixture {
@@ -472,6 +509,14 @@ mod tests {
         }
 
         fn with_proposal(
+            method: &str,
+            scope: AgentToolRegistryScope,
+            include_model_proposal: bool,
+        ) -> Self {
+            Self::legacy(method, scope, include_model_proposal).with_task_witnesses()
+        }
+
+        fn legacy(
             method: &str,
             scope: AgentToolRegistryScope,
             include_model_proposal: bool,
@@ -488,6 +533,10 @@ mod tests {
             registry.fingerprint = fingerprint_agent_tool_registry(&registry);
             let producer = ProceduralProducerBindingV1::build(
                 ProceduralProducerSpecV1 {
+                    method_evaluators: vec![MethodTaskEvaluatorV1 {
+                        id: "archive-verifier".into(),
+                        revision: 1,
+                    }],
                     binding_id: "executor".into(),
                     scope: ProceduralProducerScopeV1 {
                         memory_space_id: "space-a".into(),
@@ -500,6 +549,9 @@ mod tests {
                     },
                     source_authority: ProceduralProducerSourceAuthorityV1::RuntimeObservation,
                     claims: ProceduralProducerClaimsV1 {
+                        method_learning_materials: false,
+                        method_adoptions: true,
+                        method_task_evaluations: true,
                         execution_facts: true,
                         method_declarations: true,
                         usage_feedback: false,
@@ -531,6 +583,9 @@ mod tests {
                 subject_id: "agent-a".into(),
             };
             model_spec.claims.execution_facts = false;
+            model_spec.claims.method_adoptions = false;
+            model_spec.claims.method_task_evaluations = false;
+            model_spec.method_evaluators.clear();
             let model_producer = ProceduralProducerBindingV1::build(
                 model_spec,
                 ProceduralProducerStateV1::Active,
@@ -588,7 +643,11 @@ mod tests {
                 if proposal {
                     delta.tool_observations.clear();
                 }
-                let mut evidence = PostTurnLearningEvidenceV2 {
+                let mut evidence = PostTurnLearningEvidenceV3 {
+                    method_learning_inputs: Vec::new(),
+                    method_adoptions: Vec::new(),
+                    method_task_evaluations: Vec::new(),
+                    submitted_input_commitment: Some(format!("sha256:{}", "a".repeat(64))),
                     schema_version: POST_TURN_LEARNING_EVIDENCE_SCHEMA_VERSION,
                     memory_space_id: "space-a".into(),
                     mounted_subject_id: "agent-a".into(),
@@ -653,6 +712,7 @@ mod tests {
             }
             let jobs: Vec<_> = turns.iter().map(Self::job).collect();
             let mut body = AgentToolExperienceBodyV1::Method {
+                usage_contributions: Vec::new(),
                 task_signature: "archive-task".into(),
                 procedure: method.into(),
                 constraints: vec!["workspace-write".into()],
@@ -682,15 +742,15 @@ mod tests {
                     })
                     .collect::<Vec<_>>();
                 execution_refs.sort_by(|a, b| a.contribution_id.cmp(&b.contribution_id));
-                sources.push(AgentToolMethodSourceRefV1 {
+                sources.push(AgentToolMethodSourceRefV2::ProducerDeclaration {
                     source_job_id: job.job_id.clone(),
                     method_id: "method-a".into(),
                     method_digest: method_digest.clone(),
                     execution_refs,
                 });
             }
-            sources.sort_by(|a, b| a.source_job_id.cmp(&b.source_job_id));
-            let material = AgentToolExperienceRevisionMaterialV3::build(
+            AgentToolMethodSourceRefV2::canonicalize(sources).unwrap();
+            let material = AgentToolExperienceRevisionMaterialV4::build(
                 "space-a",
                 AgentToolExperienceOwningScopeV1::Subject {
                     mounted_subject_id: "agent-a".into(),
@@ -713,7 +773,158 @@ mod tests {
                 material,
                 turns,
                 jobs,
+                adopted_materials: Vec::new(),
             }
+        }
+
+        fn with_task_witnesses(mut self) -> Self {
+            let initial = &self.material;
+            let candidate = AgentToolExperienceRevisionMaterialV4::build(
+                &initial.memory_space_id,
+                initial.owning_scope.clone(),
+                &initial.registry_id,
+                initial.registry_scope.clone(),
+                &initial.tool_id,
+                &initial.schema_fingerprint,
+                1,
+                initial.body.clone(),
+                AgentToolExperienceStatus::Candidate,
+                initial.privacy_class,
+                20,
+                20,
+                None,
+            )
+            .unwrap();
+            let reference = MethodContentRefV1 {
+                memory_space_id: candidate.memory_space_id.clone(),
+                mounted_subject_id: "agent-a".into(),
+                registry_ref: self.registry.registry_ref(),
+                tool_id: candidate.tool_id.clone(),
+                schema_fingerprint: candidate.schema_fingerprint.clone(),
+                owner_revision: candidate.owner_revision_ref(),
+                content_digest: candidate.content_digest.clone(),
+            };
+            let originals = self.turns.clone();
+            for original in originals {
+                let original_evidence = original.learning_evidence.as_ref().unwrap();
+                if original_evidence.authority.is_model_inferred() {
+                    continue;
+                }
+                let turn_id = format!("adoption-{}", original.turn_id);
+                let observations = original.tool_observations.clone();
+                let delta = CanonicalTurnDelta {
+                    turn_id: turn_id.clone(),
+                    conversation: ConversationScope {
+                        channel: "sdk.direct".into(),
+                        chat_id: "chat-a".into(),
+                        conversation_id: Some("conversation-a".into()),
+                    },
+                    subject: "agent-a".into(),
+                    delivery_status: MemoryTurnDeliveryStatus::Delivered,
+                    source: MemoryTurnSource {
+                        ingress: crate::bus::IngressKind::User,
+                        channel: "sdk.direct".into(),
+                        provider: None,
+                        protocol: MemoryTurnProtocol::Native,
+                        endpoint: None,
+                        model_alias: None,
+                        model_resolved: None,
+                        request_id: Some(turn_id.clone()),
+                        client_conversation_hint: None,
+                    },
+                    actor: None,
+                    input_messages: vec![TranscriptInputMessage::user(
+                        "Apply the method and verify extraction",
+                    )],
+                    assistant_message: Some(TranscriptInputMessage::assistant(
+                        "Verification passed",
+                    )),
+                    tool_observations: observations.clone(),
+                    external_content_used: false,
+                    candidate_ids: vec![],
+                };
+                let mut evidence = original_evidence.clone();
+                evidence.turn_id = turn_id.clone();
+                evidence.canonical_turn_digest = canonical_turn_learning_digest(&delta).unwrap();
+                evidence.agent_tool_feedback[0].method_evidence.clear();
+                evidence.agent_tool_feedback[0].submitted_method_count = 0;
+                let observation_refs = observations
+                    .iter()
+                    .map(|item| item.observation_id.clone())
+                    .collect::<Vec<_>>();
+                evidence.method_adoptions = vec![MethodAdoptionEvidenceV1 {
+                    method: reference.clone(),
+                    task_id: turn_id.clone(),
+                    adoption: MethodAdoptionStatusV1::Adopted,
+                    observation_refs: observation_refs.clone(),
+                }];
+                evidence.method_task_evaluations = vec![MethodTaskEvaluationV1 {
+                    method: reference.clone(),
+                    task_id: turn_id.clone(),
+                    task_root_id: format!("root-{turn_id}"),
+                    independence_group: format!("scenario-{turn_id}"),
+                    evaluator_id: "archive-verifier".into(),
+                    evaluator_revision: 1,
+                    outcome: MethodTaskOutcomeV1::Passed,
+                    observation_refs,
+                }];
+                evidence.learning_evidence_digest = evidence.canonical_digest().unwrap();
+                let turn = TranscriptTurnRecord::from_delta_with_learning_evidence(
+                    &original.key,
+                    original.sequence + 100,
+                    &delta,
+                    vec![],
+                    Some(evidence),
+                    30,
+                )
+                .unwrap();
+                self.jobs.push(Self::job(&turn));
+                self.turns.push(turn);
+            }
+            self.adopted_materials = vec![candidate];
+            self.rebuild_usage();
+            self
+        }
+
+        fn rebuild_usage(&mut self) {
+            let candidate = &self.adopted_materials[0];
+            let mut body = candidate.body.clone();
+            let AgentToolExperienceBodyV1::Method {
+                usage_contributions,
+                ..
+            } = &mut body
+            else {
+                unreachable!()
+            };
+            for (turn, job) in self.turns.iter().zip(&self.jobs) {
+                let evidence = turn.learning_evidence.as_ref().unwrap();
+                for contribution in evidence
+                    .method_task_contributions_for_job(job, turn, |_| Ok(candidate.clone()))
+                    .unwrap()
+                {
+                    usage_contributions.push(contribution.reference().unwrap());
+                }
+            }
+            usage_contributions.sort_by(|a, b| a.contribution_id.cmp(&b.contribution_id));
+            usage_contributions.dedup();
+            self.material = AgentToolExperienceRevisionMaterialV4::build(
+                &candidate.memory_space_id,
+                candidate.owning_scope.clone(),
+                &candidate.registry_id,
+                candidate.registry_scope.clone(),
+                &candidate.tool_id,
+                &candidate.schema_fingerprint,
+                2,
+                body,
+                AgentToolExperienceStatus::Active,
+                candidate.privacy_class,
+                20,
+                40,
+                Some(
+                    AgentToolExperienceRetainedRevisionDigestV3::from_material(candidate).unwrap(),
+                ),
+            )
+            .unwrap();
         }
 
         fn job(turn: &TranscriptTurnRecord) -> ProceduralFeedbackJobV2 {
@@ -763,7 +974,11 @@ mod tests {
                 .jobs
                 .iter()
                 .zip(&self.turns)
-                .map(|(job, transcript)| RuntimeSkillToolPromotionSource { job, transcript })
+                .map(|(job, transcript)| RuntimeSkillToolPromotionSource {
+                    job,
+                    transcript,
+                    adopted_materials: &self.adopted_materials,
+                })
                 .collect::<Vec<_>>();
             plan_runtime_skill_promotion_from_tool_evidence(&RuntimeSkillToolPromotionInput {
                 experience: &self.material,
@@ -774,6 +989,15 @@ mod tests {
             })
             .unwrap()
         }
+    }
+
+    #[test]
+    fn successful_tool_calls_without_task_adoption_cannot_promote() {
+        let fixture = Fixture::legacy(METHOD, AgentToolRegistryScope::Global, false);
+        assert!(matches!(
+            fixture.plan(None, 100),
+            RuntimeSkillToolPromotionDecision::Observe { .. }
+        ), "different successful tool calls do not prove method adoption or independent task success");
     }
 
     #[test]
@@ -802,10 +1026,11 @@ mod tests {
         assert!(!source_job_ids.contains(&proposal_id));
         fixture.turns.pop();
         fixture.jobs.pop();
+        fixture.rebuild_usage();
         assert!(matches!(
             fixture.plan(None, 100),
             RuntimeSkillToolPromotionDecision::Observe {
-                reason: RuntimeSkillToolPromotionReason::InsufficientDistinctTurns
+                reason: RuntimeSkillToolPromotionReason::InsufficientIndependentTasks
             }
         ));
     }
@@ -849,34 +1074,78 @@ mod tests {
     }
 
     #[test]
-    fn tool_promotion_does_not_invent_methods_or_count_one_turn_twice() {
+    fn tool_promotion_does_not_invent_methods_or_count_one_task_twice() {
         assert!(validate_runtime_skill_method_shape(
             "archive-task",
             "Archive extraction completed"
         )
         .is_err());
         let mut fixture = Fixture::new(METHOD, AgentToolRegistryScope::Global);
-        fixture.turns[1] = fixture.turns[0].clone();
-        fixture.jobs[1] = fixture.jobs[0].clone();
+        let last = fixture.turns.len() - 1;
+        fixture.turns[last] = fixture.turns[last - 1].clone();
+        fixture.jobs[last] = fixture.jobs[last - 1].clone();
+        fixture.rebuild_usage();
         assert!(matches!(
             fixture.plan(None, 100),
             RuntimeSkillToolPromotionDecision::Observe {
-                reason: RuntimeSkillToolPromotionReason::InsufficientDistinctTurns
+                reason: RuntimeSkillToolPromotionReason::InsufficientIndependentTasks,
             }
         ));
-        let mut fixture = Fixture::new(METHOD, AgentToolRegistryScope::Global);
-        fixture.turns[1]
-            .learning_evidence
-            .as_mut()
-            .unwrap()
-            .agent_tool_feedback[0]
-            .method_evidence[0]
-            .body = "1. Inspect the different format.\n2. Extract its alternate manifest.".into();
-        fixture.refresh(1);
-        assert!(matches!(
-            fixture.plan(None, 100),
-            RuntimeSkillToolPromotionDecision::Observe { .. }
-        ));
+    }
+
+    #[test]
+    fn task_root_group_and_outcome_are_rechecked_instead_of_trusting_active_status() {
+        for mutation in 0..5 {
+            let mut fixture = Fixture::new(METHOD, AgentToolRegistryScope::Global);
+            let last = fixture.turns.len() - 1;
+            let first = fixture.turns[last - 1]
+                .learning_evidence
+                .as_ref()
+                .unwrap()
+                .method_task_evaluations[0]
+                .clone();
+            let evidence = fixture.turns[last].learning_evidence.as_mut().unwrap();
+            match mutation {
+                0 => evidence.method_task_evaluations[0].task_root_id = first.task_root_id,
+                1 => {
+                    evidence.method_task_evaluations[0].independence_group =
+                        first.independence_group
+                }
+                2 => evidence.method_task_evaluations[0].outcome = MethodTaskOutcomeV1::Failed,
+                3 => evidence.method_task_evaluations[0].outcome = MethodTaskOutcomeV1::Unknown,
+                _ => evidence.method_adoptions[0].adoption = MethodAdoptionStatusV1::NotAdopted,
+            }
+            fixture.refresh(last);
+            fixture.rebuild_usage();
+            assert!(
+                !matches!(
+                    fixture.plan(None, 100),
+                    RuntimeSkillToolPromotionDecision::Promote { .. }
+                ),
+                "mutation {mutation}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_or_different_adopted_revision_fails_closed() {
+        for mutation in 0..3 {
+            let mut fixture = Fixture::new(METHOD, AgentToolRegistryScope::Global);
+            match mutation {
+                0 => fixture.adopted_materials.clear(),
+                1 => fixture
+                    .adopted_materials
+                    .push(fixture.adopted_materials[0].clone()),
+                _ => {
+                    fixture.adopted_materials[0].content_digest =
+                        format!("sha256:{}", "a".repeat(64))
+                }
+            }
+            assert!(matches!(
+                fixture.plan(None, 100),
+                RuntimeSkillToolPromotionDecision::Reject { .. }
+            ));
+        }
     }
 
     #[test]
@@ -885,7 +1154,7 @@ mod tests {
             let mut fixture = Fixture::new(METHOD, AgentToolRegistryScope::Global);
             match mutation {
                 0 => {
-                    fixture.turns[0]
+                    fixture.turns[2]
                         .learning_evidence
                         .as_mut()
                         .unwrap()
@@ -905,7 +1174,7 @@ mod tests {
                     }
                 }
                 1 => {
-                    fixture.turns[0]
+                    fixture.turns[2]
                         .learning_evidence
                         .as_mut()
                         .unwrap()
@@ -913,16 +1182,16 @@ mod tests {
                         .execution_facts[0]
                         .source_sensitivity = ProceduralSourceSensitivity::Private
                 }
-                2 => fixture.turns[0].tool_observations[0].tool_name = "other-tool".into(),
+                2 => fixture.turns[2].tool_observations[0].tool_name = "other-tool".into(),
                 3 => {
-                    fixture.turns[0].tool_observations[0].observation_id =
+                    fixture.turns[2].tool_observations[0].observation_id =
                         "other-observation".into()
                 }
-                4 => fixture.turns[0].tool_observations[0].call_id = "other-call".into(),
-                5 => fixture.turns[0].tool_observations[0].external_content = true,
-                _ => fixture.turns[0].subject = "agent-b".into(),
+                4 => fixture.turns[2].tool_observations[0].call_id = "other-call".into(),
+                5 => fixture.turns[2].tool_observations[0].external_content = true,
+                _ => fixture.turns[2].subject = "agent-b".into(),
             }
-            fixture.refresh(0);
+            fixture.refresh(2);
             assert!(
                 matches!(
                     fixture.plan(None, 100),
@@ -932,7 +1201,7 @@ mod tests {
             );
         }
         let mut fixture = Fixture::new(METHOD, AgentToolRegistryScope::Global);
-        fixture.turns[0].apply_lifecycle_transition(TranscriptLifecycleTransition::Mask, 50);
+        fixture.turns[2].apply_lifecycle_transition(TranscriptLifecycleTransition::Mask, 50);
         assert!(matches!(
             fixture.plan(None, 100),
             RuntimeSkillToolPromotionDecision::Reject {

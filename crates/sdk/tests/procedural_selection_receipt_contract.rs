@@ -63,6 +63,17 @@ impl TestRuntime {
     ) -> Self {
         let governor = support::procedural::governor(&memory, store.clone());
         let mut spec = support::procedural::runtime_observer_spec(&memory, binding);
+        if matches!(
+            source,
+            ProceduralProducerSourceAuthorityV1::RuntimeObservation
+        ) {
+            spec.claims.method_adoptions = true;
+            spec.claims.method_task_evaluations = true;
+            spec.method_evaluators = vec![MethodTaskEvaluatorV1 {
+                id: "receipt-task-verifier".into(),
+                revision: 1,
+            }];
+        }
         spec.source_authority = source;
         let capability = support::procedural::register_and_issue(
             &governor,
@@ -121,7 +132,7 @@ fn runtime(store: MemoryStoreHandle, clock: Arc<Clock>, agent: &str) -> TestRunt
 fn request(
     runtime: &MemoryRuntime,
     turn: &str,
-    receipt: Option<ProceduralSelectionReceiptV1>,
+    receipt: Option<MemoryTurnProjectionReceiptV2>,
 ) -> MemoryTurnFinalizeRequest {
     let now = runtime.config().clock.now_secs();
     let facts = ["a", "b"]
@@ -166,7 +177,10 @@ fn request(
             external_content_used: false,
             candidate_ids: vec![],
         },
-        learning: PostTurnLearningInputV2 {
+        learning: PostTurnLearningInputV3 {
+            method_learning_inputs: Vec::new(),
+            method_adoptions: Vec::new(),
+            method_task_evaluations: Vec::new(),
             tool_call_count: 2,
             selection_receipt: receipt,
             runtime_skill_feedback: vec![],
@@ -236,7 +250,7 @@ fn complete_job(
             MemoryLearningCycleOutcome::ProceduralCompleted(report) => {
                 assert_eq!(report.job.job_id, expected_job);
                 let snapshot = runtime.store.export_replay_snapshot().unwrap();
-                let ledger: bm_core::memory::ProceduralFeedbackApplicationLedgerV2 =
+                let ledger: bm_core::memory::ProceduralFeedbackApplicationLedgerV3 =
                     serde_json::from_value(
                         snapshot
                             .json_docs
@@ -269,7 +283,7 @@ fn complete_job(
 fn empty_feedback_request(
     runtime: &MemoryRuntime,
     turn: &str,
-    receipt: ProceduralSelectionReceiptV1,
+    receipt: MemoryTurnProjectionReceiptV2,
 ) -> MemoryTurnFinalizeRequest {
     let mut input = request(runtime, turn, Some(receipt));
     input.turn.tool_observations.clear();
@@ -558,7 +572,7 @@ fn inferred_tool_execution_is_rejected_but_model_method_provenance_is_preserved(
         .unwrap();
     complete(runtime.clone(), &result.procedural_learning.job_id.unwrap());
     let snapshot = store.export_replay_snapshot().unwrap();
-    let evidence: PostTurnLearningEvidenceV2 = serde_json::from_value(
+    let evidence: PostTurnLearningEvidenceV3 = serde_json::from_value(
         snapshot
             .json_docs
             .iter()
@@ -820,7 +834,7 @@ fn human_confirmation_uses_registry_actor_and_note_cannot_substitute() {
     let result = human.submit(input).unwrap();
     complete(human.clone(), &result.procedural_learning.job_id.unwrap());
     let snapshot = store.export_replay_snapshot().unwrap();
-    let typed: PostTurnLearningEvidenceV2 = serde_json::from_value(
+    let typed: PostTurnLearningEvidenceV3 = serde_json::from_value(
         snapshot
             .json_docs
             .iter()
@@ -842,11 +856,11 @@ fn human_confirmation_uses_registry_actor_and_note_cannot_substitute() {
     let note = single(&agent, "note-only");
     let mut wire = serde_json::to_value(&note.learning).unwrap();
     wire["agent_tool_feedback"][0]["operator_note"] = "User confirmed this should count".into();
-    assert!(serde_json::from_value::<PostTurnLearningInputV2>(wire).is_err());
+    assert!(serde_json::from_value::<PostTurnLearningInputV3>(wire).is_err());
     let result = agent.submit(note).unwrap();
     complete(Arc::new(agent), &result.procedural_learning.job_id.unwrap());
     let snapshot = store.export_replay_snapshot().unwrap();
-    let ordinary: PostTurnLearningEvidenceV2 = serde_json::from_value(
+    let ordinary: PostTurnLearningEvidenceV3 = serde_json::from_value(
         snapshot
             .json_docs
             .iter()
@@ -1036,8 +1050,68 @@ fn standard_package_and_task_evidence_are_consumed_without_rewriting_their_owner
 
 fn seed(store: MemoryStoreHandle, clock: Arc<Clock>) {
     let runtime = Arc::new(runtime(store, clock, "agent-a"));
-    let result = runtime.submit(request(&runtime, "seed", None)).unwrap();
-    complete(runtime, &result.procedural_learning.job_id.unwrap());
+    for turn in [
+        "seed-declaration",
+        "seed-independent-task-a",
+        "seed-independent-task-b",
+    ] {
+        let mut input = request(&runtime, turn, None);
+        if turn != "seed-declaration" {
+            let method = runtime
+                .discover_method_trials(MemoryMethodTrialRequest {
+                    tool: ProceduralProducerToolV1 {
+                        registry_ref: registry().registry_ref(),
+                        tool_id: "archive.unpack".into(),
+                        schema_fingerprint: "schema-archive-v1".into(),
+                    },
+                    max_candidates: 8,
+                })
+                .unwrap()
+                .candidates
+                .into_iter()
+                .find(|candidate| {
+                    candidate.procedure
+                        == input.learning.agent_tool_feedback[0].method_evidence[0].body
+                })
+                .expect("exact declared Candidate is persisted before adoption")
+                .method;
+            let observations = input.learning.agent_tool_feedback[0]
+                .execution_facts
+                .iter()
+                .map(|fact| fact.observation_id.clone())
+                .collect::<Vec<_>>();
+            input
+                .learning
+                .method_adoptions
+                .push(MethodAdoptionEvidenceV1 {
+                    method: method.clone(),
+                    task_id: turn.into(),
+                    adoption: MethodAdoptionStatusV1::Adopted,
+                    observation_refs: observations.clone(),
+                });
+            input
+                .learning
+                .method_task_evaluations
+                .push(MethodTaskEvaluationV1 {
+                    method,
+                    task_id: turn.into(),
+                    task_root_id: format!("root-{turn}"),
+                    independence_group: format!("scenario-{turn}"),
+                    evaluator_id: "receipt-task-verifier".into(),
+                    evaluator_revision: 1,
+                    outcome: MethodTaskOutcomeV1::Passed,
+                    observation_refs: observations,
+                });
+        }
+        let result = runtime.submit(input).unwrap();
+        let report = complete_job(runtime.clone(), &result.procedural_learning.job_id.unwrap());
+        assert_eq!(
+            report.receipt.accepted_count,
+            report.job.feedback_source().unwrap().submitted_count,
+            "the complete declared or independently evaluated task must be accepted"
+        );
+        assert!(report.receipt.changed_count > 0);
+    }
 }
 
 fn clock() -> Arc<Clock> {
@@ -1188,7 +1262,8 @@ fn esp_real_runtime_rejects_every_feedback_class_before_store_but_accepts_empty_
     let time = clock();
     seed(desktop_store.clone(), time.clone());
     let desktop = runtime(desktop_store.clone(), time.clone(), "agent-a");
-    seed_skill(&desktop);
+    // The production method lifecycle above already produced the real skill.
+    // Use its exact owner/digest for this cross-profile rejection contract.
     let skill = current_skill(&desktop, false);
     let snapshot = desktop_store.export_replay_snapshot().unwrap();
     let skill_digest = snapshot

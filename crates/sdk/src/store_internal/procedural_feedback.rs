@@ -7,8 +7,8 @@ pub(crate) const EVENT_PLANE: &str = "procedural_feedback";
 use bm_core::memory::{
     GovernedMemoryOwnerPlane, MemoryMutationAuditRecord, MemoryMutationEffect,
     MemoryMutationOperationIdentity, MemoryMutationOperationKind, MemoryMutationReceipt,
-    PostTurnGovernanceJobRefV2, PostTurnGovernanceJobV3, PostTurnGovernanceScopeIndexV3,
-    ProceduralAppliedOwnerBindingV1, ProceduralFeedbackApplicationLedgerV2,
+    PostTurnGovernanceJobRefV2, PostTurnGovernanceJobV4, PostTurnGovernanceScopeIndexV4,
+    ProceduralAppliedOwnerBindingV1, ProceduralFeedbackApplicationLedgerV3,
     ProceduralFeedbackErrorClassV1, ProceduralFeedbackJobRefV2, ProceduralFeedbackJobStatusV1,
     ProceduralFeedbackJobV2, ProceduralFeedbackReceiptV2, ProceduralFeedbackReconciliationCursorV1,
     ProceduralFeedbackScopeIndexV2, ProceduralSubjectInitializationV1, ProceduralSubjectScopeV1,
@@ -18,7 +18,7 @@ use bm_core::memory::{
 };
 use bm_core::skills::{
     AgentToolExperienceOwnerHeadV3, AgentToolExperienceRetainedRevisionDigestV3,
-    AgentToolExperienceRevisionMaterialV3,
+    AgentToolExperienceRevisionMaterialV4,
 };
 use bm_core::{Error, Result};
 use serde::Serialize;
@@ -48,8 +48,14 @@ use bm_core::memory::{
 const PROCEDURAL_RETRY_BASE_SECS: u64 = 5;
 const PROCEDURAL_RETRY_MAX_SECS: u64 = 300;
 
+mod method_reconciliation;
 mod reconciliation;
+pub(crate) use method_reconciliation::{
+    preconditions as reconciliation_method_preconditions, reconciliation_retained_task_refs,
+    reconciliation_withdrawn_task_refs,
+};
 pub(crate) mod runtime_skill_control;
+pub(crate) mod transcript_control;
 pub(crate) use reconciliation::{
     commit_reconciliation_page, replay_reconciliation_page, resume_reconciliation_capacity,
     ProceduralReconciliationAuthorization, ProceduralReconciliationCommit,
@@ -104,6 +110,26 @@ pub(crate) fn read_verified_procedural_producer(
     platform: &StorePlatform,
     reference: &bm_core::memory::ProceduralProducerRevisionRefV1,
 ) -> Result<VerifiedProceduralProducer> {
+    read_verified_procedural_producer_with(reference, |namespace, key| {
+        platform
+            .read_json_docs_by_keys(namespace, &[key.to_owned()])?
+            .pop()
+            .map(|document| document.value)
+            .ok_or_else(|| {
+                Error::config(
+                    "procedural_producer_read",
+                    "required producer authority root is missing",
+                )
+            })
+    })
+}
+
+/// One exact producer proof for live planning, immutable reads and locked
+/// transaction/open validation. The caller owns the bounded read snapshot.
+pub(crate) fn read_verified_procedural_producer_with(
+    reference: &bm_core::memory::ProceduralProducerRevisionRefV1,
+    mut read: impl FnMut(&str, &str) -> Result<serde_json::Value>,
+) -> Result<VerifiedProceduralProducer> {
     use super::schema::{
         PROCEDURAL_PRODUCER_BINDING_NAMESPACE as MATERIAL,
         PROCEDURAL_PRODUCER_HEAD_NAMESPACE as HEAD,
@@ -112,13 +138,6 @@ pub(crate) fn read_verified_procedural_producer(
     if !reference.validate_contract() {
         return Err(Error::invalid_input(stage, "invalid producer reference"));
     }
-    let read = |namespace: &str, key: &str| -> Result<serde_json::Value> {
-        platform
-            .read_json_docs_by_keys(namespace, &[key.to_owned()])?
-            .pop()
-            .map(|doc| doc.value)
-            .ok_or_else(|| Error::config(stage, "required producer authority root is missing"))
-    };
     let head: bm_core::memory::ProceduralProducerHeadV1 =
         decode(read(HEAD, &reference.binding_key)?, stage)?;
     if !head.validate_contract() || !head.retained_revisions.contains(reference) {
@@ -397,7 +416,43 @@ pub(crate) fn validate_reconciliation_checkpoint_in_state(
         .ok_or_else(|| Error::config(stage, "checkpoint authoritative audit is missing"))
         .and_then(|value| decode(value.clone(), stage))?;
     validate_learning_mutation_proof(&receipt, &audit, stage)?;
-    validate_reconciliation_checkpoint_commitment(job, &receipt)
+    validate_reconciliation_checkpoint_commitment(job, &receipt)?;
+    if let bm_core::memory::ProceduralLearningWorkV1::Reconcile { source } = &job.work {
+        let root: ProceduralSubjectValidityRootV1 = state
+            .json
+            .get(&(
+                PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE.into(),
+                source.scope.root_key()?,
+            ))
+            .cloned()
+            .ok_or_else(|| Error::config(stage, "checkpoint subject root missing"))
+            .and_then(|value| decode(value, stage))?;
+        // Historical pages retain their receipt proof. New epochs own current
+        // source invalidation; they must not make old receipts look corrupt.
+        if root.validity_epoch == source.target_epoch {
+            if let Some(checkpoint) = &job.checkpoint {
+                method_reconciliation::validate_checkpoint(
+                    &source.scope,
+                    checkpoint,
+                    |namespace, key| {
+                        state
+                            .json
+                            .get(&(namespace.into(), key.into()))
+                            .cloned()
+                            .ok_or_else(|| {
+                                Error::config(
+                                    stage,
+                                    format!(
+                                        "method checkpoint dependency missing: {namespace}/{key}"
+                                    ),
+                                )
+                            })
+                    },
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Validate retained completion, not only the root's most recent epoch. The
@@ -457,7 +512,7 @@ pub(crate) fn validate_reconciliation_completion(
 
 pub(crate) fn validate_feedback_application_completion(
     job: &ProceduralFeedbackJobV2,
-    ledger: &ProceduralFeedbackApplicationLedgerV2,
+    ledger: &ProceduralFeedbackApplicationLedgerV3,
     mutation: &MemoryMutationReceipt,
     audit: &MemoryMutationAuditRecord,
 ) -> Result<()> {
@@ -510,7 +565,7 @@ pub(crate) fn validate_feedback_application_completion(
 
 pub(crate) fn read_authorized_procedural_evidence(
     platform: &StorePlatform,
-    evidence: &bm_core::memory::PostTurnLearningEvidenceV2,
+    evidence: &bm_core::memory::PostTurnLearningEvidenceV3,
     scope: &bm_core::memory::ProceduralProducerScopeV1,
 ) -> Result<VerifiedProceduralProducer> {
     let bm_core::memory::ProceduralFeedbackAuthorityV2::Producer {
@@ -996,6 +1051,9 @@ pub(crate) fn procedural_dependency_node(
     };
     let stage = "procedural_transaction_dependency_read_set";
     let mut addresses = producer_dependency_addresses(namespace, value)?;
+    addresses.extend(super::post_turn_governance::method_source_dependencies(
+        namespace, value,
+    )?);
     addresses.extend(source_dependents::dependencies(
         namespace,
         value,
@@ -1062,18 +1120,38 @@ pub(crate) fn procedural_dependency_node(
                 memory_space_id: record.key.memory_space_id.clone(),
                 mounted_subject_id: record.subject.clone(),
             });
+            addresses.extend(super::procedural_selection::intake_dependencies(&record)?);
             if record
                 .learning_evidence
                 .as_ref()
-                .and_then(|evidence| evidence.selection_receipt.as_ref())
+                .and_then(|evidence| evidence.authority.producer_revision())
                 .is_some()
             {
                 addresses.push((
-                    super::procedural_selection::NAMESPACE.into(),
-                    super::procedural_selection::authority_key(&record.key.memory_space_id),
+                    PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE.into(),
+                    ProceduralSubjectScopeV1 {
+                        memory_space_id: record.key.memory_space_id.clone(),
+                        mounted_subject_id: record.subject.clone(),
+                    }
+                    .root_key()?,
                 ));
             }
-            addresses.extend(super::procedural_selection::intake_dependencies(&record)?);
+            if let Some(evidence) = &record.learning_evidence {
+                for adoption in &evidence.method_adoptions {
+                    let reference = &adoption.method;
+                    addresses.push((
+                        AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE.into(),
+                        bm_core::skills::agent_tool_experience_material_key(
+                            &reference.memory_space_id,
+                            &AgentToolExperienceOwningScopeV1::Subject {
+                                mounted_subject_id: reference.mounted_subject_id.clone(),
+                            },
+                            &reference.owner_revision.owner_ref,
+                            reference.owner_revision.owner_revision,
+                        )?,
+                    ));
+                }
+            }
         }
         PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE => {
             let index: ProceduralFeedbackScopeIndexV2 = decode(value.clone(), stage)?;
@@ -1091,6 +1169,7 @@ pub(crate) fn procedural_dependency_node(
         }
         PROCEDURAL_FEEDBACK_JOB_NAMESPACE => {
             let job: ProceduralFeedbackJobV2 = decode(value.clone(), stage)?;
+            addresses.extend(method_reconciliation::dependencies(&job)?);
             if let Some(authority) = &job.checkpoint_authority {
                 let key = authority.operation.storage_key();
                 addresses.push((
@@ -1143,7 +1222,7 @@ pub(crate) fn procedural_dependency_node(
             }
         }
         PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE => {
-            let ledger: ProceduralFeedbackApplicationLedgerV2 = decode(value.clone(), stage)?;
+            let ledger: ProceduralFeedbackApplicationLedgerV3 = decode(value.clone(), stage)?;
             subject_scope = Some(ProceduralSubjectScopeV1 {
                 memory_space_id: ledger.identity.memory_space_id.clone(),
                 mounted_subject_id: ledger.identity.mounted_subject_id.clone(),
@@ -1219,13 +1298,23 @@ pub(crate) fn procedural_dependency_node(
             }
         }
         AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE => {
-            let material: AgentToolExperienceRevisionMaterialV3 = decode(value.clone(), stage)?;
+            let material: AgentToolExperienceRevisionMaterialV4 = decode(value.clone(), stage)?;
             let AgentToolExperienceOwningScopeV1::Subject { mounted_subject_id } =
                 &material.owning_scope;
             subject_scope = Some(ProceduralSubjectScopeV1 {
                 memory_space_id: material.memory_space_id.clone(),
                 mounted_subject_id: mounted_subject_id.clone(),
             });
+            for reference in material.body.method_usage_contributions() {
+                addresses.push((
+                    PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE.into(),
+                    reference.source_job_id.clone(),
+                ));
+                addresses.push((
+                    PROCEDURAL_FEEDBACK_JOB_NAMESPACE.into(),
+                    reference.source_job_id.clone(),
+                ));
+            }
             addresses.push((
                 AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE.into(),
                 agent_tool_experience_head_key(
@@ -1391,7 +1480,7 @@ struct TranscriptLearningSource<'a> {
 
 pub(crate) fn semantic_learning_transcript_precondition(
     platform: &StorePlatform,
-    job: &PostTurnGovernanceJobV3,
+    job: &PostTurnGovernanceJobV4,
 ) -> Result<StoreJsonPrecondition> {
     TranscriptLearningSource::semantic(job)?.read_precondition(platform)
 }
@@ -1412,7 +1501,7 @@ impl<'a> TranscriptLearningSource<'a> {
         })
     }
 
-    fn semantic(job: &'a PostTurnGovernanceJobV3) -> Result<Self> {
+    fn semantic(job: &'a PostTurnGovernanceJobV4) -> Result<Self> {
         Ok(Self {
             key: bm_core::memory::ConversationKey::new(
                 &job.identity.memory_space_id,
@@ -1543,7 +1632,7 @@ pub(crate) fn plan_transcript_learning_lifecycle(
         .collect::<BTreeSet<_>>();
     let stage = "post_turn_learning_lifecycle";
     for document in platform.read_json_namespace(POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE)? {
-        let before: PostTurnGovernanceScopeIndexV3 = decode(document.value, stage)?;
+        let before: PostTurnGovernanceScopeIndexV4 = decode(document.value, stage)?;
         if before.memory_space_id != scope.memory_space_id
             || before.mounted_subject_id != scope.subject_id
         {
@@ -1641,6 +1730,12 @@ pub(crate) fn plan_transcript_learning_lifecycle(
         {
             let job = read_job(platform, &reference.job_id)?
                 .ok_or_else(|| Error::config(stage, "procedural scope references a missing job"))?;
+            if !matches!(
+                job.work,
+                bm_core::memory::ProceduralLearningWorkV1::Feedback { .. }
+            ) {
+                continue;
+            }
             if !targets.contains(&(
                 job.feedback_source()?.identity.memory_space_id.as_str(),
                 job.feedback_source()?.identity.mounted_subject_id.as_str(),
@@ -1694,6 +1789,13 @@ pub(crate) fn plan_transcript_learning_lifecycle(
     // scheduling index. Derive exact identities before the lifecycle clears
     // evidence; never read other subjects' ledgers and filter them afterwards.
     let mut source_jobs = BTreeSet::new();
+    let lifecycle_budget = platform.current_runtime_budget(super::platform::current_unix_secs());
+    let semantic_expected = plan.preconditions.clone();
+    let mut semantic_reads = source_dependents::ReadPlan::for_conditions(
+        platform,
+        &semantic_expected,
+        super::StoreCapacityBudget::from_runtime_budget(lifecycle_budget.store_budget),
+    );
     for (record, _) in records {
         let Some(evidence) = &record.learning_evidence else {
             continue;
@@ -1722,6 +1824,51 @@ pub(crate) fn plan_transcript_learning_lifecycle(
             &record.key.conversation_id,
             &record.turn_id,
         )?;
+        let semantic_identity = bm_core::memory::PostTurnGovernanceIdentityV2::new(
+            &record.key.memory_space_id,
+            &record.subject,
+            &record.key.channel_id,
+            &producer_scope.chat_id,
+            &record.key.conversation_id,
+            &record.turn_id,
+        )?;
+        if let Some(value) = semantic_reads.before(
+            POST_TURN_GOVERNANCE_JOB_NAMESPACE,
+            &semantic_identity.job_id(),
+        )? {
+            let semantic: PostTurnGovernanceJobV4 = decode(value, stage)?;
+            semantic.validate()?;
+            if semantic.identity != semantic_identity
+                || semantic.transcript_sequence != record.sequence
+            {
+                return Err(Error::config(
+                    stage,
+                    "semantic creation source differs from exact transcript",
+                ));
+            }
+            if semantic.status == PostTurnGovernanceJobStatusV2::Succeeded
+                && semantic.receipt.as_ref().is_some_and(|receipt| {
+                    matches!(
+                        receipt.method_application,
+                        bm_core::memory::PostTurnGovernanceMethodApplicationV1::Applied { .. }
+                    )
+                })
+            {
+                let bindings = super::post_turn_governance::verify_semantic_method_application(
+                    &semantic,
+                    |namespace, key| {
+                        Ok(semantic_reads
+                            .before(namespace, key)?
+                            .unwrap_or(serde_json::Value::Null))
+                    },
+                )?;
+                affected_owners.extend(
+                    bindings
+                        .iter()
+                        .map(|binding| binding.owner_revision_ref().owner_ref),
+                );
+            }
+        }
         let job_id = identity.job_id(&evidence.learning_evidence_digest)?;
         if let Some(job) = read_job(platform, &job_id)? {
             if job.feedback_source()?.identity != identity {
@@ -1732,7 +1879,20 @@ pub(crate) fn plan_transcript_learning_lifecycle(
             }
         }
     }
-    let lifecycle_budget = platform.current_runtime_budget(super::platform::current_unix_secs());
+    super::transaction::merge_json_preconditions(
+        &mut plan.preconditions,
+        semantic_reads
+            .observed
+            .into_iter()
+            .map(|((namespace, key), value)| match value {
+                Some(value) => StoreJsonPrecondition::Exact {
+                    namespace,
+                    key,
+                    value,
+                },
+                None => StoreJsonPrecondition::Absent { namespace, key },
+            }),
+    )?;
     let source_jobs = source_jobs.into_iter().collect::<Vec<_>>();
     let source_ledgers = platform
         .read_procedural_application_ledgers_with_runtime_budget(&lifecycle_budget, &source_jobs)?;
@@ -1743,7 +1903,7 @@ pub(crate) fn plan_transcript_learning_lifecycle(
         ));
     }
     for document in source_ledgers {
-        let ledger: ProceduralFeedbackApplicationLedgerV2 = decode(document.value, stage)?;
+        let ledger: ProceduralFeedbackApplicationLedgerV3 = decode(document.value, stage)?;
         if !targets.contains(&(
             ledger.identity.memory_space_id.as_str(),
             ledger.identity.mounted_subject_id.as_str(),
@@ -1782,16 +1942,12 @@ pub(crate) fn plan_transcript_learning_lifecycle(
                 .map(|binding| binding.owner_revision_ref().owner_ref),
         );
     }
-    let runtime_owners = affected_owners
-        .iter()
-        .filter(|owner| owner.owner_plane == GovernedMemoryOwnerPlane::RuntimeSkill)
-        .cloned()
-        .collect::<BTreeSet<_>>();
     plan_runtime_skill_source_withdrawal(
         platform,
         scope,
-        &runtime_owners,
+        &affected_owners,
         &withdrawn_sources,
+        transition == TranscriptLifecycleTransition::DeleteRaw,
         now_secs,
         &mut plan,
     )?;
@@ -1865,7 +2021,7 @@ pub(crate) fn plan_transcript_learning_lifecycle(
                 .into_iter()
                 .next()
                 .ok_or_else(|| Error::config(stage, "retained experience material is missing"))?;
-            let typed_material: AgentToolExperienceRevisionMaterialV3 =
+            let typed_material: AgentToolExperienceRevisionMaterialV4 =
                 decode(material.value.clone(), stage)?;
             if AgentToolExperienceRetainedRevisionDigestV3::from_material(&typed_material)?
                 != *retained
@@ -1920,6 +2076,8 @@ pub(crate) fn plan_transcript_learning_lifecycle(
             encode(&after_manifest, stage)?,
         ));
     }
+    let preconditions = std::mem::take(&mut plan.preconditions);
+    super::transaction::merge_json_preconditions(&mut plan.preconditions, preconditions)?;
     Ok(plan)
 }
 
@@ -1933,7 +2091,7 @@ pub(crate) fn ensure_post_turn_learning_intents(
     platform: &StorePlatform,
     scope: StoreEventScope,
     runtime_budget: &RuntimeBudgetReport,
-    semantic_job: &PostTurnGovernanceJobV3,
+    semantic_job: &PostTurnGovernanceJobV4,
     procedural_job: Option<&ProceduralFeedbackJobV2>,
     now_secs: u64,
 ) -> Result<(
@@ -2011,7 +2169,7 @@ pub(crate) fn ensure_post_turn_learning_intents(
         let before_index =
             super::post_turn_governance::read_scope_index(platform, &semantic_job.scope_index_key)?;
         let mut after_index = before_index.clone().unwrap_or_else(|| {
-            PostTurnGovernanceScopeIndexV3::empty(&semantic_job.identity, now_secs)
+            PostTurnGovernanceScopeIndexV4::empty(&semantic_job.identity, now_secs)
         });
         if after_index.active_jobs.len() >= MAX_POST_TURN_GOVERNANCE_ACTIVE_JOBS
             || after_index.recent_terminal_jobs.len()
@@ -2778,6 +2936,39 @@ pub(crate) fn complete_procedural_feedback_job(
         return Err(Error::conflict("procedural_feedback_complete", "current producer head requires an exact commit fence"));
     }
     let contributions = evidence.execution_contributions_for_job(&before_job)?;
+    let method_contributions =
+        evidence.method_task_contributions_for_job(&before_job, &source, |reference| {
+            let key = bm_core::skills::agent_tool_experience_material_key(
+                &reference.memory_space_id,
+                &bm_core::skills::AgentToolExperienceOwningScopeV1::Subject {
+                    mounted_subject_id: reference.mounted_subject_id.clone(),
+                },
+                &reference.owner_revision.owner_ref,
+                reference.owner_revision.owner_revision,
+            )?;
+            let value = input
+                .experience_preconditions
+                .iter()
+                .find_map(|condition| match condition {
+                    StoreJsonPrecondition::Exact {
+                        namespace,
+                        key: actual,
+                        value,
+                    } if namespace == AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE
+                        && actual == &key =>
+                    {
+                        Some(value)
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    Error::conflict(
+                        "procedural_feedback_complete",
+                        "adopted method requires an exact prior material fence",
+                    )
+                })?;
+            decode(value.clone(), "procedural_feedback_complete")
+        })?;
     let validity = required_subject_root(
         platform,
         &before_job.work.subject_scope().root_key()?,
@@ -2789,15 +2980,51 @@ pub(crate) fn complete_procedural_feedback_job(
             "subject learning reconciliation must finish before feedback publication",
         ));
     }
-    let ledger = ProceduralFeedbackApplicationLedgerV2::build(
+    let ledger = ProceduralFeedbackApplicationLedgerV3::build(
         &before_job,
         input.applied_owner_bindings,
         contributions,
         evidence.runtime_skill_contributions_for_job(&before_job, source.created_at)?,
+        method_contributions,
         validity.validity_epoch,
         input.completed_at,
     )?;
     validate_new_applied_post_images(&ledger, &input.experience_mutations)?;
+    for mutation in &input.experience_mutations {
+        if let StoreMutation::PutJson {
+            namespace, value, ..
+        } = mutation
+        {
+            if namespace == AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE {
+                let material: AgentToolExperienceRevisionMaterialV4 =
+                    decode(value.clone(), "method_application_reduction")?;
+                validate_method_application_state(
+                    &material,
+                    &ledger,
+                    &before_job,
+                    |namespace, key| {
+                        input
+                            .experience_preconditions
+                            .iter()
+                            .find_map(|condition| match condition {
+                                StoreJsonPrecondition::Exact {
+                                    namespace: ns,
+                                    key: k,
+                                    value,
+                                } if ns == namespace && k == key => Some(value.clone()),
+                                _ => None,
+                            })
+                            .ok_or_else(|| {
+                                Error::conflict(
+                                    "method_application_reduction",
+                                    format!("exact source fence missing: {namespace}/{key}"),
+                                )
+                            })
+                    },
+                )?;
+            }
+        }
+    }
     let post_image_digest = digest_serialized(
         "procedural_feedback_post_image_digest_v1",
         &(
@@ -2892,30 +3119,33 @@ pub(crate) fn complete_procedural_feedback_job(
         ),
     ]);
     let mut preconditions = input.experience_preconditions;
-    preconditions.push(exact(
-        PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE,
-        &validity.physical_key,
-        &validity,
-        "procedural_feedback_complete",
-    )?);
-    preconditions.extend([
-        exact(
-            PROCEDURAL_FEEDBACK_JOB_NAMESPACE,
-            &before_job.job_id,
-            &before_job,
-            "procedural_feedback_complete",
-        )?,
-        exact(
-            PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE,
-            &before_job.discovery_root_key,
-            &before_index,
-            "procedural_feedback_complete",
-        )?,
-        StoreJsonPrecondition::Absent {
-            namespace: PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE.to_string(),
-            key: ledger.job_id.clone(),
-        },
-    ]);
+    super::transaction::merge_json_preconditions(
+        &mut preconditions,
+        [
+            exact(
+                PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE,
+                &validity.physical_key,
+                &validity,
+                "procedural_feedback_complete",
+            )?,
+            exact(
+                PROCEDURAL_FEEDBACK_JOB_NAMESPACE,
+                &before_job.job_id,
+                &before_job,
+                "procedural_feedback_complete",
+            )?,
+            exact(
+                PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE,
+                &before_job.discovery_root_key,
+                &before_index,
+                "procedural_feedback_complete",
+            )?,
+            StoreJsonPrecondition::Absent {
+                namespace: PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE.to_string(),
+                key: ledger.job_id.clone(),
+            },
+        ],
+    )?;
     let batch = StoreMutationBatch {
         transaction_id: operation.transaction_id().to_string(),
         operation: "post_turn.procedural.complete".to_string(),
@@ -3002,11 +3232,355 @@ pub(crate) fn read_scope_index(
         .transpose()
 }
 
+/// An immutable historical binding can outlive a deliberately erased current
+/// promotion. Absence alone is never proof: bind the exact canonical creation
+/// method, its retained tombstone, and a real already-RawDeleted application.
+/// Resolve semantic-only creation through the existing bounded scope index.
+/// Its immutable application proof is the same owner used by live reads; only
+/// the final source lifecycle predicate differs, and grants no raw access.
+fn previously_erased_semantic_method(
+    reads: &mut source_dependents::ReadPlan<'_>,
+    scope: &bm_core::memory::ProceduralProducerScopeV1,
+    head: &AgentToolExperienceOwnerHeadV3,
+) -> Result<bool> {
+    let stage = "procedural_runtime_skill_source_withdrawal";
+    let identity = bm_core::memory::PostTurnGovernanceIdentityV2::new(
+        &scope.memory_space_id,
+        &scope.mounted_subject_id,
+        &scope.channel_id,
+        &scope.chat_id,
+        "canonical",
+        "canonical",
+    )?;
+    let index_key = identity.scope_id();
+    let Some(value) = reads.before(POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE, &index_key)? else {
+        return Ok(false);
+    };
+    let index: PostTurnGovernanceScopeIndexV4 = decode(value, stage)?;
+    index.validate()?;
+    if index.scope_index_key != index_key
+        || index.memory_space_id != scope.memory_space_id
+        || index.mounted_subject_id != scope.mounted_subject_id
+        || index.channel_id != scope.channel_id
+        || index.chat_id != scope.chat_id
+    {
+        return Err(Error::config(
+            stage,
+            "semantic erasure proof index crosses scope",
+        ));
+    }
+    for reference in &index.recent_terminal_jobs {
+        let value = reads
+            .before(POST_TURN_GOVERNANCE_JOB_NAMESPACE, &reference.job_key)?
+            .ok_or_else(|| Error::config(stage, "semantic erasure retained job is missing"))?;
+        let job: PostTurnGovernanceJobV4 = decode(value, stage)?;
+        job.validate()?;
+        if PostTurnGovernanceJobRefV2::from_job(&job) != *reference
+            || job.identity.scope_id() != index_key
+        {
+            return Err(Error::config(
+                stage,
+                "semantic erasure retained job differs",
+            ));
+        }
+        if job.status != bm_core::memory::PostTurnGovernanceJobStatusV2::Succeeded {
+            continue;
+        }
+        let Some(receipt) = &job.receipt else {
+            continue;
+        };
+        let bm_core::memory::PostTurnGovernanceMethodApplicationV1::Applied {
+            owner_bindings, ..
+        } = &receipt.method_application
+        else {
+            continue;
+        };
+        if !owner_bindings.iter().any(|binding| matches!(binding,
+            ProceduralAppliedOwnerBindingV1::AgentToolExperience { owner_revision, content_digest }
+            if owner_revision.owner_ref == head.owner_ref && head.retained_revisions.iter().any(|retained|
+                retained.owner_revision == owner_revision.owner_revision && &retained.content_digest == content_digest))) { continue; }
+        super::post_turn_governance::verify_semantic_method_application(&job, |namespace, key| {
+            Ok(reads
+                .before(namespace, key)?
+                .unwrap_or(serde_json::Value::Null))
+        })?;
+        let source = TranscriptLearningSource::semantic(&job)?;
+        let value = reads
+            .before("conversation_transcript", &source.storage_key())?
+            .ok_or_else(|| Error::config(stage, "semantic erasure source is missing"))?;
+        let turn: bm_core::memory::TranscriptTurnRecord = decode(value, stage)?;
+        turn.validate_canonical_intake()?;
+        if turn.key != source.key
+            || turn.subject != source.subject_id
+            || turn.turn_id != source.turn_id
+            || turn.sequence != source.sequence
+        {
+            return Err(Error::config(
+                stage,
+                "semantic erasure source identity differs",
+            ));
+        }
+        if turn.lifecycle_state == bm_core::memory::TranscriptLifecycleState::RawDeleted
+            && turn.redaction_state == bm_core::memory::TranscriptRedactionState::RawDeleted
+            && turn.learning_evidence.is_none()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn previously_erased_runtime_promotion(
+    platform: &StorePlatform,
+    scope: &StoreEventScope,
+    runtime_owner: &bm_core::memory::GovernedMemoryOwnerRef,
+    plan: &mut super::platform::StoreOwnerMutationPlan,
+) -> Result<bool> {
+    use bm_core::skills::{
+        AgentToolExperienceHeadBindingV1, AgentToolExperienceHeadStateV3,
+        AgentToolExperienceOwningScopeV1, AgentToolExperienceScopeManifestV1,
+        RuntimeSkillCreationRef, RuntimeSkillOwningScope,
+    };
+    let stage = "procedural_runtime_skill_source_withdrawal";
+    let budget = platform.current_runtime_budget(super::platform::current_unix_secs());
+    let expected = plan.preconditions.clone();
+    let mut reads = source_dependents::ReadPlan::for_conditions(
+        platform,
+        &expected,
+        super::StoreCapacityBudget::from_runtime_budget(budget.store_budget),
+    );
+    let proven = (|| -> Result<bool> {
+        let runtime_scope = RuntimeSkillOwningScope::Subject {
+            mounted_subject_id: scope.subject_id.clone(),
+        };
+        let runtime_key = bm_core::skills::canonical_runtime_skill_owner_key(
+            &scope.memory_space_id,
+            &runtime_scope,
+            &runtime_owner.owner_id,
+        )?;
+        if reads
+            .before(super::schema::RUNTIME_SKILL_RECORD_NAMESPACE, &runtime_key)?
+            .is_some()
+        {
+            return Ok(false);
+        }
+        reads.before(
+            super::schema::RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE,
+            &bm_core::skills::runtime_skill_scope_manifest_key(
+                &scope.memory_space_id,
+                &runtime_scope,
+            )?,
+        )?;
+        let owning_scope = AgentToolExperienceOwningScopeV1::Subject {
+            mounted_subject_id: scope.subject_id.clone(),
+        };
+        let manifest_key = bm_core::skills::agent_tool_experience_scope_manifest_key(
+            &scope.memory_space_id,
+            &owning_scope,
+        )?;
+        let Some(value) = reads.before(
+            super::schema::AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE,
+            &manifest_key,
+        )?
+        else {
+            return Ok(false);
+        };
+        let manifest: AgentToolExperienceScopeManifestV1 = decode(value, stage)?;
+        manifest.validate_exact(
+            manifest.bindings.clone(),
+            budget
+                .governed_state_budget
+                .max_agent_tool_experience_owners_per_subject,
+        )?;
+        if manifest.memory_space_id != scope.memory_space_id
+            || manifest.owning_scope != owning_scope
+            || manifest.physical_key != manifest_key
+        {
+            return Err(Error::config(stage, "erasure proof manifest crosses scope"));
+        }
+        let mut matched = None;
+        for binding in &manifest.bindings {
+            let creation = RuntimeSkillCreationRef::AgentToolExperiencePromotion {
+                experience_owner_ref: binding.owner_ref.clone(),
+            };
+            if bm_core::skills::canonical_runtime_skill_owner_id(
+                &scope.memory_space_id,
+                &runtime_scope,
+                &creation,
+            )? == runtime_owner.owner_id
+            {
+                matched = Some(binding);
+                break;
+            }
+        }
+        let Some(binding) = matched else {
+            return Ok(false);
+        };
+        let Some(value) = reads.before(AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE, &binding.head_key)?
+        else {
+            return Ok(false);
+        };
+        let head: AgentToolExperienceOwnerHeadV3 = decode(value, stage)?;
+        if AgentToolExperienceHeadBindingV1::from_head(&head)? != *binding
+            || head.memory_space_id != scope.memory_space_id
+            || head.owning_scope != owning_scope
+        {
+            return Err(Error::config(
+                stage,
+                "erasure proof differs from exact method tombstone",
+            ));
+        }
+        if head.state != AgentToolExperienceHeadStateV3::Tombstoned {
+            return Ok(false);
+        }
+        let subject_scope = ProceduralSubjectScopeV1 {
+            memory_space_id: scope.memory_space_id.clone(),
+            mounted_subject_id: scope.subject_id.clone(),
+        };
+        let Some(value) = reads.before(
+            PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE,
+            &subject_scope.root_key()?,
+        )?
+        else {
+            return Ok(false);
+        };
+        let root: ProceduralSubjectValidityRootV1 = decode(value, stage)?;
+        root.validate(MAX_PROCEDURAL_SUBJECT_SCOPES)?;
+        if root.scope != subject_scope {
+            return Err(Error::config(stage, "erasure proof root crosses subject"));
+        }
+        // Follow the existing bounded subject discovery owner, never a global
+        // namespace scan or an arbitrary caller-provided ledger address.
+        for producer_scope in &root.producer_scopes {
+            if previously_erased_semantic_method(&mut reads, producer_scope, &head)? {
+                return Ok(true);
+            }
+            let index_key = producer_scope.scope_index_key()?;
+            let value = reads
+                .before(PROCEDURAL_FEEDBACK_SCOPE_INDEX_NAMESPACE, &index_key)?
+                .ok_or_else(|| {
+                    Error::config(stage, "erasure proof producer scope index is missing")
+                })?;
+            let index: ProceduralFeedbackScopeIndexV2 = decode(value, stage)?;
+            index.validate()?;
+            if index.scope_index_key != index_key
+                || index.memory_space_id != scope.memory_space_id
+                || index.mounted_subject_id != scope.subject_id
+                || index.channel_id != producer_scope.channel_id
+                || index.chat_id != producer_scope.chat_id
+            {
+                return Err(Error::config(stage, "erasure proof scope index differs"));
+            }
+            for reference in &index.recent_terminal_jobs {
+                let value = reads
+                    .before(PROCEDURAL_FEEDBACK_JOB_NAMESPACE, &reference.job_id)?
+                    .ok_or_else(|| Error::config(stage, "erasure proof retained job is missing"))?;
+                let job: ProceduralFeedbackJobV2 = decode(value, stage)?;
+                job.validate()?;
+                if ProceduralFeedbackJobRefV2::from_job(&job) != *reference {
+                    return Err(Error::config(stage, "erasure proof retained job differs"));
+                }
+                if job.status != ProceduralFeedbackJobStatusV1::Succeeded
+                    || !matches!(
+                        job.work,
+                        bm_core::memory::ProceduralLearningWorkV1::Feedback { .. }
+                    )
+                {
+                    continue;
+                }
+                let value = reads
+                    .before(
+                        PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE,
+                        &job.job_id,
+                    )?
+                    .ok_or_else(|| Error::config(stage, "erasure proof application is missing"))?;
+                let ledger: ProceduralFeedbackApplicationLedgerV3 = decode(value, stage)?;
+                ledger.validate()?;
+                if ledger.identity.producer_scope() != *producer_scope {
+                    return Err(Error::config(
+                        stage,
+                        "erasure proof application crosses scope",
+                    ));
+                }
+                if !ledger.applied_owner_bindings.iter().any(|applied| matches!(applied,
+                    ProceduralAppliedOwnerBindingV1::AgentToolExperience { owner_revision, content_digest }
+                    if owner_revision.owner_ref == head.owner_ref && head.retained_revisions.iter().any(|retained|
+                        retained.owner_revision == owner_revision.owner_revision && &retained.content_digest == content_digest))) { continue; }
+                let receipt_key = job
+                    .receipt
+                    .as_ref()
+                    .ok_or_else(|| Error::config(stage, "erasure proof receipt is missing"))?
+                    .mutation_receipt_key();
+                let receipt: MemoryMutationReceipt = decode(
+                    reads
+                        .before(
+                            bm_core::memory::MEMORY_MUTATION_RECEIPT_NAMESPACE,
+                            receipt_key,
+                        )?
+                        .ok_or_else(|| Error::config(stage, "erasure proof mutation is missing"))?,
+                    stage,
+                )?;
+                let audit: MemoryMutationAuditRecord = decode(
+                    reads
+                        .before(
+                            bm_core::memory::MEMORY_MUTATION_AUDIT_NAMESPACE,
+                            receipt_key,
+                        )?
+                        .ok_or_else(|| Error::config(stage, "erasure proof audit is missing"))?,
+                    stage,
+                )?;
+                validate_feedback_application_completion(&job, &ledger, &receipt, &audit)?;
+                let fence = TranscriptLearningSource::procedural(&job)?;
+                let value = reads
+                    .before("conversation_transcript", &fence.storage_key())?
+                    .ok_or_else(|| Error::config(stage, "erasure proof source is missing"))?;
+                let turn: bm_core::memory::TranscriptTurnRecord = decode(value, stage)?;
+                turn.validate_canonical_intake()?;
+                if turn.key != fence.key
+                    || turn.subject != scope.subject_id
+                    || turn.turn_id != ledger.identity.turn_id
+                    || turn.sequence != job.feedback_source()?.transcript_sequence
+                {
+                    return Err(Error::config(
+                        stage,
+                        "erasure proof source identity differs",
+                    ));
+                }
+                if turn.lifecycle_state == bm_core::memory::TranscriptLifecycleState::RawDeleted
+                    && turn.redaction_state == bm_core::memory::TranscriptRedactionState::RawDeleted
+                    && turn.learning_evidence.is_none()
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    })()?;
+    if proven {
+        super::transaction::merge_json_preconditions(
+            &mut plan.preconditions,
+            reads
+                .observed
+                .into_iter()
+                .map(|((namespace, key), value)| match value {
+                    Some(value) => StoreJsonPrecondition::Exact {
+                        namespace,
+                        key,
+                        value,
+                    },
+                    None => StoreJsonPrecondition::Absent { namespace, key },
+                }),
+        )?;
+    }
+    Ok(proven)
+}
+
 fn plan_runtime_skill_source_withdrawal(
     platform: &StorePlatform,
     scope: &StoreEventScope,
     owners: &BTreeSet<bm_core::memory::GovernedMemoryOwnerRef>,
     withdrawn_sources: &BTreeMap<String, String>,
+    erase_raw: bool,
     now_secs: u64,
     plan: &mut super::platform::StoreOwnerMutationPlan,
 ) -> Result<()> {
@@ -3019,6 +3593,11 @@ fn plan_runtime_skill_source_withdrawal(
         return Ok(());
     }
     let stage = "procedural_runtime_skill_source_withdrawal";
+    let runtime_owners = owners
+        .iter()
+        .filter(|owner| owner.owner_plane == GovernedMemoryOwnerPlane::RuntimeSkill)
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let owning_scope = RuntimeSkillOwningScope::Subject {
         mounted_subject_id: scope.subject_id.clone(),
     };
@@ -3031,13 +3610,12 @@ fn plan_runtime_skill_source_withdrawal(
         .into_iter()
         .next();
     let Some(document) = document else {
-        if owners.is_empty() {
-            return Ok(());
+        for owner in &runtime_owners {
+            if !previously_erased_runtime_promotion(platform, scope, owner, plan)? {
+                return Err(Error::config(stage, "derived runtime skill manifest is missing without exact creation erasure proof"));
+            }
         }
-        return Err(Error::config(
-            stage,
-            "derived runtime skill manifest is missing",
-        ));
+        return Ok(());
     };
     let before: RuntimeSkillScopeManifest = decode(document.value, stage)?;
     let limit = platform
@@ -3052,14 +3630,17 @@ fn plan_runtime_skill_source_withdrawal(
     )?;
     let mut bindings = before.owner_bindings.clone();
     let mut changed = false;
-    if owners
+    let mut erased = BTreeSet::new();
+    for owner in runtime_owners
         .iter()
-        .any(|owner| !bindings.iter().any(|binding| &binding.owner_ref == owner))
+        .filter(|owner| !bindings.iter().any(|binding| &binding.owner_ref == *owner))
     {
-        return Err(Error::config(
-            stage,
-            "derived runtime skill is absent from scope manifest",
-        ));
+        if !previously_erased_runtime_promotion(platform, scope, owner, plan)? {
+            return Err(Error::config(
+                stage,
+                "derived runtime skill is absent without exact creation erasure proof",
+            ));
+        }
     }
     for binding in &mut bindings {
         let document = platform
@@ -3091,7 +3672,37 @@ fn plan_runtime_skill_source_withdrawal(
                         && withdrawn_sources.get(&evidence.safe_ref)
                             == Some(&evidence.source_digest)
                 });
-        if !owners.contains(&owner.owner_ref) && !withdrawn_dependency {
+        let withdrawn_method_owner = matches!(&owner.creation_ref,
+            bm_core::skills::RuntimeSkillCreationRef::AgentToolExperiencePromotion { experience_owner_ref }
+            if owners.contains(experience_owner_ref));
+        if !runtime_owners.contains(&owner.owner_ref)
+            && !withdrawn_dependency
+            && !withdrawn_method_owner
+        {
+            continue;
+        }
+        if erase_raw && (withdrawn_dependency || withdrawn_method_owner) {
+            // Retiring only disables execution and deliberately keeps content.
+            // Transcript DeleteRaw erases copies whose creation actually depends
+            // on the deleted source, including already retired copies. A usage
+            // observation alone does not own the independently authored body.
+            // Exact ledger/MOR commitments and the source
+            // method tombstone remain, but no RuntimeSkill body survives.
+            plan.preconditions.push(exact(
+                RUNTIME_SKILL_RECORD_NAMESPACE,
+                &owner.physical_key,
+                &owner,
+                stage,
+            )?);
+            plan.mutations.push(StoreMutation::DeleteJson {
+                namespace: RUNTIME_SKILL_RECORD_NAMESPACE.into(),
+                key: owner.physical_key.clone(),
+                event_kind: MemoryStoreEventKind::MemoryDelete,
+                plane: "runtime_skill".into(),
+                record_key: owner.physical_key.clone(),
+            });
+            erased.insert(owner.owner_ref.clone());
+            changed = true;
             continue;
         }
         if matches!(
@@ -3116,23 +3727,123 @@ fn plan_runtime_skill_source_withdrawal(
         changed = true;
     }
     if changed {
-        let after = RuntimeSkillScopeManifest::build(
-            checked_increment(before.revision, stage, "manifest revision exhausted")?,
-            &scope.memory_space_id,
-            owning_scope,
-            bindings,
-            limit,
-        )?;
+        bindings.retain(|binding| !erased.contains(&binding.owner_ref));
         plan.preconditions.push(exact(
             RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE,
             &key,
             &before,
             stage,
         )?);
-        plan.mutations.push(put_json(
-            RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE,
-            &key,
-            encode(&after, stage)?,
+        if bindings.is_empty() {
+            plan.mutations.push(StoreMutation::DeleteJson {
+                namespace: RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE.into(),
+                key: key.clone(),
+                event_kind: MemoryStoreEventKind::MemoryDelete,
+                plane: "runtime_skill".into(),
+                record_key: key,
+            });
+        } else {
+            let after = RuntimeSkillScopeManifest::build(
+                checked_increment(before.revision, stage, "manifest revision exhausted")?,
+                &scope.memory_space_id,
+                owning_scope,
+                bindings,
+                limit,
+            )?;
+            plan.mutations.push(put_json(
+                RUNTIME_SKILL_SCOPE_MANIFEST_NAMESPACE,
+                &key,
+                encode(&after, stage)?,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Resolve the immutable revisions actually adopted, never the proposed
+/// post-image. Used by planning and locked/open closure with their own reader.
+pub(crate) fn read_method_adopted_materials(
+    turn: &bm_core::memory::TranscriptTurnRecord,
+    mut read: impl FnMut(&str, &str) -> Result<serde_json::Value>,
+) -> Result<Vec<AgentToolExperienceRevisionMaterialV4>> {
+    let stage = "method_adoption_material";
+    let Some(evidence) = &turn.learning_evidence else {
+        return Ok(Vec::new());
+    };
+    let mut materials = BTreeMap::new();
+    for adoption in &evidence.method_adoptions {
+        let reference = &adoption.method;
+        let key = bm_core::skills::agent_tool_experience_material_key(
+            &reference.memory_space_id,
+            &bm_core::skills::AgentToolExperienceOwningScopeV1::Subject {
+                mounted_subject_id: reference.mounted_subject_id.clone(),
+            },
+            &reference.owner_revision.owner_ref,
+            reference.owner_revision.owner_revision,
+        )?;
+        let material: AgentToolExperienceRevisionMaterialV4 =
+            decode(read(AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE, &key)?, stage)?;
+        if !material.validate_contract().accepted
+            || material.physical_key != key
+            || material.owner_revision_ref() != reference.owner_revision
+            || material.content_digest != reference.content_digest
+            || material.memory_space_id != reference.memory_space_id
+            || material.owning_scope.mounted_subject_id() != reference.mounted_subject_id
+        {
+            return Err(Error::config(
+                stage,
+                "adoption differs from immutable material",
+            ));
+        }
+        materials.insert(key, material);
+    }
+    Ok(materials.into_values().collect())
+}
+
+fn validate_promotable_task_state(
+    material: &AgentToolExperienceRevisionMaterialV4,
+    tasks: &[bm_core::memory::MethodTaskContributionV1],
+    executions: &[bm_core::memory::ToolExecutionContributionV1],
+) -> Result<()> {
+    let scope = ProceduralSubjectScopeV1 {
+        memory_space_id: material.memory_space_id.clone(),
+        mounted_subject_id: material.owning_scope.mounted_subject_id().into(),
+    };
+    let tool = bm_core::memory::ProceduralProducerToolV1 {
+        registry_ref: bm_core::skills::AgentToolRegistryRef {
+            registry_id: material.registry_id.clone(),
+            scope: material.registry_scope.clone(),
+            fingerprint: tasks
+                .first()
+                .map(|task| task.adoption.method.registry_ref.fingerprint.clone())
+                .unwrap_or_default(),
+        },
+        tool_id: material.tool_id.clone(),
+        schema_fingerprint: material.schema_fingerprint.clone(),
+    };
+    let (body, status) = bm_core::memory::reduce_agent_tool_method_task_contributions(
+        &scope,
+        &tool,
+        &material.body,
+        tasks,
+        executions,
+        None,
+        material
+            .body
+            .contribution_count()
+            .max(tasks.len())
+            .max(executions.len()),
+    )
+    .map_err(|_| {
+        Error::conflict(
+            "method_task_promotion",
+            "task contribution proof is invalid",
+        )
+    })?;
+    if body != material.body || status != bm_core::skills::AgentToolExperienceStatus::Active {
+        return Err(Error::conflict(
+            "method_task_promotion",
+            "independent adopted task evidence does not authorize promotion",
         ));
     }
     Ok(())
@@ -3195,7 +3906,7 @@ fn validate_runtime_skill_promotion_sources(
                 StoreMutation::PutJson {
                     namespace, value, ..
                 } if namespace == AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE => {
-                    serde_json::from_value::<AgentToolExperienceRevisionMaterialV3>(value.clone())
+                    serde_json::from_value::<AgentToolExperienceRevisionMaterialV4>(value.clone())
                         .ok()
                         .filter(|material| &material.owner_ref == experience_owner_ref)
                 }
@@ -3239,8 +3950,9 @@ fn validate_runtime_skill_promotion_sources(
                 "promotion must preserve source content, time, privacy and boundary constraints",
             ));
         }
-        let mut distinct_turns = BTreeSet::new();
-        if owner.intrinsic_contract.evidence_bindings.len() < 2 {
+        let mut task_proofs = Vec::new();
+        let mut execution_proofs = Vec::new();
+        if owner.intrinsic_contract.evidence_bindings.is_empty() {
             return Err(Error::conflict(
                 stage,
                 "promotion requires repeated canonical sources",
@@ -3278,7 +3990,7 @@ fn validate_runtime_skill_promotion_sources(
                         "historical promotion source was not accepted",
                     ));
                 }
-                let ledger: ProceduralFeedbackApplicationLedgerV2 = decode(
+                let ledger: ProceduralFeedbackApplicationLedgerV3 = decode(
                     exact_value(
                         PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE,
                         &source.job_id,
@@ -3313,7 +4025,7 @@ fn validate_runtime_skill_promotion_sources(
                         experience_owner_ref,
                         owner_revision.owner_revision,
                     )?;
-                    let retained: AgentToolExperienceRevisionMaterialV3 = decode(
+                    let retained: AgentToolExperienceRevisionMaterialV4 = decode(
                         exact_value(AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE, &key)?,
                         stage,
                     )?;
@@ -3365,36 +4077,574 @@ fn validate_runtime_skill_promotion_sources(
                     "promotion source authority is denied",
                 ));
             }
-            let matching_method = evidence.agent_tool_feedback.iter().any(|feedback| {
-                bm_core::skills::agent_tool_method_execution_matches_source(
-                    &material, &source, &turn, feedback,
-                ) == Ok(true)
-            });
-            if !matching_method {
+            let adopted = read_method_adopted_materials(&turn, &exact_value)?;
+            let tasks = bm_core::skills::agent_tool_method_task_contributions(
+                &material, &source, &turn, &adopted,
+            )
+            .map_err(|_| {
+                Error::conflict(
+                    stage,
+                    "promotion task witness differs from adopted material",
+                )
+            })?;
+            if tasks.is_empty() {
                 return Err(Error::conflict(
                     stage,
-                    "promotion method is not present in accepted source",
+                    "promotion source has no task witness",
                 ));
             }
-            distinct_turns.insert((
-                turn.key.storage_key(),
-                turn.subject,
-                turn.turn_id,
-                turn.canonical_turn_digest,
-            ));
+            task_proofs.extend(tasks);
+            execution_proofs.extend(evidence.execution_contributions_for_job(&source)?);
         }
-        if distinct_turns.len() < 2 {
+        validate_promotable_task_state(&material, &task_proofs, &execution_proofs)?;
+    }
+    Ok(())
+}
+
+/// Prepares the exact read set required by the Store reduction before the
+/// operation plan digest is formed. It uses the same validator as completion
+/// and Store-open; the temporary ledger is entirely derived from real inputs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn method_application_preconditions(
+    platform: &StorePlatform,
+    job: &ProceduralFeedbackJobV2,
+    mutations: &[StoreMutation],
+    applied_owner_bindings: &[ProceduralAppliedOwnerBindingV1],
+    existing_preconditions: &[StoreJsonPrecondition],
+    runtime_budget: &RuntimeBudgetReport,
+    completed_at: u64,
+) -> Result<Vec<StoreJsonPrecondition>> {
+    let stage = "method_application_read_set";
+    let materials = mutations
+        .iter()
+        .filter_map(|mutation| match mutation {
+            StoreMutation::PutJson {
+                namespace, value, ..
+            } if namespace == AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE => Some(value),
+            _ => None,
+        })
+        .map(|value| decode::<AgentToolExperienceRevisionMaterialV4>(value.clone(), stage))
+        .collect::<Result<Vec<_>>>()?;
+    if !materials.iter().any(|material| {
+        matches!(
+            material.body,
+            bm_core::skills::AgentToolExperienceBodyV1::Method { .. }
+        )
+    }) {
+        return Ok(Vec::new());
+    }
+    let mut plan = source_dependents::ReadPlan::for_conditions(
+        platform,
+        existing_preconditions,
+        super::StoreCapacityBudget::from_runtime_budget(runtime_budget.store_budget),
+    );
+    let mut read = |namespace: &str, key: &str| {
+        plan.before(namespace, key)?.ok_or_else(|| {
+            Error::config(
+                stage,
+                format!("method dependency unavailable: {namespace}/{key}"),
+            )
+        })
+    };
+    let fence = TranscriptLearningSource::procedural(job)?;
+    let value = read("conversation_transcript", &fence.storage_key())?;
+    fence.validate_record(&value)?;
+    let source: bm_core::memory::TranscriptTurnRecord = decode(value, stage)?;
+    let evidence = source
+        .learning_evidence
+        .as_ref()
+        .ok_or_else(|| Error::config(stage, "source evidence unavailable"))?;
+    let root: ProceduralSubjectValidityRootV1 = decode(
+        read(
+            PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE,
+            &job.work.subject_scope().root_key()?,
+        )?,
+        stage,
+    )?;
+    if !root.permits_learning_reads(MAX_PROCEDURAL_SUBJECT_SCOPES)?
+        || root.scope != job.work.subject_scope()
+    {
+        return Err(Error::conflict(
+            stage,
+            "subject reconciliation must finish before task application",
+        ));
+    }
+    let tasks = evidence.method_task_contributions_for_job(job, &source, |reference| {
+        let key = bm_core::skills::agent_tool_experience_material_key(
+            &reference.memory_space_id,
+            &bm_core::skills::AgentToolExperienceOwningScopeV1::Subject {
+                mounted_subject_id: reference.mounted_subject_id.clone(),
+            },
+            &reference.owner_revision.owner_ref,
+            reference.owner_revision.owner_revision,
+        )?;
+        decode(read(AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE, &key)?, stage)
+    })?;
+    let ledger = ProceduralFeedbackApplicationLedgerV3::build(
+        job,
+        applied_owner_bindings.to_vec(),
+        evidence.execution_contributions_for_job(job)?,
+        evidence.runtime_skill_contributions_for_job(job, source.created_at)?,
+        tasks,
+        root.validity_epoch,
+        completed_at,
+    )?;
+    validate_new_applied_post_images(&ledger, mutations)?;
+    for material in &materials {
+        validate_method_application_state(material, &ledger, job, &mut read)?;
+    }
+    Ok(plan
+        .observed
+        .into_iter()
+        .map(|((namespace, key), value)| match value {
+            Some(value) => StoreJsonPrecondition::Exact {
+                namespace,
+                key,
+                value,
+            },
+            None => StoreJsonPrecondition::Absent { namespace, key },
+        })
+        .collect())
+}
+
+/// Rebuilds the task part of an immutable application from its real source.
+/// A legitimately withdrawn Transcript is not corruption: the exact historical
+/// receipt remains the commitment and current availability is owned by the
+/// subject validity barrier. No new completion can use that withdrawn source.
+fn validate_method_ledger_witnesses(
+    material: &AgentToolExperienceRevisionMaterialV4,
+    ledger: &ProceduralFeedbackApplicationLedgerV3,
+    job: &ProceduralFeedbackJobV2,
+    read: &mut impl FnMut(&str, &str) -> Result<serde_json::Value>,
+) -> Result<()> {
+    let stage = "method_application_source";
+    ledger.validate()?;
+    if ledger.job_id != job.job_id
+        || ledger.identity != job.feedback_source()?.identity
+        || ledger.learning_evidence_digest != job.feedback_source()?.learning_evidence_digest
+    {
+        return Err(Error::conflict(
+            stage,
+            "application and canonical job differ",
+        ));
+    }
+    let digest = material
+        .body
+        .method_content_digest()?
+        .ok_or_else(|| Error::conflict(stage, "method body missing"))?;
+    let relevant = |task: &&bm_core::memory::MethodTaskContributionV1| {
+        task.adoption.method.owner_revision.owner_ref == material.owner_ref
+            && task.method_content_digest == digest
+    };
+    let expected = ledger
+        .method_task_contributions
+        .iter()
+        .filter(relevant)
+        .cloned()
+        .collect::<Vec<_>>();
+    let fence = TranscriptLearningSource::procedural(job)?;
+    let value = read("conversation_transcript", &fence.storage_key())?;
+    let turn: bm_core::memory::TranscriptTurnRecord = decode(value.clone(), stage)?;
+    if !turn.permits_post_turn_learning() {
+        if turn.key != fence.key
+            || turn.subject != ledger.identity.mounted_subject_id
+            || turn.turn_id != ledger.identity.turn_id
+            || turn.sequence != job.feedback_source()?.transcript_sequence
+        {
+            return Err(Error::conflict(stage, "withdrawn source identity differs"));
+        }
+        return Ok(());
+    }
+    fence.validate_record(&value)?;
+    let evidence = turn
+        .learning_evidence
+        .as_ref()
+        .ok_or_else(|| Error::conflict(stage, "source evidence missing"))?;
+    let reference = evidence
+        .authority
+        .producer_revision()
+        .ok_or_else(|| Error::conflict(stage, "task producer missing"))?;
+    let producer: bm_core::memory::ProceduralProducerBindingV1 = decode(
+        read(
+            super::schema::PROCEDURAL_PRODUCER_BINDING_NAMESPACE,
+            &reference.material_key(),
+        )?,
+        stage,
+    )?;
+    if producer.revision_ref()? != *reference {
+        return Err(Error::conflict(stage, "task producer revision differs"));
+    }
+    producer
+        .authorize_evidence_with_current(&producer, &producer.spec.scope, evidence)
+        .map_err(|_| Error::conflict(stage, "original producer cannot witness task evidence"))?;
+    let mut rebuilt = Vec::new();
+    for (ordinal, evaluation) in evidence.method_task_evaluations.iter().enumerate() {
+        if evaluation.method.owner_revision.owner_ref != material.owner_ref {
+            continue;
+        }
+        let adoptions = evidence
+            .method_adoptions
+            .iter()
+            .enumerate()
+            .filter(|(_, adoption)| {
+                adoption.method == evaluation.method && adoption.task_id == evaluation.task_id
+            })
+            .collect::<Vec<_>>();
+        if adoptions.len() != 1 {
             return Err(Error::conflict(
                 stage,
-                "promotion sources are not distinct canonical turns",
+                "evaluation lacks one exact adoption",
             ));
         }
+        let adopted = &evaluation.method;
+        let key = bm_core::skills::agent_tool_experience_material_key(
+            &adopted.memory_space_id,
+            &bm_core::skills::AgentToolExperienceOwningScopeV1::Subject {
+                mounted_subject_id: adopted.mounted_subject_id.clone(),
+            },
+            &adopted.owner_revision.owner_ref,
+            adopted.owner_revision.owner_revision,
+        )?;
+        let adopted_material: AgentToolExperienceRevisionMaterialV4 =
+            decode(read(AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE, &key)?, stage)?;
+        let task = bm_core::memory::MethodTaskContributionV1::build(
+            job,
+            &turn,
+            adoptions[0].0 as u32,
+            ordinal as u32,
+            &adopted_material,
+        )?;
+        if task.method_content_digest == digest {
+            rebuilt.push(task);
+        }
+    }
+    rebuilt.sort_by(|a, b| a.contribution_id.cmp(&b.contribution_id));
+    if rebuilt != expected {
+        return Err(Error::conflict(
+            stage,
+            "application omitted or invented a task evaluation",
+        ));
+    }
+    let mut execution = evidence.execution_contributions_for_job(job)?;
+    execution.sort_by(|a, b| a.contribution_id.cmp(&b.contribution_id));
+    if execution != ledger.execution_contributions {
+        return Err(Error::conflict(
+            stage,
+            "execution witnesses differ from canonical source",
+        ));
+    }
+    Ok(())
+}
+
+/// The same pure owner reduction runs for planning, locked post-image and
+/// Store-open. Ordinary feedback must retain previous positive AND negative
+/// witnesses; only the separate source reconciliation owner can withdraw them.
+/// A later declaration may drop only the exact task references whose withdrawal
+/// was committed by the existing reconciliation lane for that exact predecessor.
+/// A conservative Withdrawn read decision alone grants no evidence erasure.
+/// This uses the application epoch's retained completion, never today's mutable
+/// producer permissions, so subsequent restoration does not rewrite history.
+fn method_predecessor_withdrawn_task_refs(
+    previous: &AgentToolExperienceRevisionMaterialV4,
+    application: &ProceduralFeedbackApplicationLedgerV3,
+    read: &mut impl FnMut(&str, &str) -> Result<serde_json::Value>,
+) -> Result<Vec<bm_core::memory::MethodTaskContributionRefV1>> {
+    use bm_core::memory::ProceduralLearningWorkV1;
+    if application.validity_epoch <= 1 {
+        return Ok(Vec::new());
+    }
+    let stage = "method_predecessor_withdrawal";
+    let scope = ProceduralSubjectScopeV1 {
+        memory_space_id: application.identity.memory_space_id.clone(),
+        mounted_subject_id: application.identity.mounted_subject_id.clone(),
+    };
+    let root: ProceduralSubjectValidityRootV1 = decode(
+        read(PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE, &scope.root_key()?)?,
+        stage,
+    )?;
+    root.validate(MAX_PROCEDURAL_SUBJECT_SCOPES)?;
+    if root.scope != scope {
+        return Err(Error::conflict(stage, "withdrawal root crosses subject"));
+    }
+    let reference = root
+        .retained_work
+        .iter()
+        .find(|work| work.target_epoch == application.validity_epoch)
+        .ok_or_else(|| Error::conflict(stage, "application epoch has no retained work"))?;
+    let job: ProceduralFeedbackJobV2 = decode(
+        read(PROCEDURAL_FEEDBACK_JOB_NAMESPACE, &reference.job_id)?,
+        stage,
+    )?;
+    let ProceduralLearningWorkV1::Reconcile { source } = &job.work else {
+        return Err(Error::conflict(
+            stage,
+            "application epoch is not reconciliation",
+        ));
+    };
+    if source.scope != scope || source.reference()? != *reference {
+        return Err(Error::conflict(
+            stage,
+            "withdrawal work differs from retained epoch",
+        ));
+    }
+    let Some(receipt) = &job.receipt else {
+        return Ok(Vec::new());
+    };
+    let key = receipt.mutation_receipt_key();
+    let mutation: MemoryMutationReceipt = decode(
+        read(bm_core::memory::MEMORY_MUTATION_RECEIPT_NAMESPACE, key)?,
+        stage,
+    )?;
+    let audit: MemoryMutationAuditRecord = decode(
+        read(bm_core::memory::MEMORY_MUTATION_AUDIT_NAMESPACE, key)?,
+        stage,
+    )?;
+    validate_reconciliation_completion(&job, &mutation, &audit)?;
+    if mutation.committed_at_unix_secs > application.completed_at {
+        return Err(Error::conflict(
+            stage,
+            "withdrawal completion follows its purported consumer",
+        ));
+    }
+    let binding = ProceduralAppliedOwnerBindingV1::AgentToolExperience {
+        owner_revision: previous.owner_revision_ref(),
+        content_digest: previous.content_digest.clone(),
+    };
+    Ok(job
+        .checkpoint
+        .as_ref()
+        .and_then(|checkpoint| {
+            checkpoint
+                .verified_owners
+                .iter()
+                .find(|proof| proof.binding == binding)
+        })
+        .map(|proof| proof.withdrawn_task_refs.clone())
+        .unwrap_or_default())
+}
+
+fn validate_method_application_state(
+    material: &AgentToolExperienceRevisionMaterialV4,
+    current: &ProceduralFeedbackApplicationLedgerV3,
+    current_job: &ProceduralFeedbackJobV2,
+    mut read: impl FnMut(&str, &str) -> Result<serde_json::Value>,
+) -> Result<()> {
+    use bm_core::skills::{AgentToolExperienceBodyV1 as Body, AgentToolExperienceStatus as Status};
+    if !matches!(material.body, Body::Method { .. }) {
+        return Ok(());
+    }
+    let stage = "method_application_reduction";
+    if !material.validate_contract().accepted
+        || material.updated_at != current.completed_at
+        || material.memory_space_id != current.identity.memory_space_id
+        || material.owning_scope.mounted_subject_id() != current.identity.mounted_subject_id
+    {
+        return Err(Error::conflict(
+            stage,
+            "method application identity or time differs",
+        ));
+    }
+    let previous = material
+        .predecessor
+        .as_ref()
+        .map(|reference| {
+            let prior: AgentToolExperienceRevisionMaterialV4 = decode(
+                read(
+                    AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE,
+                    &reference.material_key,
+                )?,
+                stage,
+            )?;
+            if AgentToolExperienceRetainedRevisionDigestV3::from_material(&prior)? != *reference
+                || prior.owner_ref != material.owner_ref
+                || prior.memory_space_id != material.memory_space_id
+                || prior.owning_scope != material.owning_scope
+                || prior.body.method_content_digest()? != material.body.method_content_digest()?
+            {
+                return Err(Error::conflict(stage, "method predecessor differs"));
+            }
+            Ok(prior)
+        })
+        .transpose()?;
+    let digest = material
+        .body
+        .method_content_digest()?
+        .ok_or_else(|| Error::conflict(stage, "method content identity missing"))?;
+    let mut references = BTreeMap::new();
+    if let Some(prior) = &previous {
+        let drops_previous = prior
+            .body
+            .method_usage_contributions()
+            .iter()
+            .any(|reference| {
+                !material
+                    .body
+                    .method_usage_contributions()
+                    .contains(reference)
+            });
+        let withdrawn = if drops_previous {
+            method_predecessor_withdrawn_task_refs(prior, current, &mut read)?
+        } else {
+            Vec::new()
+        };
+        for reference in prior.body.method_usage_contributions() {
+            if !withdrawn.contains(reference) {
+                references.insert(reference.contribution_id.clone(), reference.clone());
+            }
+        }
+    }
+    for task in &current.method_task_contributions {
+        if task.adoption.method.owner_revision.owner_ref == material.owner_ref
+            && task.method_content_digest == digest
+        {
+            let reference = task.reference()?;
+            if references
+                .insert(reference.contribution_id.clone(), reference.clone())
+                .is_some_and(|old| old != reference)
+            {
+                return Err(Error::conflict(
+                    stage,
+                    "task contribution identity conflicts",
+                ));
+            }
+        }
+    }
+    let mut expected_body = material.body.clone();
+    if let Body::Method {
+        usage_contributions,
+        ..
+    } = &mut expected_body
+    {
+        *usage_contributions = references.values().cloned().collect();
+    }
+    if expected_body != material.body {
+        return Err(Error::conflict(
+            stage,
+            "ordinary feedback dropped or invented retained task witnesses",
+        ));
+    }
+    if references.is_empty() {
+        let expected = match previous.as_ref().map(|prior| prior.status) {
+            Some(status @ (Status::Stale | Status::Rejected)) => status,
+            _ => Status::Candidate,
+        };
+        if expected_body != material.body || material.status != expected {
+            return Err(Error::conflict(
+                stage,
+                "authorship alone cannot authorize an active method",
+            ));
+        }
+        // Even an empty caller ledger must not hide an actual failed task.
+        return validate_method_ledger_witnesses(material, current, current_job, &mut read);
+    }
+    let mut ledgers = BTreeMap::from([(current.job_id.clone(), current.clone())]);
+    let mut jobs = BTreeMap::from([(current_job.job_id.clone(), current_job.clone())]);
+    for reference in references.values() {
+        if ledgers.contains_key(&reference.source_job_id) {
+            continue;
+        }
+        let ledger: ProceduralFeedbackApplicationLedgerV3 = decode(
+            read(
+                PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE,
+                &reference.source_job_id,
+            )?,
+            stage,
+        )?;
+        let job: ProceduralFeedbackJobV2 = decode(
+            read(PROCEDURAL_FEEDBACK_JOB_NAMESPACE, &reference.source_job_id)?,
+            stage,
+        )?;
+        let key = job
+            .receipt
+            .as_ref()
+            .ok_or_else(|| Error::conflict(stage, "historical receipt missing"))?
+            .mutation_receipt_key();
+        let receipt: MemoryMutationReceipt = decode(
+            read(bm_core::memory::MEMORY_MUTATION_RECEIPT_NAMESPACE, key)?,
+            stage,
+        )?;
+        let audit: MemoryMutationAuditRecord = decode(
+            read(bm_core::memory::MEMORY_MUTATION_AUDIT_NAMESPACE, key)?,
+            stage,
+        )?;
+        validate_feedback_application_completion(&job, &ledger, &receipt, &audit)?;
+        if ledger.identity.memory_space_id != current.identity.memory_space_id
+            || ledger.identity.mounted_subject_id != current.identity.mounted_subject_id
+        {
+            return Err(Error::conflict(stage, "task ledger crosses subject scope"));
+        }
+        jobs.insert(job.job_id.clone(), job);
+        ledgers.insert(ledger.job_id.clone(), ledger);
+    }
+    for (id, ledger) in &ledgers {
+        validate_method_ledger_witnesses(material, ledger, &jobs[id], &mut read)?;
+    }
+    let mut tasks = Vec::new();
+    let mut executions = BTreeMap::new();
+    for reference in references.values() {
+        let ledger = &ledgers[&reference.source_job_id];
+        let task = ledger
+            .method_task_contributions
+            .iter()
+            .find(|task| task.contribution_id == reference.contribution_id)
+            .ok_or_else(|| Error::conflict(stage, "task witness is missing"))?;
+        if task.reference()? != *reference {
+            return Err(Error::conflict(stage, "task witness digest differs"));
+        }
+        for execution_ref in &task.execution_refs {
+            let execution = ledger
+                .execution_contributions
+                .iter()
+                .find(|execution| execution.contribution_id == execution_ref.contribution_id)
+                .ok_or_else(|| Error::conflict(stage, "task execution witness is missing"))?;
+            if execution
+                .reference()
+                .map_err(|_| Error::conflict(stage, "execution witness is non-canonical"))?
+                != *execution_ref
+            {
+                return Err(Error::conflict(stage, "execution witness digest differs"));
+            }
+            executions.insert(execution.contribution_id.clone(), execution.clone());
+        }
+        tasks.push(task.clone());
+    }
+    let first = tasks
+        .first()
+        .ok_or_else(|| Error::conflict(stage, "method has no actual task witness"))?;
+    let scope = ProceduralSubjectScopeV1 {
+        memory_space_id: material.memory_space_id.clone(),
+        mounted_subject_id: material.owning_scope.mounted_subject_id().into(),
+    };
+    let tool = bm_core::memory::ProceduralProducerToolV1 {
+        registry_ref: first.adoption.method.registry_ref.clone(),
+        tool_id: material.tool_id.clone(),
+        schema_fingerprint: material.schema_fingerprint.clone(),
+    };
+    let executions = executions.into_values().collect::<Vec<_>>();
+    let (body, status) = bm_core::memory::reduce_agent_tool_method_task_contributions(
+        &scope,
+        &tool,
+        &expected_body,
+        &tasks,
+        &executions,
+        previous.as_ref().map(|prior| prior.status),
+        expected_body
+            .contribution_count()
+            .max(tasks.len())
+            .max(executions.len()),
+    )
+    .map_err(|_| Error::conflict(stage, "task witness reduction failed"))?;
+    if body != material.body || status != material.status {
+        return Err(Error::conflict(
+            stage,
+            "method body/status differs from actual task evidence",
+        ));
     }
     Ok(())
 }
 
 fn validate_new_applied_post_images(
-    ledger: &ProceduralFeedbackApplicationLedgerV2,
+    ledger: &ProceduralFeedbackApplicationLedgerV3,
     mutations: &[StoreMutation],
 ) -> Result<()> {
     let stage = "procedural_feedback_applied_post_image";
@@ -3424,8 +4674,16 @@ fn validate_new_applied_post_images(
                     owner_revision,
                     content_digest,
                 } if namespace == AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE => {
-                    let material: AgentToolExperienceRevisionMaterialV3 =
+                    let material: AgentToolExperienceRevisionMaterialV4 =
                         decode(value.clone(), stage)?;
+                    if matches!(&material.body, bm_core::skills::AgentToolExperienceBodyV1::Method { usage_contributions, .. }
+                        if usage_contributions.is_empty() && material.status == bm_core::skills::AgentToolExperienceStatus::Active)
+                    {
+                        return Err(Error::conflict(
+                            stage,
+                            "active method has no task application witnesses",
+                        ));
+                    }
                     if material.owner_ref == owner_revision.owner_ref
                         && material.owner_revision == owner_revision.owner_revision
                         && material.content_digest == *content_digest
@@ -3480,7 +4738,7 @@ pub(crate) fn validate_procedural_feedback_store_image(
     let mut producer_heads = BTreeMap::<String, bm_core::memory::ProceduralProducerHeadV1>::new();
     let mut producer_materials =
         BTreeMap::<String, bm_core::memory::ProceduralProducerBindingV1>::new();
-    let mut ledgers = BTreeMap::<String, ProceduralFeedbackApplicationLedgerV2>::new();
+    let mut ledgers = BTreeMap::<String, ProceduralFeedbackApplicationLedgerV3>::new();
     let mut experience_heads = BTreeMap::new();
     let mut experience_materials = BTreeMap::new();
     let mut runtime_owners = Vec::new();
@@ -3543,7 +4801,7 @@ pub(crate) fn validate_procedural_feedback_store_image(
                 indexes.insert(key.clone(), index);
             }
             PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE => {
-                let ledger: ProceduralFeedbackApplicationLedgerV2 = decode(value.clone(), stage)?;
+                let ledger: ProceduralFeedbackApplicationLedgerV3 = decode(value.clone(), stage)?;
                 if ledger.job_id != *key || ledger.validate().is_err() {
                     return Err(Error::config(
                         stage,
@@ -3557,7 +4815,7 @@ pub(crate) fn validate_procedural_feedback_store_image(
                 experience_heads.insert(key.clone(), head);
             }
             AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE => {
-                let material: AgentToolExperienceRevisionMaterialV3 = decode(value.clone(), stage)?;
+                let material: AgentToolExperienceRevisionMaterialV4 = decode(value.clone(), stage)?;
                 experience_materials.insert(key.clone(), material);
             }
             super::schema::RUNTIME_SKILL_RECORD_NAMESPACE => {
@@ -3943,6 +5201,18 @@ pub(crate) fn validate_procedural_feedback_store_image(
                     "procedural feedback ledger material differs from retained owner authority",
                 ));
             }
+            validate_method_application_state(material, ledger, job, |namespace, key| {
+                state
+                    .json
+                    .get(&(namespace.into(), key.into()))
+                    .cloned()
+                    .ok_or_else(|| {
+                        Error::config(
+                            stage,
+                            format!("method application dependency missing: {namespace}/{key}"),
+                        )
+                    })
+            })?;
         }
     }
     for owner in &runtime_owners {
@@ -3958,7 +5228,7 @@ pub(crate) fn validate_procedural_feedback_store_image(
 fn validate_runtime_usage_store_sources(
     owner: &bm_core::skills::RuntimeSkillOwnerRecord,
     jobs: &BTreeMap<String, ProceduralFeedbackJobV2>,
-    ledgers: &BTreeMap<String, ProceduralFeedbackApplicationLedgerV2>,
+    ledgers: &BTreeMap<String, ProceduralFeedbackApplicationLedgerV3>,
     stage: &'static str,
 ) -> Result<()> {
     let summary = &owner.lifecycle.usage_outcome;
@@ -4060,7 +5330,7 @@ fn validate_runtime_promotion_store_sources(
     owner: &bm_core::skills::RuntimeSkillOwnerRecord,
     state: &BackendTransactionState,
     jobs: &BTreeMap<String, ProceduralFeedbackJobV2>,
-    ledgers: &BTreeMap<String, ProceduralFeedbackApplicationLedgerV2>,
+    ledgers: &BTreeMap<String, ProceduralFeedbackApplicationLedgerV3>,
     stage: &'static str,
 ) -> Result<()> {
     use bm_core::skills::{
@@ -4083,9 +5353,11 @@ fn validate_runtime_promotion_store_sources(
         owner.lifecycle.state,
         RuntimeSkillLifecycleState::Retired | RuntimeSkillLifecycleState::Superseded
     );
-    let mut source_turns = BTreeSet::new();
+    let mut task_proofs = Vec::new();
+    let mut execution_proofs = Vec::new();
+    let mut final_material: Option<AgentToolExperienceRevisionMaterialV4> = None;
     let mut creation_proved = false;
-    if owner.intrinsic_contract.evidence_bindings.len() < 2 {
+    if owner.intrinsic_contract.evidence_bindings.is_empty() {
         return Err(Error::config(
             stage,
             "runtime promotion lacks repeated source commitments",
@@ -4137,11 +5409,6 @@ fn validate_runtime_promotion_store_sources(
                     "runtime promotion source did not accept its experience owner",
                 )
             })?;
-        source_turns.insert((
-            job.feedback_source()?.identity.channel_id.clone(),
-            job.feedback_source()?.identity.conversation_id.clone(),
-            job.feedback_source()?.identity.turn_id.clone(),
-        ));
         for applied in &ledger.applied_owner_bindings {
             if let ProceduralAppliedOwnerBindingV1::RuntimeSkill { binding } = applied {
                 if binding.owner_ref == owner.owner_ref && binding.owner_revision == 1 {
@@ -4195,7 +5462,7 @@ fn validate_runtime_promotion_store_sources(
             experience_owner_ref,
             accepted.0.owner_revision,
         )?;
-        let material: AgentToolExperienceRevisionMaterialV3 = decode(
+        let material: AgentToolExperienceRevisionMaterialV4 = decode(
             state
                 .json
                 .get(&(
@@ -4214,27 +5481,47 @@ fn validate_runtime_promotion_store_sources(
                 "runtime promotion accepted source material differs",
             ));
         }
-        let actual_execution = evidence.agent_tool_feedback.iter().any(|feedback| {
-            bm_core::skills::agent_tool_method_execution_matches_source(
-                &material, job, &turn, feedback,
-            ) == Ok(true)
-                && (owner.owner_revision != 1
-                    || matches!(&material.body,
-                    bm_core::skills::AgentToolExperienceBodyV1::Method { procedure, .. }
-                        if procedure == &owner.procedural_content.procedure))
-        });
-        if !actual_execution {
+        let adopted = read_method_adopted_materials(&turn, |namespace, key| {
+            state
+                .json
+                .get(&(namespace.into(), key.into()))
+                .cloned()
+                .ok_or_else(|| Error::config(stage, "adopted source material is missing"))
+        })?;
+        let tasks =
+            bm_core::skills::agent_tool_method_task_contributions(&material, job, &turn, &adopted)
+                .map_err(|_| Error::config(stage, "runtime promotion task witness is invalid"))?;
+        if tasks.is_empty()
+            || (owner.owner_revision == 1
+                && !matches!(&material.body,
+            bm_core::skills::AgentToolExperienceBodyV1::Method { procedure, .. } if procedure == &owner.procedural_content.procedure))
+        {
             return Err(Error::config(
                 stage,
-                "runtime promotion source lacks canonical execution evidence",
+                "runtime promotion has no canonical adopted task proof",
             ));
         }
+        task_proofs.extend(tasks);
+        execution_proofs.extend(evidence.execution_contributions_for_job(job)?);
+        if final_material
+            .as_ref()
+            .is_none_or(|previous| previous.owner_revision < material.owner_revision)
+        {
+            final_material = Some(material);
+        }
     }
-    if source_turns.len() < 2 || !creation_proved {
+    if !creation_proved {
         return Err(Error::config(
             stage,
-            "runtime promotion lacks distinct sources or immutable creation proof",
+            "runtime promotion lacks immutable creation proof",
         ));
+    }
+    if needs_live_source {
+        validate_promotable_task_state(
+            &final_material.ok_or_else(|| Error::config(stage, "promotion material missing"))?,
+            &task_proofs,
+            &execution_proofs,
+        )?;
     }
     Ok(())
 }
@@ -4806,6 +6093,7 @@ mod tests {
             )
             .unwrap(),
             ProceduralProducerSpecV1 {
+                method_evaluators: Vec::new(),
                 binding_id: "source:test".into(),
                 scope: producer_scope,
                 principal: ProceduralProducerPrincipalV1::LocalCapability {
@@ -4813,6 +6101,9 @@ mod tests {
                 },
                 source_authority: ProceduralProducerSourceAuthorityV1::RuntimeObservation,
                 claims: ProceduralProducerClaimsV1 {
+                    method_learning_materials: false,
+                    method_adoptions: false,
+                    method_task_evaluations: false,
                     execution_facts: true,
                     method_declarations: false,
                     usage_feedback: false,
@@ -4827,7 +6118,11 @@ mod tests {
             &[],
         )
         .unwrap();
-        let mut evidence = PostTurnLearningEvidenceV2 {
+        let mut evidence = PostTurnLearningEvidenceV3 {
+            method_learning_inputs: Vec::new(),
+            method_adoptions: Vec::new(),
+            method_task_evaluations: Vec::new(),
+            submitted_input_commitment: Some(format!("sha256:{}", "a".repeat(64))),
             schema_version: POST_TURN_LEARNING_EVIDENCE_SCHEMA_VERSION,
             memory_space_id: "space:test".to_string(),
             mounted_subject_id: delta.subject.clone(),
@@ -4926,11 +6221,18 @@ mod tests {
             100,
         )
         .unwrap();
-        let empty =
-            ProceduralFeedbackApplicationLedgerV2::build(&job, vec![], vec![], vec![], 1, 101)
-                .unwrap();
+        let empty = ProceduralFeedbackApplicationLedgerV3::build(
+            &job,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            1,
+            101,
+        )
+        .unwrap();
         assert!(validate_new_applied_post_images(&empty, &[]).is_ok());
-        let claimed = ProceduralFeedbackApplicationLedgerV2::build(
+        let claimed = ProceduralFeedbackApplicationLedgerV3::build(
             &job,
             vec![ProceduralAppliedOwnerBindingV1::AgentToolExperience {
                 owner_revision: bm_core::memory::GovernedOwnerRevisionRef::try_new(
@@ -4943,6 +6245,7 @@ mod tests {
                 .unwrap(),
                 content_digest: format!("sha256:{}", "d".repeat(64)),
             }],
+            vec![],
             vec![],
             vec![],
             1,
@@ -5226,6 +6529,589 @@ mod tests {
                 .export_store_snapshot()
                 .expect("snapshot after rejected replay"),
             before_replay
+        );
+    }
+}
+
+#[cfg(test)]
+mod method_application_state_tests {
+    use super::*;
+    use bm_core::memory::ProceduralFeedbackIdentityV1;
+    fn method_fixture(
+        status: bm_core::skills::AgentToolExperienceStatus,
+    ) -> (
+        ProceduralFeedbackJobV2,
+        AgentToolExperienceRevisionMaterialV4,
+    ) {
+        use bm_core::skills::{
+            AgentToolExperienceBodyV1 as Body, AgentToolExperienceOwningScopeV1 as Scope,
+            AgentToolMethodSourceRefV2 as Source,
+        };
+        let job = ProceduralFeedbackJobV2::pending(
+            ProceduralFeedbackIdentityV1::new(
+                "space:test",
+                "subject:test",
+                "channel:test",
+                "chat:test",
+                "conversation:test",
+                "turn:test",
+            )
+            .unwrap(),
+            1,
+            format!("sha256:{}", "a".repeat(64)),
+            format!("sha256:{}", "b".repeat(64)),
+            1,
+            3,
+            100,
+        )
+        .unwrap();
+        let mut body = Body::Method {
+            task_signature: "verify-checksum".into(),
+            procedure: "1. Calculate the checksum of the file and compare it with the authenticated expected checksum.\n2. Verify equality before accepting the file; reject the file and report failure when they differ.".into(),
+            constraints: Vec::new(), sources: Vec::new(), usage_contributions: Vec::new(),
+        };
+        let digest = body.method_content_digest().unwrap().unwrap();
+        if let Body::Method { sources, .. } = &mut body {
+            sources.push(Source::ProducerDeclaration {
+                source_job_id: job.job_id.clone(),
+                method_id: "checksum-method".into(),
+                method_digest: digest,
+                execution_refs: Vec::new(),
+            });
+        }
+        let material = AgentToolExperienceRevisionMaterialV4::build(
+            "space:test",
+            Scope::Subject {
+                mounted_subject_id: "subject:test".into(),
+            },
+            "registry:test",
+            bm_core::skills::AgentToolRegistryScope::Global,
+            "tool:test",
+            "schema:test",
+            1,
+            body,
+            status,
+            bm_core::memory::MemoryPrivacyClass::SharedWithSubject,
+            100,
+            101,
+            None,
+        )
+        .unwrap();
+        assert!(material.validate_contract().accepted);
+        (job, material)
+    }
+
+    #[test]
+    fn method_application_rejects_active_without_task_evidence() {
+        let (job, material) = method_fixture(bm_core::skills::AgentToolExperienceStatus::Active);
+        let ledger = ProceduralFeedbackApplicationLedgerV3::build(
+            &job,
+            vec![ProceduralAppliedOwnerBindingV1::AgentToolExperience {
+                owner_revision: material.owner_revision_ref(),
+                content_digest: material.content_digest.clone(),
+            }],
+            vec![],
+            vec![],
+            vec![],
+            1,
+            101,
+        )
+        .unwrap();
+        let mutations = vec![put_json(
+            AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE,
+            &material.physical_key,
+            serde_json::to_value(&material).unwrap(),
+        )];
+        assert!(validate_new_applied_post_images(&ledger, &mutations).is_err(),
+            "a matching ledger digest must not authorize Active without adoption and independent task witnesses");
+    }
+
+    #[test]
+    fn ordinary_method_feedback_cannot_drop_retained_task_references() {
+        use bm_core::skills::{
+            AgentToolExperienceBodyV1 as Body, AgentToolExperienceStatus as Status,
+        };
+        let (job, original) = method_fixture(Status::Candidate);
+        let reference = bm_core::memory::MethodTaskContributionRefV1 {
+            contribution_id: format!("sha256:{}", "1".repeat(64)),
+            content_digest: format!("sha256:{}", "2".repeat(64)),
+            source_job_id: "previous-task-job".into(),
+            method: bm_core::memory::MethodContentRefV1 {
+                memory_space_id: original.memory_space_id.clone(),
+                mounted_subject_id: original.owning_scope.mounted_subject_id().into(),
+                registry_ref: bm_core::skills::AgentToolRegistryRef::new(
+                    &original.registry_id,
+                    "registry-fingerprint",
+                ),
+                tool_id: original.tool_id.clone(),
+                schema_fingerprint: original.schema_fingerprint.clone(),
+                owner_revision: original.owner_revision_ref(),
+                content_digest: original.content_digest.clone(),
+            },
+            method_content_digest: original.body.method_content_digest().unwrap().unwrap(),
+        };
+        let mut prior_body = original.body.clone();
+        if let Body::Method {
+            usage_contributions,
+            ..
+        } = &mut prior_body
+        {
+            usage_contributions.push(reference);
+        }
+        let build = |revision, body, status, predecessor| {
+            AgentToolExperienceRevisionMaterialV4::build(
+                &original.memory_space_id,
+                original.owning_scope.clone(),
+                &original.registry_id,
+                original.registry_scope.clone(),
+                &original.tool_id,
+                &original.schema_fingerprint,
+                revision,
+                body,
+                status,
+                original.privacy_class,
+                100,
+                101,
+                Some(predecessor),
+            )
+            .unwrap()
+        };
+        let previous = build(
+            2,
+            prior_body,
+            Status::Stale,
+            AgentToolExperienceRetainedRevisionDigestV3::from_material(&original).unwrap(),
+        );
+        let forged = build(
+            3,
+            original.body.clone(),
+            Status::Active,
+            AgentToolExperienceRetainedRevisionDigestV3::from_material(&previous).unwrap(),
+        );
+        let ledger = ProceduralFeedbackApplicationLedgerV3::build(
+            &job,
+            vec![ProceduralAppliedOwnerBindingV1::AgentToolExperience {
+                owner_revision: forged.owner_revision_ref(),
+                content_digest: forged.content_digest.clone(),
+            }],
+            vec![],
+            vec![],
+            vec![],
+            1,
+            101,
+        )
+        .unwrap();
+        let result = validate_method_application_state(&forged, &ledger, &job, |namespace, key| {
+            assert_eq!(namespace, AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE);
+            assert_eq!(
+                key, previous.physical_key,
+                "dropping retained evidence must fail before unrelated source reads"
+            );
+            Ok(serde_json::to_value(&previous).unwrap())
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn conservative_withdrawn_read_proof_cannot_authorize_task_evidence_erasure() {
+        use bm_core::memory::*;
+        let (feedback, material) =
+            method_fixture(bm_core::skills::AgentToolExperienceStatus::Candidate);
+        let scope = ProceduralSubjectScopeV1 {
+            memory_space_id: material.memory_space_id.clone(),
+            mounted_subject_id: material.owning_scope.mounted_subject_id().into(),
+        };
+        let root = ProceduralSubjectValidityRootV1::initialize(
+            scope.clone(),
+            ProceduralProducerScopeV1 {
+                memory_space_id: scope.memory_space_id.clone(),
+                mounted_subject_id: scope.mounted_subject_id.clone(),
+                channel_id: "channel:test".into(),
+                chat_id: "chat:test".into(),
+            },
+            MAX_PROCEDURAL_SUBJECT_SCOPES,
+        )
+        .unwrap();
+        let owner = GovernedMemoryOwnerRef::new(
+            GovernedMemoryOwnerPlane::LongTerm,
+            "unrelated-source:test",
+        );
+        let work = ProceduralReconciliationWorkV1 {
+            scope,
+            target_epoch: 2,
+            trigger: ProceduralReconciliationTriggerV1::SourceChange {
+                transaction_id: "unrelated-source-delete".into(),
+                operation: None,
+                changes: vec![ProceduralSourceTransitionV1 {
+                    owner_ref: owner.clone(),
+                    before: ProceduralSourcePostImageV1::Present {
+                        revision: GovernedOwnerRevisionRef::try_new(owner, 1).unwrap(),
+                        content_digest: format!("sha256:{}", "a".repeat(64)),
+                    },
+                    after: ProceduralSourcePostImageV1::Deleted,
+                }],
+            },
+        };
+        let root = root.begin(&work, MAX_PROCEDURAL_SUBJECT_SCOPES).unwrap();
+        let claimed = ProceduralFeedbackJobV2::pending_work(
+            ProceduralLearningWorkV1::Reconcile {
+                source: work.clone(),
+            },
+            5,
+            100,
+        )
+        .unwrap()
+        .claim("worker", 200, 101)
+        .unwrap();
+        let mut checkpoint = ProceduralReconciliationCheckpointV1::begin(
+            &work,
+            &root,
+            ProceduralReconciliationManifestPinsV1 {
+                agent_tool: ProceduralReconciliationManifestPinV1::Absent,
+                runtime_skill: ProceduralReconciliationManifestPinV1::Absent,
+            },
+            101,
+        )
+        .unwrap();
+        checkpoint.page_number = 1;
+        checkpoint.cursor = ProceduralReconciliationCursorV1::Complete;
+        checkpoint.updated_at = 102;
+        checkpoint
+            .verified_owners
+            .push(ProceduralReconciliationOwnerProofV1 {
+                withdrawn_task_refs: Vec::new(),
+                binding: ProceduralAppliedOwnerBindingV1::AgentToolExperience {
+                    owner_revision: material.owner_revision_ref(),
+                    content_digest: material.content_digest.clone(),
+                },
+                // Refusing to display a method is conservative. It proves nothing
+                // about the validity of any positive or negative task witness.
+                disposition: ProceduralReconciliationReadDispositionV1::Withdrawn,
+            });
+        checkpoint.content_digest = checkpoint.canonical_digest().unwrap();
+        let page =
+            ProceduralReconciliationPageAuthorityV1::for_claim(&claimed, "subject:test").unwrap();
+        let mut completed = claimed
+            .continue_reconciliation(checkpoint.clone(), page, "worker", claimed.lease_epoch, 102)
+            .unwrap();
+        let operation = MemoryMutationOperationIdentity::new(
+            "completed-withdrawal",
+            "space:test",
+            "subject:test",
+            "subject:test",
+            MemoryMutationOperationKind::ProceduralLearning,
+        )
+        .unwrap();
+        let intent = format!("sha256:{}", "b".repeat(64));
+        let transaction_id = format!("sha256:{}", "c".repeat(64));
+        let receipt = ProceduralReconciliationReceiptV1 {
+            schema_version: 1,
+            work: work.reference().unwrap(),
+            operation_id: "completed-withdrawal".into(),
+            transaction_id: transaction_id.clone(),
+            mutation_receipt_key: operation.storage_key(),
+            plan_digest: intent.clone(),
+            post_image_digest: digest_serialized(
+                "procedural_reconciliation_post_image_v1",
+                &(&checkpoint.content_digest, &checkpoint.current_manifests),
+                "test",
+            )
+            .unwrap(),
+            checkpoint_digest: checkpoint.content_digest.clone(),
+            completed_at: 103,
+        };
+        completed.status = ProceduralFeedbackJobStatusV1::Succeeded;
+        completed.state_revision += 1;
+        completed.next_attempt_at = None;
+        completed.updated_at = 103;
+        completed.terminal_at = Some(103);
+        completed.receipt = Some(ProceduralLearningReceiptV1::Reconcile {
+            receipt: receipt.clone(),
+        });
+        completed.validate().unwrap();
+        let mutation = MemoryMutationReceipt::new(
+            operation.clone(),
+            intent.clone(),
+            format!("sha256:{}", "d".repeat(64)),
+            transaction_id.clone(),
+            MemoryMutationEffect::Changed,
+            2,
+            103,
+        )
+        .unwrap();
+        let audit = MemoryMutationAuditRecord::new(
+            operation.clone(),
+            intent,
+            mutation.effect_plan_digest.clone(),
+            transaction_id,
+            MemoryMutationEffect::Changed,
+            2,
+            "subject:test",
+            103,
+        )
+        .unwrap();
+        validate_reconciliation_completion(&completed, &mutation, &audit).unwrap();
+        let root = root
+            .complete(
+                &work,
+                receipt.canonical_digest().unwrap(),
+                MAX_PROCEDURAL_SUBJECT_SCOPES,
+            )
+            .unwrap();
+        let application = ProceduralFeedbackApplicationLedgerV3::build(
+            &feedback,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            2,
+            104,
+        )
+        .unwrap();
+        let docs = BTreeMap::from([
+            (
+                (
+                    PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE.to_owned(),
+                    root.physical_key.clone(),
+                ),
+                serde_json::to_value(root).unwrap(),
+            ),
+            (
+                (
+                    PROCEDURAL_FEEDBACK_JOB_NAMESPACE.to_owned(),
+                    completed.job_id.clone(),
+                ),
+                serde_json::to_value(completed).unwrap(),
+            ),
+            (
+                (
+                    MEMORY_MUTATION_RECEIPT_NAMESPACE.to_owned(),
+                    operation.storage_key(),
+                ),
+                serde_json::to_value(mutation).unwrap(),
+            ),
+            (
+                (
+                    MEMORY_MUTATION_AUDIT_NAMESPACE.to_owned(),
+                    operation.storage_key(),
+                ),
+                serde_json::to_value(audit).unwrap(),
+            ),
+        ]);
+        let result = method_predecessor_withdrawn_task_refs(
+            &material,
+            &application,
+            &mut |namespace, key| {
+                docs.get(&(namespace.into(), key.into()))
+                    .cloned()
+                    .ok_or_else(|| Error::config("test", "missing exact proof"))
+            },
+        );
+        assert!(result.unwrap().is_empty(), "an exact completed conservative read withdrawal cannot authorize erasing task evidence");
+        let mut without_audit = docs.clone();
+        without_audit.remove(&(
+            MEMORY_MUTATION_AUDIT_NAMESPACE.to_owned(),
+            operation.storage_key(),
+        ));
+        assert!(
+            method_predecessor_withdrawn_task_refs(
+                &material,
+                &application,
+                &mut |namespace, key| {
+                    without_audit
+                        .get(&(namespace.into(), key.into()))
+                        .cloned()
+                        .ok_or_else(|| Error::config("test", "missing authoritative audit"))
+                }
+            )
+            .is_err(),
+            "a receipt without its authoritative audit cannot grant historical task withdrawal"
+        );
+        let wrong_epoch = ProceduralFeedbackApplicationLedgerV3::build(
+            &feedback,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            3,
+            104,
+        )
+        .unwrap();
+        assert!(
+            method_predecessor_withdrawn_task_refs(
+                &material,
+                &wrong_epoch,
+                &mut |namespace, key| {
+                    docs.get(&(namespace.into(), key.into()))
+                        .cloned()
+                        .ok_or_else(|| Error::config("test", "missing exact epoch"))
+                }
+            )
+            .is_err(),
+            "a later application cannot borrow an earlier epoch's withdrawal"
+        );
+        let before_completion = ProceduralFeedbackApplicationLedgerV3::build(
+            &feedback,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            2,
+            102,
+        )
+        .unwrap();
+        assert!(
+            method_predecessor_withdrawn_task_refs(
+                &material,
+                &before_completion,
+                &mut |namespace, key| {
+                    docs.get(&(namespace.into(), key.into()))
+                        .cloned()
+                        .ok_or_else(|| Error::config("test", "missing exact proof"))
+                }
+            )
+            .is_err(),
+            "a task application cannot consume a future withdrawal completion"
+        );
+    }
+
+    #[test]
+    fn reconciliation_receipt_cannot_publish_active_method_without_task_proof() {
+        use bm_core::memory::*;
+        let (_, material) = method_fixture(bm_core::skills::AgentToolExperienceStatus::Active);
+        let scope = ProceduralSubjectScopeV1 {
+            memory_space_id: material.memory_space_id.clone(),
+            mounted_subject_id: material.owning_scope.mounted_subject_id().into(),
+        };
+        let root = ProceduralSubjectValidityRootV1::initialize(
+            scope.clone(),
+            ProceduralProducerScopeV1 {
+                memory_space_id: scope.memory_space_id.clone(),
+                mounted_subject_id: scope.mounted_subject_id.clone(),
+                channel_id: "channel:test".into(),
+                chat_id: "chat:test".into(),
+            },
+            MAX_PROCEDURAL_SUBJECT_SCOPES,
+        )
+        .unwrap();
+        let owner = GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, "source:test");
+        let work = ProceduralReconciliationWorkV1 {
+            scope,
+            target_epoch: 2,
+            trigger: ProceduralReconciliationTriggerV1::SourceChange {
+                transaction_id: "source-delete".into(),
+                operation: None,
+                changes: vec![ProceduralSourceTransitionV1 {
+                    owner_ref: owner.clone(),
+                    before: ProceduralSourcePostImageV1::Present {
+                        revision: GovernedOwnerRevisionRef::try_new(owner, 1).unwrap(),
+                        content_digest: format!("sha256:{}", "a".repeat(64)),
+                    },
+                    after: ProceduralSourcePostImageV1::Deleted,
+                }],
+            },
+        };
+        let root = root.begin(&work, MAX_PROCEDURAL_SUBJECT_SCOPES).unwrap();
+        let claimed = ProceduralFeedbackJobV2::pending_work(
+            ProceduralLearningWorkV1::Reconcile {
+                source: work.clone(),
+            },
+            5,
+            100,
+        )
+        .unwrap()
+        .claim("worker", 200, 101)
+        .unwrap();
+        let mut checkpoint = ProceduralReconciliationCheckpointV1::begin(
+            &work,
+            &root,
+            ProceduralReconciliationManifestPinsV1 {
+                agent_tool: ProceduralReconciliationManifestPinV1::Absent,
+                runtime_skill: ProceduralReconciliationManifestPinV1::Absent,
+            },
+            101,
+        )
+        .unwrap();
+        checkpoint.page_number = 1;
+        checkpoint.cursor = ProceduralReconciliationCursorV1::RuntimeSkill { after: None };
+        checkpoint.updated_at = 102;
+        checkpoint
+            .verified_owners
+            .push(ProceduralReconciliationOwnerProofV1 {
+                withdrawn_task_refs: Vec::new(),
+                binding: ProceduralAppliedOwnerBindingV1::AgentToolExperience {
+                    owner_revision: material.owner_revision_ref(),
+                    content_digest: material.content_digest.clone(),
+                },
+                disposition: ProceduralReconciliationReadDispositionV1::Visible,
+            });
+        checkpoint.content_digest = checkpoint.canonical_digest().unwrap();
+        let authority =
+            ProceduralReconciliationPageAuthorityV1::for_claim(&claimed, "subject:test").unwrap();
+        let intent = authority.intent_digest(&checkpoint).unwrap();
+        let continued = claimed
+            .continue_reconciliation(
+                checkpoint,
+                authority.clone(),
+                "worker",
+                claimed.lease_epoch,
+                102,
+            )
+            .unwrap();
+        let receipt = MemoryMutationReceipt::new(
+            authority.operation.clone(),
+            intent.clone(),
+            format!("sha256:{}", "b".repeat(64)),
+            format!("sha256:{}", "c".repeat(64)),
+            MemoryMutationEffect::Changed,
+            2,
+            102,
+        )
+        .unwrap();
+        let audit = MemoryMutationAuditRecord::new(
+            authority.operation.clone(),
+            intent,
+            receipt.effect_plan_digest.clone(),
+            format!("sha256:{}", "c".repeat(64)),
+            MemoryMutationEffect::Changed,
+            2,
+            "subject:test",
+            102,
+        )
+        .unwrap();
+        validate_reconciliation_checkpoint_commitment(&continued, &receipt).unwrap();
+        let mut state = BackendTransactionState::default();
+        state.json.insert(
+            (
+                MEMORY_MUTATION_RECEIPT_NAMESPACE.into(),
+                authority.operation.storage_key(),
+            ),
+            serde_json::to_value(receipt).unwrap(),
+        );
+        state.json.insert(
+            (
+                MEMORY_MUTATION_AUDIT_NAMESPACE.into(),
+                authority.operation.storage_key(),
+            ),
+            serde_json::to_value(audit).unwrap(),
+        );
+        state.json.insert(
+            (
+                PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE.into(),
+                root.physical_key.clone(),
+            ),
+            serde_json::to_value(root).unwrap(),
+        );
+        state.json.insert(
+            (
+                AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE.into(),
+                material.physical_key.clone(),
+            ),
+            serde_json::to_value(material).unwrap(),
+        );
+        assert!(
+            validate_reconciliation_checkpoint_in_state(&continued, &state).is_err(),
+            "a valid page receipt cannot replace actual evidence for an Active method"
         );
     }
 }

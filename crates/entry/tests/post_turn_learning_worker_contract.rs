@@ -101,7 +101,7 @@ fn finalize_request(conversation_id: &str, turn_id: &str) -> MemoryTurnFinalizeR
             external_content_used: false,
             candidate_ids: Vec::new(),
         },
-        learning: bm_sdk::PostTurnLearningInputV2::empty(),
+        learning: bm_sdk::PostTurnLearningInputV3::empty(),
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     }
@@ -146,32 +146,39 @@ fn wait_for_completed_job_reports(runtimes: &[&EntryRuntime], expected: u64) {
 struct FakeOpenAiServer {
     address: String,
     calls: Arc<AtomicUsize>,
+    malformed_long_term_responses: Arc<AtomicUsize>,
     response_status: Arc<AtomicUsize>,
+    persona_calls: Arc<AtomicUsize>,
+    method_calls: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl FakeOpenAiServer {
     fn start() -> Self {
-        Self::start_with_options(0, Duration::ZERO, false, false)
+        Self::start_with_options(0, Duration::ZERO, false, false, false)
     }
 
     fn start_with_behavior(failures: usize, response_delay: Duration) -> Self {
-        Self::start_with_options(failures, response_delay, false, false)
+        Self::start_with_options(failures, response_delay, false, false, false)
     }
 
     fn start_with_malformed_long_term_output() -> Self {
-        Self::start_with_options(0, Duration::ZERO, true, false)
+        Self::start_with_options(0, Duration::ZERO, true, false, false)
     }
 
     fn start_with_auth_rejection() -> Self {
-        Self::start_with_options(0, Duration::ZERO, false, true)
+        Self::start_with_options(0, Duration::ZERO, false, true, false)
     }
 
     fn start_with_permission_denial() -> Self {
-        let server = Self::start_with_options(0, Duration::ZERO, false, false);
+        let server = Self::start_with_options(0, Duration::ZERO, false, false, false);
         server.response_status.store(403, Ordering::Release);
         server
+    }
+
+    fn start_with_learning() -> Self {
+        Self::start_with_options(0, Duration::ZERO, false, false, true)
     }
 
     fn start_with_options(
@@ -179,6 +186,7 @@ impl FakeOpenAiServer {
         response_delay: Duration,
         malformed_long_term_output: bool,
         auth_rejected: bool,
+        production_learning: bool,
     ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake model");
         listener
@@ -186,9 +194,15 @@ impl FakeOpenAiServer {
             .expect("nonblocking fake model");
         let address = listener.local_addr().expect("fake address").to_string();
         let calls = Arc::new(AtomicUsize::new(0));
+        let malformed_long_term_responses = Arc::new(AtomicUsize::new(0));
         let response_status = Arc::new(AtomicUsize::new(if auth_rejected { 401 } else { 0 }));
+        let persona_calls = Arc::new(AtomicUsize::new(0));
+        let method_calls = Arc::new(AtomicUsize::new(0));
+        let thread_persona_calls = Arc::clone(&persona_calls);
+        let thread_method_calls = Arc::clone(&method_calls);
         let stop = Arc::new(AtomicBool::new(false));
         let thread_calls = Arc::clone(&calls);
+        let thread_malformed_responses = Arc::clone(&malformed_long_term_responses);
         let thread_response_status = Arc::clone(&response_status);
         let thread_stop = Arc::clone(&stop);
         let failures_remaining = Arc::new(AtomicUsize::new(failures));
@@ -227,12 +241,17 @@ impl FakeOpenAiServer {
                             stream.write_all(response.as_bytes()).expect("fake failure");
                             continue;
                         }
-                        let content = if body.contains("private garden") {
-                            "null"
-                        } else if malformed_long_term_output {
-                            "not-json"
+                        let content = if production_learning {
+                            pl3_model_response(&body, &thread_persona_calls, &thread_method_calls)
+                        } else if body.contains("private garden") {
+                            "null".to_string()
+                        } else if malformed_long_term_output
+                            && body.contains("You extract durable memory updates")
+                        {
+                            thread_malformed_responses.fetch_add(1, Ordering::SeqCst);
+                            "not-json".to_string()
                         } else {
-                            "[]"
+                            "[]".to_string()
                         };
                         let response_body = serde_json::json!({
                             "choices": [{
@@ -260,7 +279,10 @@ impl FakeOpenAiServer {
         Self {
             address,
             calls,
+            malformed_long_term_responses,
             response_status,
+            persona_calls,
+            method_calls,
             stop,
             handle: Some(handle),
         }
@@ -649,7 +671,10 @@ fn malformed_long_term_output_is_retryable_instead_of_false_success() {
         Some(bm_sdk::PostTurnGovernanceErrorClassV2::MalformedModelOutput)
     );
     assert!(job.receipt.is_none());
-    assert!(fake.calls.load(Ordering::SeqCst) >= 2);
+    assert!(
+        fake.malformed_long_term_responses.load(Ordering::SeqCst) > 0,
+        "a real long-term extraction request must receive the malformed response"
+    );
 }
 
 #[test]
@@ -734,4 +759,456 @@ fn shutdown_during_model_call_prevents_post_shutdown_memory_completion() {
         .shutdown_memory_learning_service(Instant::now() + Duration::from_secs(10))
         .expect("worker joins after in-flight response is fenced");
     assert_eq!(service_report(&runtime).state, "stopped");
+}
+
+const PL3_OBSERVATION: &str =
+    "I consistently value honest uncertainty and repair grounded in evidence.";
+const PL3_GROWTH: &str = "evidence-grounded candor before certainty";
+const PL3_MATERIAL: &str = "Calculate a checksum and compare it with the authenticated expected checksum before accepting a file.";
+
+fn pl3_model_response(
+    body: &str,
+    persona_calls: &AtomicUsize,
+    method_calls: &AtomicUsize,
+) -> String {
+    let wire: serde_json::Value = serde_json::from_str(body).unwrap();
+    let messages = wire["messages"].as_array().unwrap();
+    let system = messages
+        .iter()
+        .filter(|m| m["role"] == "system")
+        .filter_map(|m| m["content"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let user = messages
+        .iter()
+        .filter(|m| m["role"] == "user")
+        .filter_map(|m| m["content"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if system.contains("persona interpretation") {
+        persona_calls.fetch_add(1, Ordering::SeqCst);
+        let input: serde_json::Value = serde_json::from_str(&user).unwrap();
+        let observation = input["observations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|observation| observation["text"] == PL3_OBSERVATION)
+            .unwrap();
+        assert!(
+            !user.contains(PL3_GROWTH),
+            "derived personality must not be relabelled as canonical observation"
+        );
+        serde_json::json!({"decision":"growth", "scope":"subject", "priority_order":[], "value_orientation":PL3_GROWTH,
+            "relationship_posture":"", "supporting_observations":[{"message_id":observation["message_id"],"quote":PL3_OBSERVATION}],
+            "counter_observations":[]}).to_string()
+    } else if system.contains("method learning extraction") {
+        method_calls.fetch_add(1, Ordering::SeqCst);
+        assert!(user.contains(PL3_MATERIAL));
+        assert!(
+            !user.contains(PL3_GROWTH),
+            "method extraction cannot consume Soul private growth"
+        );
+        serde_json::json!([{"task_signature":"verify_file", "procedure":"1. Calculate the checksum.\n2. Compare with the authenticated expected checksum and reject mismatches.",
+            "constraints":["Use an authenticated expected checksum."], "source_material_ids":["verified-material"]}]).to_string()
+    } else if system.contains("compact private self-model") {
+        assert!(user.contains(PL3_GROWTH));
+        serde_json::json!({"continuity_anchor":"I preserve evidence-grounded candor before certainty.","value_orientation":PL3_GROWTH}).to_string()
+    } else if system.contains("private garden") {
+        "null".into()
+    } else if system.contains("inward autonomy runtime") {
+        "{}".into()
+    } else {
+        "[]".into()
+    }
+}
+
+fn pl3_governor(
+    runtime: &bm_sdk::MemoryRuntime,
+    store: bm_sdk::MemoryStoreHandle,
+) -> bm_sdk::MemoryRuntime {
+    let mut scope = runtime.scoped_runtime().clone();
+    scope.actor_subject_id = runtime
+        .subject_registry()
+        .system_governor()
+        .unwrap()
+        .subject_id
+        .clone();
+    bm_sdk::MemoryRuntime::builder()
+        .identity(runtime.identity().clone())
+        .scope(runtime.scope().clone())
+        .store(store)
+        .subject_registry(runtime.subject_registry().clone())
+        .subject_relationship_graph(runtime.config().subject_relationship_graph.clone())
+        .subject_id(runtime.subject_id())
+        .scoped_runtime(scope)
+        .build()
+        .unwrap()
+}
+
+fn pl3_registry() -> bm_sdk::AgentToolRegistrySnapshot {
+    bm_sdk::AgentToolRegistrySnapshot::compact(
+        "service-learning-tools",
+        "host",
+        vec![bm_sdk::AgentToolDescriptor::compact(
+            "verify_file",
+            "Verify file",
+            "checksum-schema",
+        )],
+        1,
+    )
+}
+
+fn pl3_material_capability(
+    runtime: &bm_sdk::MemoryRuntime,
+    governor: &bm_sdk::MemoryRuntime,
+) -> bm_sdk::MemoryProceduralSubmissionCapability {
+    use bm_sdk::*;
+    let registry = pl3_registry();
+    runtime
+        .upsert_agent_tool_registry(registry.clone())
+        .unwrap();
+    governor
+        .upsert_agent_tool_registry(registry.clone())
+        .unwrap();
+    let registered = governor
+        .control_procedural_producer(MemoryProceduralProducerControlRequest {
+            operation_id: "register-service-material-producer".into(),
+            expected_revision: None,
+            state: ProceduralProducerStateV1::Active,
+            spec: ProceduralProducerSpecV1 {
+                binding_id: "service-material-producer".into(),
+                scope: ProceduralProducerScopeV1 {
+                    memory_space_id: runtime.memory_space_id().into(),
+                    mounted_subject_id: runtime.subject_id().into(),
+                    channel_id: runtime.scope().channel.clone(),
+                    chat_id: runtime.scope().chat_id.clone(),
+                },
+                principal: ProceduralProducerPrincipalV1::LocalCapability {
+                    capability_id: "service-material-observer".into(),
+                },
+                source_authority: ProceduralProducerSourceAuthorityV1::RuntimeObservation,
+                claims: ProceduralProducerClaimsV1 {
+                    method_learning_materials: true,
+                    method_adoptions: false,
+                    method_task_evaluations: false,
+                    execution_facts: false,
+                    method_declarations: false,
+                    usage_feedback: false,
+                    source_classifications: vec![ProceduralSourceSensitivity::NonPrivate],
+                },
+                tools: vec![ProceduralProducerToolV1 {
+                    registry_ref: registry.registry_ref(),
+                    tool_id: "verify_file".into(),
+                    schema_fingerprint: "checksum-schema".into(),
+                }],
+                source_config_ref: "synthetic-local-service".into(),
+                method_evaluators: vec![],
+            },
+        })
+        .unwrap();
+    governor
+        .procedural_submission_capability(&registered.binding.revision_ref().unwrap())
+        .unwrap()
+}
+
+fn pl3_projection(
+    runtime: &bm_sdk::MemoryRuntime,
+    turn: Option<&str>,
+) -> bm_sdk::MemoryProjectionOutput {
+    use bm_sdk::*;
+    runtime
+        .project(MemoryProjectionRequest {
+            binding: turn.map_or(ProceduralProjectionBindingV1::Preview, |turn| {
+                ProceduralProjectionBindingV1::Turn {
+                    turn_id: turn.into(),
+                }
+            }),
+            temporal_operation: MemoryRecallTemporalOperation::Current,
+            user_query: "How do you approach uncertain claims? verify_file".into(),
+            system_max_len: 12000,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+            structured_query_facets: vec![],
+            tool_registry_refs: vec![pl3_registry().registry_ref()],
+        })
+        .unwrap()
+}
+
+fn pl3_service_turn(
+    runtime: &bm_sdk::MemoryRuntime,
+    capability: &bm_sdk::MemoryProceduralSubmissionCapability,
+    ordinal: usize,
+) {
+    use bm_sdk::*;
+    let turn_id = format!("service-learning-turn-{ordinal}");
+    let signed = pl3_projection(runtime, Some(&turn_id));
+    let mut learning = PostTurnLearningInputV3::empty();
+    learning.selection_receipt = Some(signed.report().selection_receipt().unwrap().clone());
+    let mut observations = vec![TranscriptInputMessage::user(PL3_OBSERVATION)];
+    if ordinal == 0 {
+        observations.insert(0, TranscriptInputMessage::user(PL3_MATERIAL));
+        learning.method_learning_inputs = vec![MethodLearningInputV1 {
+            registry_ref: pl3_registry().registry_ref(),
+            tool_id: "verify_file".into(),
+            schema_fingerprint: "checksum-schema".into(),
+            materials: vec![MethodLearningMaterialV1 {
+                material_id: "verified-material".into(),
+                purpose: MethodLearningMaterialPurposeV1::TaskConstraint,
+                source: MethodLearningMaterialSourceV1::CanonicalInputMessage { input_index: 0 },
+                text: PL3_MATERIAL.into(),
+                sensitivity: ProceduralSourceSensitivity::NonPrivate,
+                external_content: false,
+            }],
+        }];
+    }
+    let finalized = runtime
+        .finalize_turn_with_procedural_evidence(
+            capability,
+            MemoryTurnFinalizeRequest {
+                turn: CanonicalTurnDelta {
+                    turn_id,
+                    conversation: ConversationScope {
+                        channel: runtime.scope().channel.clone(),
+                        chat_id: runtime.scope().chat_id.clone(),
+                        conversation_id: Some(runtime.scope().conversation_id_or_chat_id().into()),
+                    },
+                    subject: runtime.subject_id().into(),
+                    delivery_status: MemoryTurnDeliveryStatus::Delivered,
+                    source: MemoryTurnSource {
+                        ingress: IngressKind::User,
+                        channel: runtime.scope().channel.clone(),
+                        provider: None,
+                        protocol: MemoryTurnProtocol::Native,
+                        endpoint: None,
+                        model_alias: None,
+                        model_resolved: None,
+                        request_id: None,
+                        client_conversation_hint: None,
+                    },
+                    actor: None,
+                    input_messages: observations,
+                    assistant_message: Some(TranscriptInputMessage::assistant(
+                        "I will distinguish uncertainty from evidence.",
+                    )),
+                    tool_observations: vec![],
+                    external_content_used: false,
+                    candidate_ids: vec![],
+                },
+                learning,
+                pressure: PressureLevel::Normal,
+                mode_input: RuntimeLifecycleModeInput::default(),
+            },
+        )
+        .unwrap();
+    let job_id = finalized.memory_consolidation.job_id.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let job = runtime
+            .governance_job_status(MemoryGovernanceJobStatusRequest {
+                job_id: job_id.clone(),
+            })
+            .unwrap()
+            .job;
+        if job.status == PostTurnGovernanceJobStatusV2::Succeeded {
+            assert!(job.receipt.is_some());
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "official service stalled: {job:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn assert_pl3_service_result(
+    runtime: &bm_sdk::MemoryRuntime,
+    other: &bm_sdk::MemoryRuntime,
+    fake: &FakeOpenAiServer,
+) {
+    use bm_sdk::*;
+    let query = MemoryMethodTrialRequest {
+        tool: ProceduralProducerToolV1 {
+            registry_ref: pl3_registry().registry_ref(),
+            tool_id: "verify_file".into(),
+            schema_fingerprint: "checksum-schema".into(),
+        },
+        max_candidates: 4,
+    };
+    let learned = runtime.discover_method_trials(query.clone()).unwrap();
+    assert!(
+        !learned.candidates.is_empty(),
+        "official service never persisted extracted method"
+    );
+    assert!(learned
+        .candidates
+        .iter()
+        .all(|value| value.status == AgentToolExperienceStatus::Candidate));
+    assert!(learned.candidates[0]
+        .procedure
+        .contains("reject mismatches"));
+    assert!(
+        other
+            .discover_method_trials(query)
+            .unwrap()
+            .candidates
+            .is_empty(),
+        "another subject read the method candidate"
+    );
+    let projected = pl3_projection(runtime, None);
+    assert!(projected
+        .provider_payload()
+        .system_memory_block()
+        .contains(PL3_GROWTH));
+    assert!(
+        !projected
+            .provider_payload()
+            .system_memory_block()
+            .contains(&learned.candidates[0].procedure),
+        "unadopted method was prematurely delivered"
+    );
+    assert!(!pl3_projection(other, None)
+        .provider_payload()
+        .system_memory_block()
+        .contains(PL3_GROWTH));
+    let safe = runtime
+        .read_subject_soul(SubjectSoulReadRequestV1 {
+            target_subject_id: runtime.subject_id().into(),
+            selector: SubjectSoulReadSelectorV1::Current,
+            view: SubjectSoulReadViewV1::OperatorSafe,
+        })
+        .unwrap();
+    assert!(!serde_json::to_string(&safe).unwrap().contains(PL3_GROWTH));
+    assert!(fake.persona_calls.load(Ordering::SeqCst) >= 4);
+    assert!(fake.method_calls.load(Ordering::SeqCst) > 0);
+}
+
+fn pl3_other_subject(
+    runtime: &bm_sdk::MemoryRuntime,
+    store: bm_sdk::MemoryStoreHandle,
+) -> Arc<bm_sdk::MemoryRuntime> {
+    use bm_sdk::*;
+    let mut registry = runtime.subject_registry().clone();
+    registry
+        .upsert_subject(SubjectDescriptor::agent_persona(
+            default_agent_subject_id("service-other"),
+            "Other subject",
+        ))
+        .unwrap();
+    let other = Arc::new(
+        MemoryRuntime::builder()
+            .identity(MemoryIdentity::new("service-other", &runtime.identity().owner_id).unwrap())
+            .scope(MemoryScope::new(runtime.scope().channel.clone(), "other-service-chat").unwrap())
+            .store(store)
+            .subject_registry(registry)
+            .build()
+            .unwrap(),
+    );
+    other.upsert_agent_tool_registry(pl3_registry()).unwrap();
+    other
+}
+
+#[test]
+fn entry_official_service_learns_methods_and_persona_from_canonical_sources() {
+    let root = temp_store("pl3-entry-consumer");
+    let entry = runtime(&root);
+    let fake = FakeOpenAiServer::start_with_learning();
+    configure_model(&entry, &fake);
+    let store = bm_sdk::MemoryStoreHandle::open(
+        StoreBackendConfig::file(&root, support::host_production_profile())
+            .unwrap()
+            .with_fsync(false),
+    )
+    .unwrap();
+    let governor = pl3_governor(entry.runtime(), store.clone());
+    let capability = pl3_material_capability(entry.runtime(), &governor);
+    for ordinal in 0..4 {
+        pl3_service_turn(entry.runtime(), &capability, ordinal);
+    }
+    let other = pl3_other_subject(entry.runtime(), store);
+    assert_pl3_service_result(entry.runtime(), &other, &fake);
+    entry
+        .shutdown_memory_learning_service(Instant::now() + Duration::from_secs(2))
+        .unwrap();
+}
+
+#[test]
+fn attached_official_service_learns_on_existing_multi_subject_runtime() {
+    use bm_entry::*;
+    use bm_sdk::*;
+    struct Binding(String);
+    impl GovernanceBindingSource for Binding {
+        fn current_binding(&self) -> bm_sdk::Result<Option<GovernanceProviderBinding>> {
+            Ok(Some(GovernanceProviderBinding {
+                source_owner_id: "pl3-host".into(),
+                source_config_id: "single-provider".into(),
+                source_revision: 1,
+                protocol: EntryGovernanceModelProtocol::OpenAiCompatible,
+                endpoint: self.0.clone(),
+                model_id: "synthetic".into(),
+                credential_reference: None,
+                request_timeout_ms: 5000,
+                max_input_tokens: 8192,
+                max_output_tokens: 2048,
+                provider_permission_generation: 1,
+            }))
+        }
+    }
+    struct NoSecret;
+    impl GovernanceCredentialResolver for NoSecret {
+        fn resolve(
+            &self,
+            _: &GovernanceCredentialRequest,
+        ) -> bm_sdk::Result<ResolvedGovernanceCredential> {
+            panic!("loopback needs no credentials")
+        }
+    }
+    let fake = FakeOpenAiServer::start_with_learning();
+    let store = MemoryStoreHandle::open(
+        StoreBackendConfig::in_memory(support::host_production_profile()).unwrap(),
+    )
+    .unwrap();
+    let mut registry =
+        SubjectRegistry::single_agent_default("service-owner", "service-agent").unwrap();
+    registry
+        .upsert_subject(SubjectDescriptor::agent_persona(
+            default_agent_subject_id("service-other"),
+            "Other subject",
+        ))
+        .unwrap();
+    let runtime = Arc::new(
+        MemoryRuntime::builder()
+            .identity(MemoryIdentity::new("service-agent", "service-owner").unwrap())
+            .scope(MemoryScope::new("desktop.embedded", "service-chat").unwrap())
+            .store(store.clone())
+            .subject_registry(registry)
+            .build()
+            .unwrap(),
+    );
+    let other = pl3_other_subject(&runtime, store.clone());
+    let governor = pl3_governor(&runtime, store.clone());
+    let other_governor = pl3_governor(&other, store);
+    let capability = pl3_material_capability(&runtime, &governor);
+    let (service, _attachment) = MemoryLearningService::builder(runtime.clone())
+        .control_authorities(governor.learning_service_control_authorities().unwrap())
+        .binding_source(Arc::new(Binding(fake.endpoint())))
+        .credential_resolver(Arc::new(NoSecret))
+        .start()
+        .unwrap();
+    let _other_attachment = service
+        .attach_runtime(
+            other.clone(),
+            other_governor
+                .learning_service_control_authorities()
+                .unwrap(),
+        )
+        .unwrap();
+    for ordinal in 0..4 {
+        pl3_service_turn(&runtime, &capability, ordinal);
+    }
+    assert_pl3_service_result(&runtime, &other, &fake);
+    service
+        .shutdown(Instant::now() + Duration::from_secs(2))
+        .unwrap();
 }

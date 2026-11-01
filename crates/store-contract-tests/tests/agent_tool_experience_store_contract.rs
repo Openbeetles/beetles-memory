@@ -11,8 +11,8 @@ use bm_core::memory::{
 use bm_core::skills::{
     AgentToolExperienceBodyV1, AgentToolExperienceHeadBindingV1, AgentToolExperienceOwnerHeadV3,
     AgentToolExperienceOwningScopeV1, AgentToolExperienceRetainedRevisionDigestV3,
-    AgentToolExperienceRevisionMaterialV3, AgentToolExperienceScopeManifestV1,
-    AgentToolExperienceStatus, AgentToolMethodSourceRefV1, AgentToolRegistryScope,
+    AgentToolExperienceRevisionMaterialV4, AgentToolExperienceScopeManifestV1,
+    AgentToolExperienceStatus, AgentToolMethodSourceRefV2, AgentToolRegistryScope,
 };
 use bm_sdk::nonproduction_replay_harness::{
     AgentToolExperienceStoreMutationOutcomeV1, AgentToolExperienceStoreMutationPlanV1,
@@ -26,7 +26,7 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone)]
 struct ExperienceRevisionFixture {
     plan: AgentToolExperienceStoreMutationPlanV1,
-    material: AgentToolExperienceRevisionMaterialV3,
+    material: AgentToolExperienceRevisionMaterialV4,
     head: AgentToolExperienceOwnerHeadV3,
     manifest: AgentToolExperienceScopeManifestV1,
 }
@@ -60,7 +60,7 @@ fn revision_fixture(
     operation_id: &str,
     task_signature: &str,
     revision: u64,
-    previous_material: Option<&AgentToolExperienceRevisionMaterialV3>,
+    previous_material: Option<&AgentToolExperienceRevisionMaterialV4>,
     previous_head: Option<&AgentToolExperienceOwnerHeadV3>,
     previous_manifest: Option<&AgentToolExperienceScopeManifestV1>,
     evidence_refs: Vec<String>,
@@ -72,6 +72,7 @@ fn revision_fixture(
     // These fixtures exercise Store structure, not successful execution or
     // promotion. Retain typed method references without fabricated counters.
     let mut body = AgentToolExperienceBodyV1::Method {
+        usage_contributions: Vec::new(),
         task_signature: task_signature.into(),
         procedure: format!(
             "1. Inspect the release artifact.\n2. Extract and verify revision {revision}."
@@ -85,15 +86,17 @@ fn revision_fixture(
     };
     *sources = evidence_refs
         .into_iter()
-        .map(|source_job_id| AgentToolMethodSourceRefV1 {
-            source_job_id,
-            method_id: "synthetic-method".into(),
-            method_digest: method_digest.clone(),
-            execution_refs: Vec::new(),
-        })
+        .map(
+            |source_job_id| AgentToolMethodSourceRefV2::ProducerDeclaration {
+                source_job_id,
+                method_id: "synthetic-method".into(),
+                method_digest: method_digest.clone(),
+                execution_refs: Vec::new(),
+            },
+        )
         .collect();
     sources.sort_by_cached_key(|source| serde_json::to_vec(source).unwrap());
-    let material = AgentToolExperienceRevisionMaterialV3::build(
+    let material = AgentToolExperienceRevisionMaterialV4::build(
         "space:test",
         owning_scope(subject),
         "host-tools",
@@ -210,9 +213,9 @@ fn json_projection(platform: &StorePlatform) -> Vec<(String, String, serde_json:
 }
 
 #[test]
-fn store_schema_v14_is_the_only_current_schema() {
-    assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v14");
-    assert_eq!(STORE_SCHEMA_VERSION, 14);
+fn store_schema_v15_is_the_only_current_schema() {
+    assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v15");
+    assert_eq!(STORE_SCHEMA_VERSION, 15);
 }
 
 #[test]
@@ -526,7 +529,7 @@ fn snapshot_import_rejects_tampered_material_digest() {
         .find(|doc| doc.namespace == AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE)
         .expect("persisted material");
     material.value["status"] = serde_json::json!("active");
-    let forged: AgentToolExperienceRevisionMaterialV3 =
+    let forged: AgentToolExperienceRevisionMaterialV4 =
         serde_json::from_value(material.value.clone()).expect("attack is a typed material");
     assert_ne!(
         forged.content_digest,

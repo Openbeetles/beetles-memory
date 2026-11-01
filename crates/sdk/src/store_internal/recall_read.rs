@@ -34,7 +34,7 @@ use bm_core::skills::{
     agent_tool_experience_scope_manifest_key, runtime_skill_scope_manifest_key,
     validate_agent_tool_experience_owner_history, validate_agent_tool_experience_scope_closure,
     AgentToolExperienceHeadStateV3, AgentToolExperienceOwnerHeadV3,
-    AgentToolExperienceOwningScopeV1, AgentToolExperienceRevisionMaterialV3,
+    AgentToolExperienceOwningScopeV1, AgentToolExperienceRevisionMaterialV4,
     AgentToolExperienceScopeManifestV1, RuntimeSkillOwnerBinding, RuntimeSkillOwnerRecord,
     RuntimeSkillOwningScope, RuntimeSkillPremise, RuntimeSkillScopeManifest,
 };
@@ -56,7 +56,7 @@ use super::transaction::{
 };
 use crate::StoreReadReceipt;
 use bm_core::memory::{
-    ProceduralFeedbackApplicationLedgerV2, ProceduralFeedbackJobV2,
+    ProceduralFeedbackApplicationLedgerV3, ProceduralFeedbackJobV2,
     ProceduralLearningReadAvailabilityV1, ProceduralReadAuthorityV1,
     ProceduralSubjectValidityRootV1,
 };
@@ -69,6 +69,7 @@ pub(crate) struct MaterializedAgentToolExperienceScopeClosure {
     owners: Vec<bm_core::skills::AgentToolExperienceReadProjectionV1>,
     as_of_time: Option<u64>,
     read_availability: ProceduralLearningReadAvailabilityV1,
+    purpose: bm_core::skills::AgentToolExperienceReadPurposeV1,
 }
 
 impl MaterializedAgentToolExperienceScopeClosure {
@@ -83,12 +84,18 @@ impl MaterializedAgentToolExperienceScopeClosure {
 struct MaterializedProceduralReadAuthority {
     root: ProceduralSubjectValidityRootV1,
     completion: Option<ProceduralFeedbackJobV2>,
-    applications: Vec<ProceduralFeedbackApplicationLedgerV2>,
+    applications: Vec<ProceduralFeedbackApplicationLedgerV3>,
+    semantic_applications: Vec<bm_core::memory::PostTurnGovernanceJobV4>,
 }
 
 impl MaterializedProceduralReadAuthority {
     fn verified(&self) -> Result<ProceduralReadAuthorityV1<'_>> {
-        ProceduralReadAuthorityV1::try_new(&self.root, self.completion.as_ref(), &self.applications)
+        ProceduralReadAuthorityV1::try_new(
+            &self.root,
+            self.completion.as_ref(),
+            &self.applications,
+            &self.semantic_applications,
+        )
     }
 }
 
@@ -372,7 +379,14 @@ impl<'a> RecallImmutableReadContext<'a> {
     ) -> Result<Option<serde_json::Value>> {
         self.ensure_receipt_not_finalized()?;
         let address = (namespace.to_string(), key.to_string());
-        if let Some(value) = self.json_cache.get(&address) {
+        // A transient/evicted source still has its exact first-read observation.
+        // Reuse that pinned value without promoting it back into the projection
+        // cache or reading a second snapshot of the same owner.
+        if let Some(value) = self
+            .json_cache
+            .get(&address)
+            .or_else(|| self.json_observations.get(&address))
+        {
             return Ok(value.clone());
         }
         let reads = self
@@ -408,7 +422,10 @@ impl<'a> RecallImmutableReadContext<'a> {
             .collect::<Vec<_>>();
         let missing = addresses
             .iter()
-            .filter(|address| !self.json_cache.contains_key(*address))
+            .filter(|address| {
+                !self.json_cache.contains_key(*address)
+                    && !self.json_observations.contains_key(*address)
+            })
             .cloned()
             .collect::<Vec<_>>();
         if !missing.is_empty() {
@@ -436,7 +453,12 @@ impl<'a> RecallImmutableReadContext<'a> {
         Ok(addresses
             .into_iter()
             .map(|address| {
-                let value = self.json_cache.get(&address).cloned().unwrap_or(None);
+                let value = self
+                    .json_cache
+                    .get(&address)
+                    .or_else(|| self.json_observations.get(&address))
+                    .cloned()
+                    .unwrap_or(None);
                 (address, value)
             })
             .collect())
@@ -455,7 +477,10 @@ impl<'a> RecallImmutableReadContext<'a> {
             .collect::<Vec<_>>();
         let missing = addresses
             .iter()
-            .filter(|address| !self.json_cache.contains_key(*address))
+            .filter(|address| {
+                !self.json_cache.contains_key(*address)
+                    && !self.json_observations.contains_key(*address)
+            })
             .cloned()
             .collect::<Vec<_>>();
         let reads = if missing.is_empty() {
@@ -492,6 +517,7 @@ impl<'a> RecallImmutableReadContext<'a> {
                 let value = self
                     .json_cache
                     .get(&address)
+                    .or_else(|| self.json_observations.get(&address))
                     .cloned()
                     .or_else(|| reads.get(&address).cloned())
                     .unwrap_or(None);
@@ -1036,6 +1062,7 @@ impl<'a> RecallImmutableReadContext<'a> {
         memory_space_id: &str,
         subject_id: &str,
         source_jobs: &BTreeSet<String>,
+        semantic_jobs: &BTreeSet<String>,
     ) -> Result<MaterializedProceduralReadAuthority> {
         use super::schema::{
             PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE, PROCEDURAL_FEEDBACK_JOB_NAMESPACE,
@@ -1110,7 +1137,7 @@ impl<'a> RecallImmutableReadContext<'a> {
             let job: ProceduralFeedbackJobV2 = self
                 .read_json(PROCEDURAL_FEEDBACK_JOB_NAMESPACE, id)?
                 .ok_or_else(invalid)?;
-            let ledger: ProceduralFeedbackApplicationLedgerV2 = self
+            let ledger: ProceduralFeedbackApplicationLedgerV3 = self
                 .read_json(PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE, id)?
                 .ok_or_else(invalid)?;
             let key = job
@@ -1130,10 +1157,22 @@ impl<'a> RecallImmutableReadContext<'a> {
             .map_err(|_| invalid())?;
             applications.push(ledger);
         }
+        let mut semantic_applications = Vec::new();
+        for id in semantic_jobs {
+            let job: bm_core::memory::PostTurnGovernanceJobV4 = self
+                .read_json(bm_core::memory::POST_TURN_GOVERNANCE_JOB_NAMESPACE, id)?
+                .ok_or_else(invalid)?;
+            job.validate()?;
+            if job.job_id != *id {
+                return Err(invalid());
+            }
+            semantic_applications.push(job);
+        }
         let authority = MaterializedProceduralReadAuthority {
             root,
             completion,
             applications,
+            semantic_applications,
         };
         authority.verified().map_err(|_| invalid())?;
         Ok(authority)
@@ -1146,6 +1185,25 @@ impl<'a> RecallImmutableReadContext<'a> {
         max_owners_per_scope: usize,
         max_revisions_per_owner: usize,
         as_of_time: Option<u64>,
+    ) -> Result<()> {
+        self.materialize_agent_tool_experience_scope_for_purpose(
+            memory_space_id,
+            owning_scope,
+            max_owners_per_scope,
+            max_revisions_per_owner,
+            as_of_time,
+            bm_core::skills::AgentToolExperienceReadPurposeV1::GovernedRecall,
+        )
+    }
+
+    pub(crate) fn materialize_agent_tool_experience_scope_for_purpose(
+        &mut self,
+        memory_space_id: &str,
+        owning_scope: &AgentToolExperienceOwningScopeV1,
+        max_owners_per_scope: usize,
+        max_revisions_per_owner: usize,
+        as_of_time: Option<u64>,
+        purpose: bm_core::skills::AgentToolExperienceReadPurposeV1,
     ) -> Result<()> {
         use crate::store_internal::schema::{
             AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE, AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE,
@@ -1167,6 +1225,7 @@ impl<'a> RecallImmutableReadContext<'a> {
         let scope_key = (memory_space_id.to_string(), owning_scope.clone());
         if let Some(closure) = self.agent_tool_experience_scope_closures.get(&scope_key) {
             if closure.as_of_time != as_of_time
+                || closure.purpose != purpose
                 || closure.heads.len() > max_owners_per_scope
                 || closure
                     .heads
@@ -1185,6 +1244,7 @@ impl<'a> RecallImmutableReadContext<'a> {
             self.agent_tool_experience_scope_closures.insert(
                 scope_key,
                 MaterializedAgentToolExperienceScopeClosure {
+                    purpose,
                     heads: Vec::new(),
                     owners: Vec::new(),
                     as_of_time,
@@ -1201,6 +1261,7 @@ impl<'a> RecallImmutableReadContext<'a> {
             self.agent_tool_experience_scope_closures.insert(
                 scope_key,
                 MaterializedAgentToolExperienceScopeClosure {
+                    purpose,
                     read_availability: ProceduralLearningReadAvailabilityV1::Ready,
                     heads: Vec::new(),
                     owners: Vec::new(),
@@ -1279,7 +1340,7 @@ impl<'a> RecallImmutableReadContext<'a> {
             .read_json_values(&material_addresses)?
             .into_iter()
             .map(|(_, value)| {
-                serde_json::from_value::<AgentToolExperienceRevisionMaterialV3>(
+                serde_json::from_value::<AgentToolExperienceRevisionMaterialV4>(
                     value.ok_or_else(invalid)?,
                 )
                 .map_err(|_| invalid())
@@ -1302,7 +1363,29 @@ impl<'a> RecallImmutableReadContext<'a> {
                 .collect::<Vec<_>>();
             validate_agent_tool_experience_owner_history(&history)?;
         }
+        let mut unavailable = BTreeSet::new();
+        for material in &materials {
+            for source in material
+                .body
+                .method_sources()
+                .iter()
+                .filter_map(|source| source.governance_extraction())
+            {
+                if !super::post_turn_governance::verify_semantic_method_source(
+                    source,
+                    material,
+                    |namespace, key| {
+                        Ok(self
+                            .read_json::<serde_json::Value>(namespace, key)?
+                            .unwrap_or(serde_json::Value::Null))
+                    },
+                )? {
+                    unavailable.insert(material.physical_key.clone());
+                }
+            }
+        }
         let mut source_jobs = BTreeSet::new();
+        let mut semantic_jobs = BTreeSet::new();
         for material in &materials {
             match &material.body {
                 bm_core::skills::AgentToolExperienceBodyV1::Execution { contributions, .. } => {
@@ -1312,8 +1395,31 @@ impl<'a> RecallImmutableReadContext<'a> {
                             .map(|reference| reference.source_job_id.clone()),
                     )
                 }
-                bm_core::skills::AgentToolExperienceBodyV1::Method { sources, .. } => {
-                    source_jobs.extend(sources.iter().map(|source| source.source_job_id.clone()))
+                bm_core::skills::AgentToolExperienceBodyV1::Method {
+                    sources,
+                    usage_contributions,
+                    ..
+                } => {
+                    source_jobs.extend(
+                        usage_contributions
+                            .iter()
+                            .map(|reference| reference.source_job_id.clone()),
+                    );
+                    for source in sources {
+                        match source {
+                            bm_core::skills::AgentToolMethodSourceRefV2::ProducerDeclaration {
+                                source_job_id,
+                                ..
+                            } => {
+                                source_jobs.insert(source_job_id.clone());
+                            }
+                            bm_core::skills::AgentToolMethodSourceRefV2::GovernanceExtraction {
+                                source,
+                            } => {
+                                semantic_jobs.insert(source.source_job_id.clone());
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1321,6 +1427,7 @@ impl<'a> RecallImmutableReadContext<'a> {
             memory_space_id,
             owning_scope.mounted_subject_id(),
             &source_jobs,
+            &semantic_jobs,
         )?;
         let verified = authority.verified()?;
         let owners = heads
@@ -1331,9 +1438,18 @@ impl<'a> RecallImmutableReadContext<'a> {
                     .filter(|material| material.owner_ref == head.owner_ref)
                     .cloned()
                     .collect::<Vec<_>>();
-                bm_core::skills::AgentToolExperienceReadProjectionV1::try_new(
-                    head, &history, &verified, as_of_time,
-                )
+                let projection =
+                    bm_core::skills::AgentToolExperienceReadProjectionV1::try_new_for_purpose(
+                        head, &history, &verified, as_of_time, purpose,
+                    )?;
+                let denied = projection
+                    .material()
+                    .is_some_and(|material| unavailable.contains(&material.physical_key));
+                Ok(if denied {
+                    projection.without_source_authority()
+                } else {
+                    projection
+                })
             })
             .collect::<Result<Vec<_>>>()?;
         // Read observations still prove every byte validated in this immutable
@@ -1354,6 +1470,7 @@ impl<'a> RecallImmutableReadContext<'a> {
         self.agent_tool_experience_scope_closures.insert(
             scope_key,
             MaterializedAgentToolExperienceScopeClosure {
+                purpose,
                 heads,
                 owners,
                 as_of_time,
@@ -1535,16 +1652,20 @@ impl<'a> RecallImmutableReadContext<'a> {
                     memory_space_id,
                     mounted_subject_id,
                     &source_jobs,
+                    &BTreeSet::new(),
                 )?;
                 let verified = authority.verified()?;
                 let mut permitted = Vec::new();
                 for record in records {
-                    let allowed = !depends_on_feedback(&record)
+                    let mut allowed = !depends_on_feedback(&record)
                         || verified.permits_exact(
                             &bm_core::memory::ProceduralAppliedOwnerBindingV1::RuntimeSkill {
                                 binding: RuntimeSkillOwnerBinding::from_record(&record)?,
                             },
                         )?;
+                    if allowed {
+                        allowed = self.runtime_skill_method_source_permitted(&record)?;
+                    }
                     if allowed {
                         permitted.push(record);
                     } else {
@@ -1568,6 +1689,115 @@ impl<'a> RecallImmutableReadContext<'a> {
             },
         );
         Ok(Some(records))
+    }
+
+    fn runtime_skill_method_source_permitted(
+        &mut self,
+        skill: &RuntimeSkillOwnerRecord,
+    ) -> Result<bool> {
+        use super::schema::{
+            AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE, AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE,
+            AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE,
+        };
+        let bm_core::skills::RuntimeSkillCreationRef::AgentToolExperiencePromotion {
+            experience_owner_ref,
+        } = &skill.creation_ref
+        else {
+            return Ok(true);
+        };
+        let RuntimeSkillOwningScope::Subject { mounted_subject_id } = &skill.owning_scope else {
+            return Err(Error::config(
+                "runtime_skill_method_source",
+                "method-derived skill has no subject owner",
+            ));
+        };
+        let invalid = || {
+            Error::config(
+                "runtime_skill_method_source",
+                "promoted method source closure is missing or invalid",
+            )
+        };
+        let scope = AgentToolExperienceOwningScopeV1::Subject {
+            mounted_subject_id: mounted_subject_id.clone(),
+        };
+        let key =
+            agent_tool_experience_head_key(&skill.memory_space_id, &scope, experience_owner_ref)?;
+        let head: AgentToolExperienceOwnerHeadV3 = self
+            .read_json(AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE, &key)?
+            .ok_or_else(invalid)?;
+        if !head.validate_contract().accepted
+            || head.physical_key != key
+            || head.memory_space_id != skill.memory_space_id
+            || head.owning_scope != scope
+            || head.owner_ref != *experience_owner_ref
+        {
+            return Err(invalid());
+        }
+        if head.state == AgentToolExperienceHeadStateV3::Tombstoned {
+            return Ok(false);
+        }
+        let binding = bm_core::skills::AgentToolExperienceHeadBindingV1::from_head(&head)?;
+        let manifest_key = bm_core::skills::agent_tool_experience_scope_manifest_key(
+            &skill.memory_space_id,
+            &scope,
+        )?;
+        let manifest: AgentToolExperienceScopeManifestV1 = self
+            .read_json(
+                AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE,
+                &manifest_key,
+            )?
+            .ok_or_else(invalid)?;
+        manifest.validate_exact(manifest.bindings.clone(), manifest.owner_count)?;
+        if manifest.physical_key != manifest_key
+            || manifest.memory_space_id != skill.memory_space_id
+            || manifest.owning_scope != scope
+            || !manifest.bindings.contains(&binding)
+        {
+            return Err(invalid());
+        }
+        let material: AgentToolExperienceRevisionMaterialV4 = self
+            .read_json(
+                AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE,
+                &binding.material_key,
+            )?
+            .ok_or_else(invalid)?;
+        if bm_core::skills::AgentToolExperienceHeadBindingV1::from_head_and_material(
+            &head, &material,
+        )? != binding
+        {
+            return Err(invalid());
+        }
+        if material.status != bm_core::skills::AgentToolExperienceStatus::Active
+            || !material.privacy_class.projection_content_allowed()
+        {
+            return Ok(false);
+        }
+        let bm_core::skills::AgentToolExperienceBodyV1::Method { procedure, .. } = &material.body
+        else {
+            return Err(invalid());
+        };
+        if skill.owner_revision == 1 && procedure != &skill.procedural_content.procedure {
+            return Ok(false);
+        }
+        for source in material
+            .body
+            .method_sources()
+            .iter()
+            .filter_map(|source| source.governance_extraction())
+        {
+            if !super::post_turn_governance::verify_semantic_method_source(
+                source,
+                &material,
+                |namespace, key| {
+                    Ok(self
+                        .read_json_value(namespace, key)?
+                        .unwrap_or(serde_json::Value::Null))
+                },
+            )? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     pub(crate) fn materialize_runtime_skill_scopes(
@@ -3172,7 +3402,7 @@ mod tests {
     }
 
     fn agent_tool_scope_fixture() -> (
-        AgentToolExperienceRevisionMaterialV3,
+        AgentToolExperienceRevisionMaterialV4,
         AgentToolExperienceOwnerHeadV3,
         AgentToolExperienceScopeManifestV1,
         JsonMapSession,
@@ -3232,6 +3462,7 @@ mod tests {
                 expected_revision: None,
                 state: ProceduralProducerStateV1::Active,
                 spec: ProceduralProducerSpecV1 {
+                    method_evaluators: Vec::new(),
                     binding_id: "read-witness".into(),
                     scope: ProceduralProducerScopeV1 {
                         memory_space_id: memory.memory_space_id().into(),
@@ -3244,6 +3475,9 @@ mod tests {
                     },
                     source_authority: ProceduralProducerSourceAuthorityV1::RuntimeObservation,
                     claims: ProceduralProducerClaimsV1 {
+                        method_learning_materials: false,
+                        method_adoptions: false,
+                        method_task_evaluations: false,
                         execution_facts: true,
                         method_declarations: false,
                         usage_feedback: false,
@@ -3300,7 +3534,10 @@ mod tests {
                         external_content_used: false,
                         candidate_ids: vec![],
                     },
-                    learning: PostTurnLearningInputV2 {
+                    learning: PostTurnLearningInputV3 {
+                        method_learning_inputs: Vec::new(),
+                        method_adoptions: Vec::new(),
+                        method_task_evaluations: Vec::new(),
                         tool_call_count: 1,
                         agent_tool_feedback: vec![AgentToolUsageFeedbackV3 {
                             registry_ref: registry.registry_ref(),
@@ -3316,7 +3553,7 @@ mod tests {
                             }],
                             method_evidence: vec![],
                         }],
-                        ..PostTurnLearningInputV2::empty()
+                        ..PostTurnLearningInputV3::empty()
                     },
                     pressure: PressureLevel::Normal,
                     mode_input: RuntimeLifecycleModeInput::default(),
@@ -3415,7 +3652,7 @@ mod tests {
             vec![&material]
         );
         assert!(!view
-            .json_docs::<ProceduralFeedbackApplicationLedgerV2>(
+            .json_docs::<ProceduralFeedbackApplicationLedgerV3>(
                 super::super::schema::PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE
             )
             .unwrap()

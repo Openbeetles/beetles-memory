@@ -18,11 +18,13 @@ use bm_sdk::{
     ImmutableGovernanceExecutionBinding, IngressKind, LongTermMemoryDraft, LongTermMemoryKind,
     LongTermMemoryProvenance, MemoryCapabilityPolicy, MemoryEvidenceAuthority, MemoryIdentity,
     MemoryLearningCycleOutcome, MemoryLearningCycleRequest, MemoryLearningEngine,
-    MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryProjectionRequest, MemoryRuntime, MemoryScope,
-    MemoryStoreHandle, MemorySubjectVisibilityPolicy, MemoryTurnDeliveryStatus,
-    MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteRequest,
-    ParsedLongTermMemoryExtraction, PostTurnLearningInputV2, PressureLevel,
-    ProceduralLearningReadAvailabilityV1, ProceduralProjectionBindingV1,
+    MemoryMethodTrialRequest, MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryProjectionRequest,
+    MemoryRuntime, MemoryScope, MemoryStoreHandle, MemorySubjectVisibilityPolicy,
+    MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource,
+    MemoryWriteRequest, MethodAdoptionEvidenceV1, MethodAdoptionStatusV1, MethodContentRefV1,
+    MethodTaskEvaluationV1, MethodTaskEvaluatorV1, MethodTaskOutcomeV1,
+    ParsedLongTermMemoryExtraction, PostTurnLearningInputV3, PressureLevel,
+    ProceduralLearningReadAvailabilityV1, ProceduralProducerToolV1, ProceduralProjectionBindingV1,
     ProceduralSourceSensitivity, ProfileId, RuntimeLifecycleModeInput, RuntimeSkillListRequest,
     RuntimeSkillOwningScope, StoreBackendConfig, ToolExecutionFactV1, ToolExecutionOutcome,
     ToolMethodEvidenceV1, TranscriptInputMessage,
@@ -403,11 +405,15 @@ fn learn_runtime_skill(path: std::path::PathBuf) -> Arc<MemoryRuntime> {
             .unwrap(),
     );
     let governor = procedural::governor(&memory, store);
-    let capability = procedural::register_and_issue(
-        &governor,
-        procedural::runtime_observer_spec(&memory, "desktop-contract-observer"),
-        "register-desktop-contract-observer",
-    );
+    let mut producer = procedural::runtime_observer_spec(&memory, "desktop-contract-observer");
+    producer.claims.method_adoptions = true;
+    producer.claims.method_task_evaluations = true;
+    producer.method_evaluators = vec![MethodTaskEvaluatorV1 {
+        id: "desktop-report-verifier".into(),
+        revision: 1,
+    }];
+    let capability =
+        procedural::register_and_issue(&governor, producer, "register-desktop-contract-observer");
     let list_request = RuntimeSkillListRequest {
         owning_scope: RuntimeSkillOwningScope::Subject {
             mounted_subject_id: memory.subject_id().into(),
@@ -422,9 +428,14 @@ fn learn_runtime_skill(path: std::path::PathBuf) -> Arc<MemoryRuntime> {
         .unwrap()
         .skills
         .is_empty());
-    for (index, turn_id) in ["desktop-method-first", "desktop-method-second"]
-        .into_iter()
-        .enumerate()
+    let mut candidate: Option<MethodContentRefV1> = None;
+    for (index, turn_id) in [
+        "desktop-method-declaration",
+        "desktop-independent-task-first",
+        "desktop-independent-task-second",
+    ]
+    .into_iter()
+    .enumerate()
     {
         let facts: Vec<_> = ["first", "second"]
             .into_iter()
@@ -445,6 +456,33 @@ fn learn_runtime_skill(path: std::path::PathBuf) -> Arc<MemoryRuntime> {
             source_sensitivity: ProceduralSourceSensitivity::NonPrivate,
             external_content: false,
         };
+        let observation_refs = facts
+            .iter()
+            .map(|fact| fact.observation_id.clone())
+            .collect::<Vec<_>>();
+        let method_adoptions = candidate
+            .iter()
+            .map(|method| MethodAdoptionEvidenceV1 {
+                method: method.clone(),
+                task_id: turn_id.into(),
+                adoption: MethodAdoptionStatusV1::Adopted,
+                observation_refs: observation_refs.clone(),
+            })
+            .collect::<Vec<_>>();
+        let method_task_evaluations = candidate
+            .iter()
+            .map(|method| MethodTaskEvaluationV1 {
+                method: method.clone(),
+                task_id: turn_id.into(),
+                task_root_id: format!("desktop-report-root-{turn_id}"),
+                independence_group: format!("independent-desktop-report-{turn_id}"),
+                evaluator_id: "desktop-report-verifier".into(),
+                evaluator_revision: 1,
+                outcome: MethodTaskOutcomeV1::Passed,
+                observation_refs: observation_refs.clone(),
+            })
+            .collect::<Vec<_>>();
+        let expected_accepted = 1 + method_adoptions.len() + method_task_evaluations.len();
         let finalized = memory
             .finalize_turn_with_procedural_evidence(
                 &capability,
@@ -483,16 +521,20 @@ fn learn_runtime_skill(path: std::path::PathBuf) -> Arc<MemoryRuntime> {
                         external_content_used: false,
                         candidate_ids: Vec::new(),
                     },
-                    learning: PostTurnLearningInputV2 {
+                    learning: PostTurnLearningInputV3 {
                         tool_call_count: 2,
                         agent_tool_feedback: vec![AgentToolUsageFeedbackV3 {
                             registry_ref: registry.registry_ref(),
                             tool_id: "desktop.inspect".into(),
                             schema_fingerprint: "desktop-v1".into(),
                             execution_facts: facts,
-                            method_evidence: vec![method],
+                            // A task adopts the retained Candidate; it does not
+                            // declare another author or another method body.
+                            method_evidence: if index == 0 { vec![method] } else { Vec::new() },
                         }],
-                        ..PostTurnLearningInputV2::empty()
+                        method_adoptions,
+                        method_task_evaluations,
+                        ..PostTurnLearningInputV3::empty()
                     },
                     pressure: PressureLevel::Normal,
                     mode_input: RuntimeLifecycleModeInput::default(),
@@ -516,16 +558,40 @@ fn learn_runtime_skill(path: std::path::PathBuf) -> Arc<MemoryRuntime> {
             Some(report.job.job_id),
             finalized.procedural_learning.job_id
         );
-        assert_eq!(report.receipt.accepted_count, 1);
+        assert_eq!(report.receipt.accepted_count as usize, expected_accepted);
+        assert_eq!(report.receipt.rejected_count, 0);
         assert!(report.receipt.changed_count > 0);
+        if index == 0 {
+            let trials = memory
+                .discover_method_trials(MemoryMethodTrialRequest {
+                    tool: ProceduralProducerToolV1 {
+                        registry_ref: registry.registry_ref(),
+                        tool_id: "desktop.inspect".into(),
+                        schema_fingerprint: "desktop-v1".into(),
+                    },
+                    max_candidates: 8,
+                })
+                .expect("discover the actual persisted desktop Candidate");
+            candidate = Some(
+                trials
+                    .candidates
+                    .into_iter()
+                    .find(|trial| {
+                        trial.task_signature == "desktop_console"
+                            && trial.procedure.contains("verify the returned report")
+                    })
+                    .expect("nonempty exact Candidate before either task adopts it")
+                    .method,
+            );
+        }
         let skills = memory
             .list_runtime_skills(list_request.clone())
             .unwrap()
             .skills;
         assert_eq!(
             skills.len(),
-            index,
-            "only two independent accepted turns create a skill"
+            usize::from(index == 2),
+            "declaration and tool success alone never promote; two independently evaluated adoptions do"
         );
         if let Some(skill) = skills.first() {
             assert_eq!(skill.locator.owner_revision(), 1);

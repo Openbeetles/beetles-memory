@@ -29,6 +29,149 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+// Exercise the ordinary public consumer path with both Soul and relationship
+// roots already present. A signed turn must not require the host to name private
+// Store dependencies or to rebuild its Soul after a persistent reopen.
+mod signed_turn_source_closure {
+    use super::*;
+    use bm_sdk::{
+        CanonicalTurnDelta, ConversationScope, IngressKind, MemoryTurnDeliveryStatus,
+        MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, PostTurnLearningInputV3,
+        ProceduralProjectionBindingV1, TranscriptInputMessage,
+    };
+
+    const OWNER: &str = "source-closure-owner";
+    const AGENT: &str = "source-closure-agent";
+    const RELATION: &str = "relationship:source-closure";
+
+    fn open(store: bm_sdk::MemoryStoreHandle) -> MemoryRuntime {
+        relationship_runtime_with_store(OWNER, AGENT, RELATION, store)
+    }
+
+    fn prepare(runtime: &MemoryRuntime) -> MemoryTurnFinalizeRequest {
+        runtime
+            .provision_subject_soul(SubjectSoulProvisionIntentV1::Founding {
+                operation_id: "source-closure-founding".into(),
+                human_actor_subject_id: primary_human_subject_id(OWNER),
+                charter: Box::new(founding_seed().canonicalize().unwrap()),
+                source_asserted_at: Some(1_700_000_000),
+            })
+            .unwrap();
+        create_relationship_root(runtime, OWNER, AGENT, RELATION);
+        let mut projection = projection_request(MemoryRecallTemporalOperation::Current);
+        projection.binding = ProceduralProjectionBindingV1::Turn {
+            turn_id: "signed-turn".into(),
+        };
+        let projected = runtime.project(projection).unwrap();
+        assert!(projected
+            .provider_payload()
+            .system_memory_block()
+            .contains("repair before escalation"));
+        let receipt = projected
+            .report()
+            .selection_receipt()
+            .expect("formal signed turn receipt")
+            .clone();
+        assert!(receipt.soul_source_admission.is_some());
+        let mut learning = PostTurnLearningInputV3::empty();
+        learning.selection_receipt = Some(receipt);
+        MemoryTurnFinalizeRequest {
+            turn: CanonicalTurnDelta {
+                turn_id: "signed-turn".into(),
+                conversation: ConversationScope {
+                    channel: "local".into(),
+                    chat_id: "chat-1".into(),
+                    conversation_id: Some("chat-1".into()),
+                },
+                subject: runtime.subject_id().into(),
+                delivery_status: MemoryTurnDeliveryStatus::Delivered,
+                source: MemoryTurnSource {
+                    ingress: IngressKind::User,
+                    channel: "local".into(),
+                    provider: None,
+                    protocol: MemoryTurnProtocol::Native,
+                    endpoint: None,
+                    model_alias: None,
+                    model_resolved: None,
+                    request_id: None,
+                    client_conversation_hint: None,
+                },
+                actor: None,
+                input_messages: vec![TranscriptInputMessage::user(
+                    "Please distinguish evidence from guesses.",
+                )],
+                assistant_message: Some(TranscriptInputMessage::assistant(
+                    "I will state what is known and what remains uncertain.",
+                )),
+                tool_observations: Vec::new(),
+                external_content_used: false,
+                candidate_ids: Vec::new(),
+            },
+            learning,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+        }
+    }
+
+    fn commit(runtime: &MemoryRuntime, request: MemoryTurnFinalizeRequest, first: bool) {
+        let before = current_operator_soul(runtime);
+        let result = runtime
+            .finalize_turn(request)
+            .expect("signed turn commits through complete double-root closure");
+        let transcript = result
+            .transcript_commit
+            .expect("persistent transcript result");
+        assert_eq!(transcript.committed, first);
+        assert_eq!(
+            current_operator_soul(runtime),
+            before,
+            "ordinary intake cannot mutate Soul"
+        );
+        let text = project_soul(runtime, MemoryRecallTemporalOperation::Current);
+        assert!(text.contains("curious before certain"));
+        assert!(text.contains("repair before escalation"));
+    }
+
+    #[test]
+    fn in_memory_signed_turn_with_relationship_survives_runtime_reopen() {
+        let store = support::open_memory_store(
+            StoreBackendConfig::in_memory(support::host_test_profile()).unwrap(),
+        )
+        .unwrap();
+        let runtime = open(store.clone());
+        let request = prepare(&runtime);
+        commit(&runtime, request.clone(), true);
+        drop(runtime);
+        commit(&open(store), request, false);
+    }
+
+    fn persistent(config: StoreBackendConfig) {
+        let runtime = open(support::open_memory_store(config.clone()).unwrap());
+        let request = prepare(&runtime);
+        commit(&runtime, request.clone(), true);
+        drop(runtime);
+        // Every Store handle was dropped; reopen must discover authoritative
+        // roots itself, including the same durable receipt signing identity.
+        let reopened = open(support::open_memory_store(config).unwrap());
+        commit(&reopened, request, false);
+    }
+
+    #[test]
+    fn file_signed_turn_with_relationship_survives_store_reopen() {
+        let root = temp_root("source-closure-file");
+        persistent(StoreBackendConfig::file(&root, support::host_test_profile()).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    #[test]
+    fn sqlite_signed_turn_with_relationship_survives_store_reopen() {
+        let path = temp_root("source-closure-sqlite");
+        persistent(StoreBackendConfig::sqlite(&path, support::host_test_profile()).unwrap());
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
 #[test]
 fn public_mutation_inventory_lists_every_durable_subject_soul_operation_family() {
     let catalog = MemoryMutationCapabilityCatalog::current();

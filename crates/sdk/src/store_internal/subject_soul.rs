@@ -9,8 +9,8 @@ use bm_core::memory::{
     SubjectSoulContractError, SubjectSoulExpectedStateV1, SubjectSoulGenerationTombstoneV1,
     SubjectSoulLifecycleErrorKey, SubjectSoulLifecycleHeadV1, SubjectSoulLifecycleStateV1,
     SubjectSoulMutationOutcomeV1, SubjectSoulMutationReportV1, SubjectSoulOwnedDocumentV1,
-    SubjectSoulReadOutcomeV1, SubjectSoulReadRequestV1, SubjectSoulReadSelectorV1,
-    SubjectSoulReadViewV1, SubjectSoulRelationshipProjectionPlanV1,
+    SubjectSoulOwnerV1, SubjectSoulReadOutcomeV1, SubjectSoulReadRequestV1,
+    SubjectSoulReadSelectorV1, SubjectSoulReadViewV1, SubjectSoulRelationshipProjectionPlanV1,
     SubjectSoulRelationshipProjectionV1, SubjectSoulRelationshipRuntimeInputV1,
     SubjectSoulRevisionMaterialV1, SubjectSoulScopeManifestV1, SubjectSoulTerminatedGenerationV1,
     SubjectSoulVerifiedSnapshotV1, VerifiedSubjectSoulReadViewV1,
@@ -697,6 +697,17 @@ pub(crate) fn build_subject_soul_open_certificate(
             json.insert((namespace.to_string(), key), value);
         }
     }
+    for address in subject_soul_source_addresses(&json)? {
+        if !json.contains_key(&address) && json.len() >= capacity.kv_max_entries {
+            return Err(closure_error(
+                "Soul source closure exceeds bounded Store capacity",
+            ));
+        }
+        let value = engine
+            .get_json_value(&address.0, &address.1)?
+            .ok_or_else(|| closure_error("Soul source is missing"))?;
+        json.insert(address, value);
+    }
     let result_keys = json
         .keys()
         .filter_map(|(namespace, key)| {
@@ -739,6 +750,7 @@ pub(crate) fn validate_subject_soul_transaction_post_image(
         StoreMutation::PutJson { namespace, .. } | StoreMutation::DeleteJson { namespace, .. } => {
             is_subject_soul_protected_json_namespace(namespace)
                 || is_relationship_source_protected_json_namespace(namespace)
+                || namespace == "conversation_transcript"
         }
         _ => false,
     });
@@ -1049,6 +1061,7 @@ fn validate_destructive_raw_purge(
 fn validate_subject_soul_closure_map(
     json: &BTreeMap<(String, String), Value>,
 ) -> Result<StoreOpenClosureCertificate> {
+    validate_subject_soul_sources(json)?;
     let protected = json
         .iter()
         .filter(|((namespace, _), _)| {
@@ -1236,6 +1249,7 @@ fn validate_subject_soul_closure_map(
                     || envelope.soul_id != head.soul_id
                     || envelope.generation != head.generation
                     || envelope.content_digest != entry.content_digest
+                    || envelope.source_lineage != entry.source_lineage
                 {
                     return Err(closure_error("Subject Soul envelope owner/digest mismatch"));
                 }
@@ -1610,6 +1624,95 @@ pub(crate) struct SubjectSoulVerifiedStoreRead {
 }
 
 impl SubjectSoulVerifiedStoreRead {
+    /// Bind the turn to the same immutable Soul image used by projection. This
+    /// method never reads a newer root and never creates an unseeded root.
+    pub(crate) fn turn_source_admission(
+        &self,
+    ) -> std::result::Result<
+        Option<bm_core::memory::SoulTurnSourceAdmissionV1>,
+        SubjectSoulStoreFailure,
+    > {
+        use bm_core::memory::SoulTurnSourceAdmissionV1;
+        self.outcome
+            .validate_contract()
+            .map_err(SubjectSoulStoreFailure::contract)?;
+        let admission = match &self.outcome {
+            SubjectSoulReadOutcomeV1::ImplicitUnseeded {
+                memory_space_id,
+                subject_id,
+                soul_id,
+                closure_certificate_digest,
+                ..
+            } => {
+                if self.head.is_some() || self.manifest.is_some() {
+                    return Err(SubjectSoulStoreFailure::repair(
+                        "pristine turn admission has persisted roots",
+                    ));
+                }
+                SoulTurnSourceAdmissionV1 {
+                    purpose: bm_core::memory::SoulTurnSourcePurposeV1::Growth,
+                    owner: SubjectSoulOwnerV1 {
+                        memory_space_id: memory_space_id.clone(),
+                        subject_id: subject_id.clone(),
+                        soul_id: soul_id.clone(),
+                    },
+                    basis: SubjectSoulExpectedStateV1::PristineAbsent {
+                        closure_certificate_digest: closure_certificate_digest.clone(),
+                    },
+                }
+            }
+            SubjectSoulReadOutcomeV1::Verified { view }
+                if matches!(
+                    view.state,
+                    SubjectSoulLifecycleStateV1::Active | SubjectSoulLifecycleStateV1::Unseeded
+                ) =>
+            {
+                let head = self.head.as_ref().ok_or_else(|| {
+                    SubjectSoulStoreFailure::repair("verified turn admission is missing head")
+                })?;
+                let manifest = self.manifest.as_ref().ok_or_else(|| {
+                    SubjectSoulStoreFailure::repair("verified turn admission is missing manifest")
+                })?;
+                if head.generation != view.generation
+                    || head.state != view.state
+                    || head.scope_manifest_digest != manifest.closure_digest
+                {
+                    return Err(SubjectSoulStoreFailure::repair(
+                        "turn admission differs from verified Soul closure",
+                    ));
+                }
+                SoulTurnSourceAdmissionV1 {
+                    purpose: manifest
+                        .source_review
+                        .pending_basis()
+                        .map(
+                            |basis| bm_core::memory::SoulTurnSourcePurposeV1::SourceReview {
+                                basis,
+                            },
+                        )
+                        .unwrap_or(bm_core::memory::SoulTurnSourcePurposeV1::Growth),
+                    owner: SubjectSoulOwnerV1 {
+                        memory_space_id: head.memory_space_id.clone(),
+                        subject_id: head.subject_id.clone(),
+                        soul_id: head.soul_id.clone(),
+                    },
+                    basis: SubjectSoulExpectedStateV1::Exact {
+                        generation: head.generation,
+                        revision: head.current_revision,
+                        lifecycle_state: head.state,
+                        head_digest: head.head_digest.clone(),
+                        manifest_digest: head.scope_manifest_digest.clone(),
+                    },
+                }
+            }
+            _ => return Ok(None),
+        };
+        admission
+            .generation()
+            .map_err(SubjectSoulStoreFailure::from_store)?;
+        Ok(Some(admission))
+    }
+
     pub(crate) fn relationship_source(
         &self,
         relationship_id: &str,
@@ -3034,6 +3137,13 @@ fn read_verified_subject_soul_in_session_with_receipt(
             key.clone(),
         ));
     }
+    for entry in &manifest.entries {
+        for source in &entry.source_lineage {
+            closure_addresses.insert(
+                subject_soul_source_address(source).map_err(SubjectSoulStoreFailure::from_store)?,
+            );
+        }
+    }
     let closure_reads = session
         .read_json_known_keys(&closure_addresses.into_iter().collect::<Vec<_>>())
         .map_err(SubjectSoulStoreFailure::from_store)?;
@@ -3163,6 +3273,35 @@ fn read_verified_subject_soul_in_session_with_receipt(
             }
         }
     }
+    let mut historical_sources = BTreeSet::new();
+    for ((namespace, _), value) in &closure_map {
+        if namespace != SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE {
+            continue;
+        }
+        let material: SubjectSoulRevisionMaterialV1 =
+            decode_value(value).map_err(SubjectSoulStoreFailure::from_store)?;
+        if manifest.source_review.denies_revision(&material) {
+            continue;
+        }
+        for source in &material.source_lineage {
+            let address =
+                subject_soul_source_address(source).map_err(SubjectSoulStoreFailure::from_store)?;
+            if !closure_map.contains_key(&address) {
+                historical_sources.insert(address);
+            }
+        }
+    }
+    if !historical_sources.is_empty() {
+        for read in session
+            .read_json_known_keys(&historical_sources.into_iter().collect::<Vec<_>>())
+            .map_err(SubjectSoulStoreFailure::from_store)?
+        {
+            let value = read.value.ok_or_else(|| {
+                SubjectSoulStoreFailure::repair("retained revision source missing")
+            })?;
+            closure_map.insert((read.namespace, read.key), value);
+        }
+    }
     validate_subject_soul_closure_map(&closure_map).map_err(SubjectSoulStoreFailure::from_store)?;
     let selected_material = if let (Some((_, _, digest)), Some(key)) = (
         selected_material_ref.as_ref(),
@@ -3263,9 +3402,23 @@ fn read_verified_subject_soul_in_session_with_receipt(
             .as_ref()
             .map(|value| value.provenance.origin),
         requested_view: request.view,
-        runtime_private_core: matches!(request.view, SubjectSoulReadViewV1::RuntimePrivate)
-            .then(|| selected_material.as_ref().map(|value| value.core.clone()))
-            .flatten(),
+        source_read_availability: if selected_material
+            .as_ref()
+            .is_some_and(|material| manifest.source_review.denies_revision(material))
+        {
+            bm_core::memory::SubjectSoulSourceReadAvailabilityV1::RevisionSourceWithdrawn
+        } else if let Some(basis) = manifest.source_review.pending_basis() {
+            bm_core::memory::SubjectSoulSourceReadAvailabilityV1::SourceReviewPending { basis }
+        } else {
+            bm_core::memory::SubjectSoulSourceReadAvailabilityV1::Available
+        },
+        runtime_private_core: (matches!(request.view, SubjectSoulReadViewV1::RuntimePrivate)
+            && !manifest.source_review.requires_review()
+            && selected_material
+                .as_ref()
+                .is_none_or(|material| !manifest.source_review.denies_revision(material)))
+        .then(|| selected_material.as_ref().map(|value| value.core.clone()))
+        .flatten(),
         governed_disclosure: None,
         head_digest: head.head_digest.clone(),
         manifest_digest: manifest.closure_digest.clone(),
@@ -3646,6 +3799,7 @@ pub(super) mod tests {
         scope: super::super::StoreEventScope,
     ) -> SubjectSoulStoreMutationPlan {
         let mut manifest = SubjectSoulScopeManifestV1 {
+            source_review: bm_core::memory::SubjectSoulSourceReviewStateV1::empty(),
             schema_version: bm_core::memory::SUBJECT_SOUL_SCHEMA_VERSION,
             memory_space_id: memory_space_id.to_string(),
             subject_id: subject_id.to_string(),
@@ -4161,5 +4315,1148 @@ pub(super) mod tests {
         ));
         drop(reopened);
         std::fs::remove_file(path).expect("remove sqlite test store");
+    }
+}
+
+fn subject_soul_source_address(
+    source: &bm_core::memory::SubjectSoulSourceRefV1,
+) -> Result<(String, String)> {
+    let key = bm_core::memory::ConversationKey::new(
+        &source.memory_space_id,
+        &source.channel_id,
+        &source.conversation_id,
+    )?;
+    Ok((
+        "conversation_transcript".into(),
+        super::platform::transcript_turn_storage_key(&key, &source.subject_id, &source.turn_id),
+    ))
+}
+
+/// Address discovery only. Every backend resolves these keys inside its own
+/// transaction fence; callers cannot omit a referencing Soul from a raw delete.
+/// This follows existing signed admission and manifest roots, never a scan or
+/// a second dependency index.
+pub(crate) fn subject_soul_transaction_dependencies(
+    namespace: &str,
+    value: &Value,
+    mut emit: impl FnMut((String, String)) -> Result<()>,
+) -> Result<()> {
+    let mut owner = None;
+    if namespace == SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE {
+        let manifest: SubjectSoulScopeManifestV1 = decode_value(value)?;
+        manifest
+            .validate_contract()
+            .map_err(|error| closure_error(error.to_string()))?;
+        owner = Some((
+            manifest.memory_space_id,
+            manifest.subject_id,
+            manifest.soul_id,
+        ));
+        for entry in manifest.entries {
+            emit((entry.namespace, entry.physical_key))?;
+            for source in entry.source_lineage {
+                emit(subject_soul_source_address(&source)?)?;
+            }
+        }
+    } else if namespace == SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE {
+        let head: SubjectSoulLifecycleHeadV1 = decode_value(value)?;
+        head.validate_contract()
+            .map_err(|error| closure_error(error.to_string()))?;
+        owner = Some((head.memory_space_id, head.subject_id, head.soul_id));
+        for key in head.retained_revision_refs {
+            emit((SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE.into(), key))?;
+        }
+        for key in head.retained_tombstone_refs {
+            emit((SUBJECT_SOUL_GENERATION_TOMBSTONE_NAMESPACE.into(), key))?;
+        }
+    } else if namespace == SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE {
+        let material: SubjectSoulRevisionMaterialV1 = decode_value(value)?;
+        material
+            .validate_contract()
+            .map_err(|error| closure_error(error.to_string()))?;
+        owner = Some((
+            material.memory_space_id,
+            material.subject_id,
+            material.soul_id,
+        ));
+        for source in material.source_lineage {
+            emit(subject_soul_source_address(&source)?)?;
+        }
+    } else if namespace == RELATIONSHIP_SOURCE_SCOPE_MANIFEST_NAMESPACE {
+        let manifest: RelationshipSourceScopeManifestV1 = decode_value(value)?;
+        manifest
+            .validate_contract()
+            .map_err(|error| closure_error(error.to_string()))?;
+        emit((
+            RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE.into(),
+            relationship_source_revision_key(
+                &manifest.memory_space_id,
+                &manifest.relationship_id,
+                manifest.current_revision,
+            )?,
+        ))?;
+        for key in manifest.retained_revision_refs {
+            emit((RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE.into(), key))?;
+        }
+    } else if namespace == SUBJECT_SOUL_RELATIONSHIP_PROJECTION_NAMESPACE {
+        let projection: SubjectSoulRelationshipProjectionV1 = decode_value(value)?;
+        // Its cross-root contract is checked after both exact roots have been
+        // materialized. Address discovery grants no read/write authority.
+        emit((
+            SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE.into(),
+            subject_soul_revision_material_key(
+                &projection.memory_space_id,
+                &projection.subject_id,
+                &projection.soul_id,
+                projection.generation,
+                projection.soul_revision,
+            )?,
+        ))?;
+        emit((
+            RELATIONSHIP_SOURCE_CONSTITUTION_NAMESPACE.into(),
+            relationship_source_revision_key(
+                &projection.memory_space_id,
+                &projection.relationship_id,
+                projection.relationship_source_revision,
+            )?,
+        ))?;
+        emit((
+            RELATIONSHIP_SOURCE_SCOPE_MANIFEST_NAMESPACE.into(),
+            super::schema::relationship_source_scope_key(
+                &projection.memory_space_id,
+                &projection.relationship_id,
+            )?,
+        ))?;
+        owner = Some((
+            projection.memory_space_id,
+            projection.subject_id,
+            projection.soul_id,
+        ));
+    } else if is_subject_global_soul_json_namespace(namespace) {
+        let document: SubjectSoulOwnedDocumentV1 = decode_value(value)?;
+        document
+            .validate_contract()
+            .map_err(|error| closure_error(error.to_string()))?;
+        owner = Some((
+            document.memory_space_id,
+            document.subject_id,
+            document.soul_id,
+        ));
+        for source in document.source_lineage {
+            emit(subject_soul_source_address(&source)?)?;
+        }
+    } else if namespace == "conversation_transcript" {
+        let record: bm_core::memory::TranscriptTurnRecord = decode_value(value)?;
+        if let Some(admission) = record
+            .learning_evidence
+            .as_ref()
+            .and_then(|evidence| evidence.selection_receipt.as_ref())
+            .and_then(|receipt| receipt.soul_source_admission.as_ref())
+        {
+            admission
+                .owner
+                .validate_contract()
+                .map_err(|error| closure_error(error.to_string()))?;
+            if admission.owner.memory_space_id != record.key.memory_space_id
+                || admission.owner.subject_id != record.subject
+            {
+                return Err(closure_error(
+                    "Transcript Soul admission differs from source owner",
+                ));
+            }
+            owner = Some((
+                admission.owner.memory_space_id.clone(),
+                admission.owner.subject_id.clone(),
+                admission.owner.soul_id.clone(),
+            ));
+        }
+    }
+    if let Some((space, subject, soul)) = owner {
+        let root = subject_soul_scope_key(&space, &subject, &soul)?;
+        emit((SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE.into(), root.clone()))?;
+        emit((SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE.into(), root))?;
+    }
+    Ok(())
+}
+
+fn subject_soul_source_addresses(
+    json: &BTreeMap<(String, String), Value>,
+) -> Result<BTreeSet<(String, String)>> {
+    let mut addresses = BTreeSet::new();
+    for ((namespace, _), value) in json {
+        if namespace != SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE {
+            continue;
+        }
+        let manifest: SubjectSoulScopeManifestV1 = decode_value(value)?;
+        manifest
+            .validate_contract()
+            .map_err(|error| closure_error(error.to_string()))?;
+        for entry in &manifest.entries {
+            for source in &entry.source_lineage {
+                addresses.insert(subject_soul_source_address(source)?);
+            }
+        }
+    }
+    Ok(addresses)
+}
+
+fn validate_subject_soul_sources(json: &BTreeMap<(String, String), Value>) -> Result<()> {
+    for ((namespace, key), value) in json {
+        if !is_subject_global_soul_json_namespace(namespace) {
+            continue;
+        }
+        let document: SubjectSoulOwnedDocumentV1 = decode_value(value)?;
+        if namespace
+            == bm_core::memory::SubjectSoulGenerationLayerKindV1::TurnPersonaEvidence
+                .canonical_namespace()
+        {
+            if document.source_lineage.len() != 1 {
+                return Err(closure_error(
+                    "persona evidence requires its exact single canonical source",
+                ));
+            }
+            let evidence: bm_core::memory::GovernedTurnPersonaEvidenceV1 =
+                decode_value(&document.body)?;
+            let source = &document.source_lineage[0];
+            let record: bm_core::memory::TranscriptTurnRecord = decode_value(
+                json.get(&subject_soul_source_address(source)?)
+                    .ok_or_else(|| closure_error("persona evidence source is missing"))?,
+            )?;
+            let admission = record
+                .learning_evidence
+                .as_ref()
+                .and_then(|value| value.selection_receipt.as_ref())
+                .and_then(|value| value.soul_source_admission.as_ref())
+                .ok_or_else(|| closure_error("persona evidence lacks signed source admission"))?;
+            evidence.validate_source(admission, &record).map_err(|_| {
+                closure_error("persona interpretation differs from canonical evidence")
+            })?;
+            if evidence.owner.memory_space_id != document.memory_space_id
+                || evidence.owner.subject_id != document.subject_id
+                || evidence.owner.soul_id != document.soul_id
+                || evidence.generation != document.generation
+                || !source.matches_transcript(&record)
+            {
+                return Err(closure_error("persona evidence owner or source differs"));
+            }
+        }
+        if document.source_lineage.is_empty() {
+            continue;
+        }
+        let root = subject_soul_scope_key(
+            &document.memory_space_id,
+            &document.subject_id,
+            &document.soul_id,
+        )?;
+        let manifest: SubjectSoulScopeManifestV1 = decode_value(
+            json.get(&(SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE.into(), root))
+                .ok_or_else(|| closure_error("source-owned Soul layer has no owning manifest"))?,
+        )?;
+        if !manifest.entries.iter().any(|entry| {
+            entry.namespace == *namespace
+                && entry.physical_key == *key
+                && entry.source_lineage == document.source_lineage
+                && entry.content_digest == document.content_digest
+                && entry.generation == document.generation
+        }) {
+            return Err(closure_error(
+                "source-owned Soul layer is orphaned from its exact manifest",
+            ));
+        }
+    }
+    for ((namespace, _), value) in json {
+        if namespace != SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE {
+            continue;
+        }
+        let manifest: SubjectSoulScopeManifestV1 = decode_value(value)?;
+        manifest
+            .validate_contract()
+            .map_err(|error| closure_error(error.to_string()))?;
+        for entry in &manifest.entries {
+            if !entry.source_lineage.is_empty() {
+                let value = json
+                    .get(&(entry.namespace.clone(), entry.physical_key.clone()))
+                    .ok_or_else(|| closure_error("source-owned Soul layer is missing"))?;
+                let (lineage, digest) =
+                    if entry.namespace == SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE {
+                        let material: SubjectSoulRevisionMaterialV1 = decode_value(value)?;
+                        (material.source_lineage, material.content_digest)
+                    } else {
+                        let document: SubjectSoulOwnedDocumentV1 = decode_value(value)?;
+                        (document.source_lineage, document.content_digest)
+                    };
+                if lineage != entry.source_lineage || digest != entry.content_digest {
+                    return Err(closure_error(
+                        "source-owned Soul layer differs from its manifest",
+                    ));
+                }
+            }
+            for source in &entry.source_lineage {
+                if manifest.source_review.withdrawn_sources.contains(source)
+                    && matches!(
+                        entry.namespace.as_str(),
+                        SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE
+                            | "self_authored_core"
+                            | "core_revision_ledger"
+                    )
+                {
+                    // Immutable history and its ledger retain provenance. The
+                    // typed review state removes all content authority.
+                    continue;
+                }
+                let value = json
+                    .get(&subject_soul_source_address(source)?)
+                    .ok_or_else(|| {
+                        closure_error(
+                            "Soul source lineage is missing its exact canonical Transcript",
+                        )
+                    })?;
+                let record: bm_core::memory::TranscriptTurnRecord = decode_value(value)?;
+                if !source.matches_transcript(&record) {
+                    return Err(closure_error(
+                        "withdrawn or corrected source remains in Soul generation closure",
+                    ));
+                }
+                let admission = record
+                    .learning_evidence
+                    .as_ref()
+                    .and_then(|evidence| evidence.selection_receipt.as_ref())
+                    .and_then(|receipt| receipt.soul_source_admission.as_ref())
+                    .ok_or_else(|| closure_error("source lacks signed Soul admission"))?;
+                if admission.owner.memory_space_id != manifest.memory_space_id
+                    || admission.owner.subject_id != manifest.subject_id
+                    || admission.owner.soul_id != manifest.soul_id
+                    || admission
+                        .generation()
+                        .map_err(|error| closure_error(error.to_string()))?
+                        != manifest.generation
+                {
+                    return Err(closure_error(
+                        "source admission differs from retained Soul generation",
+                    ));
+                }
+            }
+        }
+    }
+    for ((namespace, _), value) in json {
+        if namespace != SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE {
+            continue;
+        }
+        let material: SubjectSoulRevisionMaterialV1 = decode_value(value)?;
+        let root = subject_soul_scope_key(
+            &material.memory_space_id,
+            &material.subject_id,
+            &material.soul_id,
+        )?;
+        let manifest: SubjectSoulScopeManifestV1 = decode_value(
+            json.get(&(SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE.into(), root))
+                .ok_or_else(|| closure_error("Soul revision lineage lacks current owner root"))?,
+        )?;
+        if manifest.source_review.denies_revision(&material) {
+            continue;
+        }
+        for source in &material.source_lineage {
+            let record: bm_core::memory::TranscriptTurnRecord = decode_value(
+                json.get(&subject_soul_source_address(source)?)
+                    .ok_or_else(|| closure_error("retained revision source is missing"))?,
+            )?;
+            if !source.matches_transcript(&record) {
+                return Err(closure_error(
+                    "retained Soul revision has an unrecorded source withdrawal",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn valid_source_review_resolution(
+    before: &BackendTransactionState,
+    after: &BackendTransactionState,
+    root: &str,
+    prior: &SubjectSoulScopeManifestV1,
+    current: &SubjectSoulScopeManifestV1,
+) -> Result<bool> {
+    if prior.source_review.pending.is_none()
+        || current.source_review.pending.is_some()
+        || prior.source_review.epoch != current.source_review.epoch
+        || prior.source_review.withdrawn_sources != current.source_review.withdrawn_sources
+        || prior.source_review.denied_revisions != current.source_review.denied_revisions
+    {
+        return Ok(false);
+    }
+    let head_key = (SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE.into(), root.into());
+    let old: SubjectSoulLifecycleHeadV1 = decode_value(
+        before
+            .json
+            .get(&head_key)
+            .ok_or_else(|| closure_error("prior review head missing"))?,
+    )?;
+    let new: SubjectSoulLifecycleHeadV1 = decode_value(
+        after
+            .json
+            .get(&head_key)
+            .ok_or_else(|| closure_error("review head missing"))?,
+    )?;
+    if old.generation != new.generation
+        || new.current_revision != old.current_revision.unwrap_or(0).checked_add(1)
+    {
+        return Ok(false);
+    }
+    let key = subject_soul_revision_material_key(
+        &new.memory_space_id,
+        &new.subject_id,
+        &new.soul_id,
+        new.generation,
+        new.current_revision
+            .ok_or_else(|| closure_error("review correction has no revision"))?,
+    )?;
+    let material: SubjectSoulRevisionMaterialV1 = decode_value(
+        after
+            .json
+            .get(&(SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE.into(), key))
+            .ok_or_else(|| closure_error("review correction material missing"))?,
+    )?;
+    material
+        .validate_contract()
+        .map_err(|error| closure_error(error.to_string()))?;
+    if material.source_review_basis != prior.source_review.pending_basis()
+        || material.source_lineage.is_empty()
+        || material
+            .source_lineage
+            .iter()
+            .any(|source| current.source_review.withdrawn_sources.contains(source))
+        || new.current_material_digest.as_ref() != Some(&material.content_digest)
+    {
+        return Ok(false);
+    }
+    if let Some(digest) = prior
+        .source_review
+        .pending
+        .as_ref()
+        .and_then(|pending| pending.founding_material_digest.as_ref())
+    {
+        let founding = new
+            .retained_revision_refs
+            .iter()
+            .filter_map(|key| {
+                after
+                    .json
+                    .get(&(SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE.into(), key.clone()))
+            })
+            .map(decode_value::<SubjectSoulRevisionMaterialV1>)
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .find(|candidate| candidate.content_digest == *digest)
+            .ok_or_else(|| closure_error("review lawful founding commitment missing"))?;
+        bm_core::memory::validate_subject_soul_review_boundaries_v1(&founding, &material.core)
+            .map_err(|error| closure_error(error.to_string()))?;
+    }
+    let entry = current
+        .entries
+        .iter()
+        .find(|entry| entry.namespace == "core_revision_ledger")
+        .ok_or_else(|| closure_error("review correction ledger missing"))?;
+    let document: SubjectSoulOwnedDocumentV1 = decode_value(
+        after
+            .json
+            .get(&(entry.namespace.clone(), entry.physical_key.clone()))
+            .ok_or_else(|| closure_error("review correction ledger document missing"))?,
+    )?;
+    let ledger: bm_core::memory::CoreRevisionLedger = decode_value(&document.body)?;
+    Ok(ledger.entries.last().is_some_and(|entry| {
+        entry.correction_kind == Some(bm_core::memory::CoreRevisionCorrectionKind::Correction)
+            && entry.corrects_revision == old.current_revision
+    }))
+}
+
+/// Primitive transactions cannot silently drop lineage or clear a privacy hold.
+/// All backends call this before applying the atomic post-image.
+pub(crate) fn validate_subject_soul_source_transition(
+    before: &BackendTransactionState,
+    after: &BackendTransactionState,
+) -> Result<()> {
+    validate_subject_soul_sources(&after.json)?;
+    for (address, previous) in &before.json {
+        if address.0 == SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE {
+            let prior: SubjectSoulScopeManifestV1 = decode_value(previous)?;
+            if let Some(current) = after.json.get(address) {
+                let current: SubjectSoulScopeManifestV1 = decode_value(current)?;
+                if current.generation == prior.generation {
+                    if current.source_review.epoch < prior.source_review.epoch
+                        || prior
+                            .source_review
+                            .withdrawn_sources
+                            .iter()
+                            .any(|source| !current.source_review.withdrawn_sources.contains(source))
+                        || prior.source_review.denied_revisions.iter().any(|revision| {
+                            !current.source_review.denied_revisions.contains(revision)
+                        })
+                    {
+                        return Err(closure_error(
+                            "same-generation mutation discarded source denial history",
+                        ));
+                    }
+                    if prior.source_review.requires_review()
+                        && !current.source_review.requires_review()
+                    {
+                        let head: SubjectSoulLifecycleHeadV1 = decode_value(
+                            after
+                                .json
+                                .get(&(
+                                    SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE.into(),
+                                    address.1.clone(),
+                                ))
+                                .ok_or_else(|| closure_error("review root is missing"))?,
+                        )?;
+                        if head.state != SubjectSoulLifecycleStateV1::Deleted
+                            && !valid_source_review_resolution(
+                                before, after, &address.1, &prior, &current,
+                            )?
+                        {
+                            return Err(closure_error(
+                                "same-generation review requires an exact correction revision",
+                            ));
+                        }
+                    }
+                }
+            }
+        } else if is_subject_global_soul_json_namespace(&address.0) {
+            let prior: SubjectSoulOwnedDocumentV1 = decode_value(previous)?;
+            if let Some(current) = after.json.get(address) {
+                let current: SubjectSoulOwnedDocumentV1 = decode_value(current)?;
+                if current.generation == prior.generation
+                    && prior
+                        .source_lineage
+                        .iter()
+                        .any(|source| !current.source_lineage.contains(source))
+                {
+                    let root = subject_soul_scope_key(
+                        &current.memory_space_id,
+                        &current.subject_id,
+                        &current.soul_id,
+                    )?;
+                    let prior_manifest: SubjectSoulScopeManifestV1 = decode_value(
+                        before
+                            .json
+                            .get(&(SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE.into(), root.clone()))
+                            .ok_or_else(|| closure_error("review prior manifest missing"))?,
+                    )?;
+                    let current_manifest: SubjectSoulScopeManifestV1 = decode_value(
+                        after
+                            .json
+                            .get(&(SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE.into(), root.clone()))
+                            .ok_or_else(|| closure_error("review current manifest missing"))?,
+                    )?;
+                    if !matches!(
+                        address.0.as_str(),
+                        "self_authored_core" | "core_revision_ledger"
+                    ) || !valid_source_review_resolution(
+                        before,
+                        after,
+                        &root,
+                        &prior_manifest,
+                        &current_manifest,
+                    )? {
+                        return Err(closure_error(
+                            "Soul update discarded inherited source lineage",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Compose source erasure with Transcript/page/job changes while the caller
+/// holds the existing Store transaction lock. This function does not commit.
+pub(crate) fn plan_transcript_subject_soul_withdrawal(
+    platform: &StorePlatform,
+    scope: &super::StoreEventScope,
+    records: &[(
+        bm_core::memory::TranscriptTurnRecord,
+        bm_core::memory::TranscriptTurnRecord,
+    )],
+    request: &bm_core::memory::TranscriptLifecycleRequest,
+    additional_mutations: &[StoreMutation],
+    additional_preconditions: &[StoreJsonPrecondition],
+    runtime_budget: &RuntimeBudgetReport,
+) -> Result<Option<SubjectSoulStoreMutationPlan>> {
+    use super::{MemoryStoreEvent, MemoryStoreEventKind};
+    use bm_core::memory::{
+        plan_subject_soul_source_withdrawal_v1, MemoryMutationEffect,
+        MemoryMutationOperationIdentity, MemoryMutationOperationKind,
+        SubjectSoulGenerationLayerDeltaPlanV1, SubjectSoulSourceRefV1,
+        SubjectSoulSourceWithdrawalIntentV1,
+    };
+    let mut owners = BTreeMap::<(String, String, String, u64), Vec<SubjectSoulSourceRefV1>>::new();
+    for (before, after) in records {
+        if !before.permits_post_turn_learning() {
+            continue;
+        }
+        let source = SubjectSoulSourceRefV1::from_transcript(before)
+            .map_err(|error| closure_error(error.to_string()))?;
+        if source.matches_transcript(after) {
+            continue;
+        }
+        let Some(receipt) = before
+            .learning_evidence
+            .as_ref()
+            .and_then(|evidence| evidence.selection_receipt.as_ref())
+        else {
+            continue;
+        };
+        let Some(admission) = &receipt.soul_source_admission else {
+            continue;
+        };
+        platform.verify_procedural_selection_receipt(receipt)?;
+        let owner = &admission.owner;
+        if owner.memory_space_id != scope.memory_space_id || owner.subject_id != scope.subject_id {
+            return Err(closure_error(
+                "Transcript withdrawal differs from its admitted Soul owner",
+            ));
+        }
+        owners
+            .entry((
+                owner.memory_space_id.clone(),
+                owner.subject_id.clone(),
+                owner.soul_id.clone(),
+                admission
+                    .generation()
+                    .map_err(|error| closure_error(error.to_string()))?,
+            ))
+            .or_default()
+            .push(source);
+    }
+    let mut result = None;
+    for ((space, subject, soul_id, generation), sources) in owners {
+        let owner = SubjectSoulOwnerV1 {
+            memory_space_id: space,
+            subject_id: subject,
+            soul_id,
+        };
+        let current = platform
+            .read_verified_subject_soul(
+                &owner.memory_space_id,
+                &owner.soul_id,
+                &SubjectSoulReadRequestV1 {
+                    target_subject_id: owner.subject_id.clone(),
+                    selector: SubjectSoulReadSelectorV1::Current,
+                    view: SubjectSoulReadViewV1::OperatorSafe,
+                },
+                runtime_budget,
+            )
+            .map_err(SubjectSoulStoreFailure::into_store_error)?;
+        let (Some(head), Some(manifest)) = (&current.head, &current.manifest) else {
+            continue;
+        };
+        if head.generation != generation {
+            continue;
+        } // A completed reset already erased this source generation.
+        let snapshot = SubjectSoulVerifiedSnapshotV1 {
+            head: head.clone(),
+            manifest: manifest.clone(),
+            current_material: current.current_material.clone(),
+            current_core: current.current_core.clone(),
+            current_core_document: current.current_core_document.clone(),
+            current_revision_ledger: current.current_ledger.clone(),
+            current_revision_ledger_document: current.current_ledger_document.clone(),
+        };
+        let sources = bm_core::memory::merge_subject_soul_source_lineage_v1(&owner, [&sources[..]])
+            .map_err(|error| closure_error(error.to_string()))?;
+        let request_bytes = serde_json::to_vec(&(request, &sources))
+            .map_err(|error| closure_error(error.to_string()))?;
+        let operation_id = format!("soul-source-withdrawal:{:x}", Sha256::digest(request_bytes));
+        let intent = SubjectSoulSourceWithdrawalIntentV1 {
+            operation_id: operation_id.clone(),
+            actor_subject_id: request.requested_by.clone(),
+            withdrawn_sources: sources,
+        };
+        let retained = head
+            .retained_revision_refs
+            .iter()
+            .map(|key| {
+                let value = current
+                    .closure_documents
+                    .iter()
+                    .find(|((namespace, physical_key), _)| {
+                        namespace == SUBJECT_SOUL_REVISION_MATERIAL_NAMESPACE && physical_key == key
+                    })
+                    .map(|(_, value)| value)
+                    .ok_or_else(|| closure_error("retained Soul source material is missing"))?;
+                Ok(bm_core::memory::SubjectSoulRetainedMaterialV1 {
+                    physical_key: key.clone(),
+                    material: decode_value(value)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let delta = plan_subject_soul_source_withdrawal_v1(
+            &owner,
+            &snapshot,
+            &retained,
+            &intent,
+            request.requested_at,
+        )
+        .map_err(|error| closure_error(error.to_string()))?;
+        let SubjectSoulGenerationLayerDeltaPlanV1::Commit {
+            expected_state,
+            intent_digest,
+            post_head,
+            post_manifest,
+            delete_addresses,
+            ..
+        } = delta
+        else {
+            continue;
+        };
+        if result.is_some() {
+            return Err(closure_error(
+                "one Transcript withdrawal exceeds its single exact Soul owner transaction",
+            ));
+        }
+        let root =
+            subject_soul_scope_key(&owner.memory_space_id, &owner.subject_id, &owner.soul_id)?;
+        let mut preconditions = Vec::new();
+        let mut mutations = Vec::new();
+        for (namespace, before, after) in [
+            (
+                SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE,
+                serde_json::to_value(head),
+                serde_json::to_value(&post_head),
+            ),
+            (
+                SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE,
+                serde_json::to_value(manifest),
+                serde_json::to_value(&post_manifest),
+            ),
+        ] {
+            preconditions.push(StoreJsonPrecondition::Exact {
+                namespace: namespace.into(),
+                key: root.clone(),
+                value: before.map_err(|error| closure_error(error.to_string()))?,
+            });
+            mutations.push(StoreMutation::PutJson {
+                namespace: namespace.into(),
+                key: root.clone(),
+                value: after.map_err(|error| closure_error(error.to_string()))?,
+                event_kind: MemoryStoreEventKind::MemoryControl,
+                plane: namespace.into(),
+                record_key: root.clone(),
+            });
+        }
+        for address in delete_addresses {
+            let prior = current
+                .closure_documents
+                .iter()
+                .find(|((namespace, key), _)| {
+                    namespace == &address.namespace && key == &address.physical_key
+                })
+                .map(|(_, value)| value.clone())
+                .ok_or_else(|| closure_error("withdrawal manifest body disappeared"))?;
+            preconditions.push(StoreJsonPrecondition::Exact {
+                namespace: address.namespace.clone(),
+                key: address.physical_key.clone(),
+                value: prior,
+            });
+            mutations.push(StoreMutation::DeleteJson {
+                namespace: address.namespace.clone(),
+                key: address.physical_key.clone(),
+                event_kind: MemoryStoreEventKind::MemoryControl,
+                plane: address.namespace,
+                record_key: address.physical_key,
+            });
+        }
+        let full_digest = canonical_subject_soul_full_intent_digest(
+            &intent_digest,
+            additional_mutations,
+            additional_preconditions,
+            &[],
+        )?;
+        let identity = MemoryMutationOperationIdentity::new(
+            &operation_id,
+            &owner.memory_space_id,
+            &owner.subject_id,
+            &request.requested_by,
+            MemoryMutationOperationKind::ProceduralLifecycle,
+        )?;
+        let operation = StoreMutationOperationPlan::new(
+            identity.clone(),
+            canonical_mor_intent_digest_from_core_digest(&full_digest)?,
+            MemoryMutationEffect::Changed,
+            mutations.len() + additional_mutations.len(),
+            &request.requested_by,
+            request.requested_at,
+        )?;
+        mutations.extend_from_slice(additional_mutations);
+        preconditions.extend_from_slice(additional_preconditions);
+        mutations.push(StoreMutation::AppendEvent {
+            event: Box::new(
+                MemoryStoreEvent::new(
+                    format!("subject-soul-event:{}", identity.storage_key()),
+                    MemoryStoreEventKind::MemoryControl,
+                    scope.clone(),
+                    request.requested_at,
+                )
+                .with_plane(SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE)
+                .with_record_key(&root)
+                .with_content_hash(&post_head.head_digest)
+                .with_payload("action", "source_withdrawal")
+                .with_payload("source_review_required", "true"),
+            ),
+        });
+        let batch = StoreMutationBatch {
+            transaction_id: operation.transaction_id().to_string(),
+            operation: "conversation.transcript.lifecycle.subject_soul".into(),
+            scope: scope.clone(),
+            mutations,
+        };
+        let plan = SubjectSoulStoreMutationPlan::new(
+            &intent_digest,
+            &full_digest,
+            expected_state,
+            SubjectSoulStorePostImage {
+                head: *post_head,
+                manifest: *post_manifest,
+                current_material: snapshot.current_material,
+                current_core: snapshot.current_core,
+                current_core_document: snapshot.current_core_document,
+                current_ledger: snapshot.current_revision_ledger,
+                current_ledger_document: snapshot.current_revision_ledger_document,
+            },
+            batch,
+            preconditions,
+            operation,
+        )
+        .map_err(SubjectSoulStoreFailure::into_store_error)?
+        .bind_additional_owner_plan(additional_mutations, additional_preconditions, &[])
+        .map_err(SubjectSoulStoreFailure::into_store_error)?;
+        result = Some(plan);
+    }
+    Ok(result)
+}
+
+#[cfg(all(test, feature = "nonproduction-replay-harness"))]
+mod source_lineage_owner_tests {
+    use super::super::transaction::{
+        apply_transaction, expand_owner_transaction_dependencies, StoreAdmissionAuthority,
+        StoreBackendUsage, StoreEngineMutation, StoreTransactionAdmission, StoreTransactionContext,
+        StoreTransactionRequest,
+    };
+    use super::*;
+
+    fn state(review_required: bool) -> BackendTransactionState {
+        let platform = StorePlatform::open(
+            super::super::StoreBackendConfig::in_memory(
+                crate::ProfileId::native_dev_full().unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let plan = super::tests::unseeded_plan_for_scope(
+            &platform,
+            "lineage:fixture",
+            "space:lineage",
+            "agent:lineage",
+            "soul:lineage",
+            current_unix_secs(),
+            super::super::StoreEventScope::new("agent", "owner", "local", "chat")
+                .with_memory_space("space:lineage")
+                .with_subject("agent:lineage"),
+        );
+        let root =
+            subject_soul_scope_key("space:lineage", "agent:lineage", "soul:lineage").unwrap();
+        let mut manifest = plan.post_image.manifest;
+
+        manifest.refresh_digest().unwrap();
+        let mut head = plan.post_image.head;
+        head.scope_manifest_digest = manifest.closure_digest.clone();
+        head.refresh_digest().unwrap();
+        if review_required {
+            let owner = SubjectSoulOwnerV1 {
+                memory_space_id: head.memory_space_id.clone(),
+                subject_id: head.subject_id.clone(),
+                soul_id: head.soul_id.clone(),
+            };
+            let source = bm_core::memory::SubjectSoulSourceRefV1 {
+                memory_space_id: owner.memory_space_id.clone(),
+                subject_id: owner.subject_id.clone(),
+                channel_id: "sdk".into(),
+                conversation_id: "conversation".into(),
+                turn_id: "withdrawn".into(),
+                sequence: 1,
+                canonical_turn_digest: format!("sha256:{}", "1".repeat(64)),
+                transcript_content_digest: format!("sha256:{}", "2".repeat(64)),
+            };
+            manifest
+                .entries
+                .push(bm_core::memory::SubjectSoulScopeManifestEntryV1 {
+                    namespace: "private_garden".into(),
+                    physical_key: "private:withdrawn".into(),
+                    owner_role: bm_core::memory::SubjectSoulManifestOwnerRoleV1::Private,
+                    generation: head.generation,
+                    revision: None,
+                    content_digest: "3".repeat(64),
+                    source_lineage: vec![source.clone()],
+                });
+            manifest.entries.sort();
+            manifest.refresh_digest().unwrap();
+            head.scope_manifest_digest = manifest.closure_digest.clone();
+            head.refresh_digest().unwrap();
+            let snapshot = SubjectSoulVerifiedSnapshotV1 {
+                head,
+                manifest,
+                current_material: None,
+                current_core: None,
+                current_core_document: None,
+                current_revision_ledger: None,
+                current_revision_ledger_document: None,
+            };
+            let plan = bm_core::memory::plan_subject_soul_source_withdrawal_v1(
+                &owner,
+                &snapshot,
+                &[],
+                &bm_core::memory::SubjectSoulSourceWithdrawalIntentV1 {
+                    operation_id: "withdraw:fixture".into(),
+                    actor_subject_id: "human:fixture".into(),
+                    withdrawn_sources: vec![source],
+                },
+                snapshot.head.updated_at + 1,
+            )
+            .unwrap();
+            let bm_core::memory::SubjectSoulGenerationLayerDeltaPlanV1::Commit {
+                post_head,
+                post_manifest,
+                ..
+            } = plan
+            else {
+                panic!("withdrawal required");
+            };
+            head = *post_head;
+            manifest = *post_manifest;
+        }
+        BackendTransactionState {
+            json: BTreeMap::from([
+                (
+                    (SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE.into(), root.clone()),
+                    serde_json::to_value(head).unwrap(),
+                ),
+                (
+                    (SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE.into(), root),
+                    serde_json::to_value(manifest).unwrap(),
+                ),
+            ]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn primitive_transaction_discovers_owner_roots_and_rejects_hold_removal() {
+        let before = state(true);
+        let manifest_address = before
+            .json
+            .keys()
+            .find(|(namespace, _)| namespace == SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE)
+            .unwrap()
+            .clone();
+        let manifest_value = before.json[&manifest_address].clone();
+        let capacity = super::super::StoreCapacityBudget::full();
+        let authority = StoreAdmissionAuthority::new();
+        let admission = StoreTransactionAdmission::for_nonproduction_harness(capacity, &authority);
+        let context = |request: &StoreTransactionRequest| {
+            // Match the backend's direct read set first, then follow exact
+            // owner dependencies while holding the same immutable fixture.
+            let mut touched = BackendTransactionState::default();
+            for address in &request.read_set().json {
+                if let Some(value) = before.json.get(address) {
+                    touched.json.insert(address.clone(), value.clone());
+                }
+            }
+            expand_owner_transaction_dependencies(
+                request,
+                capacity,
+                &mut touched,
+                |namespace, key, _| Ok(before.json.get(&(namespace.into(), key.into())).cloned()),
+            )
+            .unwrap();
+            assert_eq!(touched.json, before.json);
+            StoreTransactionContext {
+                touched,
+                usage: StoreBackendUsage {
+                    kv_entries: before.json.len(),
+                    ..Default::default()
+                },
+                existing_event_ids: BTreeSet::new(),
+            }
+        };
+        let unchanged = StoreTransactionRequest::new(
+            "source-hold:unchanged",
+            Vec::new(),
+            vec![StoreEngineMutation::PutJson {
+                namespace: manifest_address.0.clone(),
+                key: manifest_address.1.clone(),
+                value: manifest_value.clone(),
+            }],
+            None,
+        );
+        assert!(apply_transaction(&admission, &unchanged, &context(&unchanged)).is_ok());
+
+        let mut manifest: SubjectSoulScopeManifestV1 =
+            serde_json::from_value(manifest_value).unwrap();
+        manifest.source_review.pending = None;
+        manifest.refresh_digest().unwrap();
+        let head_address = (
+            SUBJECT_SOUL_LIFECYCLE_HEAD_NAMESPACE.into(),
+            manifest_address.1.clone(),
+        );
+        let mut head: SubjectSoulLifecycleHeadV1 =
+            serde_json::from_value(before.json[&head_address].clone()).unwrap();
+        head.scope_manifest_digest = manifest.closure_digest.clone();
+        head.refresh_digest().unwrap();
+        let forged = StoreTransactionRequest::new(
+            "source-hold:forged",
+            Vec::new(),
+            vec![
+                StoreEngineMutation::PutJson {
+                    namespace: manifest_address.0,
+                    key: manifest_address.1,
+                    value: serde_json::to_value(manifest).unwrap(),
+                },
+                StoreEngineMutation::PutJson {
+                    namespace: head_address.0,
+                    key: head_address.1,
+                    value: serde_json::to_value(head).unwrap(),
+                },
+            ],
+            None,
+        );
+        let error = apply_transaction(&admission, &forged, &context(&forged)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("same-generation review requires an exact correction revision"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn source_dependency_budget_rejects_before_fetching_an_extra_root() {
+        let before = state(true);
+        let (address, value) = before
+            .json
+            .iter()
+            .find(|((namespace, _), _)| namespace == SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE)
+            .unwrap();
+        let request = StoreTransactionRequest::new(
+            "source-budget",
+            Vec::new(),
+            vec![StoreEngineMutation::PutJson {
+                namespace: address.0.clone(),
+                key: address.1.clone(),
+                value: value.clone(),
+            }],
+            None,
+        );
+        let initial = BackendTransactionState {
+            json: BTreeMap::from([(address.clone(), value.clone())]),
+            ..Default::default()
+        };
+        let mut capacity = StoreCapacityBudget::full();
+        capacity.kv_max_entries = 1;
+        assert!(expand_owner_transaction_dependencies(
+            &request,
+            capacity,
+            &mut initial.clone(),
+            |_, _, _| panic!("address budget must reject before fetch")
+        )
+        .is_err());
+        let mut capacity = StoreCapacityBudget::full();
+        capacity.snapshot_max_bytes = 1;
+        assert!(expand_owner_transaction_dependencies(
+            &request,
+            capacity,
+            &mut initial.clone(),
+            |_, _, _| panic!("initial byte budget must reject before fetch")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn primitive_post_image_cannot_clear_same_generation_privacy_hold() {
+        let before = state(true);
+        assert!(validate_subject_soul_source_transition(&before, &before).is_ok());
+        let mut after = before.clone();
+        for ((namespace, _), value) in &mut after.json {
+            if namespace == SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE {
+                let mut manifest: SubjectSoulScopeManifestV1 =
+                    serde_json::from_value(value.clone()).unwrap();
+                manifest.source_review.pending = None;
+                manifest.refresh_digest().unwrap();
+                *value = serde_json::to_value(manifest).unwrap();
+            }
+        }
+        assert!(validate_subject_soul_source_transition(&before, &after).is_err());
+    }
+
+    #[test]
+    fn primitive_source_withdrawal_cannot_leave_an_orphan_manifest_dependency() {
+        let mut image = state(false);
+        let source = bm_core::memory::SubjectSoulSourceRefV1 {
+            memory_space_id: "space:lineage".into(),
+            subject_id: "agent:lineage".into(),
+            channel_id: "chat".into(),
+            conversation_id: "conversation:a".into(),
+            turn_id: "turn:a".into(),
+            sequence: 1,
+            canonical_turn_digest: format!("sha256:{}", "a".repeat(64)),
+            transcript_content_digest: format!("sha256:{}", "b".repeat(64)),
+        };
+        let owner = SubjectSoulOwnerV1 {
+            memory_space_id: source.memory_space_id.clone(),
+            subject_id: source.subject_id.clone(),
+            soul_id: "soul:lineage".into(),
+        };
+        let document = SubjectSoulOwnedDocumentV1::new(
+            &owner,
+            1,
+            None,
+            &bm_core::memory::SubjectSoulManifestAddressV1 {
+                namespace: "inner_life".into(),
+                physical_key: "inner:a".into(),
+            },
+            &serde_json::json!({"raw":"private synthetic quote"}),
+        )
+        .unwrap()
+        .with_source_lineage(vec![source.clone()])
+        .unwrap();
+        image.json.insert(
+            (document.namespace.clone(), document.physical_key.clone()),
+            serde_json::to_value(&document).unwrap(),
+        );
+        for ((namespace, _), value) in &mut image.json {
+            if namespace == SUBJECT_SOUL_SCOPE_MANIFEST_NAMESPACE {
+                let mut manifest: SubjectSoulScopeManifestV1 =
+                    serde_json::from_value(value.clone()).unwrap();
+                manifest
+                    .entries
+                    .push(bm_core::memory::SubjectSoulScopeManifestEntryV1 {
+                        namespace: document.namespace.clone(),
+                        physical_key: document.physical_key.clone(),
+                        owner_role: bm_core::memory::SubjectSoulManifestOwnerRoleV1::Private,
+                        generation: 1,
+                        revision: None,
+                        content_digest: document.content_digest.clone(),
+                        source_lineage: vec![source.clone()],
+                    });
+                manifest.refresh_digest().unwrap();
+                *value = serde_json::to_value(manifest).unwrap();
+            }
+        }
+        assert!(validate_subject_soul_sources(&image.json).is_err());
+        assert!(validate_subject_soul_source_transition(
+            &BackendTransactionState::default(),
+            &image
+        )
+        .is_err());
     }
 }

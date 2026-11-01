@@ -65,6 +65,12 @@ pub struct AgentToolRegistryRef {
 }
 
 impl AgentToolRegistryRef {
+    pub fn validate_contract(&self) -> bool {
+        canonical_registry_identifier(&self.registry_id)
+            && canonical_registry_identifier(&self.fingerprint)
+            && self.scope.validate_contract()
+    }
+
     pub fn new(registry_id: impl Into<String>, fingerprint: impl Into<String>) -> Self {
         Self {
             registry_id: registry_id.into(),

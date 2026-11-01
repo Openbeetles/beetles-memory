@@ -16,6 +16,7 @@ pub struct PersonaGovernanceReplayCase {
     pub core_revision_ledger: Option<CoreRevisionLedger>,
     pub relationship_constitution: Option<RelationshipConstitution>,
     pub recent_turns: Vec<TurnLedger>,
+    pub subject_recent_turns: Vec<TurnLedger>,
     pub expected_ready: bool,
     pub expected_outstanding: Option<&'static str>,
     pub expected_drift_flag: Option<&'static str>,
@@ -38,7 +39,16 @@ pub fn run_persona_governance_replay_case(
     case: &PersonaGovernanceReplayCase,
 ) -> PersonaGovernanceReplayResult {
     let evidence = derive_recent_persona_evidence(&case.recent_turns, 12);
+    let subject_evidence = derive_recent_persona_evidence(&case.subject_recent_turns, 12);
+    // These replay cases explicitly exercise a selected relationship, including
+    // missing-authority negatives; absence of its constitution is not SubjectOnly.
+    let scope_id = super::relationship_scope_id(
+        "agent:persona-governance-benchmark",
+        case.channel,
+        case.chat_id,
+    );
     let inspection = inspect_personality_governance(PersonalityGovernanceInspectionInput {
+        relationship_scope: super::PersonalityRelationshipScope::Active(&scope_id),
         mounted_subject_id: "agent:persona-governance-benchmark",
         channel: case.channel,
         chat_id: case.chat_id,
@@ -47,6 +57,7 @@ pub fn run_persona_governance_replay_case(
         core_revision_ledger: case.core_revision_ledger.as_ref(),
         relationship_constitution: case.relationship_constitution.as_ref(),
         relationship_topology: None,
+        subject_persona_evidence: subject_evidence.as_ref(),
         recent_persona_evidence: evidence.as_ref(),
     });
     let outstanding_match = case.expected_outstanding.is_none_or(|fragment| {
@@ -177,7 +188,11 @@ mod tests {
 
     fn sample_constitution() -> RelationshipConstitution {
         RelationshipConstitution {
-            scope_id: "rel:qq:chat-a".to_string(),
+            scope_id: super::super::relationship_scope_id(
+                "agent:persona-governance-benchmark",
+                "qq",
+                "chat-a",
+            ),
             channel: "qq".to_string(),
             chat_id: "chat-a".to_string(),
             board_revision: 4,
@@ -211,6 +226,8 @@ mod tests {
             channel: "qq".to_string(),
             ingress: IngressKind::User,
             status: TurnLedgerStatus::Answered,
+            final_reply_delivered: true,
+            canonical_reply_source: "assistant_final".to_string(),
             finished_at_ms: 950_000,
             updated_at_ms: 950_000,
             persona: Some(TurnPersonaLedger {
@@ -244,6 +261,25 @@ mod tests {
         }
     }
 
+    fn sample_subject_turns() -> Vec<TurnLedger> {
+        (0..4)
+            .map(|_| {
+                let mut turn = sample_turn(
+                    "brief",
+                    crate::memory::MentalPrivacyShareAction::AllowSummary,
+                );
+                let persona = turn.persona.as_mut().expect("fixture persona");
+                persona
+                    .priority
+                    .as_mut()
+                    .expect("fixture priority")
+                    .relationship_posture
+                    .clear();
+                turn
+            })
+            .collect()
+    }
+
     #[test]
     fn governance_replay_suite_catches_observation_and_drift_regressions() {
         let cases = vec![
@@ -255,6 +291,7 @@ mod tests {
                 self_authored_core: Some(sample_core()),
                 core_revision_ledger: Some(sample_ledger(950, false)),
                 relationship_constitution: Some(sample_constitution()),
+                subject_recent_turns: sample_subject_turns(),
                 recent_turns: vec![
                     sample_turn(
                         "brief",
@@ -287,6 +324,7 @@ mod tests {
                 self_authored_core: Some(sample_core()),
                 core_revision_ledger: Some(sample_ledger(1_800, false)),
                 relationship_constitution: Some(sample_constitution()),
+                subject_recent_turns: sample_subject_turns(),
                 recent_turns: vec![
                     sample_turn(
                         "brief",
@@ -319,6 +357,7 @@ mod tests {
                 self_authored_core: Some(sample_core()),
                 core_revision_ledger: Some(sample_ledger(1_700, true)),
                 relationship_constitution: Some(sample_constitution()),
+                subject_recent_turns: sample_subject_turns(),
                 recent_turns: vec![
                     sample_turn(
                         "brief",
@@ -351,6 +390,7 @@ mod tests {
                 self_authored_core: Some(sample_core()),
                 core_revision_ledger: Some(sample_ledger(950, false)),
                 relationship_constitution: Some(sample_constitution()),
+                subject_recent_turns: sample_subject_turns(),
                 recent_turns: vec![
                     sample_turn("full", crate::memory::MentalPrivacyShareAction::AllowRaw),
                     sample_turn("full", crate::memory::MentalPrivacyShareAction::AllowRaw),

@@ -1,9 +1,9 @@
 use bm_core::memory::{
     GovernedWriteDecision, MemoryWriteAuthority, PostTurnGovernanceExecutionBindingV1,
     PostTurnGovernanceExecutionBlockReasonV1, PostTurnGovernanceIdentityV2,
-    PostTurnGovernanceJobRefV2, PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV3,
+    PostTurnGovernanceJobRefV2, PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV4,
     PostTurnGovernancePrivacyAuthorityV1, PostTurnGovernanceReconciliationCursorV1,
-    PostTurnGovernanceScopeIndexV3, PostTurnPrivateGardenReport, PrivateGardenAdmissionDecision,
+    PostTurnGovernanceScopeIndexV4, PostTurnPrivateGardenReport, PrivateGardenAdmissionDecision,
     MAX_POST_TURN_GOVERNANCE_ACTIVE_JOBS,
 };
 
@@ -32,8 +32,8 @@ fn private_garden_freeform_report_is_not_governed_write_decision() {
     );
 }
 
-fn governance_job(conversation_id: &str) -> PostTurnGovernanceJobV3 {
-    PostTurnGovernanceJobV3::pending(
+fn governance_job(conversation_id: &str) -> PostTurnGovernanceJobV4 {
+    PostTurnGovernanceJobV4::pending(
         PostTurnGovernanceIdentityV2::new(
             "space:owner-default",
             "agent:governance",
@@ -125,7 +125,7 @@ fn governance_job_validator_rejects_lease_and_terminal_state_drift() {
 #[test]
 fn governance_scope_index_is_exact_bounded_and_active_only() {
     let job = governance_job("conversation-a");
-    let mut index = PostTurnGovernanceScopeIndexV3::empty(&job.identity, 1_800_000_000);
+    let mut index = PostTurnGovernanceScopeIndexV4::empty(&job.identity, 1_800_000_000);
     index
         .active_jobs
         .push(PostTurnGovernanceJobRefV2::from_job(&job));

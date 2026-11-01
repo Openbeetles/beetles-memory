@@ -1,3 +1,13 @@
+mod governed_method_source;
+mod method_source;
+pub(crate) use governed_method_source::{
+    verify_governed_method_material_sources, verify_governed_producer_sources,
+};
+pub(crate) use method_source::{
+    dependencies as method_source_dependencies, verify_semantic_method_application,
+    verify_semantic_method_source,
+};
+
 use bm_core::memory::{
     MemoryMutationEffect, MemoryMutationOperationIdentity, MemoryMutationOperationKind,
     MemoryMutationReceipt, PostTurnGovernanceAttemptAuthorityV3,
@@ -5,8 +15,8 @@ use bm_core::memory::{
     PostTurnGovernanceBindingSnapshotV1, PostTurnGovernanceDecisionSummaryV1,
     PostTurnGovernanceErrorClassV2, PostTurnGovernanceExecutionBindingV1,
     PostTurnGovernanceExecutionBlockAuthorityV1, PostTurnGovernanceJobRefV2,
-    PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV3, PostTurnGovernanceReceiptV3,
-    PostTurnGovernanceReconciliationCursorV1, PostTurnGovernanceScopeIndexV3,
+    PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV4, PostTurnGovernanceReceiptV4,
+    PostTurnGovernanceReconciliationCursorV1, PostTurnGovernanceScopeIndexV4,
     MAX_POST_TURN_GOVERNANCE_ACTIVE_JOBS, MAX_POST_TURN_GOVERNANCE_BINDING_REVISIONS,
     MAX_POST_TURN_GOVERNANCE_RECENT_TERMINAL_JOBS, MEMORY_MUTATION_RECEIPT_NAMESPACE,
     POST_TURN_GOVERNANCE_BINDING_REVISION_INDEX_NAMESPACE,
@@ -44,7 +54,7 @@ fn ensure_governance_intent(
     platform: &StorePlatform,
     scope: StoreEventScope,
     runtime_budget: &RuntimeBudgetReport,
-    job: &PostTurnGovernanceJobV3,
+    job: &PostTurnGovernanceJobV4,
     now_secs: u64,
 ) -> Result<GovernanceIntentEnsureOutcome> {
     let (outcome, _) = super::procedural_feedback::ensure_post_turn_learning_intents(
@@ -60,13 +70,13 @@ fn ensure_governance_intent(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GovernanceRecoveryOutcome {
-    pub(crate) job: PostTurnGovernanceJobV3,
+    pub(crate) job: PostTurnGovernanceJobV4,
     pub(crate) replayed: bool,
 }
 
 pub(crate) fn governance_recovery_operation_was_committed(
     platform: &StorePlatform,
-    job: &PostTurnGovernanceJobV3,
+    job: &PostTurnGovernanceJobV4,
     caller_operation_id: &str,
     actor_subject_id: &str,
     operation_kind: MemoryMutationOperationKind,
@@ -103,7 +113,7 @@ pub(crate) fn reconcile_governance_intents(
     platform: &StorePlatform,
     scope: StoreEventScope,
     runtime_budget: &RuntimeBudgetReport,
-    jobs: &[PostTurnGovernanceJobV3],
+    jobs: &[PostTurnGovernanceJobV4],
     cursor_source: &bm_core::memory::TranscriptTurnRecord,
     now_secs: u64,
 ) -> Result<usize> {
@@ -130,7 +140,7 @@ pub(crate) fn reconcile_governance_intents(
     let before_index = read_scope_index(platform, &scope_index_key)?;
     let mut after_index = before_index
         .clone()
-        .unwrap_or_else(|| PostTurnGovernanceScopeIndexV3::empty(identity, now_secs));
+        .unwrap_or_else(|| PostTurnGovernanceScopeIndexV4::empty(identity, now_secs));
     if after_index.recent_terminal_jobs.len() >= MAX_POST_TURN_GOVERNANCE_RECENT_TERMINAL_JOBS {
         return Err(Error::config(
             "post_turn_governance_reconcile",
@@ -330,7 +340,7 @@ pub(crate) fn claim_governance_job(
     lease_until: u64,
     authority: PostTurnGovernanceAttemptAuthorityV3,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV3> {
+) -> Result<PostTurnGovernanceJobV4> {
     authority.validate()?;
     if lease_owner.trim().is_empty() || lease_until <= now_secs {
         return Err(Error::invalid_input(
@@ -488,7 +498,7 @@ pub(crate) fn renew_governance_job_lease(
     lease_epoch: u64,
     lease_until: u64,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV3> {
+) -> Result<PostTurnGovernanceJobV4> {
     let before_job = read_job(platform, job_id)?.ok_or_else(|| {
         Error::not_found("post_turn_governance_renew", "governance job not found")
     })?;
@@ -562,7 +572,7 @@ pub(crate) fn retry_governance_job(
     lease_epoch: u64,
     error_class: PostTurnGovernanceErrorClassV2,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV3> {
+) -> Result<PostTurnGovernanceJobV4> {
     if !error_class.is_retryable() {
         return Err(Error::invalid_input(
             "post_turn_governance_retry",
@@ -678,7 +688,7 @@ pub(crate) fn block_governance_job(
     reason: &str,
     execution_block_authority: Option<PostTurnGovernanceExecutionBlockAuthorityV1>,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV3> {
+) -> Result<PostTurnGovernanceJobV4> {
     if !matches!(
         status,
         PostTurnGovernanceJobStatusV2::BlockedConfiguration
@@ -766,7 +776,7 @@ pub(crate) fn block_claimed_governance_job(
     reason: &str,
     execution_block_authority: Option<PostTurnGovernanceExecutionBlockAuthorityV1>,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV3> {
+) -> Result<PostTurnGovernanceJobV4> {
     if !matches!(
         status,
         PostTurnGovernanceJobStatusV2::BlockedConfiguration
@@ -854,7 +864,7 @@ pub(crate) fn resume_governance_job(
     runtime_budget: &RuntimeBudgetReport,
     job_id: &str,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV3> {
+) -> Result<PostTurnGovernanceJobV4> {
     let before_job = read_job(platform, job_id)?.ok_or_else(|| {
         Error::not_found("post_turn_governance_resume", "governance job not found")
     })?;
@@ -1163,7 +1173,7 @@ pub(crate) fn dead_letter_governance_job(
     error_class: PostTurnGovernanceErrorClassV2,
     reason: &str,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV3> {
+) -> Result<PostTurnGovernanceJobV4> {
     if error_class.is_retryable() || reason.trim().is_empty() {
         return Err(Error::invalid_input(
             "post_turn_governance_fail",
@@ -1255,7 +1265,7 @@ pub(crate) fn cancel_governance_job(
     job_id: &str,
     reason: &str,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV3> {
+) -> Result<PostTurnGovernanceJobV4> {
     if reason.trim().is_empty() {
         return Err(Error::invalid_input(
             "post_turn_governance_cancel",
@@ -1372,6 +1382,15 @@ fn plan_governance_job_completion(
         ));
     }
 
+    let before_job = read_job(platform, job_id)?.ok_or_else(|| {
+        Error::not_found("post_turn_governance_complete", "governance job not found")
+    })?;
+    let method_application = derive_method_application(
+        platform,
+        &before_job,
+        &memory_mutations,
+        &mut memory_preconditions,
+    )?;
     let mutation_plan_digest = governance_sha256(
         &serde_json::to_vec(&(&memory_mutations, &memory_preconditions))
             .map_err(|error| Error::config("post_turn_governance_complete", error.to_string()))?,
@@ -1381,18 +1400,16 @@ fn plan_governance_job_completion(
             .map_err(|error| Error::config("post_turn_governance_complete", error.to_string()))?,
     );
     let transaction_id = governance_completion_transaction_id(job_id, lease_epoch)?;
-    let expected_receipt = PostTurnGovernanceReceiptV3::new(
+    let expected_receipt = PostTurnGovernanceReceiptV4::new(
         job_id,
         transaction_id.clone(),
         mutation_plan_digest,
         memory_post_image_digest,
         now_secs,
         decision_summary,
+        method_application,
     )?;
 
-    let before_job = read_job(platform, job_id)?.ok_or_else(|| {
-        Error::not_found("post_turn_governance_complete", "governance job not found")
-    })?;
     if before_job.status == PostTurnGovernanceJobStatusV2::Succeeded {
         let job = completed_job_if_same_receipt(before_job, &expected_receipt)?;
         return Ok(GovernanceCompletionPlan::AlreadyCompleted {
@@ -1520,15 +1537,497 @@ fn plan_governance_job_completion(
 
 enum GovernanceCompletionPlan {
     AlreadyCompleted {
-        job: Box<PostTurnGovernanceJobV3>,
+        job: Box<PostTurnGovernanceJobV4>,
         transaction_id: String,
     },
     Pending(Box<GovernanceCompletionPending>),
 }
 
+fn derive_method_application(
+    platform: &StorePlatform,
+    job: &PostTurnGovernanceJobV4,
+    mutations: &[StoreMutation],
+    conditions: &mut Vec<StoreJsonPrecondition>,
+) -> Result<bm_core::memory::PostTurnGovernanceMethodApplicationV1> {
+    use super::schema::{
+        AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE, PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE,
+    };
+    use bm_core::memory::{
+        PostTurnGovernanceMethodApplicationV1 as Application,
+        ProceduralAppliedOwnerBindingV1 as Binding,
+    };
+    use bm_core::skills::{AgentToolExperienceRevisionMaterialV4, AgentToolExperienceStatus};
+    let invalid = || {
+        Error::conflict(
+            "post_turn_method_application",
+            "method post-image differs from exact semantic source authority",
+        )
+    };
+    let materials = mutations
+        .iter()
+        .filter_map(|mutation| match mutation {
+            StoreMutation::PutJson {
+                namespace, value, ..
+            } if namespace == AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE => Some(value),
+            _ => None,
+        })
+        .map(|value| {
+            serde_json::from_value::<AgentToolExperienceRevisionMaterialV4>(value.clone())
+                .map_err(|_| invalid())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if materials.is_empty() {
+        return Ok(Application::None);
+    }
+    let mut read_exact = |namespace: &str, key: String| -> Result<serde_json::Value> {
+        let document = platform
+            .read_json_docs_by_keys(namespace, &[key])?
+            .pop()
+            .ok_or_else(invalid)?;
+        merge_completion_preconditions(
+            conditions,
+            [StoreJsonPrecondition::Exact {
+                namespace: document.namespace,
+                key: document.key,
+                value: document.value.clone(),
+            }],
+        )?;
+        Ok(document.value)
+    };
+    let scope = bm_core::memory::ProceduralSubjectScopeV1 {
+        memory_space_id: job.identity.memory_space_id.clone(),
+        mounted_subject_id: job.identity.mounted_subject_id.clone(),
+    };
+    let root: bm_core::memory::ProceduralSubjectValidityRootV1 = serde_json::from_value(
+        read_exact(PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE, scope.root_key()?)?,
+    )
+    .map_err(|_| invalid())?;
+    if root.scope != scope
+        || !root.permits_learning_reads(bm_core::memory::MAX_PROCEDURAL_SUBJECT_SCOPES)?
+    {
+        return Err(invalid());
+    }
+    let key = bm_core::memory::ConversationKey::new(
+        &job.identity.memory_space_id,
+        &job.identity.channel_id,
+        &job.identity.conversation_id,
+    )?;
+    let transcript: bm_core::memory::TranscriptTurnRecord = serde_json::from_value(read_exact(
+        "conversation_transcript",
+        super::transcript_turn_storage_key(
+            &key,
+            &job.identity.mounted_subject_id,
+            &job.identity.turn_id,
+        ),
+    )?)
+    .map_err(|_| invalid())?;
+    let PostTurnGovernanceExecutionBindingV1::Bound {
+        binding_id,
+        binding_revision,
+    } = &job.execution_binding
+    else {
+        return Err(invalid());
+    };
+    let binding: PostTurnGovernanceBindingSnapshotV1 = serde_json::from_value(read_exact(
+        POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE,
+        format!("{binding_id}:{binding_revision}"),
+    )?)
+    .map_err(|_| invalid())?;
+    let evidence = transcript.learning_evidence.as_ref().ok_or_else(invalid)?;
+    let producer = super::procedural_feedback::read_verified_procedural_producer_with(
+        evidence.authority.producer_revision().ok_or_else(invalid)?,
+        |namespace, key| read_exact(namespace, key.into()),
+    )?;
+    producer
+        .historical
+        .authorize_evidence_with_current(
+            &producer.current,
+            &bm_core::memory::ProceduralProducerScopeV1 {
+                memory_space_id: scope.memory_space_id.clone(),
+                mounted_subject_id: scope.mounted_subject_id.clone(),
+                channel_id: job.identity.channel_id.clone(),
+                chat_id: job.identity.chat_id.clone(),
+            },
+            evidence,
+        )
+        .map_err(|_| invalid())?;
+    merge_completion_preconditions(
+        conditions,
+        [StoreJsonPrecondition::Exact {
+            namespace: super::schema::PROCEDURAL_PRODUCER_HEAD_NAMESPACE.into(),
+            key: producer.head.binding_key.clone(),
+            value: serde_json::to_value(&producer.head).map_err(|_| invalid())?,
+        }],
+    )?;
+    if !verify_governed_producer_sources(
+        &scope.memory_space_id,
+        &scope.mounted_subject_id,
+        &producer.historical.spec.source_authority,
+        &producer.current.spec.source_authority,
+        |namespace, key| {
+            let value = platform
+                .read_json_docs_by_keys(namespace, &[key.into()])?
+                .pop()
+                .map(|doc| doc.value);
+            merge_completion_preconditions(
+                conditions,
+                [match value.clone() {
+                    Some(value) => StoreJsonPrecondition::Exact {
+                        namespace: namespace.into(),
+                        key: key.into(),
+                        value,
+                    },
+                    None => StoreJsonPrecondition::Absent {
+                        namespace: namespace.into(),
+                        key: key.into(),
+                    },
+                }],
+            )?;
+            Ok(value.unwrap_or(serde_json::Value::Null))
+        },
+    )? {
+        return Err(invalid());
+    }
+    let mut owner_bindings = Vec::new();
+    for material in materials {
+        if !material.validate_contract().accepted
+            || material.memory_space_id != scope.memory_space_id
+            || material.owning_scope.mounted_subject_id() != scope.mounted_subject_id
+            || material.status != AgentToolExperienceStatus::Candidate
+        {
+            return Err(invalid());
+        }
+        let producing_sources = material
+            .body
+            .method_sources()
+            .iter()
+            .filter_map(|source| source.governance_extraction())
+            .filter(|source| source.source_job_id == job.job_id)
+            .collect::<Vec<_>>();
+        if producing_sources.is_empty() {
+            return Err(invalid());
+        }
+        for source in producing_sources {
+            source.validate_against(job, &binding, &transcript)?;
+            if !verify_governed_method_material_sources(
+                &job.identity.memory_space_id,
+                &job.identity.mounted_subject_id,
+                &source.materials,
+                |namespace, key| {
+                    let document = platform
+                        .read_json_docs_by_keys(namespace, &[key.into()])?
+                        .pop();
+                    let value = document.as_ref().map(|value| value.value.clone());
+                    merge_completion_preconditions(
+                        conditions,
+                        [match value.clone() {
+                            Some(value) => StoreJsonPrecondition::Exact {
+                                namespace: namespace.into(),
+                                key: key.into(),
+                                value,
+                            },
+                            None => StoreJsonPrecondition::Absent {
+                                namespace: namespace.into(),
+                                key: key.into(),
+                            },
+                        }],
+                    )?;
+                    Ok(value.unwrap_or(serde_json::Value::Null))
+                },
+            )? {
+                return Err(invalid());
+            }
+        }
+        for source in material
+            .body
+            .method_sources()
+            .iter()
+            .filter_map(|value| value.governance_extraction())
+            .filter(|source| source.source_job_id != job.job_id)
+        {
+            if !verify_semantic_method_source(source, &material, |namespace, key| {
+                let document = platform
+                    .read_json_docs_by_keys(namespace, &[key.into()])?
+                    .pop();
+                let value = document.as_ref().map(|value| value.value.clone());
+                merge_completion_preconditions(
+                    conditions,
+                    [match value.clone() {
+                        Some(value) => StoreJsonPrecondition::Exact {
+                            namespace: namespace.into(),
+                            key: key.into(),
+                            value,
+                        },
+                        None => StoreJsonPrecondition::Absent {
+                            namespace: namespace.into(),
+                            key: key.into(),
+                        },
+                    }],
+                )?;
+                Ok(value.unwrap_or(serde_json::Value::Null))
+            })? {
+                return Err(invalid());
+            }
+        }
+        owner_bindings.push(Binding::AgentToolExperience {
+            owner_revision: material.owner_revision_ref(),
+            content_digest: material.content_digest,
+        });
+    }
+    owner_bindings.sort_by_cached_key(|binding| serde_json::to_vec(binding).unwrap_or_default());
+    let application = Application::Applied {
+        validity_epoch: root.validity_epoch,
+        source_commitment_digest: job.method_source_commitment_digest(&binding)?,
+        owner_bindings,
+    };
+    application.validate()?;
+    Ok(application)
+}
+
+/// The transaction fence authenticates a semantic application from the exact
+/// leased pre-image and its completed post-image. An operation name or a
+/// deserialized receipt alone is never admission authority.
+pub(crate) fn validate_semantic_method_completion(
+    batch: &StoreMutationBatch,
+    before: &super::transaction::BackendTransactionState,
+    after: &super::transaction::BackendTransactionState,
+) -> Result<bool> {
+    use super::schema::{
+        AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE, PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE,
+    };
+    use bm_core::memory::{
+        PostTurnGovernanceMethodApplicationV1 as Application,
+        ProceduralAppliedOwnerBindingV1 as Binding,
+    };
+    use bm_core::skills::{AgentToolExperienceRevisionMaterialV4, AgentToolExperienceStatus};
+    let invalid = || {
+        Error::conflict(
+            "semantic_method_completion",
+            "semantic method application has no exact leased transaction authority",
+        )
+    };
+    let jobs = batch
+        .mutations
+        .iter()
+        .filter_map(|mutation| match mutation {
+            StoreMutation::PutJson {
+                namespace, value, ..
+            } if namespace == POST_TURN_GOVERNANCE_JOB_NAMESPACE => Some(value),
+            _ => None,
+        })
+        .map(|value| {
+            let job: PostTurnGovernanceJobV4 =
+                serde_json::from_value(value.clone()).map_err(|_| invalid())?;
+            job.validate()?;
+            Ok(job)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    // A lifecycle transaction may cancel several queued semantic jobs while
+    // withdrawing procedural material. Such cancellation is not a semantic
+    // application; its independent typed lifecycle authority is checked by
+    // the caller. Only an actual Applied completion can supply this authority.
+    let jobs = jobs
+        .into_iter()
+        .filter(|job| {
+            job.status == PostTurnGovernanceJobStatusV2::Succeeded
+                && job.receipt.as_ref().is_some_and(|receipt| {
+                    matches!(receipt.method_application, Application::Applied { .. })
+                })
+        })
+        .collect::<Vec<_>>();
+    if jobs.is_empty() {
+        return Ok(false);
+    }
+    if jobs.len() != 1 {
+        return Err(invalid());
+    }
+    let job = &jobs[0];
+    let previous: PostTurnGovernanceJobV4 = before
+        .json
+        .get(&(
+            POST_TURN_GOVERNANCE_JOB_NAMESPACE.into(),
+            job.job_id.clone(),
+        ))
+        .cloned()
+        .ok_or_else(invalid)
+        .and_then(|value| serde_json::from_value(value).map_err(|_| invalid()))?;
+    previous.validate()?;
+    let receipt = job.receipt.as_ref().ok_or_else(invalid)?;
+    let Application::Applied {
+        validity_epoch,
+        source_commitment_digest,
+        owner_bindings,
+    } = &receipt.method_application
+    else {
+        return Err(invalid());
+    };
+    if previous.status != PostTurnGovernanceJobStatusV2::Leased
+        || previous.lease_owner.is_none()
+        || previous
+            .lease_until
+            .is_none_or(|until| until <= receipt.completed_at)
+        || job.status != PostTurnGovernanceJobStatusV2::Succeeded
+        || job.lease_epoch != previous.lease_epoch
+        || Some(job.state_revision) != previous.state_revision.checked_add(1)
+        || job.identity != previous.identity
+        || job.execution_binding != previous.execution_binding
+        || job.transcript_digest != previous.transcript_digest
+        || job.transcript_sequence != previous.transcript_sequence
+        || job.runtime_binding_digest != previous.runtime_binding_digest
+        || job.identity.memory_space_id != batch.scope.memory_space_id
+        || job.identity.mounted_subject_id != batch.scope.subject_id
+        || receipt.semantic_transaction_id != batch.transaction_id
+        || governance_completion_transaction_id(&job.job_id, job.lease_epoch)?
+            != batch.transaction_id
+    {
+        return Err(invalid());
+    }
+    let scope = bm_core::memory::ProceduralSubjectScopeV1 {
+        memory_space_id: job.identity.memory_space_id.clone(),
+        mounted_subject_id: job.identity.mounted_subject_id.clone(),
+    };
+    let root_key = (
+        PROCEDURAL_SUBJECT_VALIDITY_NAMESPACE.into(),
+        scope.root_key()?,
+    );
+    let root: bm_core::memory::ProceduralSubjectValidityRootV1 =
+        serde_json::from_value(after.json.get(&root_key).cloned().ok_or_else(invalid)?)
+            .map_err(|_| invalid())?;
+    if before.json.get(&root_key) != after.json.get(&root_key)
+        || root.scope != scope
+        || root.validity_epoch != *validity_epoch
+        || !root.permits_learning_reads(bm_core::memory::MAX_PROCEDURAL_SUBJECT_SCOPES)?
+    {
+        return Err(invalid());
+    }
+    let PostTurnGovernanceExecutionBindingV1::Bound {
+        binding_id,
+        binding_revision,
+    } = &job.execution_binding
+    else {
+        return Err(invalid());
+    };
+    let binding: PostTurnGovernanceBindingSnapshotV1 = serde_json::from_value(
+        after
+            .json
+            .get(&(
+                POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE.into(),
+                format!("{binding_id}:{binding_revision}"),
+            ))
+            .cloned()
+            .ok_or_else(invalid)?,
+    )
+    .map_err(|_| invalid())?;
+    let binding_address = (
+        POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE.into(),
+        binding.storage_key(),
+    );
+    if before.json.get(&binding_address) != after.json.get(&binding_address)
+        || previous.method_source_commitment_digest(&binding)? != *source_commitment_digest
+        || job.method_source_commitment_digest(&binding)? != *source_commitment_digest
+    {
+        return Err(invalid());
+    }
+    let key = bm_core::memory::ConversationKey::new(
+        &job.identity.memory_space_id,
+        &job.identity.channel_id,
+        &job.identity.conversation_id,
+    )?;
+    let transcript: bm_core::memory::TranscriptTurnRecord = serde_json::from_value(
+        after
+            .json
+            .get(&(
+                "conversation_transcript".into(),
+                super::transcript_turn_storage_key(
+                    &key,
+                    &job.identity.mounted_subject_id,
+                    &job.identity.turn_id,
+                ),
+            ))
+            .cloned()
+            .ok_or_else(invalid)?,
+    )
+    .map_err(|_| invalid())?;
+    let mut actual = Vec::new();
+    for mutation in &batch.mutations {
+        let StoreMutation::PutJson {
+            namespace,
+            key,
+            value,
+            ..
+        } = mutation
+        else {
+            continue;
+        };
+        if namespace != AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE {
+            continue;
+        }
+        let material: AgentToolExperienceRevisionMaterialV4 =
+            serde_json::from_value(value.clone()).map_err(|_| invalid())?;
+        if !material.validate_contract().accepted
+            || material.status != AgentToolExperienceStatus::Candidate
+            || before.json.contains_key(&(namespace.clone(), key.clone()))
+        {
+            return Err(invalid());
+        }
+        let sources = material
+            .body
+            .method_sources()
+            .iter()
+            .filter_map(|source| source.governance_extraction())
+            .filter(|source| source.source_job_id == job.job_id)
+            .collect::<Vec<_>>();
+        if sources.is_empty() {
+            return Err(invalid());
+        }
+        for source in sources {
+            source.validate_against(job, &binding, &transcript)?;
+            if !verify_governed_method_material_sources(
+                &job.identity.memory_space_id,
+                &job.identity.mounted_subject_id,
+                &source.materials,
+                |namespace, key| {
+                    Ok(after
+                        .json
+                        .get(&(namespace.into(), key.into()))
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null))
+                },
+            )? {
+                return Err(invalid());
+            }
+        }
+        for source in material
+            .body
+            .method_sources()
+            .iter()
+            .filter_map(|value| value.governance_extraction())
+        {
+            if !verify_semantic_method_source(source, &material, |namespace, key| {
+                Ok(after
+                    .json
+                    .get(&(namespace.into(), key.into()))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null))
+            })? {
+                return Err(invalid());
+            }
+        }
+        actual.push(Binding::AgentToolExperience {
+            owner_revision: material.owner_revision_ref(),
+            content_digest: material.content_digest,
+        });
+    }
+    actual.sort_by_cached_key(|binding| serde_json::to_vec(binding).unwrap_or_default());
+    if actual != *owner_bindings {
+        return Err(invalid());
+    }
+    Ok(true)
+}
+
 struct GovernanceCompletionPending {
-    expected_receipt: PostTurnGovernanceReceiptV3,
-    after_job: PostTurnGovernanceJobV3,
+    expected_receipt: PostTurnGovernanceReceiptV4,
+    after_job: PostTurnGovernanceJobV4,
     batch: StoreMutationBatch,
     preconditions: Vec<StoreJsonPrecondition>,
 }
@@ -1546,7 +2045,7 @@ pub(crate) fn complete_governance_job_with_memory_plan(
     memory_preconditions: Vec<StoreJsonPrecondition>,
     memory_blob_preconditions: Vec<StoreBlobPrecondition>,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV3> {
+) -> Result<PostTurnGovernanceJobV4> {
     let plan = plan_governance_job_completion(
         platform,
         scope,
@@ -1593,7 +2092,7 @@ pub(crate) fn complete_governance_job_with_memory_plan(
 
 #[derive(Debug)]
 pub(crate) struct SubjectSoulGovernanceCompletionOutcome {
-    pub(crate) job: PostTurnGovernanceJobV3,
+    pub(crate) job: PostTurnGovernanceJobV4,
     pub(crate) soul: SubjectSoulStoreMutationOutcome,
 }
 
@@ -1730,9 +2229,9 @@ pub(crate) fn complete_governance_job_with_subject_soul_plan(
 }
 
 fn completed_job_if_same_receipt(
-    job: PostTurnGovernanceJobV3,
-    expected: &PostTurnGovernanceReceiptV3,
-) -> Result<PostTurnGovernanceJobV3> {
+    job: PostTurnGovernanceJobV4,
+    expected: &PostTurnGovernanceReceiptV4,
+) -> Result<PostTurnGovernanceJobV4> {
     let Some(actual) = job.receipt.as_ref() else {
         return Err(Error::config(
             "post_turn_governance_complete",
@@ -1743,6 +2242,7 @@ fn completed_job_if_same_receipt(
         && actual.mutation_plan_digest == expected.mutation_plan_digest
         && actual.memory_post_image_digest == expected.memory_post_image_digest
         && actual.decision_summary == expected.decision_summary
+        && actual.method_application == expected.method_application
     {
         return Ok(job);
     }
@@ -2060,7 +2560,7 @@ pub(crate) fn read_binding_snapshot(
 pub(crate) fn read_job(
     platform: &StorePlatform,
     job_id: &str,
-) -> Result<Option<PostTurnGovernanceJobV3>> {
+) -> Result<Option<PostTurnGovernanceJobV4>> {
     let mut docs = platform
         .read_json_docs_by_keys(POST_TURN_GOVERNANCE_JOB_NAMESPACE, &[job_id.to_string()])?;
     let Some(doc) = docs.pop() else {
@@ -2074,7 +2574,7 @@ pub(crate) fn read_job(
 pub(crate) fn read_scope_index(
     platform: &StorePlatform,
     scope_index_key: &str,
-) -> Result<Option<PostTurnGovernanceScopeIndexV3>> {
+) -> Result<Option<PostTurnGovernanceScopeIndexV4>> {
     let mut docs = platform.read_json_docs_by_keys(
         POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
         &[scope_index_key.to_string()],
@@ -2093,10 +2593,10 @@ fn commit_job_and_index(
     scope: StoreEventScope,
     runtime_budget: &RuntimeBudgetReport,
     operation: &str,
-    before_job: &PostTurnGovernanceJobV3,
-    after_job: &PostTurnGovernanceJobV3,
-    before_index: &PostTurnGovernanceScopeIndexV3,
-    after_index: &PostTurnGovernanceScopeIndexV3,
+    before_job: &PostTurnGovernanceJobV4,
+    after_job: &PostTurnGovernanceJobV4,
+    before_index: &PostTurnGovernanceScopeIndexV4,
+    after_index: &PostTurnGovernanceScopeIndexV4,
     now_secs: u64,
 ) -> Result<()> {
     commit_job_and_index_with_extra(
@@ -2120,10 +2620,10 @@ fn commit_job_and_index_with_extra(
     scope: StoreEventScope,
     runtime_budget: &RuntimeBudgetReport,
     operation: &str,
-    before_job: &PostTurnGovernanceJobV3,
-    after_job: &PostTurnGovernanceJobV3,
-    before_index: &PostTurnGovernanceScopeIndexV3,
-    after_index: &PostTurnGovernanceScopeIndexV3,
+    before_job: &PostTurnGovernanceJobV4,
+    after_job: &PostTurnGovernanceJobV4,
+    before_index: &PostTurnGovernanceScopeIndexV4,
+    after_index: &PostTurnGovernanceScopeIndexV4,
     mut extra_mutations: Vec<StoreMutation>,
     mut extra_preconditions: Vec<StoreJsonPrecondition>,
     now_secs: u64,
@@ -2185,10 +2685,10 @@ fn commit_recovery_job_and_index(
     scope: StoreEventScope,
     runtime_budget: &RuntimeBudgetReport,
     operation: &str,
-    before_job: &PostTurnGovernanceJobV3,
-    after_job: &PostTurnGovernanceJobV3,
-    before_index: &PostTurnGovernanceScopeIndexV3,
-    after_index: &PostTurnGovernanceScopeIndexV3,
+    before_job: &PostTurnGovernanceJobV4,
+    after_job: &PostTurnGovernanceJobV4,
+    before_index: &PostTurnGovernanceScopeIndexV4,
+    after_index: &PostTurnGovernanceScopeIndexV4,
     caller_operation_id: &str,
     actor_subject_id: &str,
     operation_kind: MemoryMutationOperationKind,
@@ -2323,7 +2823,7 @@ fn governance_recovery_intent_digest(
 }
 
 fn governance_recovery_operation_identity(
-    job: &PostTurnGovernanceJobV3,
+    job: &PostTurnGovernanceJobV4,
     caller_operation_id: &str,
     actor_subject_id: &str,
     operation_kind: MemoryMutationOperationKind,
@@ -2426,9 +2926,9 @@ pub(crate) fn append_binding_reference_mutation(
 }
 
 fn replace_scope_index_ref(
-    index: &mut PostTurnGovernanceScopeIndexV3,
-    before_job: &PostTurnGovernanceJobV3,
-    after_job: &PostTurnGovernanceJobV3,
+    index: &mut PostTurnGovernanceScopeIndexV4,
+    before_job: &PostTurnGovernanceJobV4,
+    after_job: &PostTurnGovernanceJobV4,
     stage: &'static str,
 ) -> Result<()> {
     let reference = index
@@ -2447,8 +2947,8 @@ fn replace_scope_index_ref(
 }
 
 fn append_terminal_ref(
-    index: &mut PostTurnGovernanceScopeIndexV3,
-    job: &PostTurnGovernanceJobV3,
+    index: &mut PostTurnGovernanceScopeIndexV4,
+    job: &PostTurnGovernanceJobV4,
     stage: &'static str,
 ) -> Result<()> {
     if !job.status.is_terminal() {
@@ -2525,7 +3025,7 @@ mod tests {
     use bm_core::memory::{
         PostTurnGovernanceAttemptAuthorityV3, PostTurnGovernanceBindingSnapshotV1,
         PostTurnGovernanceDecisionSummaryV1, PostTurnGovernanceExecutionBindingV1,
-        PostTurnGovernanceIdentityV2, PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV3,
+        PostTurnGovernanceIdentityV2, PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV4,
         PostTurnGovernancePrivacyAuthorityV1, PostTurnGovernanceProviderProtocolV1,
         PostTurnSemanticGovernanceReport, SubjectSoulReadOutcomeV1, SubjectSoulReadRequestV1,
         SubjectSoulReadSelectorV1, SubjectSoulReadViewV1,
@@ -2545,7 +3045,7 @@ mod tests {
             .as_secs()
     }
 
-    fn pending_job(platform: &StorePlatform, now_secs: u64) -> PostTurnGovernanceJobV3 {
+    fn pending_job(platform: &StorePlatform, now_secs: u64) -> PostTurnGovernanceJobV4 {
         use bm_core::memory::{
             CanonicalTurnDelta, ConversationKey, ConversationScope, ConversationTranscriptStore,
             IngressKind, MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource,
@@ -2592,7 +3092,7 @@ mod tests {
         platform
             .append_turn(&record)
             .expect("commit real source transcript");
-        PostTurnGovernanceJobV3::pending(
+        PostTurnGovernanceJobV4::pending(
             PostTurnGovernanceIdentityV2::new(
                 "space:atomic",
                 "subject:atomic",
@@ -3029,3 +3529,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "nonproduction-replay-harness"))]
+#[path = "post_turn_governance/method_source_tests.rs"]
+mod method_source_tests;

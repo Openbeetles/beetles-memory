@@ -6,8 +6,8 @@ use bm_core::skills::{
     AgentToolExperienceBodyV1, AgentToolExperienceFocusV1, AgentToolExperienceHeadBindingV1,
     AgentToolExperienceOwnerHeadV3, AgentToolExperienceOwnerLocatorV3,
     AgentToolExperienceOwningScopeV1, AgentToolExperienceRetainedRevisionDigestV3,
-    AgentToolExperienceRevisionMaterialV3, AgentToolExperienceScopeManifestV1,
-    AgentToolExperienceStatus, AgentToolMethodSourceRefV1, AgentToolRegistryScope,
+    AgentToolExperienceRevisionMaterialV4, AgentToolExperienceScopeManifestV1,
+    AgentToolExperienceStatus, AgentToolMethodSourceRefV2, AgentToolRegistryScope,
 };
 
 fn scope(subject: &str) -> AgentToolExperienceOwningScopeV1 {
@@ -21,8 +21,9 @@ fn material(
     mounted_subject_id: &str,
     revision: u64,
     predecessor: Option<AgentToolExperienceRetainedRevisionDigestV3>,
-) -> AgentToolExperienceRevisionMaterialV3 {
+) -> AgentToolExperienceRevisionMaterialV4 {
     let mut body = AgentToolExperienceBodyV1::Method {
+        usage_contributions: Vec::new(),
         task_signature: "extract_pdf_text_for_release_notes".into(),
         procedure: "1. Inspect the PDF document.\n2. Extract and verify the release notes.".into(),
         constraints: vec!["filesystem.read".into()],
@@ -32,13 +33,13 @@ fn material(
     let AgentToolExperienceBodyV1::Method { sources, .. } = &mut body else {
         unreachable!()
     };
-    sources.push(AgentToolMethodSourceRefV1 {
+    sources.push(AgentToolMethodSourceRefV2::ProducerDeclaration {
         source_job_id: format!("source-{revision}"),
         method_id: "method-a".into(),
         method_digest,
         execution_refs: vec![],
     });
-    AgentToolExperienceRevisionMaterialV3::build(
+    AgentToolExperienceRevisionMaterialV4::build(
         memory_space_id,
         scope(mounted_subject_id),
         "host-tools",

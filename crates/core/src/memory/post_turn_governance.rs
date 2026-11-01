@@ -226,7 +226,7 @@ pub struct DeferredGovernanceJobSummary {
 }
 
 impl DeferredGovernanceJobSummary {
-    pub fn from_job(job: &PostTurnGovernanceJobV3) -> Self {
+    pub fn from_job(job: &PostTurnGovernanceJobV4) -> Self {
         let status = match job.status {
             PostTurnGovernanceJobStatusV2::Pending
             | PostTurnGovernanceJobStatusV2::BlockedConfiguration
@@ -277,7 +277,7 @@ pub struct DeferredGovernanceQueueReport {
 }
 
 pub fn build_deferred_governance_queue_report(
-    jobs: &[PostTurnGovernanceJobV3],
+    jobs: &[PostTurnGovernanceJobV4],
     recent_limit: usize,
 ) -> DeferredGovernanceQueueReport {
     let mut report = DeferredGovernanceQueueReport {
@@ -328,8 +328,8 @@ pub fn build_deferred_governance_queue_report(
     report
 }
 
-pub const POST_TURN_GOVERNANCE_JOB_SCHEMA_VERSION: u32 = 3;
-pub const POST_TURN_GOVERNANCE_SCOPE_INDEX_SCHEMA_VERSION: u32 = 3;
+pub const POST_TURN_GOVERNANCE_JOB_SCHEMA_VERSION: u32 = 4;
+pub const POST_TURN_GOVERNANCE_SCOPE_INDEX_SCHEMA_VERSION: u32 = 4;
 pub const POST_TURN_GOVERNANCE_PRIVACY_AUTHORITY_SCHEMA_VERSION: u32 = 1;
 pub const POST_TURN_GOVERNANCE_JOB_NAMESPACE: &str = "post_turn_governance_jobs";
 pub const POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE: &str = "post_turn_governance_scope_indexes";
@@ -1111,17 +1111,54 @@ impl PostTurnGovernanceDecisionSummaryV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PostTurnGovernanceMethodApplicationV1 {
+    None,
+    Applied {
+        validity_epoch: u64,
+        source_commitment_digest: String,
+        owner_bindings: Vec<super::ProceduralAppliedOwnerBindingV1>,
+    },
+}
+
+impl PostTurnGovernanceMethodApplicationV1 {
+    pub fn validate(&self) -> Result<()> {
+        let Self::Applied {
+            validity_epoch,
+            source_commitment_digest,
+            owner_bindings,
+        } = self
+        else {
+            return Ok(());
+        };
+        if *validity_epoch == 0 || !is_sha256_digest(source_commitment_digest) || owner_bindings.is_empty()
+            || owner_bindings.len() > super::MAX_METHOD_LEARNING_PROPOSALS
+            || !owner_bindings.iter().all(|binding| matches!(binding,
+                super::ProceduralAppliedOwnerBindingV1::AgentToolExperience { owner_revision, content_digest }
+                if owner_revision.owner_revision > 0 && owner_revision.owner_ref.owner_plane == super::GovernedMemoryOwnerPlane::AgentToolExperience
+                    && is_sha256_digest(content_digest)))
+            || !owner_bindings.windows(2).all(|pair| {
+                serde_json::to_vec(&pair[0]).ok() < serde_json::to_vec(&pair[1]).ok()
+            }) {
+            return Err(Error::invalid_input("post_turn_method_application", "method application is non-canonical"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PostTurnGovernanceReceiptV3 {
+pub struct PostTurnGovernanceReceiptV4 {
     pub receipt_id: String,
     pub semantic_transaction_id: String,
     pub mutation_plan_digest: String,
     pub memory_post_image_digest: String,
     pub completed_at: u64,
     pub decision_summary: PostTurnGovernanceDecisionSummaryV1,
+    pub method_application: PostTurnGovernanceMethodApplicationV1,
 }
 
-impl PostTurnGovernanceReceiptV3 {
+impl PostTurnGovernanceReceiptV4 {
     pub fn new(
         job_id: &str,
         semantic_transaction_id: impl Into<String>,
@@ -1129,6 +1166,7 @@ impl PostTurnGovernanceReceiptV3 {
         memory_post_image_digest: impl Into<String>,
         completed_at: u64,
         decision_summary: PostTurnGovernanceDecisionSummaryV1,
+        method_application: PostTurnGovernanceMethodApplicationV1,
     ) -> Result<Self> {
         let mut receipt = Self {
             receipt_id: String::new(),
@@ -1137,6 +1175,7 @@ impl PostTurnGovernanceReceiptV3 {
             memory_post_image_digest: memory_post_image_digest.into(),
             completed_at,
             decision_summary,
+            method_application,
         };
         receipt.receipt_id = receipt.canonical_receipt_id(job_id)?;
         Ok(receipt)
@@ -1155,7 +1194,14 @@ impl PostTurnGovernanceReceiptV3 {
             ));
         }
         self.decision_summary.validate()?;
-        let mut payload = b"bm-receipt-v3-id\0".to_vec();
+        self.method_application.validate()?;
+        let mut payload = b"bm-receipt-v4-id\0".to_vec();
+        push_receipt_field(
+            &mut payload,
+            &serde_json::to_vec(&self.method_application).map_err(|error| {
+                Error::config("post_turn_governance_receipt", error.to_string())
+            })?,
+        );
         push_receipt_field(&mut payload, job_id.as_bytes());
         push_receipt_field(&mut payload, self.semantic_transaction_id.as_bytes());
         push_receipt_field(&mut payload, self.mutation_plan_digest.as_bytes());
@@ -1179,7 +1225,7 @@ impl PostTurnGovernanceReceiptV3 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PostTurnGovernanceJobV3 {
+pub struct PostTurnGovernanceJobV4 {
     pub schema_version: u32,
     pub job_id: String,
     pub idempotency_key: String,
@@ -1206,13 +1252,56 @@ pub struct PostTurnGovernanceJobV3 {
     pub last_provider_permission_recovery_generation: Option<u64>,
     pub blocking_reason: Option<String>,
     pub last_error_class: Option<PostTurnGovernanceErrorClassV2>,
-    pub receipt: Option<PostTurnGovernanceReceiptV3>,
+    pub receipt: Option<PostTurnGovernanceReceiptV4>,
     pub created_at: u64,
     pub updated_at: u64,
     pub terminal_at: Option<u64>,
 }
 
-impl PostTurnGovernanceJobV3 {
+impl PostTurnGovernanceJobV4 {
+    /// Body-free producing input commitment retained by the semantic receipt.
+    /// Mutable lease/attempt/status/receipt fields are deliberately excluded.
+    pub fn method_source_commitment_digest(
+        &self,
+        binding: &PostTurnGovernanceBindingSnapshotV1,
+    ) -> Result<String> {
+        self.validate()?;
+        binding.validate()?;
+        if !matches!(&self.execution_binding,
+            PostTurnGovernanceExecutionBindingV1::Bound { binding_id, binding_revision }
+            if *binding_id == binding.binding_id && *binding_revision == binding.binding_revision)
+        {
+            return Err(Error::invalid_input(
+                "post_turn_method_source_commitment",
+                "source commitment requires the exact immutable execution binding",
+            ));
+        }
+        let mut payload = b"bm-method-source-commitment-v1\0".to_vec();
+        payload.extend(
+            serde_json::to_vec(&(
+                self.schema_version,
+                &self.job_id,
+                &self.idempotency_key,
+                &self.scope_index_key,
+                &self.identity,
+                self.transcript_sequence,
+                &self.transcript_digest,
+                &self.runtime_binding_digest,
+                self.governance_contract_version,
+                &self.execution_binding,
+                &binding.canonical_digest,
+                &self.privacy_authority,
+                &self.candidate_ids,
+                self.tool_call_count,
+                self.created_at,
+            ))
+            .map_err(|error| {
+                Error::config("post_turn_method_source_commitment", error.to_string())
+            })?,
+        );
+        Ok(format!("sha256:{:x}", Sha256::digest(payload)))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn pending(
         identity: PostTurnGovernanceIdentityV2,
@@ -1434,7 +1523,7 @@ pub struct PostTurnGovernanceJobRefV2 {
 }
 
 impl PostTurnGovernanceJobRefV2 {
-    pub fn from_job(job: &PostTurnGovernanceJobV3) -> Self {
+    pub fn from_job(job: &PostTurnGovernanceJobV4) -> Self {
         Self {
             job_schema_version: POST_TURN_GOVERNANCE_JOB_SCHEMA_VERSION,
             job_id: job.job_id.clone(),
@@ -1476,7 +1565,7 @@ impl PostTurnGovernanceReconciliationCursorV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PostTurnGovernanceScopeIndexV3 {
+pub struct PostTurnGovernanceScopeIndexV4 {
     pub schema_version: u32,
     pub scope_index_key: String,
     pub memory_space_id: String,
@@ -1490,7 +1579,7 @@ pub struct PostTurnGovernanceScopeIndexV3 {
     pub updated_at: u64,
 }
 
-impl PostTurnGovernanceScopeIndexV3 {
+impl PostTurnGovernanceScopeIndexV4 {
     pub fn empty(identity: &PostTurnGovernanceIdentityV2, now_secs: u64) -> Self {
         Self {
             schema_version: POST_TURN_GOVERNANCE_SCOPE_INDEX_SCHEMA_VERSION,
@@ -1640,7 +1729,15 @@ fn is_sha256_digest(value: &str) -> bool {
 }
 
 pub fn post_turn_governance_transcript_digest(record: &TranscriptTurnRecord) -> Result<String> {
-    let bytes = serde_json::to_vec(record).map_err(|error| {
+    // Archive/restore are presentation lifecycle changes, not changes to the
+    // admitted canonical learning content. Current permission is checked by
+    // permits_post_turn_learning at every read/egress/commit boundary. Retain
+    // redaction state in this commitment: privacy withdrawal never aliases the
+    // original readable content, even if its raw bytes have not been erased yet.
+    let mut canonical = record.clone();
+    canonical.lifecycle_state = super::TranscriptLifecycleState::Active;
+    canonical.updated_at = canonical.created_at;
+    let bytes = serde_json::to_vec(&canonical).map_err(|error| {
         Error::config("post_turn_governance_transcript_digest", error.to_string())
     })?;
     Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
@@ -1653,4 +1750,129 @@ pub struct PostTurnMemoryGovernanceReport<MaintenanceReport, LifecycleReport> {
     pub private_garden_self_work: PostTurnPrivateGardenReport,
     pub semantic_governance: PostTurnSemanticGovernanceReport,
     pub lifecycle_report: LifecycleReport,
+}
+
+#[cfg(test)]
+mod transcript_commitment_tests {
+    use super::*;
+    use crate::memory::{
+        CanonicalTurnDelta, ConversationKey, ConversationScope, MemoryTurnDeliveryStatus,
+        MemoryTurnProtocol, MemoryTurnSource, TranscriptInputMessage,
+        TranscriptLifecycleTransition,
+    };
+
+    fn canonical_record() -> TranscriptTurnRecord {
+        let delta = CanonicalTurnDelta {
+            turn_id: "turn-a".into(),
+            conversation: ConversationScope {
+                channel: "sdk.direct".into(),
+                chat_id: "chat-a".into(),
+                conversation_id: Some("conversation-a".into()),
+            },
+            subject: "agent-a".into(),
+            delivery_status: MemoryTurnDeliveryStatus::Delivered,
+            source: MemoryTurnSource {
+                ingress: crate::bus::IngressKind::User,
+                channel: "sdk.direct".into(),
+                provider: None,
+                protocol: MemoryTurnProtocol::Native,
+                endpoint: None,
+                model_alias: None,
+                model_resolved: None,
+                request_id: Some("request-a".into()),
+                client_conversation_hint: None,
+            },
+            actor: None,
+            input_messages: vec![TranscriptInputMessage::user(
+                "Use a checksum before extraction",
+            )],
+            assistant_message: Some(TranscriptInputMessage::assistant("Checksum verified")),
+            tool_observations: Vec::new(),
+            external_content_used: false,
+            candidate_ids: Vec::new(),
+        };
+        TranscriptTurnRecord::from_delta(
+            &ConversationKey::new("space-a", "sdk.direct", "conversation-a").unwrap(),
+            1,
+            &delta,
+            Vec::new(),
+            10,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn governance_transcript_commitment_survives_archive_and_restore() {
+        let mut record = canonical_record();
+        let original = post_turn_governance_transcript_digest(&record).unwrap();
+        record.apply_lifecycle_transition(TranscriptLifecycleTransition::Archive, 20);
+        assert!(record.permits_post_turn_learning());
+        assert_eq!(record.updated_at, 20);
+        assert_eq!(
+            post_turn_governance_transcript_digest(&record).unwrap(),
+            original,
+            "a legal archive must not invalidate canonical learning content"
+        );
+        record.apply_lifecycle_transition(TranscriptLifecycleTransition::Restore, 30);
+        assert!(record.permits_post_turn_learning());
+        assert_eq!(record.updated_at, 30);
+        assert_eq!(
+            post_turn_governance_transcript_digest(&record).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn governance_transcript_commitment_does_not_authorize_privacy_withdrawal() {
+        let original = canonical_record();
+        let digest = post_turn_governance_transcript_digest(&original).unwrap();
+        for transition in [
+            TranscriptLifecycleTransition::Mask,
+            TranscriptLifecycleTransition::DeleteRaw,
+        ] {
+            let mut denied = original.clone();
+            denied.apply_lifecycle_transition(transition, 20);
+            assert!(!denied.permits_post_turn_learning());
+            assert_ne!(
+                post_turn_governance_transcript_digest(&denied).unwrap(),
+                digest
+            );
+        }
+    }
+
+    #[test]
+    fn governance_transcript_commitment_binds_content_identity_and_sequence() {
+        let original = canonical_record();
+        let digest = post_turn_governance_transcript_digest(&original).unwrap();
+        let mut changed = original.clone();
+        changed.input_messages[0].content = "Do not verify the checksum".into();
+        assert_ne!(
+            post_turn_governance_transcript_digest(&changed).unwrap(),
+            digest
+        );
+        let mut changed = original.clone();
+        changed.subject = "agent-b".into();
+        assert_ne!(
+            post_turn_governance_transcript_digest(&changed).unwrap(),
+            digest
+        );
+        let mut changed = original.clone();
+        changed.sequence = 2;
+        assert_ne!(
+            post_turn_governance_transcript_digest(&changed).unwrap(),
+            digest
+        );
+        let mut changed = original.clone();
+        changed.key.memory_space_id = "space-b".into();
+        assert_ne!(
+            post_turn_governance_transcript_digest(&changed).unwrap(),
+            digest
+        );
+        let mut changed = original;
+        changed.created_at += 1;
+        assert_ne!(
+            post_turn_governance_transcript_digest(&changed).unwrap(),
+            digest
+        );
+    }
 }

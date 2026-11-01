@@ -33,7 +33,7 @@ mod runtime;
 mod tool_promotion;
 
 pub use tool_promotion::{
-    agent_tool_execution_matches_transcript, agent_tool_method_execution_matches_source,
+    agent_tool_execution_matches_transcript, agent_tool_method_task_contributions,
     plan_runtime_skill_promotion_from_tool_evidence, runtime_skill_applicability_for_tool_scope,
     RuntimeSkillToolPromotionDecision, RuntimeSkillToolPromotionInput,
     RuntimeSkillToolPromotionReason, RuntimeSkillToolPromotionSource,
@@ -63,14 +63,15 @@ pub use agent_tool::{
 pub use agent_tool_experience_contract::{
     agent_tool_experience_head_key, agent_tool_experience_material_key,
     agent_tool_experience_scope_manifest_key, canonical_agent_tool_experience_owner_id,
-    validate_agent_tool_experience_owner_history, validate_agent_tool_experience_scope_closure,
-    AgentToolExperienceBodyV1, AgentToolExperienceContractFailure,
-    AgentToolExperienceContractValidation, AgentToolExperienceFocusV1,
-    AgentToolExperienceHeadBindingV1, AgentToolExperienceHeadStateV3,
+    canonical_agent_tool_method_content_digest, validate_agent_tool_experience_owner_history,
+    validate_agent_tool_experience_scope_closure, AgentToolExperienceBodyV1,
+    AgentToolExperienceContractFailure, AgentToolExperienceContractValidation,
+    AgentToolExperienceFocusV1, AgentToolExperienceHeadBindingV1, AgentToolExperienceHeadStateV3,
     AgentToolExperienceOwnerHeadV3, AgentToolExperienceOwnerLocatorV3,
     AgentToolExperienceOwningScopeV1, AgentToolExperienceReadProjectionV1,
-    AgentToolExperienceRetainedRevisionDigestV3, AgentToolExperienceRevisionMaterialV3,
-    AgentToolExperienceScopeManifestV1, AgentToolMethodSourceRefV1,
+    AgentToolExperienceReadPurposeV1, AgentToolExperienceRetainedRevisionDigestV3,
+    AgentToolExperienceRevisionMaterialV4, AgentToolExperienceScopeManifestV1,
+    AgentToolMethodSourceRefV2, AgentToolProducerDeclarationRefV1,
     AGENT_TOOL_EXPERIENCE_HEAD_SCHEMA_VERSION, AGENT_TOOL_EXPERIENCE_MATERIAL_SCHEMA_VERSION,
     AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_SCHEMA_VERSION,
 };

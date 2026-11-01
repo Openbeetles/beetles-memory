@@ -82,6 +82,9 @@ fn grant(governor: &MemoryRuntime) -> crate::MemoryProceduralProducerControlRepo
                     execution_facts: true,
                     method_declarations: true,
                     usage_feedback: false,
+                    method_learning_materials: false,
+                    method_adoptions: false,
+                    method_task_evaluations: false,
                     source_classifications: vec![
                         ProceduralSourceSensitivity::NonPrivate,
                         ProceduralSourceSensitivity::Private,
@@ -93,6 +96,7 @@ fn grant(governor: &MemoryRuntime) -> crate::MemoryProceduralProducerControlRepo
                     tool_id: "extract".into(),
                     schema_fingerprint: "schema-a".into(),
                 }],
+                method_evaluators: Vec::new(),
                 source_config_ref: "host-executor-a".into(),
             },
         })
@@ -134,7 +138,7 @@ fn request(memory: &MemoryRuntime, id: &str) -> MemoryTurnFinalizeRequest {
             external_content_used: false,
             candidate_ids: vec![],
         },
-        learning: PostTurnLearningInputV2 {
+        learning: PostTurnLearningInputV3 {
             tool_call_count: 1,
             agent_tool_feedback: vec![AgentToolUsageFeedbackV3 {
                 registry_ref: registry().registry_ref(),
@@ -159,7 +163,7 @@ fn request(memory: &MemoryRuntime, id: &str) -> MemoryTurnFinalizeRequest {
                     external_content: false,
                 }],
             }],
-            ..PostTurnLearningInputV2::empty()
+            ..PostTurnLearningInputV3::empty()
         },
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
@@ -178,6 +182,118 @@ fn image(
             .collect(),
         platform.read_events().unwrap(),
     )
+}
+
+fn pl3_material_capability(
+    governor: &MemoryRuntime,
+) -> crate::MemoryProceduralSubmissionCapability {
+    let registered = grant(governor);
+    let mut spec = registered.binding.spec.clone();
+    spec.claims.execution_facts = false;
+    spec.claims.method_declarations = false;
+    spec.claims.method_learning_materials = true;
+    let revised = governor
+        .control_procedural_producer(crate::MemoryProceduralProducerControlRequest {
+            operation_id: "grant-pl3-materials".into(),
+            expected_revision: Some(registered.binding.revision_ref().unwrap()),
+            state: ProceduralProducerStateV1::Active,
+            spec,
+        })
+        .unwrap();
+    governor
+        .procedural_submission_capability(&revised.binding.revision_ref().unwrap())
+        .unwrap()
+}
+
+fn pl3_material_request(memory: &MemoryRuntime, id: &str) -> MemoryTurnFinalizeRequest {
+    let mut request = request(memory, id);
+    request.learning.agent_tool_feedback.clear();
+    request.turn.tool_observations[0].summary = "Executor compared the received checksum with the authenticated expected checksum before accepting the file.".into();
+    request.learning.method_learning_inputs = vec![MethodLearningInputV1 {
+        registry_ref: registry().registry_ref(),
+        tool_id: "extract".into(),
+        schema_fingerprint: "schema-a".into(),
+        materials: vec![MethodLearningMaterialV1 {
+            material_id: "bounded-observation".into(),
+            purpose: MethodLearningMaterialPurposeV1::VerificationObservation,
+            source: MethodLearningMaterialSourceV1::ToolObservation {
+                observation_id: format!("obs-{id}"),
+            },
+            text: request.turn.tool_observations[0].summary.clone(),
+            sensitivity: ProceduralSourceSensitivity::NonPrivate,
+            external_content: false,
+        }],
+    }];
+    request
+}
+
+#[test]
+fn pl3_public_intake_material_requires_own_claim_and_exact_source_fragment() {
+    let platform = platform();
+    let governor = runtime(&platform, &system_governor_subject_id("pfi2-owner"));
+    let memory = runtime(&platform, &default_agent_subject_id("pfi2-agent"));
+    let capability = pl3_material_capability(&governor);
+    let input = pl3_material_request(&memory, "pl3-material");
+    let before = image(&platform);
+    assert!(memory.finalize_turn(input.clone()).is_err());
+    assert_eq!(image(&platform), before);
+    let mut forged = input.clone();
+    forged.learning.method_learning_inputs[0].materials[0].text =
+        "An invented method that never appeared in the observation.".into();
+    assert!(memory
+        .finalize_turn_with_procedural_evidence(&capability, forged)
+        .is_err());
+    assert_eq!(image(&platform), before);
+    let report = memory
+        .finalize_turn_with_procedural_evidence(&capability, input.clone())
+        .unwrap();
+    assert!(report.transcript_commit.unwrap().committed);
+    let record = platform
+        .get_turn(
+            &ConversationKey::new(memory.memory_space_id(), "sdk.direct", "pfi2-chat").unwrap(),
+            memory.subject_id(),
+            "pl3-material",
+        )
+        .unwrap()
+        .unwrap();
+    let evidence = record.learning_evidence.unwrap();
+    assert_eq!(
+        evidence.method_learning_inputs[0].materials,
+        input.learning.method_learning_inputs[0].materials
+    );
+    assert!(evidence.has_authorized_content());
+    assert!(!evidence.has_procedural_work());
+    assert!(evidence.submitted_input_commitment.is_some());
+}
+
+#[test]
+fn pl3_rejected_private_material_is_body_free_and_changed_retry_conflicts() {
+    let platform = platform();
+    let governor = runtime(&platform, &system_governor_subject_id("pfi2-owner"));
+    let memory = runtime(&platform, &default_agent_subject_id("pfi2-agent"));
+    let capability = pl3_material_capability(&governor);
+    let mut input = pl3_material_request(&memory, "pl3-private");
+    input.learning.method_learning_inputs[0].materials[0].sensitivity =
+        ProceduralSourceSensitivity::Private;
+    input.learning.method_learning_inputs[0].materials[0].text =
+        "Private-learning-only-marker-first".into();
+    memory
+        .finalize_turn_with_procedural_evidence(&capability, input.clone())
+        .unwrap();
+    let before = image(&platform);
+    assert!(!serde_json::to_string(&before.0)
+        .unwrap()
+        .contains("Private-learning-only-marker-first"));
+    memory
+        .finalize_turn_with_procedural_evidence(&capability, input.clone())
+        .unwrap();
+    assert_eq!(image(&platform), before);
+    input.learning.method_learning_inputs[0].materials[0].text =
+        "Private-learning-only-marker-changed".into();
+    assert!(memory
+        .finalize_turn_with_procedural_evidence(&capability, input)
+        .is_err());
+    assert_eq!(image(&platform), before);
 }
 
 #[test]
@@ -324,6 +440,9 @@ fn pfi2_producer_registration_persists_subject_root_without_assets() {
             execution_facts: false,
             method_declarations: false,
             usage_feedback: true,
+            method_learning_materials: false,
+            method_adoptions: false,
+            method_task_evaluations: false,
             source_classifications: vec![],
         };
         usage.tools.clear();
@@ -509,7 +628,7 @@ fn pfi2_intake_proof_is_exact_and_fenced_across_retry_and_revocation() {
     let governor = runtime(&platform, &system_governor_subject_id("pfi2-owner"));
     let memory = runtime(&platform, &default_agent_subject_id("pfi2-agent"));
     let mut ordinary = request(&memory, "ordinary-empty");
-    ordinary.learning = PostTurnLearningInputV2::empty();
+    ordinary.learning = PostTurnLearningInputV3::empty();
     ordinary.learning.tool_call_count = ordinary.turn.tool_observations.len() as u32;
     assert!(
         memory
@@ -741,7 +860,7 @@ fn pfi2_governed_source_revision_fences_intake_and_claimed_application() {
         .unwrap();
     assert!(
         materials.iter().any(|document| serde_json::from_value::<
-            AgentToolExperienceRevisionMaterialV3,
+            AgentToolExperienceRevisionMaterialV4,
         >(document.value.clone())
         .is_ok_and(|material| material.status
             == bm_core::skills::AgentToolExperienceStatus::Candidate
@@ -1274,7 +1393,7 @@ fn shared_sources_fence_every_dependent_once_and_reopen(change: &str) {
                 .unwrap();
             assert!(
                 learned.iter().any(|doc| serde_json::from_value::<
-                    AgentToolExperienceRevisionMaterialV3,
+                    AgentToolExperienceRevisionMaterialV4,
                 >(doc.value.clone())
                 .is_ok_and(|material| material.owning_scope
                     == bm_core::skills::AgentToolExperienceOwningScopeV1::Subject {
@@ -1780,7 +1899,7 @@ fn pfi2_corrupt_source_dependent_index_never_reads_other_subject_bodies() {
             .unwrap()
             .into_iter()
             .filter(|document| {
-                serde_json::from_value::<AgentToolExperienceRevisionMaterialV3>(
+                serde_json::from_value::<AgentToolExperienceRevisionMaterialV4>(
                     document.value.clone(),
                 )
                 .unwrap()
@@ -2888,7 +3007,7 @@ fn pfi2_failed_execution_applies_but_revocation_fences_a_claimed_job() {
         !materials.is_empty(),
         "failed execution is genuine evidence, not an empty success-only aggregate"
     );
-    assert!(materials.iter().any(|document| serde_json::from_value::<AgentToolExperienceRevisionMaterialV3>(document.value.clone()).is_ok_and(|material|
+    assert!(materials.iter().any(|document| serde_json::from_value::<AgentToolExperienceRevisionMaterialV4>(document.value.clone()).is_ok_and(|material|
             matches!(material.body, bm_core::skills::AgentToolExperienceBodyV1::Execution { counts, .. } if counts.failed == 1 && counts.succeeded == 0))));
     let second = claim("claimed-before-revoke");
     governor

@@ -1,6 +1,6 @@
 [package]
 name = "bm-sdk"
-version = "0.9.0"
+version = "0.10.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -114,3 +114,7 @@ required-features = ["nonproduction-replay-harness"]
 name = "runtime_metrics_contract"
 path = "tests/runtime_metrics_contract.rs"
 required-features = ["nonproduction-replay-harness"]
+
+[target.'cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))'.dependencies]
+iana-time-zone = "0.1.65"
+jiff = { version = "0.2.38", default-features = false, features = ["std", "tzdb-zoneinfo", "tzdb-bundle-platform"] }

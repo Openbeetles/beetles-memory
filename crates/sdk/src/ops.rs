@@ -14,7 +14,7 @@ use bm_core::memory::{
     MemoryLongTermTargetResolutionReport, MemoryLongTermTombstoneRef, MemoryMutationReceipt,
     MemoryPrivacyClass, MemoryProjectionImpactReport, PostTurnGovernanceAttemptAuthorityV3,
     PostTurnGovernanceErrorClassV2, PostTurnGovernanceExecutionBlockAuthorityV1,
-    PostTurnGovernanceJobV3, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
+    PostTurnGovernanceJobV4, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
     QueryFacetInput, RedactedTranscriptSlice, RelationshipDisclosureCeilingV1,
     RelationshipSourceControlErrorKeyV1, RelationshipSourceStateV1, SessionMessage,
     SessionTurnCommitReport, SubjectScopedRuntime, SubjectSoulLifecycleErrorKey,
@@ -1262,6 +1262,8 @@ pub struct MemoryProjectionRequest {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LLMRuntimeProjectionEnvelope {
+    /// Trusted per-operation presentation clock; never persisted as memory truth.
+    pub user_local_time: Option<bm_core::memory::UserLocalTimeContext>,
     pub projection_id: String,
     pub runtime_awareness: String,
     pub subject_mount: SoulLifeProjectionReport,
@@ -1488,7 +1490,7 @@ impl ProviderProjectionPayload {
 /// }
 /// ```
 pub struct MemoryProjectionReport {
-    pub(crate) selection_receipt: Option<bm_core::memory::ProceduralSelectionReceiptV1>,
+    pub(crate) selection_receipt: Option<bm_core::memory::MemoryTurnProjectionReceiptV2>,
     pub(crate) temporal_operation: MemoryRecallTemporalOperation,
     pub(crate) ui_api_projection: String,
     pub(crate) ui_api_chars: usize,
@@ -1505,7 +1507,7 @@ pub struct MemoryProjectionReport {
 }
 
 impl MemoryProjectionReport {
-    pub fn selection_receipt(&self) -> Option<&bm_core::memory::ProceduralSelectionReceiptV1> {
+    pub fn selection_receipt(&self) -> Option<&bm_core::memory::MemoryTurnProjectionReceiptV2> {
         self.selection_receipt.as_ref()
     }
 
@@ -1652,7 +1654,7 @@ pub struct MemoryMaintenanceReport {
 #[derive(Clone, Debug)]
 pub struct MemoryTurnFinalizeRequest {
     pub turn: CanonicalTurnDelta,
-    pub learning: bm_core::memory::PostTurnLearningInputV2,
+    pub learning: bm_core::memory::PostTurnLearningInputV3,
     pub pressure: crate::PressureLevel,
     pub mode_input: RuntimeLifecycleModeInput,
 }
@@ -1699,7 +1701,7 @@ pub struct MemoryGovernanceJobStatusRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryGovernanceJobStatusReport {
-    pub job: PostTurnGovernanceJobV3,
+    pub job: PostTurnGovernanceJobV4,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1709,7 +1711,7 @@ pub struct MemoryGovernanceActiveJobsRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryGovernanceActiveJobsReport {
-    pub jobs: Vec<PostTurnGovernanceJobV3>,
+    pub jobs: Vec<PostTurnGovernanceJobV4>,
     pub has_more: bool,
 }
 
@@ -1763,7 +1765,7 @@ pub struct MemoryGovernanceJobBlockRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryGovernanceJobBlockReport {
-    pub job: PostTurnGovernanceJobV3,
+    pub job: PostTurnGovernanceJobV4,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1778,7 +1780,7 @@ pub struct MemoryGovernanceClaimedJobBlockRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryGovernanceClaimedJobBlockReport {
-    pub job: PostTurnGovernanceJobV3,
+    pub job: PostTurnGovernanceJobV4,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1788,7 +1790,7 @@ pub struct MemoryGovernanceJobResumeRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryGovernanceJobResumeReport {
-    pub job: PostTurnGovernanceJobV3,
+    pub job: PostTurnGovernanceJobV4,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1831,7 +1833,7 @@ pub struct MemoryGovernanceJobFailRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryGovernanceJobFailReport {
-    pub job: PostTurnGovernanceJobV3,
+    pub job: PostTurnGovernanceJobV4,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1860,7 +1862,7 @@ pub struct MemoryGovernanceJobClaimRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryGovernanceJobClaimReport {
-    pub job: PostTurnGovernanceJobV3,
+    pub job: PostTurnGovernanceJobV4,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1873,7 +1875,7 @@ pub struct MemoryGovernanceJobRenewRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryGovernanceJobRenewReport {
-    pub job: PostTurnGovernanceJobV3,
+    pub job: PostTurnGovernanceJobV4,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1886,7 +1888,7 @@ pub struct MemoryGovernanceJobRetryRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryGovernanceJobRetryReport {
-    pub job: PostTurnGovernanceJobV3,
+    pub job: PostTurnGovernanceJobV4,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1898,7 +1900,7 @@ pub struct MemoryGovernanceJobRunRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryGovernanceJobRunReport {
-    pub job: PostTurnGovernanceJobV3,
+    pub job: PostTurnGovernanceJobV4,
     pub private_garden_self_work: PostTurnPrivateGardenReport,
     pub semantic_governance: PostTurnSemanticGovernanceReport,
 }

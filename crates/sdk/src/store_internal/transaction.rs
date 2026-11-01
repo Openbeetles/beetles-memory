@@ -11,7 +11,7 @@ use bm_core::memory::{
     GovernedEvidenceDocument, GovernedEvidenceSourceRef, GovernedMemoryOwnerPlane,
     LongTermMemoryHeadManifest, LongTermMemoryVersionMaterial, LongTermMemoryVersionScopeManifest,
     MemoryFacetIndexDoc, MemoryFacetIndexManifest, MemoryGraphScopeManifest,
-    ProceduralFeedbackApplicationLedgerV2, ProceduralFeedbackJobV2, ProceduralFeedbackScopeIndexV2,
+    ProceduralFeedbackApplicationLedgerV3, ProceduralFeedbackJobV2, ProceduralFeedbackScopeIndexV2,
     RelationshipPortfolio, RelationshipTopology, TranscriptConversationAlias,
     TranscriptSearchNormalizerV1, TranscriptTurnRecord, MAX_TRANSCRIPT_INDEX_TERMS_PER_MESSAGE,
     MEMORY_FACET_POSTING_NAMESPACE,
@@ -21,7 +21,7 @@ use bm_core::skills::{
     agent_tool_experience_scope_manifest_key, canonical_runtime_skill_owner_key,
     runtime_skill_scope_manifest_key, AgentToolExperienceHeadStateV3,
     AgentToolExperienceOwnerHeadV3, AgentToolExperienceOwningScopeV1,
-    AgentToolExperienceRevisionMaterialV3, AgentToolExperienceScopeManifestV1,
+    AgentToolExperienceRevisionMaterialV4, AgentToolExperienceScopeManifestV1,
     RuntimeSkillOwnerRecord, RuntimeSkillScopeManifest,
 };
 use bm_core::{Error, Result};
@@ -64,8 +64,39 @@ use crate::store_internal::{
 use crate::{
     enforce_event_key_budget, enforce_logical_key_budget, store_budget_error, MemoryStoreEvent,
     MemoryStoreEventKind, StoreBlobPrecondition, StoreCapacityBudget, StoreEventScope,
-    StoreJsonPrecondition, StoreMutationBatch, StoreMutationBudgetReport, StoreSnapshotJsonDoc,
+    StoreJsonPrecondition, StoreMutation, StoreMutationBatch, StoreMutationBudgetReport,
+    StoreSnapshotJsonDoc,
 };
+
+pub(crate) fn merge_json_preconditions(
+    target: &mut Vec<StoreJsonPrecondition>,
+    incoming: impl IntoIterator<Item = StoreJsonPrecondition>,
+) -> Result<()> {
+    let mut by_address = BTreeMap::<(String, String), StoreJsonPrecondition>::new();
+    for precondition in target.drain(..).chain(incoming) {
+        let address = match &precondition {
+            StoreJsonPrecondition::Absent { namespace, key }
+            | StoreJsonPrecondition::Exact { namespace, key, .. } => {
+                (namespace.clone(), key.clone())
+            }
+        };
+        if let Some(existing) = by_address.get(&address) {
+            if existing != &precondition {
+                return Err(Error::config(
+                    "memory_write_transaction_precondition_conflict",
+                    format!(
+                        "conflicting JSON preconditions for namespace {}, key {}",
+                        address.0, address.1
+                    ),
+                ));
+            }
+        } else {
+            by_address.insert(address, precondition);
+        }
+    }
+    target.extend(by_address.into_values());
+    Ok(())
+}
 
 #[derive(Clone)]
 pub struct StoreTransactionAdmission {
@@ -938,6 +969,103 @@ pub(crate) struct StoreTransactionPlan {
     pub(crate) report: StoreTransactionReport,
 }
 
+/// Complete the known-key Soul/source read graph under the backend's lock.
+/// Both old and proposed values are roots: deleting/replacing a source must
+/// still discover its previous dependents. Missing reads are visited once and
+/// remain missing for post-image validation; no fallback or namespace scan.
+pub(crate) fn expand_owner_transaction_dependencies(
+    request: &StoreTransactionRequest,
+    capacity: StoreCapacityBudget,
+    touched: &mut BackendTransactionState,
+    mut read_json: impl FnMut(&str, &str, usize) -> Result<Option<Value>>,
+) -> Result<()> {
+    fn enqueue(
+        namespace: &str,
+        value: &Value,
+        capacity: StoreCapacityBudget,
+        visited: &BTreeSet<(String, String)>,
+        pending: &mut BTreeSet<(String, String)>,
+    ) -> Result<()> {
+        if serialized_json_len(value)? > capacity.snapshot_max_bytes {
+            return Err(store_budget_error(
+                "Soul dependency document exceeds byte budget",
+            ));
+        }
+        let mut emit = |address: (String, String)| {
+            if !visited.contains(&address) && !pending.contains(&address) {
+                if visited.len().saturating_add(pending.len()) >= capacity.kv_max_entries {
+                    return Err(store_budget_error(
+                        "Soul dependency read-set exceeds address budget",
+                    ));
+                }
+                enforce_logical_key_budget(
+                    capacity,
+                    &address.0,
+                    &address.1,
+                    "memory_write_transaction",
+                )?;
+                pending.insert(address);
+            }
+            Ok(())
+        };
+        super::subject_soul::subject_soul_transaction_dependencies(namespace, value, &mut emit)?;
+        let node = super::procedural_feedback::procedural_dependency_node(namespace, value, false)?;
+        for address in node.addresses {
+            emit(address)?;
+        }
+        Ok(())
+    }
+    let mut visited = request.read_set().json.clone();
+    visited.extend(touched.json.keys().cloned());
+    let mut bytes = touched.json.values().try_fold(0usize, |total, value| {
+        total
+            .checked_add(serialized_json_len(value)?)
+            .ok_or_else(|| store_budget_error("Soul dependency read bytes overflow"))
+    })?;
+    if visited.len() > capacity.kv_max_entries || bytes > capacity.snapshot_max_bytes {
+        return Err(store_budget_error(
+            "initial transaction read-set exceeds operation budget",
+        ));
+    }
+    let mut pending = BTreeSet::new();
+    for ((namespace, _), value) in &touched.json {
+        enqueue(namespace, value, capacity, &visited, &mut pending)?;
+    }
+    for mutation in &request.mutations {
+        if let StoreEngineMutation::PutJson {
+            namespace, value, ..
+        } = mutation
+        {
+            enqueue(namespace, value, capacity, &visited, &mut pending)?;
+        }
+    }
+    while let Some(address) = pending.pop_first() {
+        if !visited.insert(address.clone()) {
+            continue;
+        }
+        if visited.len() > capacity.kv_max_entries || bytes > capacity.snapshot_max_bytes {
+            return Err(store_budget_error(
+                "Soul dependency read-set exceeds operation budget",
+            ));
+        }
+        let (namespace, key) = &address;
+        enforce_logical_key_budget(capacity, namespace, key, "memory_write_transaction")?;
+        if let Some(value) = read_json(namespace, key, capacity.snapshot_max_bytes - bytes)? {
+            bytes = bytes
+                .checked_add(serialized_json_len(&value)?)
+                .ok_or_else(|| store_budget_error("Soul dependency read bytes overflow"))?;
+            if bytes > capacity.snapshot_max_bytes {
+                return Err(store_budget_error(
+                    "Soul dependency read-set exceeds byte budget",
+                ));
+            }
+            enqueue(namespace, &value, capacity, &visited, &mut pending)?;
+            touched.json.insert(address, value);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn apply_transaction(
     admission: &StoreTransactionAdmission,
     request: &StoreTransactionRequest,
@@ -1045,12 +1173,21 @@ pub(crate) fn apply_transaction(
     // Lifecycle continuity is an engine invariant, including primitive callers
     // without optional governed-batch reporting metadata.
     super::platform::validate_runtime_skill_owner_transitions(current, &next, &changed_json)?;
+    super::subject_soul::validate_subject_soul_source_transition(current, &next)?;
     let mut source_fences = super::procedural_feedback::source_dependents::validate_transition(
         current,
         &next,
         &request.transaction_id,
         &effective.preconditions,
     )?;
+    source_fences.extend(
+        super::procedural_feedback::transcript_control::validate_transition(
+            current,
+            &next,
+            &request.transaction_id,
+            &effective.preconditions,
+        )?,
+    );
     source_fences.extend(
         super::procedural_feedback::runtime_skill_control::validate_transition(
             current,
@@ -1192,7 +1329,7 @@ pub(crate) fn apply_transaction(
         if !request.preconditions.iter().any(|condition| matches!(condition, StoreJsonPrecondition::Absent { namespace, key } if namespace == &address.0 && key == &address.1)) {
             return Err(Error::config("procedural_feedback_application_ledger", "application ledger creation requires absent CAS"));
         }
-        let ledger: bm_core::memory::ProceduralFeedbackApplicationLedgerV2 =
+        let ledger: bm_core::memory::ProceduralFeedbackApplicationLedgerV3 =
             serde_json::from_value(next.json[address].clone()).map_err(|_| {
                 Error::config(
                     "procedural_feedback_application_ledger",
@@ -1236,6 +1373,67 @@ pub(crate) fn apply_transaction(
         }
     }
 
+    // A protected method post-image needs the exact declared operations, not
+    // merely a nonempty metadata wrapper. Backend primitives cannot bypass the
+    // shared method closure through absent or unrelated governed metadata.
+    let is_method_namespace = |namespace: &str| {
+        matches!(
+            namespace,
+            super::schema::AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE
+                | super::schema::AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE
+                | super::schema::AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE
+                | super::schema::PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE
+        )
+    };
+    let actual_methods = effective
+        .mutations
+        .iter()
+        .filter_map(|mutation| {
+            let (namespace, key, value) = match mutation {
+                StoreEngineMutation::PutJson {
+                    namespace,
+                    key,
+                    value,
+                } => (namespace, key, Some(value)),
+                StoreEngineMutation::DeleteJson { namespace, key }
+                | StoreEngineMutation::DeleteJsonIfPresent { namespace, key, .. } => {
+                    (namespace, key, None)
+                }
+                _ => return None,
+            };
+            is_method_namespace(namespace).then_some(((namespace, key), value))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let declared_methods = effective
+        .governed_batch
+        .iter()
+        .flat_map(|batch| &batch.mutations)
+        .filter_map(|mutation| {
+            let (namespace, key, value) = match mutation {
+                StoreMutation::PutJson {
+                    namespace,
+                    key,
+                    value,
+                    ..
+                } => (namespace, key, Some(value)),
+                StoreMutation::DeleteJson { namespace, key, .. } => (namespace, key, None),
+                _ => return None,
+            };
+            is_method_namespace(namespace).then_some(((namespace, key), value))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if (!actual_methods.is_empty() || !declared_methods.is_empty())
+        && (actual_methods != declared_methods
+            || effective
+                .governed_batch
+                .as_ref()
+                .is_none_or(|batch| batch.transaction_id != effective.transaction_id))
+    {
+        return Err(Error::config(
+            "method_transaction_authority",
+            "method owners require their exact governed transaction closure",
+        ));
+    }
     if let Some(batch) = effective.governed_batch.as_deref() {
         crate::store_internal::platform::validate_governed_transaction_post_image(
             batch,
@@ -1837,7 +2035,7 @@ pub(crate) fn json_document_matches_scoped_projection(
     let long_term_owner_id = scope.memory_space_id.as_str();
     match namespace {
         AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE => {
-            serde_json::from_value::<AgentToolExperienceRevisionMaterialV3>(value.clone())
+            serde_json::from_value::<AgentToolExperienceRevisionMaterialV4>(value.clone())
                 .is_ok_and(|material| {
                     material.memory_space_id == scope.memory_space_id
                         && material.owning_scope.mounted_subject_id() == mounted_subject_id
@@ -1927,7 +2125,7 @@ pub(crate) fn json_document_matches_scoped_projection(
                     .is_ok_and(|scope_key| scope_key == key)
         }),
         PROCEDURAL_FEEDBACK_APPLICATION_LEDGER_NAMESPACE => {
-            serde_json::from_value::<ProceduralFeedbackApplicationLedgerV2>(value.clone())
+            serde_json::from_value::<ProceduralFeedbackApplicationLedgerV3>(value.clone())
                 .is_ok_and(|ledger| {
                     ledger.identity.memory_space_id == scope.memory_space_id
                         && ledger.identity.mounted_subject_id == mounted_subject_id

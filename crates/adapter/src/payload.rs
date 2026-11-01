@@ -5,7 +5,7 @@ use bm_sdk::{
     MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryLongTermTarget,
     MemoryMaintenanceRequest, MemoryProjectionRequest, MemoryRecallRequest,
     MemoryRecallTemporalOperation, MemoryRecoverRequest, MemoryReplayRequest,
-    MemoryTranscriptAttrWriteRequest, MemoryTurnFinalizeRequest, PostTurnLearningInputV2,
+    MemoryTranscriptAttrWriteRequest, MemoryTurnFinalizeRequest, PostTurnLearningInputV3,
     PressureLevel, ProceduralProjectionBindingV1, QueryFacetInput, Result,
     RuntimeLifecycleModeInput, RuntimeLifecycleTrigger, TranscriptAttrEnvelope,
 };
@@ -364,7 +364,7 @@ struct ProjectPayload {
 #[serde(deny_unknown_fields)]
 struct FinalizeTurnPayload {
     turn: CanonicalTurnDelta,
-    learning: PostTurnLearningInputV2,
+    learning: PostTurnLearningInputV3,
     #[serde(default)]
     pressure: PressureLevel,
     #[serde(default)]

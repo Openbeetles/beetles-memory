@@ -16,8 +16,8 @@ use bm_core::memory::{
     MemoryGraphRecallIndexDoc, MemoryGraphRevisionDoc, MemoryGraphScopeManifest,
     MemoryLongTermGovernancePolicy, MemoryMutationAuditRecord, MemoryMutationOperationIdentity,
     MemoryMutationReceipt, PostTurnGovernanceBindingRevisionIndexV1,
-    PostTurnGovernanceBindingSnapshotV1, PostTurnGovernanceJobV3, PostTurnGovernanceScopeIndexV3,
-    ProceduralFeedbackApplicationLedgerV2, ProceduralFeedbackJobV2, ProceduralFeedbackScopeIndexV2,
+    PostTurnGovernanceBindingSnapshotV1, PostTurnGovernanceJobV4, PostTurnGovernanceScopeIndexV4,
+    ProceduralFeedbackApplicationLedgerV3, ProceduralFeedbackJobV2, ProceduralFeedbackScopeIndexV2,
     RelationshipSourceConstitutionV1, RelationshipSourceControlOutcomeV1,
     RelationshipSourceControlReportV1, RelationshipSourceScopeManifestV1,
     SubjectSoulGenerationTombstoneV1, SubjectSoulLifecycleHeadV1, SubjectSoulMutationOutcomeV1,
@@ -40,7 +40,7 @@ use bm_core::memory::{
 use bm_core::platform::MemorySystemKind;
 use bm_core::skills::{
     canonical_runtime_skill_owner_key, runtime_skill_scope_manifest_key,
-    AgentToolExperienceOwnerHeadV3, AgentToolExperienceRevisionMaterialV3,
+    AgentToolExperienceOwnerHeadV3, AgentToolExperienceRevisionMaterialV4,
     AgentToolExperienceScopeManifestV1, RuntimeSkillOwnerRecord, RuntimeSkillOwningScope,
     RuntimeSkillScopeManifest, RUNTIME_SKILL_SCOPE_MANIFEST_SCHEMA_VERSION,
 };
@@ -61,8 +61,8 @@ use crate::store_internal::recall_index::{
     TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE,
 };
 
-pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema_v14";
-pub const STORE_SCHEMA_VERSION: u32 = 14;
+pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema_v15";
+pub const STORE_SCHEMA_VERSION: u32 = 15;
 pub(crate) const LONG_TERM_VERSION_MATERIAL_NAMESPACE: &str = "long_term_version_materials";
 pub(crate) const LONG_TERM_HEAD_MANIFEST_NAMESPACE: &str = "long_term_head_manifests";
 pub(crate) const LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE: &str =
@@ -349,6 +349,7 @@ pub(crate) const STORE_JSON_NAMESPACE_REGISTRY: &[StoreJsonNamespaceContract] = 
     subject_soul_json_namespace("relationship_topology"),
     opaque_json_namespace("world_sense"),
     subject_soul_json_namespace("outer_voice"),
+    subject_soul_json_namespace("soul_turn_persona_evidence"),
     subject_soul_json_namespace("autonomy_strategy"),
     subject_soul_json_namespace("inner_life"),
     subject_soul_json_namespace("felt_significance"),
@@ -693,6 +694,7 @@ const SUBJECT_GLOBAL_SOUL_JSON_NAMESPACES: &[&str] = &[
     "private_doc",
     "private_garden",
     "outer_voice",
+    "soul_turn_persona_evidence",
 ];
 
 pub(crate) fn is_subject_global_soul_json_namespace(namespace: &str) -> bool {
@@ -776,6 +778,7 @@ impl SubjectSoulDurableOperationResultV1 {
                     | bm_core::memory::MemoryMutationOperationKind::SoulReset
                     | bm_core::memory::MemoryMutationOperationKind::SoulReseed
                     | bm_core::memory::MemoryMutationOperationKind::SoulDelete
+                    | bm_core::memory::MemoryMutationOperationKind::ProceduralLifecycle
             )
             || self.committed_report.outcome != SubjectSoulMutationOutcomeV1::Committed
             || self.committed_report.replayed
@@ -976,6 +979,31 @@ fn validate_store_json_value(
                 return Err(invalid(
                     "subject Soul owner envelope physical key mismatch".to_string(),
                 ));
+            }
+            if namespace == "soul_turn_persona_evidence" {
+                let evidence: bm_core::memory::GovernedTurnPersonaEvidenceV1 =
+                    decode_json(&document.body, invalid)?;
+                evidence
+                    .validate_contract()
+                    .map_err(|error| invalid(error.to_string()))?;
+                if evidence.owner.memory_space_id != document.memory_space_id
+                    || evidence.owner.subject_id != document.subject_id
+                    || evidence.owner.soul_id != document.soul_id
+                    || evidence.generation != document.generation
+                    || !document.source_lineage.iter().any(|source| {
+                        source.memory_space_id == evidence.source.memory_space_id
+                            && source.subject_id == evidence.source.mounted_subject_id
+                            && source.channel_id == evidence.source.channel_id
+                            && source.conversation_id == evidence.source.conversation_id
+                            && source.turn_id == evidence.source.turn_id
+                            && source.sequence == evidence.source_sequence
+                            && source.canonical_turn_digest == evidence.canonical_turn_digest
+                    })
+                {
+                    return Err(invalid(
+                        "persona evidence lacks exact generation/source lineage".into(),
+                    ));
+                }
             }
             Ok(())
         }
@@ -1524,7 +1552,7 @@ fn validate_store_json_value(
             Ok(())
         }
         StoreJsonDecoderKind::AgentToolExperienceRevisionMaterial => {
-            let material = decode_json::<AgentToolExperienceRevisionMaterialV3>(value, invalid)?;
+            let material = decode_json::<AgentToolExperienceRevisionMaterialV4>(value, invalid)?;
             if !material.validate_contract().accepted || material.physical_key != key {
                 return Err(invalid(
                     "Agent Tool experience material contract or physical key mismatch".to_string(),
@@ -1603,7 +1631,7 @@ fn validate_store_json_value(
             Ok(())
         }
         StoreJsonDecoderKind::PostTurnGovernanceJob => {
-            let job = decode_json::<PostTurnGovernanceJobV3>(value, invalid)?;
+            let job = decode_json::<PostTurnGovernanceJobV4>(value, invalid)?;
             if job.job_id != key || job.identity.job_key() != key || job.validate().is_err() {
                 return Err(invalid(
                     "post-turn governance job contract or physical key mismatch".to_string(),
@@ -1612,7 +1640,7 @@ fn validate_store_json_value(
             Ok(())
         }
         StoreJsonDecoderKind::PostTurnGovernanceScopeIndex => {
-            let index = decode_json::<PostTurnGovernanceScopeIndexV3>(value, invalid)?;
+            let index = decode_json::<PostTurnGovernanceScopeIndexV4>(value, invalid)?;
             if index.scope_index_key != key || index.validate().is_err() {
                 return Err(invalid(
                     "post-turn governance scope index contract or physical key mismatch"
@@ -1701,7 +1729,7 @@ fn validate_store_json_value(
             Ok(())
         }
         StoreJsonDecoderKind::ProceduralFeedbackApplicationLedger => {
-            let ledger = decode_json::<ProceduralFeedbackApplicationLedgerV2>(value, invalid)?;
+            let ledger = decode_json::<ProceduralFeedbackApplicationLedgerV3>(value, invalid)?;
             if ledger.job_id != key || ledger.validate().is_err() {
                 return Err(invalid(
                     "procedural feedback application ledger contract or physical key mismatch"
@@ -3143,6 +3171,7 @@ mod tests {
         use bm_core::memory::*;
         let binding = ProceduralProducerBindingV1::build(
             ProceduralProducerSpecV1 {
+                method_evaluators: Vec::new(),
                 binding_id: "usage-reporter".into(),
                 scope: ProceduralProducerScopeV1 {
                     memory_space_id: "space-a".into(),
@@ -3155,6 +3184,9 @@ mod tests {
                 },
                 source_authority: ProceduralProducerSourceAuthorityV1::RuntimeObservation,
                 claims: ProceduralProducerClaimsV1 {
+                    method_learning_materials: false,
+                    method_adoptions: false,
+                    method_task_evaluations: false,
                     execution_facts: false,
                     method_declarations: false,
                     usage_feedback: true,
@@ -3318,14 +3350,14 @@ mod tests {
     }
 
     #[test]
-    fn store_schema_identity_is_exactly_v14_and_rejects_v13() {
-        assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v14");
-        assert_eq!(STORE_SCHEMA_VERSION, 14);
+    fn store_schema_identity_is_exactly_v15_and_rejects_v14() {
+        assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v15");
+        assert_eq!(STORE_SCHEMA_VERSION, 15);
         assert!(
             validate_store_schema_identity(STORE_SCHEMA_ID, STORE_SCHEMA_VERSION, "test").is_ok()
         );
         assert!(
-            validate_store_schema_identity("beetle_memory_store_schema_v13", 13, "test").is_err()
+            validate_store_schema_identity("beetle_memory_store_schema_v14", 14, "test").is_err()
         );
         assert!(
             validate_store_schema_identity("unknown_memory_store_schema_v999", 999, "test")
@@ -3334,7 +3366,7 @@ mod tests {
     }
 
     #[test]
-    fn store_v14_rejects_v2_governance_job_and_scope_payloads() {
+    fn store_v15_rejects_v2_governance_job_and_scope_payloads() {
         let identity = PostTurnGovernanceIdentityV2::new(
             "space:v2-reject",
             "subject:v2-reject",
@@ -3344,7 +3376,7 @@ mod tests {
             "turn:v2-reject",
         )
         .unwrap();
-        let job = PostTurnGovernanceJobV3::pending(
+        let job = PostTurnGovernanceJobV4::pending(
             identity.clone(),
             1,
             "sha256:1111111111111111111111111111111111111111111111111111111111111111",
@@ -3390,7 +3422,7 @@ mod tests {
         )
         .is_err());
 
-        let mut index = PostTurnGovernanceScopeIndexV3::empty(&identity, 1_800_000_000);
+        let mut index = PostTurnGovernanceScopeIndexV4::empty(&identity, 1_800_000_000);
         index
             .active_jobs
             .push(PostTurnGovernanceJobRefV2::from_job(&job));

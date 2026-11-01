@@ -16,8 +16,9 @@ fn registry() -> AgentToolRegistrySnapshot {
     )
 }
 
-fn material(signature: &str, guidance: &str) -> AgentToolExperienceRevisionMaterialV3 {
+fn material(signature: &str, guidance: &str) -> AgentToolExperienceRevisionMaterialV4 {
     let mut body = AgentToolExperienceBodyV1::Method {
+        usage_contributions: Vec::new(),
         task_signature: signature.into(),
         procedure: format!("1. {guidance}.\n2. Verify the result."),
         constraints: vec![],
@@ -27,13 +28,13 @@ fn material(signature: &str, guidance: &str) -> AgentToolExperienceRevisionMater
     let AgentToolExperienceBodyV1::Method { sources, .. } = &mut body else {
         unreachable!()
     };
-    sources.push(AgentToolMethodSourceRefV1 {
+    sources.push(AgentToolMethodSourceRefV2::ProducerDeclaration {
         source_job_id: "private-evidence-marker".into(),
         method_id: "method-a".into(),
         method_digest,
         execution_refs: vec![],
     });
-    AgentToolExperienceRevisionMaterialV3::build(
+    AgentToolExperienceRevisionMaterialV4::build(
         "space",
         AgentToolExperienceOwningScopeV1::Subject {
             mounted_subject_id: "agent".into(),
@@ -55,7 +56,7 @@ fn material(signature: &str, guidance: &str) -> AgentToolExperienceRevisionMater
 
 fn select(
     query: &str,
-    materials: &[AgentToolExperienceRevisionMaterialV3],
+    materials: &[AgentToolExperienceRevisionMaterialV4],
     registries: &[AgentToolRegistrySnapshot],
     refs: &[AgentToolRegistryRef],
 ) -> AgentToolSelectionReport {
@@ -110,7 +111,7 @@ fn select(
     )
     .unwrap();
     let applications = [
-        bm_core::memory::ProceduralFeedbackApplicationLedgerV2::build(
+        bm_core::memory::ProceduralFeedbackApplicationLedgerV3::build(
             &job,
             materials
                 .iter()
@@ -123,13 +124,15 @@ fn select(
                 .collect(),
             vec![],
             vec![],
+            vec![],
             1,
             100,
         )
         .unwrap(),
     ];
     let authority =
-        bm_core::memory::ProceduralReadAuthorityV1::try_new(&root, None, &applications).unwrap();
+        bm_core::memory::ProceduralReadAuthorityV1::try_new(&root, None, &applications, &[])
+            .unwrap();
     let owners = heads
         .iter()
         .map(|head| {
@@ -171,8 +174,8 @@ fn assert_safe_rejected(report: &AgentToolSelectionReport, reason: &str) {
 fn pfi2_verified_projection_selects_before_authorizing_and_never_carries_denied_history() {
     use bm_core::memory::*;
     let first = material("weather-task", "A private-history method marker");
-    let next = |previous: &AgentToolExperienceRevisionMaterialV3, time| {
-        AgentToolExperienceRevisionMaterialV3::build(
+    let next = |previous: &AgentToolExperienceRevisionMaterialV4, time| {
+        AgentToolExperienceRevisionMaterialV4::build(
             &previous.memory_space_id,
             previous.owning_scope.clone(),
             &previous.registry_id,
@@ -219,7 +222,7 @@ fn pfi2_verified_projection_selects_before_authorizing_and_never_carries_denied_
         8,
     )
     .unwrap();
-    let application = |material: &AgentToolExperienceRevisionMaterialV3| {
+    let application = |material: &AgentToolExperienceRevisionMaterialV4| {
         let job = ProceduralFeedbackJobV2::pending(
             ProceduralFeedbackIdentityV1::new(
                 "space",
@@ -238,12 +241,13 @@ fn pfi2_verified_projection_selects_before_authorizing_and_never_carries_denied_
             100,
         )
         .unwrap();
-        ProceduralFeedbackApplicationLedgerV2::build(
+        ProceduralFeedbackApplicationLedgerV3::build(
             &job,
             vec![ProceduralAppliedOwnerBindingV1::AgentToolExperience {
                 owner_revision: material.owner_revision_ref(),
                 content_digest: material.content_digest.clone(),
             }],
+            vec![],
             vec![],
             vec![],
             1,
@@ -252,7 +256,7 @@ fn pfi2_verified_projection_selects_before_authorizing_and_never_carries_denied_
         .unwrap()
     };
     let applications = [application(&first), application(&third)];
-    let authority = ProceduralReadAuthorityV1::try_new(&root, None, &applications).unwrap();
+    let authority = ProceduralReadAuthorityV1::try_new(&root, None, &applications, &[]).unwrap();
     let positive =
         AgentToolExperienceReadProjectionV1::try_new(&head, &history, &authority, Some(150))
             .unwrap();
@@ -270,7 +274,7 @@ fn pfi2_verified_projection_selects_before_authorizing_and_never_carries_denied_
     );
     assert!(!format!("{denied:?}").contains("private-history method marker"));
     let only_old = [application(&first)];
-    let authority = ProceduralReadAuthorityV1::try_new(&root, None, &only_old).unwrap();
+    let authority = ProceduralReadAuthorityV1::try_new(&root, None, &only_old, &[]).unwrap();
     assert!(
         AgentToolExperienceReadProjectionV1::try_new(&head, &history, &authority, Some(150))
             .unwrap()
@@ -358,7 +362,7 @@ fn private_and_scope_denials_have_safe_nonempty_audit() {
         project_id: "other-project".into(),
     };
     // Rebuild the complete canonical owner when changing applicability.
-    scoped = AgentToolExperienceRevisionMaterialV3::build(
+    scoped = AgentToolExperienceRevisionMaterialV4::build(
         "space",
         scoped.owning_scope,
         "tools",

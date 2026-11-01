@@ -17,6 +17,11 @@ pub const TURN_CONTINUITY_EVIDENCE_HISTORY_MAX_ITEMS: usize = 16;
 /// Minimal terminal evidence that may affect future reply/persona continuity.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TurnContinuityEvidence {
+    /// A retained contradictory observation consumes the observation window;
+    /// it must not be filtered out and replaced by older positive samples.
+    pub growth_counterevidence: bool,
+    /// Populated only by source-verified subject evidence, never by execution ledgers.
+    pub subject_value_orientation: String,
     #[serde(default)]
     pub ingress: IngressKind,
     #[serde(default)]
@@ -34,6 +39,8 @@ pub struct TurnContinuityEvidence {
 impl TurnContinuityEvidence {
     pub fn from_turn_ledger(ledger: &TurnLedger) -> Option<Self> {
         ledger.status.is_terminal().then(|| Self {
+            growth_counterevidence: false,
+            subject_value_orientation: String::new(),
             ingress: ledger.ingress,
             status: ledger.status,
             final_reply_delivered: ledger.final_reply_delivered,
@@ -46,6 +53,14 @@ impl TurnContinuityEvidence {
 
 /// Store for compact terminal turn evidence used by prompt/persona continuity.
 pub trait TurnContinuityEvidenceStore: Send + Sync {
+    /// Only the generation-verified Soul evidence view may supply subject-wide
+    /// growth evidence. Ordinary relationship/turn ledgers cannot attest it.
+    fn recent_subject_persona_evidence(
+        &self,
+        _subject_id: &str,
+    ) -> Result<Option<RecentPersonaEvidence>> {
+        Ok(None)
+    }
     /// Append one terminal evidence record for a relationship scope.
     fn append(&self, chat_id: &str, evidence: &TurnContinuityEvidence) -> Result<()>;
     /// Clear compact evidence for a relationship scope.

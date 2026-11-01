@@ -1,4 +1,4 @@
-//! 0.9.0 API example; not compatible with the v0.7.0 tag.
+//! Current 0.10.0 Input V3 / Store v15 API example; not the v0.9.0 contract.
 //! Uses only an isolated InMemory Store and synthetic text. No provider, key,
 //! network listener, disk Store or nonproduction harness is used.
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use bm_sdk::{
     AgentToolUsageFeedbackV3, CanonicalTurnDelta, ConversationScope, IngressKind, MemoryIdentity,
     MemoryProceduralProducerControlRequest, MemoryRuntime, MemoryScope, MemoryStoreHandle,
     MemoryTurnDeliveryStatus, MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource,
-    PostTurnLearningInputV2, PressureLevel, ProceduralProducerClaimsV1,
+    PostTurnLearningInputV3, PressureLevel, ProceduralProducerClaimsV1,
     ProceduralProducerPrincipalV1, ProceduralProducerScopeV1, ProceduralProducerSourceAuthorityV1,
     ProceduralProducerSpecV1, ProceduralProducerStateV1, ProceduralProducerToolV1,
     ProceduralSourceSensitivity, ProfileId, RuntimeLifecycleModeInput, StoreBackendConfig,
@@ -99,6 +99,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         execution_facts: true,
                         method_declarations: true,
                         usage_feedback: false,
+                        method_learning_materials: false,
+                        method_adoptions: false,
+                        method_task_evaluations: false,
                         source_classifications: vec![ProceduralSourceSensitivity::NonPrivate],
                     },
                     tools: vec![ProceduralProducerToolV1 {
@@ -106,6 +109,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         tool_id: "word-count".into(),
                         schema_fingerprint: "words-v1".into(),
                     }],
+                    // This producer reports execution and a candidate declaration,
+                    // never adoption or independent task evaluation.
+                    method_evaluators: Vec::new(),
                     source_config_ref: "example-compiled-tool".into(),
                 },
             })?;
@@ -130,7 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             summary: "Synthetic word count completed".into(),
             external_content: false,
         });
-        turn.learning = PostTurnLearningInputV2 {
+        turn.learning = PostTurnLearningInputV3 {
             agent_tool_feedback: vec![AgentToolUsageFeedbackV3 {
                 registry_ref: tool_registry.registry_ref(),
                 tool_id: "word-count".into(),
@@ -154,7 +160,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     external_content: false,
                 }],
             }],
-            ..PostTurnLearningInputV2::with_tool_call_count(1)
+            ..PostTurnLearningInputV3::with_tool_call_count(1)
         };
         // Same turn + exact payload for a delivery retry. A new real execution
         // needs new turn/call/observation identities. No selection was used here;
@@ -258,7 +264,7 @@ fn request(agent: &MemoryRuntime, id: &str, input: &str, reply: &str) -> MemoryT
             external_content_used: false,
             candidate_ids: Vec::new(),
         },
-        learning: PostTurnLearningInputV2::empty(),
+        learning: PostTurnLearningInputV3::empty(),
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     }

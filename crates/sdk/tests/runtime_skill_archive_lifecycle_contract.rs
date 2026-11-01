@@ -347,7 +347,10 @@ fn old_public_archive_cannot_reactivate_a_withdrawn_runtime_skill() {
                     external_content_used: false,
                     candidate_ids: Vec::new(),
                 },
-                learning: PostTurnLearningInputV2 {
+                learning: PostTurnLearningInputV3 {
+                    method_learning_inputs: Vec::new(),
+                    method_adoptions: Vec::new(),
+                    method_task_evaluations: Vec::new(),
                     selection_receipt: Some(selection),
                     runtime_skill_feedback: vec![RuntimeSkillUsageFeedbackV1 {
                         locator: selected.locator,
@@ -355,7 +358,7 @@ fn old_public_archive_cannot_reactivate_a_withdrawn_runtime_skill() {
                         outcome: ProceduralExecutionOutcomeV1::Succeeded,
                         observation_ref: "synthetic-actual-usage".into(),
                     }],
-                    ..PostTurnLearningInputV2::empty()
+                    ..PostTurnLearningInputV3::empty()
                 },
                 pressure: PressureLevel::Normal,
                 mode_input: RuntimeLifecycleModeInput::default(),

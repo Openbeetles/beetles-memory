@@ -369,7 +369,9 @@ fn seed_governed_private_context(runtime: &MemoryRuntime) {
             _: Option<&[ToolSpec]>,
             _: ToolChoicePolicy,
         ) -> Result<LlmResponse> {
-            let content = if system.contains("governed private document workspace") {
+            let content = if system.contains("persona interpretation") {
+                r#"{"decision":"no_change"}"#.to_string()
+            } else if system.contains("governed private document workspace") {
                 serde_json::json!({"inner_journal": "RAW_PRIVATE_WORKSPACE_NOTE_DO_NOT_AUDIT"})
                     .to_string()
             } else if system.contains("private garden") {
@@ -399,6 +401,35 @@ fn seed_governed_private_context(runtime: &MemoryRuntime) {
             source_asserted_at: Some(1_700_000_000),
         })
         .expect("typed founding before private governance");
+    let projection = runtime
+        .project(MemoryProjectionRequest {
+            binding: ProceduralProjectionBindingV1::Turn {
+                turn_id: "gateway-private-turn".into(),
+            },
+            temporal_operation: MemoryRecallTemporalOperation::Current,
+            structured_query_facets: Vec::new(),
+            user_query: "Keep inward reflections within their governed private owner.".into(),
+            system_max_len: 16000,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+            tool_registry_refs: Vec::new(),
+        })
+        .expect("public signed admission for private governance");
+    let mut learning = PostTurnLearningInputV3::empty();
+    learning.selection_receipt = Some(
+        projection
+            .report()
+            .selection_receipt()
+            .expect("turn receipt")
+            .clone(),
+    );
+    assert!(learning
+        .selection_receipt
+        .as_ref()
+        .unwrap()
+        .soul_source_admission
+        .is_some());
     let report = runtime
         .finalize_turn_with_inline_governance(
             Some(&mut NoNetwork),
@@ -409,7 +440,9 @@ fn seed_governed_private_context(runtime: &MemoryRuntime) {
                     conversation: ConversationScope {
                         channel: "llm.gateway".into(),
                         chat_id: "chat-a".into(),
-                        conversation_id: Some("gateway-private-conversation".into()),
+                        conversation_id: Some(
+                            runtime.scope().conversation_id_or_chat_id().to_string(),
+                        ),
                     },
                     subject: runtime.subject_id().into(),
                     delivery_status: MemoryTurnDeliveryStatus::Delivered,
@@ -435,7 +468,7 @@ fn seed_governed_private_context(runtime: &MemoryRuntime) {
                     external_content_used: false,
                     candidate_ids: vec![],
                 },
-                learning: PostTurnLearningInputV2::empty(),
+                learning,
                 pressure: PressureLevel::Normal,
                 mode_input: RuntimeLifecycleModeInput::default(),
             },

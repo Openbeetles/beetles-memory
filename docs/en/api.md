@@ -2,13 +2,24 @@
 
 The SDK API is the primary entry point. Host projects should enter through `bm-sdk` or through `bm-entry` plus a protocol adapter. They should not implement their own memory schema, store envelope, replay format, or adapter dispatch rules.
 
-## Subject projection in 0.9.0
+## 0.10.0: production learning and local time
+
+The 0.10.0 source uses Store v15. The historical 0.9.0 release uses Store v14. There is no compatibility reader or automatic migration; use the same source tag for every Beetle crate.
+
+- `PostTurnLearningInputV3` accepts sourced `MethodLearningInputV1`, `MethodAdoptionEvidenceV1` and `MethodTaskEvaluationV1`. Trusted producer claims and evaluator revisions must match. Hosts submit actual facts; Memory owns extraction, governance, persistence and promotion.
+- `MemoryRuntime::discover_method_trials(MemoryMethodTrialRequest)` returns a bounded `MemoryMethodTrialReport` with exact `MethodContentRefV1` references. Candidates support explicit trials, not ordinary mature-method projection. Selection, successful tool execution and successful tasks are distinct facts; promotion requires actual adoption and independent task evaluations.
+- Consume established methods through a `Turn`-bound `project` call. `projection.report().selection_receipt()` contains the delivered `agent_tool_experiences`. Call `MethodContentRefV1::from_selection(receipt, selection)` to obtain a reference bound to the receipt's space, subject and exact version, then report actual adoption and attach the same receipt to the turn. Consumers need neither cached Candidate IDs nor SDK-private Store owner constructors. A reference or receipt alone proves neither adoption nor task success.
+- The official `MemoryLearningEngine` interprets canonical turns bound to signed projections into subject/generation-scoped persona observations with provenance and contradictory evidence. Hosts cannot manufacture persona ledgers or promote task/tool habits into personality. Qualified observations enter existing Soul revision governance; absent evidence preserves unseeded state.
+- Source withdrawal denies affected methods and derived skills. Soul reports source review through `SubjectSoulSourceReadAvailabilityV1`. A real subsequent turn may receive typed `SoulTurnSourcePurposeV1::SourceReview`; only a lawful correction restores current access, while denied historical revisions remain unavailable. OperatorSafe reports contain no private body.
+- `UserLocalTimeProvider` supplies user-device time and time zone. Model-visible time always includes its zone; `None` omits the field instead of guessing UTC or retaining stale values. See [integration](integration.md).
+
+## Subject projection (introduced in 0.9.0)
 
 `LLMRuntimeProjectionEnvelope.expression_guidance` carries model-only `SubjectExpressionDiscipline`.
 `runtime_constraints` is now `Vec<RuntimeProjectionSourceBlock>`, preserving content provenance and protection.
 Explicit struct-literal consumers of the envelope, Core `InhabitedSubjectProjection` or
 `SubjectSoulRelationshipRuntimeViewV1` must update to the new fields; the latter runtime view also has a changed
-serialized shape. Store v14 and persistent materials are unchanged.
+serialized shape. The 0.9.0 release kept Store v14; 0.10.0 requires Store v15.
 Use `projection.provider_payload().system_memory_block()` for the model; use `projection.report()` safe
 UI/operator/Gateway methods for display and diagnostics. Do not log the raw envelope or rebuild a renderer.
 See [0.9.0 API changes and Store boundaries](release-notes-0.9.0.md).
@@ -75,7 +86,7 @@ Status and recovery controls require opaque SDK-minted capabilities. `MemoryRunt
 
 ## Procedural Evidence Authority
 
-The 0.9.0 source uses `PostTurnLearningInputV2`. The published 0.7.0 API is not interchangeable with this contract. Ordinary turns use `PostTurnLearningInputV2::empty()` or `with_tool_call_count(n)` and `finalize_turn`; no producer registration is required, and an empty feedback set creates no procedural job. A selection receipt proves an exact projection, not permission to report execution.
+The 0.10.0 source uses `PostTurnLearningInputV3`; the published 0.9.0 `PostTurnLearningInputV2` contract is historical and is not an alias or compatibility path. Ordinary turns use `PostTurnLearningInputV3::empty()` or `with_tool_call_count(n)` and `finalize_turn`; no producer registration is required, and an empty feedback set creates no procedural job. A selection receipt proves an exact projection, not permission to report execution.
 
 For feedback, a trusted composition root uses an active governing `SystemGovernor` runtime with the same Store, SubjectRegistry, MemorySpace and mounted scope:
 
@@ -99,7 +110,7 @@ Only `RuntimeObservation` and `HumanUser` producer authorities may claim executi
 
 ## Subject Soul Provisioning
 
-`bm-sdk` 0.9.0 exposes a host-neutral Subject Soul provisioning and lifecycle contract. Hosts submit typed intent only; Core, SDK, and Store own Soul revisions, generations, material, manifests, ledgers, audit records, events, and durable operation receipts in one transaction. Adapters, HTTP, MCP, Console, and host databases must not maintain a second Soul state or create a default personality and overwrite it later.
+`bm-sdk` 0.10.0 exposes a host-neutral Subject Soul provisioning and lifecycle contract. Hosts submit typed intent only; Core, SDK, and Store own Soul revisions, generations, material, manifests, ledgers, audit records, events, and durable operation receipts in one transaction. Adapters, HTTP, MCP, Console, and host databases must not maintain a second Soul state or create a default personality and overwrite it later.
 
 | Operation | SDK surface | Contract |
 | --- | --- | --- |
@@ -148,11 +159,11 @@ CTQ1 query surfaces use the Store-owned `TranscriptQueryCursor`. Treat it as opa
 
 `HostUi` is only the host-presentable redacted disclosure view. It is not a chat-window API, pagination direction, product name, transcript index owner, or authorization token. Catalog, timeline, search, and activity return only candidates that remain visible after Runtime hydration and redaction for the requested view. Search hits contain a governed Unicode-safe excerpt and durable `TranscriptAnchor`; pass that anchor to `TranscriptTimelineAnchor::Around` instead of asking the host UI to scan or re-match transcript text.
 
-0.9.0 accepts Store v14 only; 0.7.0 uses Store v13. There is no public Store migration API, compatibility reader, dual write, or automatic migration. Older, partial, and foreign schema payloads fail closed. Development data from an older generation must be explicitly discarded and recreated by its owner; archive export/import is not schema migration.
+0.10.0 accepts Store v15 only; 0.9.0 uses Store v14 and 0.7.0 uses Store v13. There is no public Store migration API, compatibility reader, dual write, or automatic migration. Older, partial, and foreign schema payloads fail closed. Development data from an older generation must be explicitly discarded and recreated by its owner; archive export/import is not schema migration.
 
-Timeline supports latest, before, after, around-anchor, around-sequence, around-time, and first-visible-in-range queries. Page turns stay in sequence order and reports may carry opaque older/newer cursors. Calendar conversion stays with the host: resolve the user's IANA time zone and local date into a canonical UTC `[start_inclusive, end_exclusive)` range before calling Memory. Do not assume every local day is 86,400 seconds; DST days can be 23 or 25 hours. Beetle Memory does not store or guess the host time zone.
+Timeline supports latest, before, after, around-anchor, around-sequence, around-time, and first-visible-in-range queries. Page turns stay in sequence order and reports may carry opaque older/newer cursors. Calendar conversion stays with the host: resolve the user's IANA time zone and local date into a canonical UTC `[start_inclusive, end_exclusive)` range before calling Memory. Do not assume every local day is 86,400 seconds; DST days can be 23 or 25 hours. Transcript queries consume explicit UTC ranges and do not persist calendar time zones; the model-context local-time provider is a separate presentation input.
 
-The current working source keeps the CTQ1 public query shapes and capability snapshot v5. Store v14 strengthens procedural evidence authority and contribution/reconciliation closure; it does not add a second transcript query model. Local automated contracts do not establish real-data, Provider, GUI/UAT, crates.io or hosted Release evidence.
+The 0.10.0 source keeps the CTQ1 public query shapes and capability snapshot v5. Store v15 adds the required method/task provenance and Soul source-review closure; it does not add a second transcript query model. Local automated contracts do not establish real-data, Provider, GUI/UAT, crates.io or hosted Release evidence.
 
 Transcript attrs are Memory-owned transcript metadata, not a host business object store. Every attr has a `TranscriptAttrTarget`, namespaced key, `TranscriptAttrValueKind`, JSON value, `HostRefVisibility`, `TranscriptAttrSource`, `TranscriptAttrGovernance`, and optional `TranscriptAttrLink` refs. `HostUi` replay returns only HostUi-visible attrs, `ModelContext` returns only model-context attrs, `OperatorAudit` returns audit-visible attrs, and `Export` returns only export-visible attrs with `export_allowed=true`. `RawOwnerOnly` remains internal. Store repair reports missing target turns/messages, mismatched attr source keys, invalid keys, oversized values, and corrupt attr records as fail-closed issues. `DeleteRaw` hides attrs by default; `OperatorAuditOnlyAfterMask` may leave only redacted audit metadata and never returns the original attr value after raw deletion.
 
@@ -200,7 +211,7 @@ The most common SDK request types are:
 | `MemoryWriteRequest::GovernedEvidenceDocuments` | `mutations` | Atomically creates, revises, or deletes governed evidence owners together with source claims and derived indexes. `Upsert` carries a bounded `GovernedEvidenceDocumentDraft`; `Delete` requires an expected owner revision. |
 | `MemoryRecallRequest` | `temporal_operation`, `query`, `limit`, `structured_query_facets`, `tool_registry_refs` | Returns runtime skill hits, standard Agent Skill hits, working recall inspection data, and experience-backed `agent_tool_hints`; structured facets are typed query constraints, and without governed experience tool hints are empty. |
 | `MemoryProjectionRequest` | `binding`, `temporal_operation`, `user_query`, `system_max_len`, `recent_messages_limit`, `pressure`, `mode_input`, `structured_query_facets`, `tool_registry_refs` | `Preview` performs a read-only projection. `Turn { turn_id }` binds a current execution projection and its signed selection receipt to the exact turn later passed to `finalize_turn`. |
-| `MemoryTurnFinalizeRequest` | `turn`, `learning`, `pressure`, `mode_input` | Atomically commits the canonical turn and durable post-turn intent. `learning: PostTurnLearningInputV2` carries the optional signed selection receipt and typed feedback; reporting authority is a separate non-wire capability. Callers cannot write procedural owners directly. |
+| `MemoryTurnFinalizeRequest` | `turn`, `learning`, `pressure`, `mode_input` | Atomically commits the canonical turn and durable post-turn intent. `learning: PostTurnLearningInputV3` carries the optional signed selection receipt and typed feedback; reporting authority is a separate non-wire capability. Callers cannot write procedural owners directly. |
 | `MemoryEvidenceDocumentReadRequest` | `memory_space_id`, `document_ids` | Reads an exact bounded set of governed evidence documents through `MemoryRuntime::read_governed_evidence_documents(request)`. The runtime rejects a memory-space mismatch, empty/duplicate document ids, and requests above the current profile read budget; each result is privacy-filtered and carries typed owner identity, revision, canonical evidence binding, safe source metadata, and bounded body/chunks. |
 | `MemoryInspectionRequest` | `query`, `system_max_len`, `pressure`, `mode_input` | Returns capability, lifecycle, operator inspection data, the Agent Skill directory report, and the Agent Tool registry report. |
 | `RuntimeSkillListRequest` | `owning_scope`, `query`, `include_disabled`, `include_retired`, `limit` | Lists only exact typed owners bound by the explicit Subject or SharedProgram scope manifest. |

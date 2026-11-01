@@ -7,8 +7,8 @@ use std::fmt::Write as _;
 
 use super::{
     audit_relationship_constitution, build_core_revision_timeline,
-    compute_core_revision_governance_digest, relationship_scope_id, CoreRevisionGovernanceDigest,
-    CoreRevisionLedger, CoreRevisionTimelineEntry, RecentPersonaEvidence, RelationshipConstitution,
+    compute_core_revision_governance_digest, CoreRevisionGovernanceDigest, CoreRevisionLedger,
+    CoreRevisionTimelineEntry, RecentPersonaEvidence, RelationshipConstitution,
     RelationshipConstitutionAudit, RelationshipTopology, SelfAuthoredCore,
 };
 
@@ -18,6 +18,24 @@ const PERSONALITY_CLOSURE_EVENT_LIMIT: usize = 8;
 const PERSONALITY_MIN_EVIDENCE_TURNS: usize = 4;
 const PERSONALITY_RUNTIME_GATE_REASON_MAX_CHARS: usize = 220;
 const PERSONALITY_REPAIR_SUMMARY_MAX_CHARS: usize = 160;
+
+/// Absence of a loaded constitution never proves that no relationship applies.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PersonalityRelationshipScope<'a> {
+    #[default]
+    Unverified,
+    SubjectOnly,
+    Active(&'a str),
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PersonalityRelationshipApplicability {
+    #[default]
+    Unverified,
+    NotApplicable,
+    Required,
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersonalityGovernanceEvent {
@@ -31,6 +49,11 @@ pub struct PersonalityGovernanceEvent {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersonalityClosureReport {
+    pub relationship_applicability: PersonalityRelationshipApplicability,
+    /// Initial evidence-led model formation only; does not authorize normal promotion.
+    pub subject_bootstrap_ready: bool,
+    pub subject_distillation_ready: bool,
+    pub relationship_expression_ready: bool,
     #[serde(default)]
     pub ready: bool,
     #[serde(default)]
@@ -114,6 +137,10 @@ pub struct PersonalityGovernanceRepairPlan {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersonalityRuntimeGovernanceGate {
+    pub relationship_applicability: PersonalityRelationshipApplicability,
+    pub allow_subject_bootstrap: bool,
+    pub relationship_authority_ready: bool,
+    pub allow_relationship_expression: bool,
     #[serde(default)]
     pub conservative_reply: bool,
     #[serde(default)]
@@ -130,6 +157,7 @@ pub struct PersonalityRuntimeGovernanceGate {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PersonalityGovernanceInspectionInput<'a> {
+    pub relationship_scope: PersonalityRelationshipScope<'a>,
     pub mounted_subject_id: &'a str,
     pub channel: &'a str,
     pub chat_id: &'a str,
@@ -138,14 +166,36 @@ pub struct PersonalityGovernanceInspectionInput<'a> {
     pub core_revision_ledger: Option<&'a CoreRevisionLedger>,
     pub relationship_constitution: Option<&'a RelationshipConstitution>,
     pub relationship_topology: Option<&'a RelationshipTopology>,
+    pub subject_persona_evidence: Option<&'a RecentPersonaEvidence>,
+    /// Exact active-relationship evidence. Never substitutes for subject evidence.
     pub recent_persona_evidence: Option<&'a RecentPersonaEvidence>,
 }
 
 pub fn inspect_personality_governance(
     input: PersonalityGovernanceInspectionInput<'_>,
 ) -> PersonalityGovernanceInspection {
-    let relationship_scope_id =
-        relationship_scope_id(input.mounted_subject_id, input.channel, input.chat_id);
+    let (relationship_applicability, relationship_scope_id) = match input.relationship_scope {
+        PersonalityRelationshipScope::SubjectOnly => (
+            PersonalityRelationshipApplicability::NotApplicable,
+            String::new(),
+        ),
+        PersonalityRelationshipScope::Active(id)
+            if !id.is_empty() && id.trim() == id && !id.chars().any(char::is_control) =>
+        {
+            (
+                PersonalityRelationshipApplicability::Required,
+                id.to_owned(),
+            )
+        }
+        _ => (
+            PersonalityRelationshipApplicability::Unverified,
+            String::new(),
+        ),
+    };
+    let relationship_constitution = input.relationship_constitution.filter(|constitution| {
+        relationship_applicability == PersonalityRelationshipApplicability::Required
+            && constitution.scope_id == relationship_scope_id
+    });
     let core_revision_governance = compute_core_revision_governance_digest(
         input.core_revision_ledger,
         input
@@ -162,7 +212,7 @@ pub fn inspect_personality_governance(
         .core_revision_ledger
         .map(|ledger| build_core_revision_timeline(ledger, PERSONALITY_CLOSURE_EVENT_LIMIT))
         .unwrap_or_default();
-    let relationship_audit = input.relationship_constitution.map(|constitution| {
+    let relationship_audit = relationship_constitution.map(|constitution| {
         let topology_entry = input.relationship_topology.and_then(|topology| {
             topology
                 .entries
@@ -179,17 +229,16 @@ pub fn inspect_personality_governance(
     });
     let governance_events = build_governance_events(
         &core_revision_timeline,
-        input.relationship_constitution,
+        relationship_constitution,
         relationship_audit.as_ref(),
         input.recent_persona_evidence,
     );
     let closure = build_personality_closure_report(
-        input.self_authored_core,
-        input.core_revision_ledger,
+        input,
+        relationship_applicability,
         &core_revision_governance,
-        input.relationship_constitution,
+        relationship_constitution,
         relationship_audit.as_ref(),
-        input.recent_persona_evidence,
     );
     let provisional = PersonalityGovernanceInspection {
         subject_id: input.mounted_subject_id.to_string(),
@@ -219,10 +268,20 @@ pub fn derive_personality_runtime_governance_gate_from_inspection(
     inspection: &PersonalityGovernanceInspection,
 ) -> PersonalityRuntimeGovernanceGate {
     let conservative_reply = !inspection.closure.ready;
+    let scope_verified = inspection.closure.relationship_applicability
+        != PersonalityRelationshipApplicability::Unverified;
     PersonalityRuntimeGovernanceGate {
+        relationship_applicability: inspection.closure.relationship_applicability,
+        allow_subject_bootstrap: scope_verified && inspection.closure.subject_bootstrap_ready,
+        relationship_authority_ready: inspection.closure.relationship_applicability
+            == PersonalityRelationshipApplicability::Required
+            && inspection.closure.relationship_governance_ready,
+        allow_relationship_expression: inspection.closure.relationship_applicability
+            == PersonalityRelationshipApplicability::Required
+            && inspection.closure.relationship_expression_ready,
         conservative_reply,
-        allow_dynamic_persona_priority: !conservative_reply,
-        allow_upward_distillation: !conservative_reply,
+        allow_dynamic_persona_priority: scope_verified && !conservative_reply,
+        allow_upward_distillation: scope_verified && inspection.closure.subject_distillation_ready,
         reason_summary: build_personality_runtime_gate_reason_summary(inspection),
         outstanding: inspection.closure.outstanding.clone(),
         repair_plan: inspection.repair_plan.clone(),
@@ -237,7 +296,10 @@ pub fn derive_personality_governance_repair_plan(
     let board_review_due = inspection.core_revision_governance.review_due;
     let board_under_observation = inspection.core_revision_governance.observation_active;
     let board_conservative = inspection.core_revision_governance.conservative_mode;
-    let relationship_missing = !inspection.closure.relationship_governance_ready;
+    let relationship_required = inspection.closure.relationship_applicability
+        == PersonalityRelationshipApplicability::Required;
+    let relationship_missing =
+        relationship_required && !inspection.closure.relationship_governance_ready;
     let relationship_audit = inspection.relationship_audit.as_ref();
     let relationship_material_drift =
         relationship_audit.is_some_and(|audit| audit.has_material_drift());
@@ -253,10 +315,13 @@ pub fn derive_personality_governance_repair_plan(
     let evidence_insufficient = !inspection.closure.evidence_loop_ready;
     let repair_self_authored_core =
         board_core_missing || revision_history_missing || board_review_due || board_conservative;
-    let repair_relationship_constitution =
-        relationship_missing || relationship_material_drift || relationship_review_due;
-    let repair_outer_voice =
-        expression_drift && !repair_self_authored_core && !repair_relationship_constitution;
+    let repair_relationship_constitution = relationship_required
+        && (relationship_missing || relationship_material_drift || relationship_review_due);
+    let repair_outer_voice = relationship_required
+        && inspection.closure.relationship_governance_ready
+        && expression_drift
+        && !repair_self_authored_core
+        && !repair_relationship_constitution;
     let observe_only =
         !repair_self_authored_core && !repair_relationship_constitution && !repair_outer_voice;
 
@@ -336,6 +401,13 @@ pub fn render_personality_governance_inspection_markdown(
         inspection.relationship_scope_id
     );
     let _ = writeln!(out, "- Closure ready: {}", inspection.closure.ready);
+    let _ = writeln!(
+        out,
+        "- Initial subject model eligible: {} | normal subject distillation ready: {} | relationship expression ready: {}",
+        inspection.closure.subject_bootstrap_ready,
+        inspection.closure.subject_distillation_ready,
+        inspection.closure.relationship_expression_ready
+    );
     let _ = writeln!(
         out,
         "- Board core ready: {} | revision governance ready: {} | relationship governance ready: {}",
@@ -530,13 +602,19 @@ fn build_governance_events(
 }
 
 fn build_personality_closure_report(
-    self_authored_core: Option<&SelfAuthoredCore>,
-    core_revision_ledger: Option<&CoreRevisionLedger>,
+    input: PersonalityGovernanceInspectionInput<'_>,
+    relationship_applicability: PersonalityRelationshipApplicability,
     governance: &CoreRevisionGovernanceDigest,
     relationship_constitution: Option<&RelationshipConstitution>,
     relationship_audit: Option<&RelationshipConstitutionAudit>,
-    recent_persona_evidence: Option<&RecentPersonaEvidence>,
 ) -> PersonalityClosureReport {
+    let PersonalityGovernanceInspectionInput {
+        self_authored_core,
+        core_revision_ledger,
+        subject_persona_evidence,
+        recent_persona_evidence,
+        ..
+    } = input;
     let board_core_ready = self_authored_core.is_some_and(|core| {
         core.revision > 0 && !core.identity_anchor.trim().is_empty() && core.stability_score > 0
     });
@@ -545,13 +623,41 @@ fn build_personality_closure_report(
     let relationship_governance_ready = relationship_constitution.is_some_and(|constitution| {
         constitution.is_meaningful() && constitution.board_revision > 0
     });
-    let evidence_loop_ready = recent_persona_evidence.is_some_and(|evidence| {
-        evidence.is_meaningful() && evidence.meaningful_turns >= PERSONALITY_MIN_EVIDENCE_TURNS
+    let evidence_loop_ready = subject_persona_evidence.is_some_and(|evidence| {
+        evidence.counterevidence_turns == 0
+            && evidence.has_promotable_growth_signals()
+            && evidence.repeated_relationship_posture.is_empty()
+            && evidence.meaningful_turns >= PERSONALITY_MIN_EVIDENCE_TURNS
     });
+    let relationship_evidence_ready = recent_persona_evidence.is_some_and(|evidence| {
+        evidence.counterevidence_turns == 0
+            && evidence.has_promotable_growth_signals()
+            && evidence.meaningful_turns >= PERSONALITY_MIN_EVIDENCE_TURNS
+    });
+    // An absent core AND absent ledger is the only bootstrap state. A partial or
+    // malformed existing pair must stay on the repair path, never initialize again.
+    let subject_bootstrap_ready = self_authored_core.is_none()
+        && core_revision_ledger.is_none()
+        && evidence_loop_ready
+        && subject_persona_evidence.is_some_and(|evidence| evidence.volatility_flags.is_empty())
+        && relationship_applicability != PersonalityRelationshipApplicability::Unverified;
     let drift_control_ready = relationship_audit.is_some_and(|audit| !audit.has_material_drift());
     let observation_control_ready = !governance.observation_active;
     let review_cadence_ready = !governance.review_due
         && relationship_constitution.is_none_or(|constitution| !constitution.review_overdue);
+    let subject_distillation_ready = board_core_ready
+        && revision_governance_ready
+        && evidence_loop_ready
+        && observation_control_ready
+        && !governance.review_due
+        && !governance.conservative_mode
+        && relationship_applicability != PersonalityRelationshipApplicability::Unverified;
+    let relationship_expression_ready = subject_distillation_ready
+        && relationship_evidence_ready
+        && relationship_applicability == PersonalityRelationshipApplicability::Required
+        && relationship_governance_ready
+        && drift_control_ready
+        && review_cadence_ready;
     let mut outstanding = Vec::with_capacity(PERSONALITY_CLOSURE_OUTSTANDING_MAX);
     if !board_core_ready {
         outstanding.push("board_core_not_stable".to_string());
@@ -559,13 +665,25 @@ fn build_personality_closure_report(
     if !revision_governance_ready {
         outstanding.push("revision_governance_history_missing".to_string());
     }
-    if !relationship_governance_ready {
+    if relationship_applicability == PersonalityRelationshipApplicability::Unverified {
+        outstanding.push("relationship_applicability_unverified".to_string());
+    }
+    if relationship_applicability == PersonalityRelationshipApplicability::Required
+        && !relationship_governance_ready
+    {
         outstanding.push("relationship_constitution_missing".to_string());
     }
     if !evidence_loop_ready {
         outstanding.push("recent_persona_evidence_insufficient".to_string());
     }
-    if !drift_control_ready {
+    if relationship_applicability == PersonalityRelationshipApplicability::Required
+        && !relationship_evidence_ready
+    {
+        outstanding.push("relationship_persona_evidence_insufficient".to_string());
+    }
+    if relationship_applicability == PersonalityRelationshipApplicability::Required
+        && !drift_control_ready
+    {
         outstanding.push("relationship_drift_not_under_control".to_string());
     }
     if !observation_control_ready {
@@ -576,13 +694,13 @@ fn build_personality_closure_report(
     }
     outstanding.truncate(PERSONALITY_CLOSURE_OUTSTANDING_MAX);
     PersonalityClosureReport {
-        ready: board_core_ready
-            && revision_governance_ready
-            && relationship_governance_ready
-            && evidence_loop_ready
-            && drift_control_ready
-            && observation_control_ready
-            && review_cadence_ready,
+        relationship_applicability,
+        subject_bootstrap_ready,
+        subject_distillation_ready,
+        relationship_expression_ready,
+        ready: subject_distillation_ready
+            && (relationship_applicability == PersonalityRelationshipApplicability::NotApplicable
+                || relationship_expression_ready),
         board_core_ready,
         revision_governance_ready,
         relationship_governance_ready,
@@ -599,6 +717,177 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unseeded_subject_evidence_opens_only_the_initial_model_gate() {
+        let evidence = RecentPersonaEvidence {
+            sampled_turns: 4,
+            meaningful_turns: 4,
+            repeated_value_orientation: "truth_before_comfort".into(),
+            updated_at: 99,
+            ..Default::default()
+        };
+        fn inspect<'a>(
+            scope: PersonalityRelationshipScope<'a>,
+            subject_evidence: Option<&'a RecentPersonaEvidence>,
+            relationship_evidence: Option<&'a RecentPersonaEvidence>,
+        ) -> PersonalityGovernanceInspection {
+            inspect_personality_governance(PersonalityGovernanceInspectionInput {
+                mounted_subject_id: "agent:a",
+                relationship_scope: scope,
+                subject_persona_evidence: subject_evidence,
+                recent_persona_evidence: relationship_evidence,
+                now_secs: 100,
+                ..Default::default()
+            })
+        }
+        let subject = inspect(
+            PersonalityRelationshipScope::SubjectOnly,
+            Some(&evidence),
+            None,
+        );
+        let gate = derive_personality_runtime_governance_gate_from_inspection(&subject);
+        assert!(subject.closure.subject_bootstrap_ready);
+        assert!(gate.allow_subject_bootstrap);
+        assert!(gate.conservative_reply);
+        assert!(!gate.allow_upward_distillation);
+        assert!(!gate.allow_dynamic_persona_priority);
+        assert!(!gate.allow_relationship_expression);
+        assert!(!subject.closure.ready);
+        let relationship_missing = inspect(
+            PersonalityRelationshipScope::Active("relationship:a"),
+            Some(&evidence),
+            None,
+        );
+        let relationship_gate =
+            derive_personality_runtime_governance_gate_from_inspection(&relationship_missing);
+        assert!(relationship_gate.allow_subject_bootstrap);
+        assert!(!relationship_gate.relationship_authority_ready);
+        assert!(!relationship_gate.allow_relationship_expression);
+
+        for inspection in [
+            inspect(PersonalityRelationshipScope::SubjectOnly, None, None),
+            inspect(
+                PersonalityRelationshipScope::SubjectOnly,
+                None,
+                Some(&evidence),
+            ),
+            inspect(
+                PersonalityRelationshipScope::Unverified,
+                Some(&evidence),
+                None,
+            ),
+        ] {
+            assert!(
+                !derive_personality_runtime_governance_gate_from_inspection(&inspection)
+                    .allow_subject_bootstrap
+            );
+        }
+        let mut counterevidence = evidence.clone();
+        counterevidence.counterevidence_turns = 1;
+        let mut insufficient = evidence.clone();
+        insufficient.meaningful_turns = 3;
+        let mut volatile = evidence.clone();
+        volatile.volatility_flags = vec!["priority_varies".into()];
+        let mut relational = evidence;
+        relational.repeated_relationship_posture = "warm but bounded".into();
+        for ineligible in [counterevidence, insufficient, volatile, relational] {
+            let inspection = inspect(
+                PersonalityRelationshipScope::SubjectOnly,
+                Some(&ineligible),
+                None,
+            );
+            assert!(!inspection.closure.subject_bootstrap_ready);
+        }
+    }
+
+    #[test]
+    fn existing_or_partial_core_state_cannot_reenter_bootstrap() {
+        let evidence = RecentPersonaEvidence {
+            sampled_turns: 4,
+            meaningful_turns: 4,
+            repeated_value_orientation: "truth_before_comfort".into(),
+            ..Default::default()
+        };
+        let core = SelfAuthoredCore {
+            revision: 1,
+            ..Default::default()
+        };
+        let ledger = CoreRevisionLedger::default();
+        for (core, ledger) in [
+            (Some(&core), None),
+            (None, Some(&ledger)),
+            (Some(&core), Some(&ledger)),
+        ] {
+            let inspection = inspect_personality_governance(PersonalityGovernanceInspectionInput {
+                mounted_subject_id: "agent:a",
+                relationship_scope: PersonalityRelationshipScope::SubjectOnly,
+                self_authored_core: core,
+                core_revision_ledger: ledger,
+                subject_persona_evidence: Some(&evidence),
+                ..Default::default()
+            });
+            assert!(!inspection.closure.subject_bootstrap_ready);
+        }
+    }
+
+    #[test]
+    fn explicit_absence_is_distinct_from_missing_relationship_authority() {
+        let subject_only = inspect_personality_governance(PersonalityGovernanceInspectionInput {
+            mounted_subject_id: "agent-a",
+            relationship_scope: PersonalityRelationshipScope::SubjectOnly,
+            ..Default::default()
+        });
+        assert_eq!(
+            subject_only.closure.relationship_applicability,
+            PersonalityRelationshipApplicability::NotApplicable
+        );
+        assert!(!subject_only.repair_plan.repair_relationship_constitution);
+        assert!(!subject_only.closure.relationship_expression_ready);
+        let missing = inspect_personality_governance(PersonalityGovernanceInspectionInput {
+            mounted_subject_id: "agent-a",
+            relationship_scope: PersonalityRelationshipScope::Active("relationship:exact"),
+            ..Default::default()
+        });
+        assert_eq!(missing.relationship_scope_id, "relationship:exact");
+        assert_eq!(
+            missing.closure.relationship_applicability,
+            PersonalityRelationshipApplicability::Required
+        );
+        assert!(!missing.closure.ready);
+        assert!(!missing.closure.relationship_expression_ready);
+        assert!(missing.repair_plan.repair_relationship_constitution);
+        let unknown =
+            inspect_personality_governance(PersonalityGovernanceInspectionInput::default());
+        assert_eq!(
+            unknown.closure.relationship_applicability,
+            PersonalityRelationshipApplicability::Unverified
+        );
+        assert!(!unknown.closure.ready);
+    }
+
+    #[test]
+    fn subject_readiness_does_not_grant_relationship_expression() {
+        let inspection = PersonalityGovernanceInspection {
+            closure: PersonalityClosureReport {
+                ready: true,
+                subject_distillation_ready: true,
+                relationship_expression_ready: false,
+                relationship_applicability: PersonalityRelationshipApplicability::NotApplicable,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let gate = derive_personality_runtime_governance_gate_from_inspection(&inspection);
+        assert!(gate.allow_upward_distillation);
+        assert!(!gate.allow_relationship_expression);
+        let mut unverified = inspection;
+        unverified.closure.relationship_applicability =
+            PersonalityRelationshipApplicability::Unverified;
+        let gate = derive_personality_runtime_governance_gate_from_inspection(&unverified);
+        assert!(!gate.allow_upward_distillation);
+        assert!(!gate.allow_relationship_expression);
+    }
+
+    #[test]
     fn runtime_gate_turns_conservative_when_closure_is_not_ready() {
         let mut inspection = PersonalityGovernanceInspection {
             subject_id: "board".to_string(),
@@ -606,6 +895,10 @@ mod tests {
             core_revision_governance: CoreRevisionGovernanceDigest::default(),
             relationship_audit: Some(RelationshipConstitutionAudit::default()),
             closure: PersonalityClosureReport {
+                relationship_applicability: PersonalityRelationshipApplicability::Required,
+                subject_bootstrap_ready: false,
+                subject_distillation_ready: false,
+                relationship_expression_ready: false,
                 ready: false,
                 board_core_ready: true,
                 revision_governance_ready: true,
@@ -637,7 +930,11 @@ mod tests {
     #[test]
     fn runtime_gate_block_renders_only_for_conservative_mode() {
         let gate = PersonalityRuntimeGovernanceGate {
+            relationship_applicability: PersonalityRelationshipApplicability::Required,
+            relationship_authority_ready: true,
+            allow_relationship_expression: false,
             conservative_reply: true,
+            allow_subject_bootstrap: false,
             allow_dynamic_persona_priority: false,
             allow_upward_distillation: false,
             reason_summary: "recent_persona_evidence_insufficient".to_string(),
@@ -658,7 +955,11 @@ mod tests {
         assert!(rendered.contains("Preferred repair path: observe_only"));
 
         let non_conservative = PersonalityRuntimeGovernanceGate {
+            relationship_applicability: PersonalityRelationshipApplicability::Required,
+            relationship_authority_ready: true,
+            allow_relationship_expression: true,
             conservative_reply: false,
+            allow_subject_bootstrap: false,
             allow_dynamic_persona_priority: true,
             allow_upward_distillation: true,
             reason_summary: String::new(),
@@ -672,6 +973,10 @@ mod tests {
     fn repair_plan_prioritizes_board_core_repair_when_board_governance_is_unsettled() {
         let inspection = PersonalityGovernanceInspection {
             closure: PersonalityClosureReport {
+                relationship_applicability: PersonalityRelationshipApplicability::Required,
+                subject_bootstrap_ready: false,
+                subject_distillation_ready: false,
+                relationship_expression_ready: false,
                 ready: false,
                 board_core_ready: false,
                 revision_governance_ready: false,
@@ -711,6 +1016,10 @@ mod tests {
         let relationship_repair =
             derive_personality_governance_repair_plan(&PersonalityGovernanceInspection {
                 closure: PersonalityClosureReport {
+                    relationship_applicability: PersonalityRelationshipApplicability::Required,
+                    subject_bootstrap_ready: false,
+                    subject_distillation_ready: false,
+                    relationship_expression_ready: false,
                     ready: false,
                     board_core_ready: true,
                     revision_governance_ready: true,
@@ -738,6 +1047,10 @@ mod tests {
         let expression_repair =
             derive_personality_governance_repair_plan(&PersonalityGovernanceInspection {
                 closure: PersonalityClosureReport {
+                    relationship_applicability: PersonalityRelationshipApplicability::Required,
+                    subject_bootstrap_ready: false,
+                    subject_distillation_ready: false,
+                    relationship_expression_ready: false,
                     ready: false,
                     board_core_ready: true,
                     revision_governance_ready: true,

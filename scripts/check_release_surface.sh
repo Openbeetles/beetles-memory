@@ -53,6 +53,7 @@ required_docs=(
   "docs/en/adapters.md"
   "docs/en/operator-guide.md"
   "docs/en/release-checklist.md"
+  "docs/en/release-notes-0.10.0.md"
   "docs/en/release-notes-0.9.0.md"
   "docs/en/release-notes-0.8.0.md"
   "docs/en/release-notes-0.7.0.md"
@@ -71,6 +72,7 @@ required_docs=(
   "docs/zh-CN/adapters.md"
   "docs/zh-CN/operator-guide.md"
   "docs/zh-CN/release-checklist.md"
+  "docs/zh-CN/release-notes-0.10.0.md"
   "docs/zh-CN/release-notes-0.9.0.md"
   "docs/zh-CN/release-notes-0.8.0.md"
   "docs/zh-CN/release-notes-0.7.0.md"
@@ -94,7 +96,7 @@ for doc in "${required_docs[@]}"; do
   fi
 done
 
-release_version="0.9.0"
+release_version="0.10.0"
 version_manifests=(
   "crates/core/Cargo.toml"
   "crates/store-contract-tests/Cargo.toml"
@@ -181,10 +183,10 @@ for desktop_identity in apps/desktop/package.json apps/desktop/package-lock.json
   }
 done
 
-for doc in docs/en/release-notes-0.9.0.md docs/zh-CN/release-notes-0.9.0.md; do
-  for marker in 'Store v14' 'material v5' 'Adapter V2' 'automatic migration' 'PostTurnLearningInputV2' 'AgentToolUsageFeedbackV3' 'MemoryLearningService' 'MemoryProceduralSubmissionCapability' 'procedural_reconciliation_status' 'SubjectExpressionDiscipline' 'RuntimeProjectionSourceBlock' 'SubjectSoulRelationshipRuntimeViewV1'; do
+for doc in docs/en/release-notes-0.10.0.md docs/zh-CN/release-notes-0.10.0.md; do
+  for marker in 'Store v15' 'material v5' 'Adapter V2' 'automatic migration' 'PostTurnLearningInputV3' 'Job V4' 'MemoryLearningService' 'MemoryProceduralSubmissionCapability' 'procedural_reconciliation_status' 'MethodContentRefV1' 'UserLocalTimeProvider' 'governance-model-client-std'; do
     rg -F -q "$marker" "$doc" || {
-      echo "0.9.0 source candidate notes omit required compatibility marker: doc=$doc marker=$marker" >&2
+      echo "0.10.0 source notes omit required compatibility marker: doc=$doc marker=$marker" >&2
       exit 1
     }
   done
@@ -201,6 +203,10 @@ for doc in "${current_version_docs[@]}"; do
     echo "current integration document is not on the release version: $doc" >&2
     exit 1
   }
+  rg -F -q "tag = \"v$release_version\"" "$doc" || {
+    echo "current integration document omits the source tag: $doc" >&2
+    exit 1
+  }
 done
 
 for doc in docs/en/api.md docs/zh-CN/api.md; do
@@ -211,7 +217,7 @@ for doc in docs/en/api.md docs/zh-CN/api.md; do
 done
 
 for doc in docs/en/integration.md docs/zh-CN/integration.md; do
-  for marker in 'Job V3' 'MemoryLearningService' 'MemoryLearningEngine' 'typed inspection authority'; do
+  for marker in 'Job V4' 'MemoryLearningService' 'MemoryLearningEngine' 'typed inspection authority'; do
     rg -F -q "$marker" "$doc" || {
       echo "current integration document omits the production learning owner: doc=$doc marker=$marker" >&2
       exit 1
@@ -537,6 +543,14 @@ cargo test --locked -p bm-sdk --test subject_soul_public_contract \
   --no-default-features --features sqlite-store
 cargo test --locked -p bm-store-contract-tests --test subject_soul_store_contract \
   --features sqlite-store
+
+# PL3 must also work for real consumers without the replay harness.
+cargo test --locked -p bm-sdk --no-default-features --features sqlite-store \
+  --test production_learning_contract --test production_persona_learning_contract \
+  --test user_local_time_projection_contract
+cargo test --locked -p bm-entry --no-default-features \
+  --features governance-model-client-std,bm-sdk/sqlite-store \
+  --test post_turn_learning_worker_contract --test memory_learning_service_contract
 
 # PL2 is feature-gated and must not disappear behind a default-workspace 0-test result.
 cargo test --locked -p bm-core --test post_turn_memory_governance_contract

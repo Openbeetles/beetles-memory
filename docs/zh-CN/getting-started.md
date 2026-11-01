@@ -11,11 +11,11 @@
 bm-sdk = { path = "crates/sdk", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
-外部仓库可以调整 path；crates 发布后使用版本号：
+外部仓库使用源码 tag，无需等待 crates.io 发布：
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.9.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.10.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.10.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 宿主必须按操作系统只选择一个 desktop embedded feature：`profile-desktop-macos-embedded-sdk`、`profile-desktop-windows-embedded-sdk` 或 `profile-desktop-linux-embedded-sdk`。Linux 桌面宿主禁止借用 server 或 dev-full profile。

@@ -7,8 +7,8 @@ use bm_adapter::{
 use bm_entry::EntryRuntime;
 use bm_sdk::{
     CanonicalTurnDelta, ConversationScope, MaintenanceBudget, MemoryTurnDeliveryStatus,
-    MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, PostTurnLearningInputV2,
-    ProceduralSelectionReceiptV1, RuntimeLifecycleModeInput, TranscriptInputMessage,
+    MemoryTurnFinalizeRequest, MemoryTurnProjectionReceiptV2, MemoryTurnProtocol, MemoryTurnSource,
+    PostTurnLearningInputV3, RuntimeLifecycleModeInput, TranscriptInputMessage,
 };
 #[cfg(test)]
 use serde_json::json;
@@ -44,7 +44,7 @@ pub(crate) struct GatewayMaintenancePlan {
     turn_source: MemoryTurnSource,
     turn_id: String,
     external_content_used: bool,
-    selection_receipt: Option<ProceduralSelectionReceiptV1>,
+    selection_receipt: Option<MemoryTurnProjectionReceiptV2>,
     pressure: bm_sdk::PressureLevel,
     mode_input: RuntimeLifecycleModeInput,
     budget: MaintenanceBudget,
@@ -57,7 +57,7 @@ pub(crate) struct GatewayMaintenancePlanInput {
     pub(crate) turn_source: MemoryTurnSource,
     pub(crate) turn_id: String,
     pub(crate) external_content_used: bool,
-    pub(crate) selection_receipt: Option<ProceduralSelectionReceiptV1>,
+    pub(crate) selection_receipt: Option<MemoryTurnProjectionReceiptV2>,
     pub(crate) pressure: bm_sdk::PressureLevel,
     pub(crate) mode_input: RuntimeLifecycleModeInput,
     pub(crate) budget: MaintenanceBudget,
@@ -105,10 +105,13 @@ impl GatewayMaintenancePlan {
                     external_content_used: self.external_content_used,
                     candidate_ids: Vec::new(),
                 },
-                learning: PostTurnLearningInputV2 {
+                learning: PostTurnLearningInputV3 {
+                    method_learning_inputs: Vec::new(),
+                    method_adoptions: Vec::new(),
+                    method_task_evaluations: Vec::new(),
                     // Model tool-call proposals are passthrough, not executed observations.
                     selection_receipt: self.selection_receipt.clone(),
-                    ..PostTurnLearningInputV2::empty()
+                    ..PostTurnLearningInputV3::empty()
                 },
                 pressure: self.pressure,
                 mode_input: self.mode_input,

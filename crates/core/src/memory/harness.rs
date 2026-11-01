@@ -439,6 +439,7 @@ impl HarnessStores {
         participation_plan: PromptParticipationPlan,
     ) -> PromptMemoryContextParams<'a> {
         PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: CHAT_ID,
             current_channel: CHANNEL,

@@ -110,6 +110,7 @@ pub fn enqueue_self_runtime_post_reply(
 ) -> bool {
     let now_secs = current_unix_secs();
     let payload = SelfRuntimeJobPayload {
+        user_local_time: None,
         trigger: SelfRuntimeTrigger::PostReply,
         source_channel: source_channel.to_string(),
         user_content: truncate_content_to_max(user_content, 512).into_owned(),
@@ -241,6 +242,7 @@ pub fn enqueue_self_runtime_operator_request(
         detached_work_store,
         chat_id,
         SelfRuntimeJobPayload {
+            user_local_time: None,
             trigger: SelfRuntimeTrigger::OperatorRequested,
             source_channel: source_channel.trim().to_string(),
             user_content: String::new(),
@@ -264,6 +266,7 @@ fn enqueue_self_runtime_idle_tick_for_relation(
             system_inbound_tx,
             chat_id,
             SelfRuntimeJobPayload {
+                user_local_time: None,
                 trigger: SelfRuntimeTrigger::IdleTick,
                 source_channel: source_channel.to_string(),
                 user_content: String::new(),
@@ -279,6 +282,7 @@ fn enqueue_self_runtime_idle_tick_for_relation(
         detached_work_store,
         chat_id,
         SelfRuntimeJobPayload {
+            user_local_time: None,
             trigger: SelfRuntimeTrigger::IdleTick,
             source_channel: source_channel.to_string(),
             user_content: String::new(),
@@ -1596,6 +1600,7 @@ mod tests {
             &detached_work_store,
             "chat-a",
             SelfRuntimeJobPayload {
+                user_local_time: None,
                 trigger: SelfRuntimeTrigger::IdleTick,
                 source_channel: "chat_channel".to_string(),
                 user_content: String::new(),

@@ -17,7 +17,13 @@ impl std::ops::Deref for TestRuntime {
 }
 fn authorized_runtime(memory: MemoryRuntime, store: MemoryStoreHandle) -> Arc<TestRuntime> {
     let governor = support::procedural::governor(&memory, store);
-    let spec = support::procedural::runtime_observer_spec(&memory, "registry-executor");
+    let mut spec = support::procedural::runtime_observer_spec(&memory, "registry-executor");
+    spec.claims.method_adoptions = true;
+    spec.claims.method_task_evaluations = true;
+    spec.method_evaluators = vec![MethodTaskEvaluatorV1 {
+        id: "pdf-release-verifier".into(),
+        revision: 1,
+    }];
     let capability =
         support::procedural::register_and_issue(&governor, spec, "register-registry-executor");
     Arc::new(TestRuntime {
@@ -146,10 +152,45 @@ fn submit_feedback(
     runtime: Arc<TestRuntime>,
     feedback: AgentToolUsageFeedbackV3,
 ) -> ProceduralFeedbackReceiptV2 {
+    submit_feedback_with_task(runtime, feedback, None)
+}
+
+fn submit_feedback_with_task(
+    runtime: Arc<TestRuntime>,
+    feedback: AgentToolUsageFeedbackV3,
+    adopted_method: Option<MethodContentRefV1>,
+) -> ProceduralFeedbackReceiptV2 {
     let turn_id = format!("turn-{}", feedback.execution_facts[0].observation_id);
     let tool_call_count = feedback.execution_facts.len() as u32;
     let tool_observations =
         support::procedural::canonical_observations("pdf.extract", &feedback.execution_facts);
+    let refs = feedback
+        .execution_facts
+        .iter()
+        .map(|fact| fact.observation_id.clone())
+        .collect::<Vec<_>>();
+    let method_adoptions = adopted_method
+        .iter()
+        .map(|method| MethodAdoptionEvidenceV1 {
+            method: method.clone(),
+            task_id: turn_id.clone(),
+            adoption: MethodAdoptionStatusV1::Adopted,
+            observation_refs: refs.clone(),
+        })
+        .collect();
+    let method_task_evaluations = adopted_method
+        .iter()
+        .map(|method| MethodTaskEvaluationV1 {
+            method: method.clone(),
+            task_id: turn_id.clone(),
+            task_root_id: format!("release-root-{turn_id}"),
+            independence_group: format!("independent-document-{turn_id}"),
+            evaluator_id: "pdf-release-verifier".into(),
+            evaluator_revision: 1,
+            outcome: MethodTaskOutcomeV1::Passed,
+            observation_refs: refs.clone(),
+        })
+        .collect();
     let finalize = runtime
         .finalize_turn_with_procedural_evidence(
             &runtime.capability,
@@ -183,7 +224,10 @@ fn submit_feedback(
                     external_content_used: false,
                     candidate_ids: Vec::new(),
                 },
-                learning: PostTurnLearningInputV2 {
+                learning: PostTurnLearningInputV3 {
+                    method_learning_inputs: Vec::new(),
+                    method_adoptions,
+                    method_task_evaluations,
                     tool_call_count,
                     selection_receipt: None,
                     runtime_skill_feedback: Vec::new(),
@@ -223,6 +267,59 @@ fn submit_feedback(
         }
     }
     panic!("procedural feedback job did not complete")
+}
+
+/// Consume an already persisted Candidate with two real, independently judged
+/// tasks. Tool execution alone above deliberately never establishes a method.
+fn establish_method(runtime: Arc<TestRuntime>, registry: &AgentToolRegistrySnapshot) {
+    let candidates = runtime
+        .discover_method_trials(MemoryMethodTrialRequest {
+            tool: ProceduralProducerToolV1 {
+                registry_ref: registry.registry_ref(),
+                tool_id: "pdf.extract".into(),
+                schema_fingerprint: "schema-pdf-v1".into(),
+            },
+            max_candidates: 8,
+        })
+        .unwrap();
+    let candidate = candidates
+        .candidates
+        .into_iter()
+        .find(|candidate| {
+            candidate.task_signature == "extract_pdf_text_for_release_notes"
+                && candidate.procedure.contains("Validate extracted text")
+        })
+        .expect("nonempty exact Candidate before actual adoption");
+    for observation_id in [
+        "independent-release-document-a",
+        "independent-release-document-b",
+    ] {
+        let receipt = submit_feedback_with_task(
+            runtime.clone(),
+            feedback(registry, vec![observation(observation_id)]),
+            Some(candidate.method.clone()),
+        );
+        assert_eq!(
+            receipt.accepted_count, 3,
+            "execution group, actual adoption and independent evaluation must all be accepted"
+        );
+    }
+    let recalled = runtime
+        .recall(MemoryRecallRequest {
+            temporal_operation: MemoryRecallTemporalOperation::Current,
+            structured_query_facets: vec![],
+            query: "extract PDF release notes".into(),
+            limit: 8,
+            tool_registry_refs: vec![registry.registry_ref()],
+        })
+        .unwrap();
+    assert!(
+        recalled
+            .agent_tool_hints
+            .iter()
+            .any(|hint| hint.tool_id == "pdf.extract"),
+        "mature exact method positive must really exist before negative boundaries are tested"
+    );
 }
 
 #[test]
@@ -298,6 +395,7 @@ fn sdk_agent_tool_feedback_requires_governed_experience_before_projection() {
     );
     assert_eq!(accepted.accepted_count, 1);
     assert!(accepted.changed_count > 0);
+    establish_method(runtime.clone(), &registry);
 
     let projected = runtime
         .project(MemoryProjectionRequest {
@@ -344,6 +442,7 @@ fn sdk_agent_tool_projection_rejects_registry_fingerprint_drift() {
         feedback(&registry, vec![observation("obs-a"), observation("obs-b")]),
     );
     assert!(accepted.changed_count > 0);
+    establish_method(runtime.clone(), &registry);
 
     let mut stale_ref = registry.registry_ref();
     stale_ref.fingerprint = "stale-fingerprint".to_string();
@@ -385,6 +484,7 @@ fn agent_tool_experience_is_exactly_isolated_by_mounted_subject_in_a_shared_stor
         ),
     );
     assert!(accepted.changed_count > 0);
+    establish_method(agent_a.clone(), &registry);
 
     let project = |runtime: &MemoryRuntime| {
         runtime
@@ -462,6 +562,7 @@ fn historical_recall_does_not_apply_current_agent_tool_experience() {
         ),
     );
     assert!(accepted.changed_count > 0);
+    establish_method(runtime.clone(), &registry);
 
     let project = |temporal_operation| {
         runtime
@@ -509,6 +610,7 @@ fn agent_tool_registry_scope_mismatch_is_rejected_before_hint_selection() {
         ),
     );
     assert!(accepted.changed_count > 0);
+    establish_method(runtime.clone(), &scoped);
 
     let project = |registry_ref| {
         runtime

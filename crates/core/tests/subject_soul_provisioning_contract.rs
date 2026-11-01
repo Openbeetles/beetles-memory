@@ -32,11 +32,12 @@ use bm_core::memory::{
     SubjectSoulProvisionIntentV1, SubjectSoulProvisionPlanV1, SubjectSoulReadOutcomeV1,
     SubjectSoulRelationshipProjectionPlanV1, SubjectSoulRelationshipProjectionV1,
     SubjectSoulRelationshipRuntimeInputV1, SubjectSoulRelationshipRuntimeProjectionDispositionV1,
-    SubjectSoulRevisionAddressBindingsV1, SubjectSoulRevisionOriginV1,
-    SubjectSoulRevisionProvenanceV1, SubjectSoulSelfAuthoredCommitPlanV1,
-    SubjectSoulSelfAuthoredPostImageAddressesV1, SubjectSoulSelfAuthoredRevisionBasisV1,
-    SubjectSoulSourceAuthorityV1, SubjectSoulTerminalActionV1, SubjectSoulTerminatedGenerationV1,
-    SubjectSoulVerifiedSnapshotV1, SubjectVisibility,
+    SubjectSoulRevisionAddressBindingsV1, SubjectSoulRevisionEvidenceV1,
+    SubjectSoulRevisionOriginV1, SubjectSoulRevisionProvenanceV1,
+    SubjectSoulSelfAuthoredCommitPlanV1, SubjectSoulSelfAuthoredPostImageAddressesV1,
+    SubjectSoulSelfAuthoredRevisionBasisV1, SubjectSoulSourceAuthorityV1, SubjectSoulSourceRefV1,
+    SubjectSoulTerminalActionV1, SubjectSoulTerminatedGenerationV1, SubjectSoulVerifiedSnapshotV1,
+    SubjectVisibility,
 };
 
 #[test]
@@ -307,6 +308,23 @@ fn autonomous_revision_bindings(revision: u64) -> SubjectSoulRevisionAddressBind
     }
 }
 
+fn revision_evidence() -> SubjectSoulRevisionEvidenceV1 {
+    SubjectSoulRevisionEvidenceV1 {
+        lawful_founding: None,
+        source_review: None,
+        source_lineage: vec![SubjectSoulSourceRefV1 {
+            memory_space_id: "space:1".into(),
+            subject_id: "agent:a".into(),
+            channel_id: "sdk.direct".into(),
+            conversation_id: "conversation:a".into(),
+            turn_id: "observed-persona:a".into(),
+            sequence: 1,
+            canonical_turn_digest: format!("sha256:{}", "1".repeat(64)),
+            transcript_content_digest: format!("sha256:{}", "2".repeat(64)),
+        }],
+    }
+}
+
 fn autonomous_adoption_refresh_plan(
     existing_core: Option<&SelfAuthoredCore>,
     existing_ledger: &CoreRevisionLedger,
@@ -374,10 +392,20 @@ fn autonomous_bootstrap_builds_revision_one_from_implicit_unseeded_in_one_post_i
         closure_certificate_digest: "b".repeat(64),
     };
     assert_eq!(
-        subject_soul_self_authored_revision_intent_digest_v1(&owner, &expected_a, &refresh)
-            .expect("autonomous bootstrap intent digest"),
-        subject_soul_self_authored_revision_intent_digest_v1(&owner, &expected_b, &refresh)
-            .expect("reopened autonomous bootstrap intent digest"),
+        subject_soul_self_authored_revision_intent_digest_v1(
+            &owner,
+            &expected_a,
+            &refresh,
+            &revision_evidence()
+        )
+        .expect("autonomous bootstrap intent digest"),
+        subject_soul_self_authored_revision_intent_digest_v1(
+            &owner,
+            &expected_b,
+            &refresh,
+            &revision_evidence()
+        )
+        .expect("reopened autonomous bootstrap intent digest"),
         "ephemeral pristine certificates cannot destabilize autonomous replay"
     );
     let plan = plan_subject_soul_self_authored_revision_v1(
@@ -386,6 +414,7 @@ fn autonomous_bootstrap_builds_revision_one_from_implicit_unseeded_in_one_post_i
             closure_certificate_digest: "a".repeat(64),
         },
         &refresh,
+        &revision_evidence(),
         Some(&addresses),
         20,
     )
@@ -488,6 +517,7 @@ fn autonomous_bootstrap_uses_revision_one_inside_an_explicit_reset_generation() 
             snapshot: Box::new(explicit_unseeded),
         },
         &refresh,
+        &revision_evidence(),
         Some(&SubjectSoulSelfAuthoredPostImageAddressesV1::Adopt {
             revision: Box::new(SubjectSoulRevisionAddressBindingsV1 {
                 material: SubjectSoulManifestAddressV1 {
@@ -553,6 +583,7 @@ fn founding_revision_advances_to_self_governed_revision_and_retains_exact_as_of_
             snapshot: Box::new(snapshot),
         },
         &refresh,
+        &revision_evidence(),
         Some(&SubjectSoulSelfAuthoredPostImageAddressesV1::Adopt {
             revision: Box::new(autonomous_revision_bindings(2)),
         }),
@@ -627,6 +658,7 @@ fn reviewed_rejection_updates_only_current_ledger_closure_without_a_soul_revisio
             snapshot: Box::new(snapshot),
         },
         &refresh,
+        &revision_evidence(),
         Some(
             &SubjectSoulSelfAuthoredPostImageAddressesV1::ReviewedRejected {
                 revision_ledger: SubjectSoulManifestAddressV1 {
@@ -857,6 +889,7 @@ fn self_authored_planner_rejects_a_forged_non_successor_ledger() {
             snapshot: Box::new(snapshot),
         },
         &refresh,
+        &revision_evidence(),
         Some(
             &SubjectSoulSelfAuthoredPostImageAddressesV1::ReviewedRejected {
                 revision_ledger: SubjectSoulManifestAddressV1 {
@@ -1078,6 +1111,7 @@ fn autonomous_cycle_intent(
     mutations: Vec<SubjectSoulGenerationLayerMutationV1>,
 ) -> SubjectSoulAutonomousCycleIntentV1 {
     SubjectSoulAutonomousCycleIntentV1 {
+        evidence: revision_evidence(),
         operation_id: operation_id.to_string(),
         actor_subject_id: "agent:a".to_string(),
         layer_mutations: mutations,
@@ -1265,6 +1299,7 @@ fn autonomous_cycle_requires_one_manifest_revision_for_first_evidence_and_bootst
     )
     .expect("first evidence envelope");
     let intent = SubjectSoulAutonomousCycleIntentV1 {
+        evidence: revision_evidence(),
         operation_id: "operation:atomic-autonomous-cycle".to_string(),
         actor_subject_id: owner.subject_id.clone(),
         layer_mutations: vec![SubjectSoulGenerationLayerMutationV1::Upsert {
@@ -2138,6 +2173,7 @@ fn archive_purges_all_relationship_projections_while_restore_preserves_soul_mate
             generation: projected.head.generation,
             revision: projected.head.current_revision,
             content_digest: "d".repeat(64),
+            source_lineage: Vec::new(),
         });
     projected.manifest.entries.sort();
     projected
@@ -2457,7 +2493,7 @@ fn relationship_source_with_provenance(
     };
     contribution.refresh_digest().expect("contribution digest");
     let mut root = RelationshipSourceConstitutionV1 {
-        schema_version: 1,
+        schema_version: bm_core::memory::SUBJECT_SOUL_SCHEMA_VERSION,
         memory_space_id: "space:1".to_string(),
         relationship_id: "relationship:1".to_string(),
         mounted_subject_id: "agent:a".to_string(),
@@ -2490,7 +2526,7 @@ fn relationship_manifest(
     manifest_revision: u64,
 ) -> RelationshipSourceScopeManifestV1 {
     let mut manifest = RelationshipSourceScopeManifestV1 {
-        schema_version: 1,
+        schema_version: bm_core::memory::SUBJECT_SOUL_SCHEMA_VERSION,
         memory_space_id: source.memory_space_id.clone(),
         relationship_id: source.relationship_id.clone(),
         current_revision: source.revision,
@@ -2780,7 +2816,7 @@ fn relationship_runtime_view_uses_source_truth_and_recompiles_missing_or_stale_p
     let mental_privacy_ceiling = relationship_mental_privacy_ceiling_v1(None);
     let soul_self_boundary_ceiling = relationship_soul_self_boundary_ceiling_v1(None);
     let mut projection = SubjectSoulRelationshipProjectionV1 {
-        schema_version: 1,
+        schema_version: bm_core::memory::SUBJECT_SOUL_SCHEMA_VERSION,
         memory_space_id: material.memory_space_id.clone(),
         subject_id: material.subject_id.clone(),
         soul_id: material.soul_id.clone(),

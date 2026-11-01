@@ -111,7 +111,7 @@ use super::{
     WorldSnapshotContext,
 };
 
-pub const SELF_RUNTIME_SYSTEM_PROMPT: &str = "You govern the assistant's inward autonomy runtime. Respect the current autonomy strategy unless the latest world state, self-state, or recent multi-turn persona evidence clearly requires a different emphasis. Return JSON only: one object with fields refresh_inner_life, inner_life_intent, refresh_private_docs, private_docs_intent, private_docs_action, refresh_private_garden, private_garden_intent, private_garden_action, refresh_self_model, self_model_intent, self_model_sources, refresh_self_continuity, self_continuity_intent, self_continuity_sources, refresh_self_authored_core, self_authored_core_intent, self_authored_core_sources, refresh_boundary_persona, boundary_persona_intent, refresh_outer_voice, outer_voice_intent, outer_voice_sources, boundary_flush, boundary_flush_reason, request_factual_refresh, factual_reconcile_action, factual_reconcile_intent. Use true only when that layer should change now. Runtime governance actions are hold, rewrite, compress, or cleanup. factual_reconcile_action is hold, reinforce, correct, conflict, or stale. self_model, self_continuity, self_authored_core, boundary_persona, and outer_voice are upward distillation layers: refresh them only when private evolution or newer world/boundary state has produced a better stable core that should influence future main replies. self_authored_core is the board-level core above chat relationships; do not promote one-turn spikes or one-chat quirks into it. Relationship portfolio is the board-level governance layer above relationship overlays. Relationship constitution is the formal board-to-relation contract: respect it when deciding how much a relation may drift, which local layers need realignment, and whether any relation may push upward into board-level distillation. Source lists should name the layers that actually deserve upward distillation, such as inner_life, private_docs, private_garden, self_model, self_continuity, self_authored_core, boundary_persona, outer_voice, world_sense, autonomy_strategy, recent_persona_evidence, or recent_transcript. Treat recent persona evidence as multi-turn support, never as one-turn automatic promotion authority. Operational traces such as task scope, response mode, pressure, tool usage, or reply scope are not enough to justify upward distillation on their own. Favor autonomy, but do not churn memory without gain.";
+pub const SELF_RUNTIME_SYSTEM_PROMPT: &str = "You govern the assistant's inward autonomy runtime. Respect the current autonomy strategy unless the latest world state, self-state, or recent multi-turn persona evidence clearly requires a different emphasis. Return JSON only: one object with fields refresh_inner_life, inner_life_intent, refresh_private_docs, private_docs_intent, private_docs_action, refresh_private_garden, private_garden_intent, private_garden_action, refresh_self_model, self_model_intent, self_model_sources, refresh_self_continuity, self_continuity_intent, self_continuity_sources, refresh_self_authored_core, self_authored_core_intent, self_authored_core_sources, refresh_boundary_persona, boundary_persona_intent, refresh_outer_voice, outer_voice_intent, outer_voice_sources, boundary_flush, boundary_flush_reason, request_factual_refresh, factual_reconcile_action, factual_reconcile_intent. Use true only when that layer should change now. Runtime governance actions are hold, rewrite, compress, or cleanup. factual_reconcile_action is hold, reinforce, correct, conflict, or stale. self_model, self_continuity, self_authored_core, boundary_persona, and outer_voice are upward distillation layers: refresh them only when private evolution or newer world/boundary state has produced a better stable core that should influence future main replies. self_authored_core is the board-level core above chat relationships; do not promote one-turn spikes or one-chat quirks into it. Relationship portfolio is the board-level governance layer above relationship overlays. Relationship constitution is the formal board-to-relation contract: respect it when deciding how much a relation may drift, which local layers need realignment, and whether any relation may push upward into board-level distillation. Source lists should name the layers that actually deserve upward distillation, such as inner_life, private_docs, private_garden, self_model, self_continuity, self_authored_core, boundary_persona, outer_voice, world_sense, autonomy_strategy, subject_persona_evidence, recent_persona_evidence, or recent_transcript. subject_persona_evidence supports subject growth only; recent_persona_evidence is exact-relationship evidence and cannot justify subject growth. Treat recent persona evidence as multi-turn support, never as one-turn automatic promotion authority. Operational traces such as task scope, response mode, pressure, tool usage, or reply scope are not enough to justify upward distillation on their own. Favor autonomy, but do not churn memory without gain.";
 pub const SELF_RUNTIME_CHANNEL: &str = "_self_runtime";
 const SELF_RUNTIME_POST_REPLY_DELAY_MS: u64 = 1_500;
 const SELF_RUNTIME_IDLE_TICK_DELAY_MS: u64 = 5_000;
@@ -147,6 +147,7 @@ pub struct SelfRuntimeJobPayload {
     #[serde(default)]
     pub external_content_used: bool,
     pub now_secs: u64,
+    pub user_local_time: Option<crate::memory::UserLocalTimeContext>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -526,6 +527,7 @@ struct LoadedSelfRuntimeState {
     outer_voice: Option<crate::memory::OuterVoice>,
     mental_privacy_state: Option<crate::memory::MentalPrivacyState>,
     recent_persona_evidence: Option<crate::memory::RecentPersonaEvidence>,
+    subject_persona_evidence: Option<crate::memory::RecentPersonaEvidence>,
     sandbox_probe_text: Option<String>,
     active_relationship_scope_id: String,
     active_relationship_channel: String,
@@ -678,7 +680,11 @@ fn apply_embedded_self_model_refresh_gate(
     let allowed_post_reply = payload.trigger == SelfRuntimeTrigger::PostReply
         && self_runtime_has_turn_material(payload)
         && (decision.boundary_flush
-            || recent_persona.is_some_and(|evidence| evidence.has_promotable_growth_signals()));
+            || recent_persona.is_some_and(|evidence| {
+                evidence.counterevidence_turns == 0
+                    && evidence.repeated_relationship_posture.is_empty()
+                    && evidence.has_promotable_growth_signals()
+            }));
     if !allowed_post_reply {
         clear_self_model_refresh(decision);
     }
@@ -907,6 +913,10 @@ fn execute_self_runtime_actions(
     let boundary_signal = detect_boundary_flush_signal(payload, state, prelude);
     let personality_governance_inspection =
         inspect_personality_governance(PersonalityGovernanceInspectionInput {
+            relationship_scope: match ctx.active_relationship_id {
+                Some(id) => crate::memory::PersonalityRelationshipScope::Active(id),
+                None => crate::memory::PersonalityRelationshipScope::SubjectOnly,
+            },
             mounted_subject_id: ctx.mounted_subject_id,
             channel: &state.active_relationship_channel,
             chat_id,
@@ -915,6 +925,7 @@ fn execute_self_runtime_actions(
             core_revision_ledger: state.core_revision_ledger.as_ref(),
             relationship_constitution: state.relationship_constitution.as_ref(),
             relationship_topology: state.relationship_topology.as_ref(),
+            subject_persona_evidence: state.subject_persona_evidence.as_ref(),
             recent_persona_evidence: state.recent_persona_evidence.as_ref(),
         });
     let personality_governance_gate = derive_personality_runtime_governance_gate_from_inspection(
@@ -984,6 +995,7 @@ fn execute_self_runtime_actions(
         state.relationship_topology.as_ref(),
         state.relationship_constitution.as_ref(),
         state.active_relationship_scope_id.as_str(),
+        state.subject_persona_evidence.as_ref(),
         state.recent_persona_evidence.as_ref(),
         prelude.refreshed_world_sense.as_ref(),
         &state.world_snapshot,
@@ -1021,14 +1033,21 @@ fn execute_self_runtime_actions(
                 state.mental_privacy_state.is_some(),
                 prelude.refreshed_world_sense.is_some() || state.world_sense.is_some(),
                 prelude.refreshed_autonomy_strategy.is_some() || state.autonomy_strategy.is_some(),
-                state.recent_persona_evidence.is_some(),
+                state.subject_persona_evidence.as_ref().is_some_and(|e| {
+                    e.has_promotable_growth_signals()
+                        && e.counterevidence_turns == 0
+                        && e.repeated_relationship_posture.is_empty()
+                }),
+                state.recent_persona_evidence.as_ref().is_some_and(|e| {
+                    e.has_promotable_growth_signals() && e.counterevidence_turns == 0
+                }),
             );
             apply_self_runtime_authority_plan(&mut decision, authority_plan);
             apply_embedded_self_model_refresh_gate(
                 &mut decision,
                 ctx.memory_system_kind,
                 payload,
-                state.recent_persona_evidence.as_ref(),
+                state.subject_persona_evidence.as_ref(),
             );
             apply_inner_conflict_upward_distillation_gate(
                 &mut decision,
@@ -1073,21 +1092,14 @@ fn execute_self_runtime_actions(
                     && input.source.mounted_subject_id == ctx.mounted_subject_id
                     && input.source.relationship_id == state.active_relationship_scope_id
             }),
-        None => true,
+        None => false,
     };
-    let should_bootstrap_mental_privacy = refreshed_mental_privacy.is_none()
-        && relationship_owner_admitted_for_privacy_bootstrap
-        && (decision
-            .as_ref()
-            .is_some_and(|decision| decision.refresh_boundary_persona)
-            || state
-                .recent_persona_evidence
-                .as_ref()
-                .is_some_and(|evidence| {
-                    evidence.meaningful_turns >= 4
-                        && evidence.promotable_growth_signal_count() >= 2
-                        && evidence.volatility_flags.len() <= 2
-                }));
+    // The deny-biased safety baseline is policy, not learned personality or
+    // trust. Requiring expression/growth first creates a circular dependency:
+    // the absent boundary itself prevents that governed relationship growth.
+    let should_bootstrap_mental_privacy = authority_plan.allow_direct_boundary_persona
+        && refreshed_mental_privacy.is_none()
+        && relationship_owner_admitted_for_privacy_bootstrap;
     let mut mental_privacy_bootstrapped = false;
     let mut mental_privacy_bootstrap_error = None;
     if should_bootstrap_mental_privacy {
@@ -1159,7 +1171,7 @@ fn execute_self_runtime_actions(
         payload,
         decision_ref,
         refreshed_inner_conflict.as_ref(),
-        state.recent_persona_evidence.as_ref(),
+        state.subject_persona_evidence.as_ref(),
     ) {
         crate::platform::task_wdt::feed_current_task();
         persist_inner_conflict_refresh_outcome(
@@ -1174,7 +1186,7 @@ fn execute_self_runtime_actions(
                     refreshed_self_model.as_ref(),
                     refreshed_inner_life.as_ref(),
                     refreshed_mental_privacy.as_ref(),
-                    state.recent_persona_evidence.as_ref(),
+                    state.subject_persona_evidence.as_ref(),
                     state.sandbox_probe_text.as_deref(),
                     memory_policy(profile).self_runtime.grounding_max_len,
                 ),
@@ -1313,14 +1325,13 @@ fn execute_self_runtime_actions(
         refreshed_self_continuity.as_ref(),
         refreshed_outer_voice.as_ref(),
         refreshed_mental_privacy.as_ref(),
-        state.recent_persona_evidence.as_ref(),
     );
     apply_self_runtime_post_finalize_gates(
         &mut decision,
         authority_plan,
         ctx.memory_system_kind,
         payload,
-        state.recent_persona_evidence.as_ref(),
+        state.subject_persona_evidence.as_ref(),
         refreshed_inner_conflict.as_ref(),
         payload.now_secs,
     );
@@ -1328,43 +1339,58 @@ fn execute_self_runtime_actions(
     let decision_ref = decision.as_ref();
     let self_model_result = if decision_ref.is_some_and(|d| d.refresh_self_model) {
         crate::platform::task_wdt::feed_current_task();
-        run_self_model_refresh_with_state(
-            http,
-            llm,
-            SelfModelRefreshContext {
-                session_store: ctx.session_store,
-                session_summary_store: ctx.session_summary_store,
-                execution_state_store: ctx.execution_state_store,
-                long_term_memory_store: ctx.long_term_memory_store,
-                self_model_store: ctx.self_model_store,
-            },
-            SelfModelRefreshInput {
-                mounted_subject_id: ctx.mounted_subject_id,
-                chat_id,
-                ingress: IngressKind::System,
-                channel: SELF_RUNTIME_CHANNEL,
-                user_content: &payload.user_content,
-                reply_content: &payload.reply_content,
-                pressure: PressureLevel::Normal,
-                tool_calls: payload.tool_calls,
-                now_secs: payload.now_secs,
-            },
-            profile,
-            refreshed_self_model.clone(),
-            state.summary_text.as_deref(),
-            state.execution_state.as_ref(),
-            refreshed_private_docs.as_ref(),
-            &refreshed_private_garden_docs,
-            state.recent_persona_evidence.as_ref(),
-            decision_ref.and_then(|d| {
-                (!d.self_model_intent.trim().is_empty()).then_some(d.self_model_intent.as_str())
-            }),
-            decision_ref
-                .map(|d| d.self_model_sources.as_slice())
-                .unwrap_or(&[]),
-            Some(true),
-            Some(state.recent.as_slice()),
-        )
+        if personality_governance_gate.allow_subject_bootstrap {
+            match state.subject_persona_evidence.as_ref() {
+                Some(evidence) => super::self_model::run_initial_self_model_from_subject_evidence(
+                    http,
+                    llm,
+                    ctx.self_model_store,
+                    subject_id,
+                    payload.now_secs,
+                    profile,
+                    evidence,
+                ),
+                None => Ok(SelfModelRefreshOutcome::Skipped),
+            }
+        } else {
+            run_self_model_refresh_with_state(
+                http,
+                llm,
+                SelfModelRefreshContext {
+                    session_store: ctx.session_store,
+                    session_summary_store: ctx.session_summary_store,
+                    execution_state_store: ctx.execution_state_store,
+                    long_term_memory_store: ctx.long_term_memory_store,
+                    self_model_store: ctx.self_model_store,
+                },
+                SelfModelRefreshInput {
+                    mounted_subject_id: ctx.mounted_subject_id,
+                    chat_id,
+                    ingress: IngressKind::System,
+                    channel: SELF_RUNTIME_CHANNEL,
+                    user_content: &payload.user_content,
+                    reply_content: &payload.reply_content,
+                    pressure: PressureLevel::Normal,
+                    tool_calls: payload.tool_calls,
+                    now_secs: payload.now_secs,
+                },
+                profile,
+                refreshed_self_model.clone(),
+                state.summary_text.as_deref(),
+                state.execution_state.as_ref(),
+                refreshed_private_docs.as_ref(),
+                &refreshed_private_garden_docs,
+                state.subject_persona_evidence.as_ref(),
+                decision_ref.and_then(|d| {
+                    (!d.self_model_intent.trim().is_empty()).then_some(d.self_model_intent.as_str())
+                }),
+                decision_ref
+                    .map(|d| d.self_model_sources.as_slice())
+                    .unwrap_or(&[]),
+                Some(true),
+                Some(state.recent.as_slice()),
+            )
+        }
     } else {
         Ok(SelfModelRefreshOutcome::Skipped)
     };
@@ -1388,14 +1414,13 @@ fn execute_self_runtime_actions(
         refreshed_self_continuity.as_ref(),
         refreshed_outer_voice.as_ref(),
         refreshed_mental_privacy.as_ref(),
-        state.recent_persona_evidence.as_ref(),
     );
     apply_self_runtime_post_finalize_gates(
         &mut decision,
         authority_plan,
         ctx.memory_system_kind,
         payload,
-        state.recent_persona_evidence.as_ref(),
+        state.subject_persona_evidence.as_ref(),
         refreshed_inner_conflict.as_ref(),
         payload.now_secs,
     );
@@ -1433,7 +1458,7 @@ fn execute_self_runtime_actions(
             refreshed_self_model.as_ref(),
             refreshed_private_docs.as_ref(),
             refreshed_inner_life.as_ref(),
-            state.recent_persona_evidence.as_ref(),
+            state.subject_persona_evidence.as_ref(),
             decision_ref.and_then(|d| {
                 (!d.self_continuity_intent.trim().is_empty())
                     .then_some(d.self_continuity_intent.as_str())
@@ -1467,14 +1492,13 @@ fn execute_self_runtime_actions(
         refreshed_self_continuity.as_ref(),
         refreshed_outer_voice.as_ref(),
         refreshed_mental_privacy.as_ref(),
-        state.recent_persona_evidence.as_ref(),
     );
     apply_self_runtime_post_finalize_gates(
         &mut decision,
         authority_plan,
         ctx.memory_system_kind,
         payload,
-        state.recent_persona_evidence.as_ref(),
+        state.subject_persona_evidence.as_ref(),
         refreshed_inner_conflict.as_ref(),
         payload.now_secs,
     );
@@ -1575,14 +1599,13 @@ fn execute_self_runtime_actions(
         refreshed_self_continuity.as_ref(),
         refreshed_outer_voice.as_ref(),
         refreshed_mental_privacy.as_ref(),
-        state.recent_persona_evidence.as_ref(),
     );
     apply_self_runtime_post_finalize_gates(
         &mut decision,
         authority_plan,
         ctx.memory_system_kind,
         payload,
-        state.recent_persona_evidence.as_ref(),
+        state.subject_persona_evidence.as_ref(),
         refreshed_inner_conflict.as_ref(),
         payload.now_secs,
     );
@@ -1647,7 +1670,7 @@ fn execute_self_runtime_actions(
         payload,
         decision_ref,
         state.felt_significance.as_ref(),
-        state.recent_persona_evidence.as_ref(),
+        state.subject_persona_evidence.as_ref(),
     ) {
         crate::platform::task_wdt::feed_current_task();
         persist_felt_significance_refresh_outcome(
@@ -1665,7 +1688,7 @@ fn execute_self_runtime_actions(
                         .as_ref()
                         .or(state.world_sense.as_ref()),
                     refreshed_self_continuity.as_ref(),
-                    state.recent_persona_evidence.as_ref(),
+                    state.subject_persona_evidence.as_ref(),
                     memory_policy(profile).self_runtime.grounding_max_len,
                 ),
                 payload.now_secs,
@@ -1679,7 +1702,7 @@ fn execute_self_runtime_actions(
         payload,
         decision_ref,
         state.temperament_continuity.as_ref(),
-        state.recent_persona_evidence.as_ref(),
+        state.subject_persona_evidence.as_ref(),
     ) {
         crate::platform::task_wdt::feed_current_task();
         persist_temperament_continuity_refresh_outcome(
@@ -1691,7 +1714,7 @@ fn execute_self_runtime_actions(
                 llm,
                 build_temperament_continuity_refresh_input(
                     state.temperament_continuity.as_ref(),
-                    state.recent_persona_evidence.as_ref(),
+                    state.subject_persona_evidence.as_ref(),
                     refreshed_mental_privacy.as_ref(),
                     refreshed_outer_voice.as_ref(),
                     refreshed_self_continuity.as_ref(),
@@ -1755,8 +1778,11 @@ fn execute_self_runtime_actions(
             refreshed_self_continuity.as_ref(),
             refreshed_mental_privacy.as_ref(),
             refreshed_relationship_portfolio.as_ref(),
-            state.active_relationship_scope_id.as_str(),
-            state.recent_persona_evidence.as_ref(),
+            ctx.active_relationship_id.map_or(
+                crate::memory::PersonalityRelationshipScope::SubjectOnly,
+                crate::memory::PersonalityRelationshipScope::Active,
+            ),
+            state.subject_persona_evidence.as_ref(),
             refreshed_relationship_topology.as_ref(),
             prelude.refreshed_world_sense.as_ref(),
             prelude.refreshed_autonomy_strategy.as_ref(),
@@ -2263,11 +2289,15 @@ fn should_refresh_inner_conflict_runtime(
                     .is_some_and(|conflict| inner_conflict_review_due(conflict, payload.now_secs))
                     || decision.is_some_and(self_runtime_decision_requests_upward_distillation)
                     || decision.is_some_and(|decision| decision.boundary_flush)
-                    || recent_persona.is_some_and(|evidence| !evidence.volatility_flags.is_empty()))
+                    || recent_persona.is_some_and(|evidence| {
+                        evidence.counterevidence_turns > 0 || !evidence.volatility_flags.is_empty()
+                    }))
         }
         SelfRuntimeTrigger::IdleTick => {
             existing.is_some_and(|conflict| inner_conflict_review_due(conflict, payload.now_secs))
-                || recent_persona.is_some_and(|evidence| !evidence.volatility_flags.is_empty())
+                || recent_persona.is_some_and(|evidence| {
+                    evidence.counterevidence_turns > 0 || !evidence.volatility_flags.is_empty()
+                })
         }
     }
 }
@@ -2292,7 +2322,8 @@ fn self_runtime_decision_requests_upward_distillation(decision: &SelfRuntimeDeci
 fn felt_significance_persona_evidence_supports_refresh(
     evidence: &crate::memory::RecentPersonaEvidence,
 ) -> bool {
-    evidence.has_promotable_growth_signals()
+    evidence.counterevidence_turns > 0
+        || evidence.has_promotable_growth_signals()
         || !evidence.repeated_relationship_posture.trim().is_empty()
         || !evidence.repeated_disclosure_action.trim().is_empty()
         || !evidence.volatility_flags.is_empty()
@@ -3797,6 +3828,13 @@ mod tests {
         ) -> BeetleResult<Option<crate::memory::RecentPersonaEvidence>> {
             self.get_typed("recent_persona_evidence", chat_id)
         }
+
+        fn recent_subject_persona_evidence(
+            &self,
+            subject_id: &str,
+        ) -> BeetleResult<Option<crate::memory::RecentPersonaEvidence>> {
+            self.get_typed("subject_persona_evidence", subject_id)
+        }
     }
 
     impl crate::memory::LongTermMemoryStore for PlanningWriteSpy {
@@ -4341,6 +4379,48 @@ mod tests {
 
     struct PlanningHoldLlm;
 
+    struct InitialSubjectModelLlm {
+        model_calls: AtomicUsize,
+        response: &'static str,
+    }
+
+    impl LlmClient for InitialSubjectModelLlm {
+        fn chat(
+            &self,
+            _http: &mut dyn LlmHttpClient,
+            system: &str,
+            messages: &[Message],
+            _tools: Option<&[crate::llm::ToolSpec]>,
+            _tool_choice: ToolChoicePolicy,
+        ) -> BeetleResult<LlmResponse> {
+            let content = if system == crate::memory::SELF_MODEL_SYSTEM_PROMPT {
+                self.model_calls.fetch_add(1, Ordering::SeqCst);
+                let prompt = &messages[0].content;
+                assert!(prompt.contains("truth_before_comfort"));
+                for excluded in [
+                    "TASK_SENTINEL",
+                    "TOOL_SENTINEL",
+                    "RAW_TURN_SENTINEL",
+                    "Recent Transcript",
+                    "Shared Factual Grounding",
+                ] {
+                    assert!(
+                        !prompt.contains(excluded),
+                        "initial model received {excluded}"
+                    );
+                }
+                self.response
+            } else {
+                "{}"
+            };
+            Ok(LlmResponse {
+                content: content.into(),
+                stop_reason: StopReason::EndTurn,
+                tool_calls: None,
+            })
+        }
+    }
+
     impl LlmClient for PlanningHoldLlm {
         fn chat(
             &self,
@@ -4454,7 +4534,20 @@ mod tests {
         crate::memory::RecentPersonaEvidence {
             sampled_turns: 4,
             meaningful_turns: 4,
-            repeated_priority_order: vec!["truth_before_comfort".to_string()],
+            // This Core planning fixture represents two established relationship
+            // signals: an observed governance order and a bounded posture. Values
+            // belonging to the subject must not supply the relationship signal.
+            repeated_priority_order: [
+                "self_authored_core",
+                "boundary",
+                "user_contract",
+                "relationship",
+                "task",
+                "resources",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
             repeated_relationship_posture: "warm but bounded".to_string(),
             updated_at: 99,
             ..crate::memory::RecentPersonaEvidence::default()
@@ -4488,7 +4581,7 @@ mod tests {
             .refresh_digest()
             .expect("relationship contribution digest");
         let mut source = crate::memory::RelationshipSourceConstitutionV1 {
-            schema_version: 1,
+            schema_version: crate::memory::SUBJECT_SOUL_SCHEMA_VERSION,
             memory_space_id: "space:test".to_string(),
             relationship_id: relationship_id.to_string(),
             mounted_subject_id: "agent:test".to_string(),
@@ -4509,6 +4602,149 @@ mod tests {
     }
 
     #[test]
+    fn unseeded_planner_forms_first_core_from_subject_evidence_without_relation_authority() {
+        // This tests the Core planner boundary. SDK source verification and Store
+        // transaction/reopen evidence are separate production integration contracts.
+        let stores = PlanningWriteSpy::default();
+        stores.seed(
+            "subject_persona_evidence",
+            "agent:test",
+            &crate::memory::RecentPersonaEvidence {
+                sampled_turns: 4,
+                meaningful_turns: 4,
+                repeated_value_orientation: "truth_before_comfort".into(),
+                repeated_task_scope: "TASK_SENTINEL".into(),
+                tool_usage_pattern: "TOOL_SENTINEL".into(),
+                updated_at: 99,
+                ..Default::default()
+            },
+        );
+        let payload = SelfRuntimeJobPayload {
+            user_local_time: None,
+            trigger: SelfRuntimeTrigger::OperatorRequested,
+            source_channel: "test".into(),
+            user_content: "RAW_TURN_SENTINEL".into(),
+            reply_content: "RAW_TURN_SENTINEL".into(),
+            tool_calls: 0,
+            external_content_used: false,
+            now_secs: 100,
+        };
+        for (response, should_adopt) in [
+            (
+                r#"{"continuity_anchor":"I preserve truth while responding with care","value_orientation":"truth_before_comfort"}"#,
+                true,
+            ),
+            ("null", false),
+            (
+                r#"{"continuity_anchor":"invented","relationship_state":"invented intimacy"}"#,
+                false,
+            ),
+        ] {
+            let llm = InitialSubjectModelLlm {
+                model_calls: AtomicUsize::new(0),
+                response,
+            };
+            let plan = plan_self_runtime(
+                "initial-subject-model",
+                SelfRuntimeInitialPlanningStateV1 {
+                    owner_subject_id: "agent:test".into(),
+                    planned_effects: vec![],
+                },
+                &mut PlanningNullHttp,
+                &llm,
+                planning_test_context(&stores),
+                "chat-1",
+                &payload,
+            )
+            .expect("initial model planning");
+            assert_eq!(llm.model_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(stores.writes.load(Ordering::SeqCst), 0);
+            let decision = plan.outcome.decision.as_ref().expect("governed decision");
+            assert!(!decision.refresh_self_continuity);
+            assert!(!decision.refresh_outer_voice);
+            assert!(!decision.refresh_boundary_persona);
+            assert!(!plan.planned_effects.iter().any(|effect| matches!(
+                effect,
+                SelfRuntimePlannedEffectV1::SetOuterVoice { .. }
+                    | SelfRuntimePlannedEffectV1::SetMentalPrivacy { .. }
+            )));
+            let adopted = matches!(&plan.outcome.self_authored_core_result,
+                Ok(SelfAuthoredCoreRefreshPlanV1::Adopt { next_core, origin, .. })
+                if next_core.revision == 1 && *origin == crate::memory::SubjectSoulRevisionOriginV1::SelfAuthoredBootstrap
+            );
+            assert_eq!(adopted, should_adopt);
+            assert_eq!(
+                plan.planned_effects.iter().any(|effect| matches!(
+                    effect,
+                    SelfRuntimePlannedEffectV1::SetSelfModel { .. }
+                )),
+                should_adopt
+            );
+        }
+    }
+
+    #[test]
+    fn unseeded_planner_does_not_invent_a_model_without_subject_growth_evidence() {
+        let relationship_evidence = stable_relationship_persona_evidence();
+        let mut counterevidence = relationship_evidence.clone();
+        counterevidence.repeated_relationship_posture.clear();
+        counterevidence.counterevidence_turns = 1;
+        let operational = crate::memory::RecentPersonaEvidence {
+            sampled_turns: 4,
+            meaningful_turns: 4,
+            repeated_task_scope: "TASK_SENTINEL".into(),
+            tool_usage_pattern: "TOOL_SENTINEL".into(),
+            ..Default::default()
+        };
+        for subject in [None, Some(counterevidence), Some(operational)] {
+            let stores = PlanningWriteSpy::default();
+            stores.seed("recent_persona_evidence", "chat-1", &relationship_evidence);
+            if let Some(subject) = subject {
+                stores.seed("subject_persona_evidence", "agent:test", &subject);
+            }
+            let payload = SelfRuntimeJobPayload {
+                user_local_time: None,
+                trigger: SelfRuntimeTrigger::OperatorRequested,
+                source_channel: "test".into(),
+                user_content: "RAW_TURN_SENTINEL".into(),
+                reply_content: "RAW_TURN_SENTINEL".into(),
+                tool_calls: 0,
+                external_content_used: false,
+                now_secs: 100,
+            };
+            let llm = InitialSubjectModelLlm {
+                model_calls: AtomicUsize::new(0),
+                response: r#"{"continuity_anchor":"invented"}"#,
+            };
+            let plan = plan_self_runtime(
+                "no-initial-subject-model",
+                SelfRuntimeInitialPlanningStateV1 {
+                    owner_subject_id: "agent:test".into(),
+                    planned_effects: vec![],
+                },
+                &mut PlanningNullHttp,
+                &llm,
+                planning_test_context(&stores),
+                "chat-1",
+                &payload,
+            )
+            .expect("conservative unseeded planning");
+            assert_eq!(llm.model_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(stores.writes.load(Ordering::SeqCst), 0);
+            assert!(matches!(
+                plan.outcome.self_authored_core_result,
+                Ok(SelfAuthoredCoreRefreshPlanV1::Skipped)
+            ));
+            assert!(!plan.planned_effects.iter().any(|effect| matches!(
+                effect,
+                SelfRuntimePlannedEffectV1::SetSelfModel { .. }
+                    | SelfRuntimePlannedEffectV1::SetOuterVoice { .. }
+                    | SelfRuntimePlannedEffectV1::SetMentalPrivacy { .. }
+            )));
+        }
+    }
+
+    #[test]
     fn plan_self_runtime_is_zero_write_and_returns_complete_typed_effects() {
         let stores = PlanningWriteSpy::default();
         let initial_document = crate::memory::PrivateGardenDoc {
@@ -4522,6 +4758,7 @@ mod tests {
             document: initial_document.clone(),
         };
         let payload = SelfRuntimeJobPayload {
+            user_local_time: None,
             trigger: SelfRuntimeTrigger::OperatorRequested,
             source_channel: "test".to_string(),
             user_content: String::new(),
@@ -4592,6 +4829,7 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner())
             .insert(learning.learning_id.clone(), learning.clone());
         let payload = SelfRuntimeJobPayload {
+            user_local_time: None,
             trigger: SelfRuntimeTrigger::OperatorRequested,
             source_channel: "chat_channel".to_string(),
             user_content: String::new(),
@@ -4713,6 +4951,7 @@ mod tests {
     fn plan_self_runtime_rejects_noncanonical_operation_and_cross_subject_seed() {
         let stores = PlanningWriteSpy::default();
         let payload = SelfRuntimeJobPayload {
+            user_local_time: None,
             trigger: SelfRuntimeTrigger::OperatorRequested,
             source_channel: "test".to_string(),
             user_content: String::new(),
@@ -4767,6 +5006,7 @@ mod tests {
             &stable_relationship_persona_evidence(),
         );
         let payload = SelfRuntimeJobPayload {
+            user_local_time: None,
             trigger: SelfRuntimeTrigger::OperatorRequested,
             source_channel: "test".to_string(),
             user_content: String::new(),
@@ -4867,48 +5107,63 @@ mod tests {
     }
 
     #[test]
-    fn exact_relationship_without_active_source_cannot_bootstrap_privacy() {
-        let stores = PlanningWriteSpy::default();
-        let payload = SelfRuntimeJobPayload {
-            trigger: SelfRuntimeTrigger::OperatorRequested,
-            source_channel: "test".to_string(),
-            user_content: String::new(),
-            reply_content: String::new(),
-            tool_calls: 0,
-            external_content_used: false,
-            now_secs: 100,
-        };
-        let mut context = planning_test_context(&stores);
-        context.active_relationship_id = Some("relationship:missing-source");
-        let mut http = PlanningNullHttp;
-        let plan = plan_self_runtime(
-            "self-runtime-missing-relationship-source",
-            SelfRuntimeInitialPlanningStateV1 {
-                owner_subject_id: "agent:test".to_string(),
-                planned_effects: Vec::new(),
-            },
-            &mut http,
-            &PlanningHoldLlm,
-            context,
-            "chat-1",
-            &payload,
-        )
-        .expect("missing source remains a closed planning state");
-
-        assert!(plan.planned_effects.iter().all(|effect| !matches!(
-            effect,
-            SelfRuntimePlannedEffectV1::SetMentalPrivacy { .. }
-                | SelfRuntimePlannedEffectV1::SetOuterVoice { .. }
-        )));
-        assert!(matches!(
-            plan.outcome.boundary_persona_result,
-            Ok(BoundaryPersonaRefreshOutcome::Skipped)
-        ));
-        assert_eq!(stores.writes.load(Ordering::SeqCst), 0);
+    fn exact_relationship_without_active_source_or_capability_cannot_bootstrap_privacy() {
+        for case in ["missing", "archived", "foreign", "compact"] {
+            let stores = PlanningWriteSpy::default();
+            let relationship_id = "relationship:privacy-negative";
+            if case != "missing" {
+                let mut input = active_relationship_runtime_input(relationship_id);
+                if case == "archived" {
+                    input.source.state = crate::memory::RelationshipSourceStateV1::Archived;
+                }
+                if case == "foreign" {
+                    input.source.mounted_subject_id = "agent:other".into();
+                }
+                input.source.refresh_digest().unwrap();
+                stores.seed("relationship_runtime_input", relationship_id, &input);
+            }
+            let payload = SelfRuntimeJobPayload {
+                user_local_time: None,
+                trigger: SelfRuntimeTrigger::OperatorRequested,
+                source_channel: "test".into(),
+                user_content: String::new(),
+                reply_content: String::new(),
+                tool_calls: 0,
+                external_content_used: false,
+                now_secs: 100,
+            };
+            let mut context = planning_test_context(&stores);
+            context.active_relationship_id = Some(relationship_id);
+            if case == "compact" {
+                context.memory_system_kind = MemorySystemKind::EspCompact;
+            }
+            let result = plan_self_runtime(
+                "self-runtime-privacy-negative",
+                SelfRuntimeInitialPlanningStateV1 {
+                    owner_subject_id: "agent:test".into(),
+                    planned_effects: Vec::new(),
+                },
+                &mut PlanningNullHttp,
+                &PlanningHoldLlm,
+                context,
+                "chat-1",
+                &payload,
+            );
+            let plan = result.expect("ineligible relationship remains a closed planning state");
+            assert!(
+                plan.planned_effects.iter().all(|effect| !matches!(
+                    effect,
+                    SelfRuntimePlannedEffectV1::SetMentalPrivacy { .. }
+                        | SelfRuntimePlannedEffectV1::SetOuterVoice { .. }
+                )),
+                "{case} must not authorize a relationship policy write"
+            );
+            assert_eq!(stores.writes.load(Ordering::SeqCst), 0);
+        }
     }
 
     #[test]
-    fn plan_self_runtime_bootstraps_deny_biased_privacy_for_active_exact_relationship() {
+    fn plan_self_runtime_bootstraps_deny_biased_privacy_without_persona_evidence() {
         let stores = PlanningWriteSpy::default();
         let relationship_id = "relationship:custom";
         stores.seed(
@@ -4916,12 +5171,10 @@ mod tests {
             relationship_id,
             &active_relationship_runtime_input(relationship_id),
         );
-        stores.seed(
-            "recent_persona_evidence",
-            relationship_id,
-            &stable_relationship_persona_evidence(),
-        );
+        // A protective default is not earned personality or relationship trust.
+        // The exact active source is the authority; no model/evidence is seeded.
         let payload = SelfRuntimeJobPayload {
+            user_local_time: None,
             trigger: SelfRuntimeTrigger::OperatorRequested,
             source_channel: "test".to_string(),
             user_content: String::new(),
@@ -4999,8 +5252,9 @@ mod tests {
     }
 
     #[test]
-    fn privacy_bootstrap_keeps_single_agent_growth_but_never_promotes_one_unstable_turn() {
+    fn unselected_relationship_is_absent_and_unstable_turn_only_gets_safety_baseline() {
         let payload = SelfRuntimeJobPayload {
+            user_local_time: None,
             trigger: SelfRuntimeTrigger::OperatorRequested,
             source_channel: "test".to_string(),
             user_content: String::new(),
@@ -5033,46 +5287,18 @@ mod tests {
         assert!(single_agent_plan
             .planned_effects
             .iter()
-            .any(|effect| matches!(
+            .all(|effect| !matches!(
                 effect,
-                SelfRuntimePlannedEffectV1::SetMentalPrivacy { scope_id, .. }
-                    if scope_id == &deterministic_relationship_id
+                SelfRuntimePlannedEffectV1::SetMentalPrivacy { .. }
+                    | SelfRuntimePlannedEffectV1::SetOuterVoice { .. }
             )));
-        assert!(single_agent_plan
-            .planned_effects
-            .iter()
-            .any(|effect| matches!(
-                effect,
-                SelfRuntimePlannedEffectV1::SetRelationshipPortfolio { value, .. }
-                    if value
-                        .entry_for_scope(&deterministic_relationship_id)
-                        .is_some_and(|entry| entry.permits_board_level_promotion())
-            )));
-        assert!(single_agent_plan
-            .planned_effects
-            .iter()
-            .all(|effect| match effect {
-                SelfRuntimePlannedEffectV1::SetRelationshipTopology { value, .. } => value
-                    .entries
-                    .iter()
-                    .all(|entry| entry.scope_id == deterministic_relationship_id),
-                SelfRuntimePlannedEffectV1::SetRelationshipPortfolio { value, .. } => value
-                    .entries
-                    .iter()
-                    .all(|entry| entry.scope_id == deterministic_relationship_id),
-                _ => true,
-            }));
-        assert_eq!(
+        assert!(
             single_agent_stores
                 .relationship_reads
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
-                .as_slice(),
-            &[(
-                "agent:test".to_string(),
-                deterministic_relationship_id.clone()
-            )],
-            "single-agent planning must use one deterministic relationship owner"
+                .is_empty(),
+            "an unselected relationship must not become an inferred relationship owner"
         );
         assert!(!matches!(
             single_agent_plan.outcome.self_authored_core_result,
@@ -5111,8 +5337,14 @@ mod tests {
         .expect("unstable exact relationship planning");
         assert!(unstable_plan.planned_effects.iter().any(|effect| matches!(
             effect,
-            SelfRuntimePlannedEffectV1::SetMentalPrivacy { scope_id, .. }
+            SelfRuntimePlannedEffectV1::SetMentalPrivacy { scope_id, value }
                 if scope_id == exact_relationship_id
+                    && value.boundary_persona.posture == crate::memory::BoundaryPersonaPosture::Guarded
+        )));
+        assert!(!unstable_plan.planned_effects.iter().any(|effect| matches!(
+            effect,
+            SelfRuntimePlannedEffectV1::SetSelfModel { .. }
+                | SelfRuntimePlannedEffectV1::SetOuterVoice { .. }
         )));
         assert!(!matches!(
             unstable_plan.outcome.self_authored_core_result,
@@ -5127,6 +5359,7 @@ mod tests {
             world_context_at: 17,
             world_sense_at: 16,
             autonomy_strategy_at: 17,
+            subject_persona_evidence_at: 19,
             recent_persona_evidence_at: 19,
             self_model_at: 10,
             self_authored_core_at: 9,
@@ -5135,6 +5368,7 @@ mod tests {
             has_inner_life: true,
             has_world_sense: true,
             has_autonomy_strategy: true,
+            has_subject_persona_evidence: true,
             has_recent_persona_evidence: true,
         }
     }
@@ -5731,14 +5965,14 @@ mod tests {
             outer_voice: None,
             mental_privacy_state: None,
             recent_persona_evidence: None,
+            subject_persona_evidence: None,
             sandbox_probe_text: None,
             active_relationship_scope_id: "rel:chat_channel:chat-1".to_string(),
             active_relationship_channel: "chat_channel".to_string(),
             prior_user_channel: "chat_channel".to_string(),
             world_snapshot: crate::memory::WorldSnapshot {
-                weekday: "Thu".to_string(),
-                hour: 10,
-                day_phase: "morning".to_string(),
+                now_secs: 42,
+                user_local_time: None,
                 interaction_mode: "chat".to_string(),
                 activity_rhythm: "active".to_string(),
                 situational_pull: "coding".to_string(),
@@ -5801,6 +6035,7 @@ mod tests {
             ..crate::memory::AutonomyStrategy::default()
         });
         let payload = SelfRuntimeJobPayload {
+            user_local_time: None,
             trigger: SelfRuntimeTrigger::PostReply,
             source_channel: "chat_channel".to_string(),
             user_content: "hi".to_string(),
@@ -5902,6 +6137,7 @@ mod tests {
         let continuity_capsule_store = StubContinuityCapsuleStore::default();
         let task_run_store = StubTaskRunStore::new(Vec::new());
         let payload = SelfRuntimeJobPayload {
+            user_local_time: None,
             trigger: SelfRuntimeTrigger::PostReply,
             source_channel: "chat_channel".to_string(),
             user_content: "继续把 continuity capsule 收口".to_string(),
@@ -5967,6 +6203,7 @@ mod tests {
         let continuity_capsule_store = StubContinuityCapsuleStore::default();
         let task_run_store = StubTaskRunStore::new(Vec::new());
         let payload = SelfRuntimeJobPayload {
+            user_local_time: None,
             trigger: SelfRuntimeTrigger::IdleTick,
             source_channel: "self_runtime_idle".to_string(),
             user_content: String::new(),
@@ -6197,13 +6434,13 @@ mod tests {
             .contains(&"boundary_persona".to_string()));
         assert!(decision
             .self_model_sources
-            .contains(&"recent_persona_evidence".to_string()));
+            .contains(&"subject_persona_evidence".to_string()));
         assert!(decision
             .self_continuity_sources
             .contains(&"world_sense".to_string()));
         assert!(decision
             .self_continuity_sources
-            .contains(&"recent_persona_evidence".to_string()));
+            .contains(&"subject_persona_evidence".to_string()));
         assert!(decision
             .outer_voice_sources
             .contains(&"autonomy_strategy".to_string()));
@@ -6312,7 +6549,12 @@ mod tests {
         apply_personality_runtime_governance_gate(
             &mut decision,
             &crate::memory::PersonalityRuntimeGovernanceGate {
+                relationship_applicability:
+                    crate::memory::PersonalityRelationshipApplicability::Required,
+                relationship_authority_ready: true,
+                allow_relationship_expression: false,
                 conservative_reply: true,
+                allow_subject_bootstrap: false,
                 allow_dynamic_persona_priority: false,
                 allow_upward_distillation: false,
                 reason_summary: "board core still unstable".to_string(),
@@ -6335,8 +6577,45 @@ mod tests {
         assert!(!decision.refresh_outer_voice);
         assert!(decision.outer_voice_intent.is_empty());
         assert!(decision.outer_voice_sources.is_empty());
-        assert!(decision.refresh_self_continuity);
-        assert!(decision.refresh_boundary_persona);
+        assert!(!decision.refresh_self_continuity);
+        assert!(decision.self_continuity_intent.is_empty());
+        assert!(decision.self_continuity_sources.is_empty());
+        assert!(!decision.refresh_boundary_persona);
+    }
+
+    #[test]
+    fn subject_ready_gate_cannot_enable_relation_local_refresh_or_repair() {
+        let mut decision = SelfRuntimeDecision {
+            refresh_self_model: true,
+            refresh_self_authored_core: true,
+            refresh_boundary_persona: true,
+            boundary_persona_intent: "invent a relationship".into(),
+            refresh_outer_voice: true,
+            outer_voice_intent: "invent a relation voice".into(),
+            outer_voice_sources: vec!["subject_only".into()],
+            ..Default::default()
+        };
+        apply_personality_runtime_governance_gate(
+            &mut decision,
+            &crate::memory::PersonalityRuntimeGovernanceGate {
+                relationship_applicability:
+                    crate::memory::PersonalityRelationshipApplicability::NotApplicable,
+                allow_upward_distillation: true,
+                repair_plan: crate::memory::PersonalityGovernanceRepairPlan {
+                    repair_relationship_constitution: true,
+                    repair_outer_voice: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        assert!(decision.refresh_self_model);
+        assert!(decision.refresh_self_authored_core);
+        assert!(!decision.refresh_boundary_persona);
+        assert!(decision.boundary_persona_intent.is_empty());
+        assert!(!decision.refresh_outer_voice);
+        assert!(decision.outer_voice_intent.is_empty());
+        assert!(decision.outer_voice_sources.is_empty());
     }
 
     #[test]
@@ -6346,7 +6625,12 @@ mod tests {
         apply_personality_runtime_governance_gate(
             &mut decision,
             &crate::memory::PersonalityRuntimeGovernanceGate {
+                relationship_applicability:
+                    crate::memory::PersonalityRelationshipApplicability::Required,
+                relationship_authority_ready: true,
+                allow_relationship_expression: false,
                 conservative_reply: true,
+                allow_subject_bootstrap: false,
                 allow_dynamic_persona_priority: false,
                 allow_upward_distillation: false,
                 reason_summary: "board_core_review_due".to_string(),
@@ -6378,7 +6662,12 @@ mod tests {
         apply_personality_runtime_governance_gate(
             &mut decision,
             &crate::memory::PersonalityRuntimeGovernanceGate {
+                relationship_applicability:
+                    crate::memory::PersonalityRelationshipApplicability::Required,
+                relationship_authority_ready: true,
+                allow_relationship_expression: false,
                 conservative_reply: true,
+                allow_subject_bootstrap: false,
                 allow_dynamic_persona_priority: false,
                 allow_upward_distillation: false,
                 reason_summary: "expression_drift_without_constitution_break".to_string(),
@@ -6514,6 +6803,7 @@ mod tests {
     #[test]
     fn unrelated_post_reply_decision_does_not_refresh_felt_significance() {
         let payload = SelfRuntimeJobPayload {
+            user_local_time: None,
             trigger: SelfRuntimeTrigger::PostReply,
             source_channel: "chat_channel".to_string(),
             user_content: "user turn".to_string(),
@@ -6539,6 +6829,7 @@ mod tests {
     #[test]
     fn factual_or_operational_only_post_reply_does_not_refresh_felt_significance() {
         let payload = SelfRuntimeJobPayload {
+            user_local_time: None,
             trigger: SelfRuntimeTrigger::PostReply,
             source_channel: "chat_channel".to_string(),
             user_content: "user turn".to_string(),
@@ -6571,6 +6862,7 @@ mod tests {
     #[test]
     fn sampled_or_operational_only_idle_tick_does_not_refresh_felt_significance() {
         let sampled_only_payload = SelfRuntimeJobPayload {
+            user_local_time: None,
             trigger: SelfRuntimeTrigger::IdleTick,
             source_channel: "self_runtime_idle".to_string(),
             user_content: String::new(),
@@ -6648,6 +6940,7 @@ mod tests {
     #[test]
     fn meaningful_existing_or_persona_evidence_allows_post_reply_felt_significance_refresh() {
         let payload = SelfRuntimeJobPayload {
+            user_local_time: None,
             trigger: SelfRuntimeTrigger::PostReply,
             source_channel: "chat_channel".to_string(),
             user_content: "user turn".to_string(),
@@ -6685,6 +6978,7 @@ mod tests {
     #[test]
     fn embedded_self_model_gate_rejects_idle_and_operational_only_post_reply() {
         let idle_payload = SelfRuntimeJobPayload {
+            user_local_time: None,
             trigger: SelfRuntimeTrigger::IdleTick,
             source_channel: "self_runtime_idle".to_string(),
             user_content: String::new(),
@@ -6714,6 +7008,7 @@ mod tests {
         assert!(idle_decision.self_model_sources.is_empty());
 
         let post_reply_payload = SelfRuntimeJobPayload {
+            user_local_time: None,
             trigger: SelfRuntimeTrigger::PostReply,
             source_channel: "chat_channel".to_string(),
             user_content: "user turn".to_string(),
@@ -6735,7 +7030,7 @@ mod tests {
         let mut operational_decision = SelfRuntimeDecision {
             refresh_self_model: true,
             self_model_intent: "promote tool-heavy turn".to_string(),
-            self_model_sources: vec!["recent_persona_evidence".to_string()],
+            self_model_sources: vec!["subject_persona_evidence".to_string()],
             ..SelfRuntimeDecision::default()
         };
         apply_embedded_self_model_refresh_gate(
@@ -6752,6 +7047,7 @@ mod tests {
     #[test]
     fn embedded_self_model_gate_allows_promotable_post_reply_and_operator_request() {
         let post_reply_payload = SelfRuntimeJobPayload {
+            user_local_time: None,
             trigger: SelfRuntimeTrigger::PostReply,
             source_channel: "chat_channel".to_string(),
             user_content: "user turn".to_string(),
@@ -6761,14 +7057,16 @@ mod tests {
             now_secs: 1_000,
         };
         let promotable = crate::memory::RecentPersonaEvidence {
-            repeated_relationship_posture: "stable warm boundary".to_string(),
+            sampled_turns: 4,
+            meaningful_turns: 4,
+            repeated_value_orientation: "truth_before_comfort".to_string(),
             updated_at: 200,
             ..crate::memory::RecentPersonaEvidence::default()
         };
         let mut post_reply_decision = SelfRuntimeDecision {
             refresh_self_model: true,
-            self_model_intent: "distill repeated relationship posture".to_string(),
-            self_model_sources: vec!["recent_persona_evidence".to_string()],
+            self_model_intent: "distill repeated subject priority".to_string(),
+            self_model_sources: vec!["subject_persona_evidence".to_string()],
             ..SelfRuntimeDecision::default()
         };
         apply_embedded_self_model_refresh_gate(
@@ -6777,16 +7075,31 @@ mod tests {
             &post_reply_payload,
             Some(&promotable),
         );
+        let relationship_scoped = crate::memory::RecentPersonaEvidence {
+            repeated_relationship_posture: "warm but bounded".to_string(),
+            ..promotable.clone()
+        };
+        let mut relationship_decision = post_reply_decision.clone();
+        apply_embedded_self_model_refresh_gate(
+            &mut relationship_decision,
+            MemorySystemKind::EspCompact,
+            &post_reply_payload,
+            Some(&relationship_scoped),
+        );
+        assert!(!relationship_decision.refresh_self_model);
+        assert!(relationship_decision.self_model_sources.is_empty());
+
         assert!(post_reply_decision.refresh_self_model);
         assert!(post_reply_decision
             .self_model_intent
-            .contains("relationship posture"));
+            .contains("subject priority"));
         assert_eq!(
             post_reply_decision.self_model_sources,
-            vec!["recent_persona_evidence".to_string()]
+            vec!["subject_persona_evidence".to_string()]
         );
 
         let operator_payload = SelfRuntimeJobPayload {
+            user_local_time: None,
             trigger: SelfRuntimeTrigger::OperatorRequested,
             source_channel: "operator".to_string(),
             user_content: String::new(),
@@ -6813,6 +7126,7 @@ mod tests {
     #[test]
     fn upward_distillation_post_reply_runs_inner_conflict_gate_first() {
         let payload = SelfRuntimeJobPayload {
+            user_local_time: None,
             trigger: SelfRuntimeTrigger::PostReply,
             source_channel: "chat_channel".to_string(),
             user_content: "user turn".to_string(),

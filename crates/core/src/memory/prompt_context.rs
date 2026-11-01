@@ -216,7 +216,6 @@ pub fn compile_inhabited_subject_projection(
     let relationship_scope =
         relationship_scope_id(input.mounted_subject_id, input.channel, input.chat_id);
     let shell = compile_subject_shell(SubjectShellCompileInput {
-        now_secs: input.now_secs,
         platform: input.platform,
         device_identity: input.device_identity,
         relationship_scope: &relationship_scope,
@@ -1663,6 +1662,7 @@ pub struct PromptMemoryContextParams<'a> {
     pub memory_system_kind: MemorySystemKind,
     pub system_max_len: usize,
     pub now_secs: u64,
+    pub user_local_time: Option<&'a super::UserLocalTimeContext>,
     pub participation_plan: crate::memory::PromptParticipationPlan,
     pub recent_messages_limit: usize,
     pub load_long_term_memory: bool,
@@ -2473,6 +2473,7 @@ mod tests {
     #[test]
     fn prompt_memory_records_unreadable_layers_as_health_issues() {
         let context = load_prompt_memory_context(PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -2550,6 +2551,7 @@ mod tests {
     #[test]
     fn prompt_memory_records_unreadable_world_snapshot_commitments_as_health_issues() {
         let context = load_prompt_memory_context(PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -2610,6 +2612,7 @@ mod tests {
     #[test]
     fn prompt_memory_records_unreadable_turn_continuity_layers_as_health_issues() {
         let context = load_prompt_memory_context(PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -2766,6 +2769,7 @@ mod tests {
         };
 
         let context = load_prompt_memory_context(PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -2829,6 +2833,7 @@ mod tests {
     #[test]
     fn stage_seed_marks_esp_compact_first_turn_graph() {
         let params = PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -2906,6 +2911,7 @@ mod tests {
             calls: Mutex::new(Vec::new()),
         };
         let mut params = PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -3005,6 +3011,7 @@ mod tests {
         let mental_privacy_store = CountingMentalPrivacyStore::default();
 
         let context = load_prompt_memory_context(PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -3087,6 +3094,7 @@ mod tests {
         let turn_ledger_store = CountingTurnLedgerStore::default();
 
         let context = load_prompt_memory_context(PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -3154,6 +3162,7 @@ mod tests {
         let turn_ledger_store = CountingTurnLedgerStore::default();
 
         let context = load_prompt_memory_context(PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -3236,6 +3245,7 @@ mod tests {
         let mental_privacy_store = CountingMentalPrivacyStore::default();
 
         let context = load_prompt_memory_context(PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -3324,6 +3334,7 @@ mod tests {
         };
 
         let context = load_prompt_memory_context(PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -3424,6 +3435,7 @@ mod tests {
         });
 
         let context = load_prompt_memory_context(PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -4539,7 +4551,7 @@ mod tests {
                 .refresh_digest()
                 .map_err(|error| Error::config("typed_relationship_test_fixture", error.reason))?;
             let mut source = crate::memory::RelationshipSourceConstitutionV1 {
-                schema_version: 1,
+                schema_version: crate::memory::SUBJECT_SOUL_SCHEMA_VERSION,
                 memory_space_id: "space:test".to_string(),
                 relationship_id: relationship_id.to_string(),
                 mounted_subject_id: mounted_subject_id.to_string(),
@@ -5279,6 +5291,7 @@ mod tests {
         )
         .unwrap();
         let mut context = load_prompt_memory_context(PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -5625,6 +5638,7 @@ mod tests {
         let continuity_capsule_store = StubContinuityCapsuleStore::default();
 
         let mut context = load_prompt_memory_context(PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -5819,6 +5833,7 @@ mod tests {
         let continuity_capsule_store = StubContinuityCapsuleStore::default();
 
         let mut context = load_prompt_memory_context(PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -5950,6 +5965,7 @@ mod tests {
         let continuity_capsule_store = StubContinuityCapsuleStore::default();
 
         let context = load_prompt_memory_context(PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: TEST_SUBJECT_ID,
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -6063,6 +6079,7 @@ mod tests {
         let skill_storage = StubSkillStorage::default();
         let continuity_capsule_store = StubContinuityCapsuleStore::default();
         let context = load_prompt_memory_context(PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -6148,6 +6165,7 @@ mod tests {
         let continuity_capsule_store = StubContinuityCapsuleStore::default();
 
         let mut context = load_prompt_memory_context(PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -6290,6 +6308,7 @@ mod tests {
             .unwrap();
 
         let mut context = load_prompt_memory_context(PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -6452,6 +6471,7 @@ mod tests {
             .unwrap();
 
         let mut context = load_prompt_memory_context(PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -6598,6 +6618,7 @@ mod tests {
             .unwrap();
 
         let mut context = load_prompt_memory_context(PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -6714,6 +6735,7 @@ mod tests {
             .unwrap();
 
         let mut context = load_prompt_memory_context(PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -6984,6 +7006,7 @@ mod tests {
             .unwrap();
 
         load_prompt_memory_context(PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -7105,6 +7128,7 @@ mod tests {
             .unwrap();
 
         load_prompt_memory_context(PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -7210,6 +7234,7 @@ mod tests {
             .unwrap();
 
         load_prompt_memory_context(PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",
@@ -7315,6 +7340,7 @@ mod tests {
             .unwrap();
 
         load_prompt_memory_context(PromptMemoryContextParams {
+            user_local_time: None,
             mounted_subject_id: "agent:test",
             chat_id: "chat-1",
             current_channel: "chat_channel",

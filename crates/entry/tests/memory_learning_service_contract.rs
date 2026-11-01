@@ -230,7 +230,7 @@ fn finalize_request() -> MemoryTurnFinalizeRequest {
             external_content_used: false,
             candidate_ids: Vec::new(),
         },
-        learning: bm_sdk::PostTurnLearningInputV2::empty(),
+        learning: bm_sdk::PostTurnLearningInputV3::empty(),
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     }
@@ -458,6 +458,7 @@ fn reopened_service_discovers_durable_capacity_without_an_old_job_report() {
         );
         governor.upsert_agent_tool_registry(tools.clone()).unwrap();
         let spec = ProceduralProducerSpecV1 {
+            method_evaluators: Vec::new(),
             binding_id: "method-author".into(),
             scope: ProceduralProducerScopeV1 {
                 memory_space_id: runtime.memory_space_id().into(),
@@ -470,6 +471,9 @@ fn reopened_service_discovers_durable_capacity_without_an_old_job_report() {
             },
             source_authority: ProceduralProducerSourceAuthorityV1::RuntimeObservation,
             claims: ProceduralProducerClaimsV1 {
+                method_learning_materials: false,
+                method_adoptions: false,
+                method_task_evaluations: false,
                 execution_facts: false,
                 method_declarations: true,
                 usage_feedback: false,
@@ -504,7 +508,10 @@ fn reopened_service_discovers_durable_capacity_without_an_old_job_report() {
             let mut input = finalize_request();
             input.turn.turn_id = format!("capacity-{ordinal}");
             input.turn.subject = runtime.subject_id().into();
-            input.learning = PostTurnLearningInputV2 {
+            input.learning = PostTurnLearningInputV3 {
+                method_learning_inputs: Vec::new(),
+                method_adoptions: Vec::new(),
+                method_task_evaluations: Vec::new(),
                 agent_tool_feedback: vec![AgentToolUsageFeedbackV3 {
                     registry_ref: tools.registry_ref(),
                     tool_id: "validate".into(),
@@ -519,7 +526,7 @@ fn reopened_service_discovers_durable_capacity_without_an_old_job_report() {
                         external_content: false,
                     }],
                 }],
-                ..PostTurnLearningInputV2::empty()
+                ..PostTurnLearningInputV3::empty()
             };
             let submitted = runtime
                 .finalize_turn_with_procedural_evidence(&capability, input)

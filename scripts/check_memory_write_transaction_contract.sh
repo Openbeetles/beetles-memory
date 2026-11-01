@@ -288,6 +288,7 @@ if rg -n "commit_governed_(memory|graph_repair)_transaction" crates \
   --glob '!**/tests/**' \
   --glob '!crates/sdk/src/store_internal/platform.rs' \
   --glob '!crates/sdk/src/store_internal/post_turn_governance.rs' \
+  --glob '!crates/sdk/src/store_internal/post_turn_governance/**' \
   --glob '!crates/sdk/src/store_internal/procedural_feedback.rs' \
   --glob '!crates/sdk/src/store_internal/subject_soul.rs' \
   --glob '!crates/sdk/src/runtime.rs'; then

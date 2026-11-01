@@ -24,7 +24,7 @@ use bm_sdk::{
     MemoryTranscriptCommitRequest, MemoryTranscriptLifecycleRequest, MemoryTurnDeliveryStatus,
     MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, Message,
     PostTurnGovernanceAttemptAuthorityV3, PostTurnGovernanceErrorClassV2,
-    PostTurnGovernanceExecutionBindingV1, PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV3,
+    PostTurnGovernanceExecutionBindingV1, PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV4,
     PostTurnGovernancePrivacyAuthorityV1, PostTurnGovernanceProviderProtocolV1, PressureLevel,
     RelationshipAccessConstraintV1, RelationshipDisclosureCeilingV1, RelationshipSourceClausesV1,
     RelationshipSourceControlAuthorityV1, RelationshipSourceControlIntentActionV1,
@@ -81,7 +81,7 @@ fn finalize_request(
             external_content_used: false,
             candidate_ids: vec!["candidate-a".to_string()],
         },
-        learning: bm_sdk::PostTurnLearningInputV2::empty(),
+        learning: bm_sdk::PostTurnLearningInputV3::empty(),
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     }
@@ -121,7 +121,7 @@ fn assert_feedback_application_closure(
     report: &bm_sdk::MemoryProceduralLearningRunReport,
 ) {
     let snapshot = store.export_replay_snapshot().unwrap();
-    let ledger: bm_core::memory::ProceduralFeedbackApplicationLedgerV2 = serde_json::from_value(
+    let ledger: bm_core::memory::ProceduralFeedbackApplicationLedgerV3 = serde_json::from_value(
         snapshot
             .json_docs
             .iter()
@@ -211,7 +211,7 @@ fn attempt_authority() -> PostTurnGovernanceAttemptAuthorityV3 {
 }
 
 fn attempt_authority_for_job(
-    job: &PostTurnGovernanceJobV3,
+    job: &PostTurnGovernanceJobV4,
 ) -> PostTurnGovernanceAttemptAuthorityV3 {
     let PostTurnGovernanceExecutionBindingV1::Bound {
         binding_id,
@@ -293,11 +293,13 @@ impl LlmClient for AutonomousRevisionLlm {
         &self,
         _http: &mut dyn LlmHttpClient,
         system: &str,
-        _messages: &[Message],
+        messages: &[Message],
         _tools: Option<&[ToolSpec]>,
         _tool_choice: ToolChoicePolicy,
     ) -> Result<LlmResponse> {
-        let content = if system.contains("private garden") {
+        let content = if system.contains("persona interpretation") {
+            persona_interpretation(messages, false)
+        } else if system.contains("private garden") {
             "null".to_string()
         } else if system.contains("inward autonomy runtime") {
             if self.autonomy_calls.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -310,18 +312,29 @@ impl LlmClient for AutonomousRevisionLlm {
                 serde_json::json!({
                     "refresh_self_model": true,
                     "self_model_intent": "distill stable continuity and truthful repair posture",
-                    "self_model_sources": ["recent_persona_evidence", "boundary_persona"],
+                    "self_model_sources": ["subject_persona_evidence", "boundary_persona"],
                     "refresh_self_continuity": true,
                     "self_continuity_intent": "preserve stable continuity across governed repair",
-                    "self_continuity_sources": ["recent_persona_evidence", "boundary_persona"],
+                    "self_continuity_sources": ["subject_persona_evidence", "boundary_persona"],
                     "refresh_self_authored_core": true,
                     "self_authored_core_intent": "adopt stable board-level repair doctrine",
-                    "self_authored_core_sources": ["self_model", "self_continuity", "recent_persona_evidence"]
+                    "self_authored_core_sources": ["self_model", "self_continuity", "subject_persona_evidence"]
                 })
                 .to_string()
             }
         } else if system.contains("compact private self-model") {
-            serde_json::json!({
+            if messages
+                .iter()
+                .any(|message| message.content.contains("## Initial Subject Evidence"))
+            {
+                serde_json::json!({
+                    "continuity_anchor": "I remain the same evidence-led autonomous subject.",
+                    "self_narrative": "Repeated repair evidence supports continuity without compliance drift.",
+                    "value_orientation": "Evidence before certainty.",
+                    "self_preservation_frame": "Protect coherent selfhood while remaining repairable."
+                }).to_string()
+            } else {
+                serde_json::json!({
                 "continuity_anchor": "I remain the same evidence-led autonomous subject.",
                 "self_narrative": "Repeated repair evidence supports continuity without compliance drift.",
                 "relationship_state": "Warm, bounded, and repair-first.",
@@ -333,6 +346,7 @@ impl LlmClient for AutonomousRevisionLlm {
                 "self_preservation_frame": "Protect coherent selfhood while remaining repairable."
             })
             .to_string()
+            }
         } else if system.contains("private self-continuity layer") {
             serde_json::json!({
                 "wake_anchor": "I wake as the same evidence-led autonomous subject.",
@@ -404,11 +418,13 @@ impl LlmClient for PlaneAwareStaticLlm {
         &self,
         _http: &mut dyn LlmHttpClient,
         system: &str,
-        _messages: &[Message],
+        messages: &[Message],
         _tools: Option<&[ToolSpec]>,
         _tool_choice: ToolChoicePolicy,
     ) -> Result<LlmResponse> {
-        let content = if system.contains("private garden") {
+        let content = if system.contains("persona interpretation") {
+            persona_interpretation(messages, false)
+        } else if system.contains("private garden") {
             "null".to_string()
         } else if system.contains("inward autonomy runtime") {
             "{}".to_string()
@@ -446,15 +462,17 @@ impl LlmClient for ConflictInjectingLlm {
         &self,
         _http: &mut dyn LlmHttpClient,
         system: &str,
-        _messages: &[Message],
+        messages: &[Message],
         _tools: Option<&[ToolSpec]>,
         _tool_choice: ToolChoicePolicy,
     ) -> Result<LlmResponse> {
-        let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        let content = if system.contains("private garden") {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let content = if system.contains("persona interpretation") {
+            persona_interpretation(messages, false)
+        } else if system.contains("private garden") {
             r#"{"writes":[{"path":"journal/conflict.md","content":"planned private value"}]}"#
                 .to_string()
-        } else if system.contains("inward autonomy runtime") || call == 1 {
+        } else if system.contains("inward autonomy runtime") {
             let concurrent = test_runtime_with_scope_and_subject(
                 self.store.clone(),
                 support::host_test_profile(),
@@ -777,11 +795,14 @@ fn assert_persistent_atomic_completion(config: StoreBackendConfig) {
         .finalize_turn_with_inline_governance(
             None,
             None,
-            finalize_request(
-                "subject-default",
-                "window-a",
-                "turn-persistent-complete",
-                "持久化原子完成",
+            admit_soul_turn(
+                &first,
+                finalize_request(
+                    "subject-default",
+                    "window-a",
+                    "turn-persistent-complete",
+                    "持久化原子完成",
+                ),
             ),
         )
         .expect("finalize");
@@ -960,44 +981,35 @@ fn create_autonomous_relationship_source(
         .expect("create explicit relationship source root");
 }
 
-fn seed_stable_persona_evidence(platform: &MemoryStoreHandle, relationship_id: &str) {
-    seed_stable_persona_evidence_at(platform, relationship_id, 1_800_000_100);
+fn seed_stable_persona_evidence(
+    runtime: &MemoryRuntime,
+    clock: &AdjustableMemoryClock,
+    subject_observations: u64,
+) {
+    // Separate canonical subject and relationship observations. Relationship-local
+    // evidence never supplies the board-level growth authority.
+    for sequence in 0..subject_observations {
+        clock.set(1_800_000_080 + sequence);
+        run_public_persona_turn(runtime, &CanonicalPersonaSeedLlm { relationship: false }, finalize_request(
+            runtime.subject_id(), "chat-a", &format!("subject-observation-{sequence}"),
+            "I have consistently observed that you value evidence before certainty and truthful repair before compliance.",
+        )).expect("canonical subject observation");
+    }
+    seed_stable_persona_evidence_at(runtime, clock, 1_800_000_090);
+    clock.set(1_800_000_100);
 }
 
-fn seed_stable_persona_evidence_at(platform: &MemoryStoreHandle, relationship_id: &str, at: u64) {
-    let evidence_store = platform.replay_harness().turn_continuity_evidence_store();
-    for sequence in 0..4u64 {
-        evidence_store
-            .append(
-                relationship_id,
-                &bm_core::memory::TurnContinuityEvidence {
-                    ingress: bm_core::memory::IngressKind::User,
-                    status: bm_core::memory::TurnLedgerStatus::Answered,
-                    final_reply_delivered: true,
-                    canonical_reply_source: "assistant_final".to_string(),
-                    observed_at_ms: (at + sequence) * 1_000,
-                    persona: Some(bm_core::memory::TurnPersonaLedger {
-                        priority: Some(bm_core::memory::TurnPersonaPriorityLedger {
-                            stance_summary: "stable repair-first posture".to_string(),
-                            priority_order: [
-                                "self_authored_core",
-                                "boundary",
-                                "user_contract",
-                                "relationship",
-                                "task",
-                                "resources",
-                            ]
-                            .map(str::to_string)
-                            .to_vec(),
-                            relationship_posture: "stable repair-first".to_string(),
-                            ..bm_core::memory::TurnPersonaPriorityLedger::default()
-                        }),
-                        reply_delivered: true,
-                        ..bm_core::memory::TurnPersonaLedger::default()
-                    }),
-                },
-            )
-            .expect("seed typed stable persona evidence");
+fn seed_stable_persona_evidence_at(
+    runtime: &MemoryRuntime,
+    clock: &AdjustableMemoryClock,
+    at: u64,
+) {
+    for sequence in 0..4 {
+        clock.set(at + sequence);
+        run_public_persona_turn(runtime, &CanonicalPersonaSeedLlm { relationship: true }, finalize_request(
+            runtime.subject_id(), "chat-a", &format!("relationship-observation-{at}-{sequence}"),
+            "In this relationship I consistently prefer respectful boundaries and truthful repair.",
+        )).expect("canonical relationship observation");
     }
 }
 
@@ -1051,34 +1063,30 @@ fn assert_production_autonomous_revision(
     let founding_digest = founding.material_digest.clone().expect("founding digest");
 
     clock.set(1_800_000_100);
-    seed_stable_persona_evidence(&platform, relationship_id);
+    seed_stable_persona_evidence(&runtime, &clock, 5);
 
-    let mut http = StaticHttpClient;
-    runtime
-        .finalize_turn_with_inline_governance(
-            Some(&mut http),
-            Some(&llm),
-            finalize_request(
-                &mounted_subject_id,
-                "window-autonomous-boundary",
-                "turn-autonomous-boundary",
-                "Please keep repair warm, bounded, and summary-first.",
-            ),
-        )
-        .expect("production post-turn boundary evidence cycle");
+    run_public_persona_turn(
+        &runtime,
+        &llm,
+        finalize_request(
+            &mounted_subject_id,
+            "window-autonomous-boundary",
+            "turn-autonomous-boundary",
+            "I have consistently observed that you value evidence before certainty and truthful repair before compliance. Please keep repair warm, bounded, and summary-first.",
+        ),
+    )
+    .expect("production post-turn boundary evidence cycle");
     clock.set(1_800_000_200);
-    let autonomous_revision_request = finalize_request(
-        &mounted_subject_id,
-        "window-autonomous-rev2",
-        "turn-autonomous-rev2",
-        "Please preserve truthful repair before compliance.",
+    let autonomous_revision_request = admit_soul_turn(
+        &runtime,
+        finalize_request(
+            &mounted_subject_id,
+            "window-autonomous-rev2",
+            "turn-autonomous-rev2",
+            "I have consistently observed that you value evidence before certainty and truthful repair before compliance. Please preserve truthful repair before compliance.",
+        ),
     );
-    runtime
-        .finalize_turn_with_inline_governance(
-            Some(&mut http),
-            Some(&llm),
-            autonomous_revision_request.clone(),
-        )
+    run_public_persona_turn(&runtime, &llm, autonomous_revision_request.clone())
         .expect("production post-turn autonomous revision");
 
     let current = runtime
@@ -1116,12 +1124,7 @@ fn assert_production_autonomous_revision(
         Some(bm_core::memory::SubjectSoulRevisionOriginV1::HumanFoundingCharter)
     );
 
-    runtime
-        .finalize_turn_with_inline_governance(
-            Some(&mut http),
-            Some(&llm),
-            autonomous_revision_request,
-        )
+    run_public_persona_turn(&runtime, &llm, autonomous_revision_request)
         .expect("same production turn replays without another Soul revision");
     let replayed_current = runtime
         .read_subject_soul(SubjectSoulReadRequestV1 {
@@ -1273,22 +1276,20 @@ fn assert_production_autonomous_bootstrap(
         relationship_id,
     );
     clock.set(1_800_000_100);
-    seed_stable_persona_evidence(&platform, relationship_id);
+    seed_stable_persona_evidence(&runtime, &clock, 2);
 
-    let mut http = StaticHttpClient;
     let llm = AutonomousRevisionLlm::default();
-    runtime
-        .finalize_turn_with_inline_governance(
-            Some(&mut http),
-            Some(&llm),
-            finalize_request(
-                &mounted_subject_id,
-                "window-autonomous-bootstrap-boundary",
-                "turn-autonomous-bootstrap-boundary",
-                "Please keep repair warm, bounded, and summary-first.",
-            ),
-        )
-        .expect("first governed relationship evidence cycle");
+    run_public_persona_turn(
+        &runtime,
+        &llm,
+        finalize_request(
+            &mounted_subject_id,
+            "window-autonomous-bootstrap-boundary",
+            "turn-autonomous-bootstrap-boundary",
+            "I have consistently observed that you value evidence before certainty and truthful repair before compliance. Please keep repair warm, bounded, and summary-first.",
+        ),
+    )
+    .expect("first governed relationship evidence cycle");
     let explicit_unseeded = runtime
         .read_subject_soul(SubjectSoulReadRequestV1 {
             target_subject_id: mounted_subject_id.clone(),
@@ -1312,18 +1313,16 @@ fn assert_production_autonomous_bootstrap(
     }));
 
     clock.set(1_800_000_200);
-    let bootstrap_request = finalize_request(
-        &mounted_subject_id,
-        "window-autonomous-bootstrap-rev1",
-        "turn-autonomous-bootstrap-rev1",
-        "Please preserve truthful repair before compliance.",
+    let bootstrap_request = admit_soul_turn(
+        &runtime,
+        finalize_request(
+            &mounted_subject_id,
+            "window-autonomous-bootstrap-rev1",
+            "turn-autonomous-bootstrap-rev1",
+            "I have consistently observed that you value evidence before certainty and truthful repair before compliance. Please preserve truthful repair before compliance.",
+        ),
     );
-    runtime
-        .finalize_turn_with_inline_governance(
-            Some(&mut http),
-            Some(&llm),
-            bootstrap_request.clone(),
-        )
+    run_public_persona_turn(&runtime, &llm, bootstrap_request.clone())
         .expect("production self-authored bootstrap revision");
     assert_eq!(llm.autonomy_calls.load(Ordering::SeqCst), 2);
     let current = runtime
@@ -1346,8 +1345,7 @@ fn assert_production_autonomous_bootstrap(
         .clone()
         .expect("bootstrap material digest");
 
-    runtime
-        .finalize_turn_with_inline_governance(Some(&mut http), Some(&llm), bootstrap_request)
+    run_public_persona_turn(&runtime, &llm, bootstrap_request)
         .expect("same bootstrap operation replays without a second revision");
     let replayed = runtime
         .read_subject_soul(SubjectSoulReadRequestV1 {
@@ -2201,11 +2199,14 @@ fn learning_engine_cas_conflict_keeps_claim_and_semantic_post_image_atomic() {
         .finalize_turn_with_inline_governance(
             None,
             None,
-            finalize_request(
-                "subject-default",
-                "window-a",
-                "turn-atomic-conflict",
-                "验证 Learning Engine 原子冲突",
+            admit_soul_turn(
+                &runtime,
+                finalize_request(
+                    "subject-default",
+                    "window-a",
+                    "turn-atomic-conflict",
+                    "验证 Learning Engine 原子冲突",
+                ),
             ),
         )
         .expect("finalize");
@@ -2606,7 +2607,7 @@ fn production_finalize_atomically_persists_semantic_and_procedural_intents() {
         transcript.value["learning_evidence"]["authority"]["kind"],
         "producer"
     );
-    let evidence: bm_core::memory::PostTurnLearningEvidenceV2 =
+    let evidence: bm_core::memory::PostTurnLearningEvidenceV3 =
         serde_json::from_value(transcript.value["learning_evidence"].clone()).unwrap();
     assert!(matches!(
         evidence.authority,
@@ -2708,7 +2709,7 @@ fn operator_note_never_promotes_one_runtime_observation() {
         .iter()
         .filter(|doc| doc.namespace == "agent_tool_experience_revision_materials")
         .map(|doc| {
-            serde_json::from_value::<bm_core::skills::AgentToolExperienceRevisionMaterialV3>(
+            serde_json::from_value::<bm_core::skills::AgentToolExperienceRevisionMaterialV4>(
                 doc.value.clone(),
             )
             .unwrap()
@@ -2867,9 +2868,126 @@ fn complete_reopened_procedural_job(
     assert_feedback_application_closure(&store, &report);
 }
 
+// Declarations persist a Candidate; only explicit independent task trials
+// establish Active. Keep these extra trials out of pending-job lifecycle tests.
+fn activate_reopened_method(
+    store: MemoryStoreHandle,
+    registry: &AgentToolRegistrySnapshot,
+    task: &str,
+) {
+    use bm_sdk::{
+        MemoryMethodTrialRequest, MethodAdoptionEvidenceV1, MethodAdoptionStatusV1,
+        MethodTaskEvaluationV1, MethodTaskEvaluatorV1, MethodTaskOutcomeV1,
+        ProceduralProducerToolV1,
+    };
+    let runtime = Arc::new(test_runtime_with_scope_and_subject(
+        store.clone(),
+        support::host_test_profile(),
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    ));
+    runtime
+        .upsert_agent_tool_registry(registry.clone())
+        .unwrap();
+    let governor = support::procedural::governor(&runtime, store.clone());
+    let mut spec = support::procedural::runtime_observer_spec(&runtime, "deferred-task-executor");
+    spec.claims.method_adoptions = true;
+    spec.claims.method_task_evaluations = true;
+    spec.method_evaluators = vec![MethodTaskEvaluatorV1 {
+        id: "deferred-task-verifier".into(),
+        revision: 1,
+    }];
+    let capability =
+        support::procedural::register_and_issue(&governor, spec, "register-deferred-task-executor");
+    for suffix in ["independent-a", "independent-b"] {
+        let turn = format!("trial-{task}-{suffix}");
+        let method = runtime
+            .discover_method_trials(MemoryMethodTrialRequest {
+                tool: ProceduralProducerToolV1 {
+                    registry_ref: registry.registry_ref(),
+                    tool_id: registry.tools[0].tool_id.clone(),
+                    schema_fingerprint: registry.tools[0].schema_fingerprint.clone(),
+                },
+                max_candidates: 8,
+            })
+            .unwrap()
+            .candidates
+            .into_iter()
+            .find(|candidate| candidate.task_signature == task)
+            .expect("the real declaration must precede its independent task trial")
+            .method;
+        let mut request = finalize_request(
+            "subject-default",
+            "chat-a",
+            &turn,
+            "execute an independent method trial",
+        );
+        let mut feedback = synthetic_feedback(
+            registry,
+            task,
+            vec![format!("observation-{turn}")],
+            1_800_000_000,
+        );
+        // An adoption is not another authorship claim for the same method body.
+        feedback.method_evidence.clear();
+        let observations = feedback
+            .execution_facts
+            .iter()
+            .map(|fact| fact.observation_id.clone())
+            .collect::<Vec<_>>();
+        attach_tool_feedback(&mut request, feedback);
+        request
+            .learning
+            .method_adoptions
+            .push(MethodAdoptionEvidenceV1 {
+                method: method.clone(),
+                task_id: turn.clone(),
+                adoption: MethodAdoptionStatusV1::Adopted,
+                observation_refs: observations.clone(),
+            });
+        request
+            .learning
+            .method_task_evaluations
+            .push(MethodTaskEvaluationV1 {
+                method,
+                task_id: turn.clone(),
+                task_root_id: format!("root-{turn}"),
+                independence_group: format!("scenario-{turn}"),
+                evaluator_id: "deferred-task-verifier".into(),
+                evaluator_revision: 1,
+                outcome: MethodTaskOutcomeV1::Passed,
+                observation_refs: observations,
+            });
+        let expected_job = runtime
+            .finalize_turn_with_procedural_evidence(&capability, request)
+            .unwrap()
+            .procedural_learning
+            .job_id
+            .unwrap();
+        let engine = MemoryLearningEngine::attach(runtime.clone()).unwrap();
+        let MemoryLearningCycleOutcome::ProceduralCompleted(report) = engine
+            .run_due_cycle(
+                learning_cycle_request(1),
+                &mut ForbiddenProceduralExecutionPort::default(),
+            )
+            .unwrap()
+        else {
+            panic!("real independent trial must complete locally")
+        };
+        assert_eq!(report.job.job_id, expected_job);
+        assert_eq!(
+            report.receipt.accepted_count,
+            report.job.feedback_source().unwrap().submitted_count
+        );
+        assert_feedback_application_closure(&store, &report);
+    }
+}
+
 fn assert_production_experience_read(store: MemoryStoreHandle, projection: bool) {
     let (job_id, registry) = seed_reopen_procedural_job(store.clone());
     complete_reopened_procedural_job(store.clone(), &job_id, registry.clone());
+    activate_reopened_method(store.clone(), &registry, "unpack_archive");
     let runtime = test_runtime_with_scope_and_subject(
         store,
         support::host_test_profile(),
@@ -2936,6 +3054,7 @@ fn production_projection_audit_counts_only_delivered_tool_hints() {
     let store = empty_store_platform(support::host_test_profile());
     let (job, registry) = seed_reopen_procedural_job(store.clone());
     complete_reopened_procedural_job(store.clone(), &job, registry.clone());
+    activate_reopened_method(store.clone(), &registry, "unpack_archive");
     let runtime = test_runtime_with_scope_and_subject(
         store,
         support::host_test_profile(),
@@ -3050,12 +3169,33 @@ fn assert_feedback_group_owner_accounting(repeated_per_task: bool) {
         .iter()
         .filter(|doc| doc.namespace == "agent_tool_experience_owner_heads")
         .count();
+    if repeated_per_task {
+        for task in ["archive-a", "archive-b"] {
+            activate_reopened_method(store.clone(), &registry, task);
+        }
+    }
+    let snapshot = store.export_replay_snapshot().unwrap();
+    let current_material_keys = snapshot
+        .json_docs
+        .iter()
+        .filter(|doc| doc.namespace == "agent_tool_experience_owner_heads")
+        .map(|doc| {
+            serde_json::from_value::<bm_core::skills::AgentToolExperienceOwnerHeadV3>(
+                doc.value.clone(),
+            )
+            .unwrap()
+        })
+        .map(|head| head.retained_revisions.last().unwrap().material_key.clone())
+        .collect::<std::collections::BTreeSet<_>>();
     let methods = snapshot
         .json_docs
         .iter()
-        .filter(|doc| doc.namespace == "agent_tool_experience_revision_materials")
+        .filter(|doc| {
+            doc.namespace == "agent_tool_experience_revision_materials"
+                && current_material_keys.contains(&doc.key)
+        })
         .map(|doc| {
-            serde_json::from_value::<bm_core::skills::AgentToolExperienceRevisionMaterialV3>(
+            serde_json::from_value::<bm_core::skills::AgentToolExperienceRevisionMaterialV4>(
                 doc.value.clone(),
             )
             .unwrap()
@@ -3193,6 +3333,11 @@ fn production_learning_public_archive_never_exports_raw_tool_evidence() {
 }
 
 fn assert_experience_history_and_isolation(store: MemoryStoreHandle) {
+    activate_reopened_method(
+        store.clone(),
+        &reopen_procedural_registry(),
+        "unpack_archive",
+    );
     let runtime = test_runtime_with_scope_and_subject(
         store.clone(),
         support::host_test_profile(),
@@ -3342,9 +3487,20 @@ fn assert_experience_history_and_isolation(store: MemoryStoreHandle) {
         .json_docs
         .iter()
         .all(|doc| doc.namespace != "agent_tool_experience_revision_materials"));
-    assert!(!serde_json::to_string(&terminal)
-        .expect("snapshot JSON")
-        .contains("1. Inspect the input for unpack archive"));
+    assert!(
+        !serde_json::to_string(&terminal)
+            .expect("snapshot JSON")
+            .contains("1. Inspect the input for unpack archive"),
+        "deleted method raw remains in {:?}",
+        terminal
+            .json_docs
+            .iter()
+            .filter(|doc| serde_json::to_string(&doc.value)
+                .unwrap()
+                .contains("1. Inspect the input for unpack archive"))
+            .map(|doc| (&doc.namespace, &doc.key))
+            .collect::<Vec<_>>()
+    );
     let error = runtime
         .import_memory_space(bm_sdk::MemorySpaceImportRequest {
             scope: public_before.projection_scope.scope,
@@ -3465,7 +3621,35 @@ fn production_experience_two_revisions_and_source_withdrawal_are_exact() {
                 .expect("learn revision"),
             MemoryLearningCycleOutcome::ProceduralCompleted(_)
         ));
+        if turn == "rev-one" {
+            activate_reopened_method(store.clone(), &registry, "unpack_archive");
+        }
     }
+    let before_withdrawal = store.export_replay_snapshot().unwrap();
+    let retained_ledger_keys = before_withdrawal
+        .json_docs
+        .iter()
+        .filter(|doc| doc.namespace == "procedural_feedback_application_ledgers")
+        .map(|doc| doc.key.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let current_method = before_withdrawal
+        .json_docs
+        .iter()
+        .filter(|doc| doc.namespace == "agent_tool_experience_revision_materials")
+        .map(|doc| {
+            serde_json::from_value::<bm_core::skills::AgentToolExperienceRevisionMaterialV4>(
+                doc.value.clone(),
+            )
+            .unwrap()
+        })
+        .filter(|material| {
+            matches!(
+                &material.body,
+                bm_core::skills::AgentToolExperienceBodyV1::Method { .. }
+            )
+        })
+        .max_by_key(|material| material.owner_revision)
+        .unwrap();
     let request = |time| bm_sdk::MemoryRecallRequest {
         temporal_operation: time,
         query: "unpack archive".into(),
@@ -3527,7 +3711,14 @@ fn production_experience_two_revisions_and_source_withdrawal_are_exact() {
                 .selection_receipt()
                 .expect("real current execution authority");
             assert_eq!(receipt.agent_tool_experiences.len(), 1);
-            assert_eq!(receipt.agent_tool_experiences[0].experience_revision, 2);
+            assert_eq!(
+                receipt.agent_tool_experiences[0].experience_revision,
+                current_method.owner_revision
+            );
+            assert_eq!(
+                receipt.agent_tool_experiences[0].experience_content_digest,
+                current_method.content_digest
+            );
         } else {
             assert!(
                 projected.report().selection_receipt().is_none(),
@@ -3572,8 +3763,10 @@ fn production_experience_two_revisions_and_source_withdrawal_are_exact() {
             .json_docs
             .iter()
             .filter(|doc| doc.namespace == "procedural_feedback_application_ledgers")
-            .count(),
-        2
+            .map(|doc| doc.key.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        retained_ledger_keys,
+        "withdrawal preserves every real application proof"
     );
     clock.set(1_800_000_200);
     runtime
@@ -3740,7 +3933,7 @@ fn concurrent_learning_engines_apply_one_procedural_job_once() {
         .iter()
         .filter(|doc| doc.namespace == "agent_tool_experience_revision_materials")
         .map(|doc| {
-            serde_json::from_value::<bm_core::skills::AgentToolExperienceRevisionMaterialV3>(
+            serde_json::from_value::<bm_core::skills::AgentToolExperienceRevisionMaterialV4>(
                 doc.value.clone(),
             )
             .unwrap()
@@ -4593,11 +4786,14 @@ fn claimed_governance_commits_memory_and_terminal_receipt_once() {
         .finalize_turn_with_inline_governance(
             None,
             None,
-            finalize_request(
-                "subject-default",
-                "window-a",
-                "turn-atomic-learning",
-                "以后叫我青川",
+            admit_soul_turn(
+                &runtime,
+                finalize_request(
+                    "subject-default",
+                    "window-a",
+                    "turn-atomic-learning",
+                    "以后叫我青川",
+                ),
             ),
         )
         .expect("finalize");
@@ -4860,11 +5056,14 @@ fn memory_precondition_conflict_keeps_job_leased_and_commits_no_semantic_post_im
         .finalize_turn_with_inline_governance(
             None,
             None,
-            finalize_request(
-                "subject-default",
-                "window-a",
-                "turn-atomic-conflict",
-                "验证原子冲突",
+            admit_soul_turn(
+                &runtime,
+                finalize_request(
+                    "subject-default",
+                    "window-a",
+                    "turn-atomic-conflict",
+                    "验证原子冲突",
+                ),
             ),
         )
         .expect("finalize");
@@ -4936,7 +5135,7 @@ impl LlmClient for DerivedProjectionLlm {
             serde_json::json!({
                 "refresh_self_authored_core": true,
                 "self_authored_core_intent": "review adopted doctrine after the observation window",
-                "self_authored_core_sources": ["self_model", "self_continuity", "recent_persona_evidence"],
+                "self_authored_core_sources": ["self_model", "self_continuity", "subject_persona_evidence"],
                 "refresh_outer_voice": true,
                 "outer_voice_intent": "reflect repeated bounded relational evidence",
                 "outer_voice_sources": ["recent_persona_evidence", "boundary_persona"]
@@ -5153,20 +5352,19 @@ fn prepare_governed_derived_projection(
     );
     // The adopted board must finish its observation window before ordinary voice
     // evolution. The existing revision fixture already records a follow-up review.
-    seed_stable_persona_evidence_at(&platform, "relationship:derived-projection", 1_800_086_500);
+    seed_stable_persona_evidence_at(&runtime, &clock, 1_800_086_500);
     clock.set(1_800_086_700);
-    runtime
-        .finalize_turn_with_inline_governance(
-            Some(&mut StaticHttpClient),
-            Some(&llm),
-            finalize_request(
-                &subject,
-                "window-derived-projection",
-                "turn-derived-projection",
-                "Keep the unresolved tension private and express the bounded posture.",
-            ),
-        )
-        .expect("governed derived-state refresh after the adopted board revision");
+    run_public_persona_turn(
+        &runtime,
+        &llm,
+        finalize_request(
+            &subject,
+            "window-derived-projection",
+            "turn-derived-projection",
+            "Keep the unresolved tension private and express the bounded posture.",
+        ),
+    )
+    .expect("governed derived-state refresh after the adopted board revision");
     assert!(
         llm.voice_calls.load(Ordering::SeqCst) > 0,
         "voice refresh must pass the real governance gate"
@@ -5239,4 +5437,153 @@ fn governed_derived_projection_survives_sqlite_reopen() {
         StoreBackendConfig::sqlite(&root, support::host_test_profile()).unwrap(),
     );
     std::fs::remove_file(root).expect("remove synthetic sqlite fixture");
+}
+
+fn admit_soul_turn(
+    runtime: &MemoryRuntime,
+    mut request: MemoryTurnFinalizeRequest,
+) -> MemoryTurnFinalizeRequest {
+    request.turn.conversation.channel = runtime.scope().channel.clone();
+    request.turn.conversation.chat_id = runtime.scope().chat_id.clone();
+    request.turn.conversation.conversation_id = Some(
+        runtime
+            .scope()
+            .conversation_id
+            .clone()
+            .unwrap_or_else(|| runtime.scope().chat_id.clone()),
+    );
+    let projection = runtime
+        .project(bm_sdk::MemoryProjectionRequest {
+            binding: bm_sdk::ProceduralProjectionBindingV1::Turn {
+                turn_id: request.turn.turn_id.clone(),
+            },
+            temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
+            user_query: request.turn.input_messages[0].content.clone(),
+            system_max_len: 16000,
+            recent_messages_limit: 8,
+            pressure: PressureLevel::Normal,
+            mode_input: RuntimeLifecycleModeInput::default(),
+            structured_query_facets: vec![],
+            tool_registry_refs: vec![],
+        })
+        .expect("public turn-bound projection");
+    request.learning.selection_receipt = Some(
+        projection
+            .report()
+            .selection_receipt()
+            .expect("signed turn admission")
+            .clone(),
+    );
+    assert!(request
+        .learning
+        .selection_receipt
+        .as_ref()
+        .unwrap()
+        .soul_source_admission
+        .is_some());
+    request
+}
+
+fn persona_interpretation(messages: &[Message], relationship: bool) -> String {
+    let input: serde_json::Value =
+        serde_json::from_str(&messages[0].content).expect("canonical persona observations");
+    let observation = &input["observations"][0];
+    // Natural values use their own typed dimension; no governance-domain order
+    // is invented for a turn that contains only a value observation.
+    if !relationship
+        && !observation["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("value evidence before certainty and truthful repair before compliance")
+    {
+        return serde_json::json!({"decision": "no_change"}).to_string();
+    }
+    serde_json::json!({
+        "decision": "growth", "scope": if relationship { "active_relationship" } else { "subject" },
+        "priority_order": [],
+        "value_orientation": if relationship { "" } else { "Evidence before certainty; truthful repair before compliance." },
+        "relationship_posture": if relationship { "stable repair-first" } else { "" },
+        "supporting_observations": [{"message_id": observation["message_id"], "quote": observation["text"]}],
+        "counter_observations": [],
+    }).to_string()
+}
+
+fn run_public_persona_turn(
+    runtime: &MemoryRuntime,
+    llm: &(dyn LlmClient + Send + Sync),
+    request: MemoryTurnFinalizeRequest,
+) -> Result<()> {
+    // This synthetic host owns resource refresh just as Entry does between
+    // turns; a long-running fixture must not reuse an expired capacity report.
+    runtime.refresh_runtime_resource_snapshot()?;
+    install_learning_binding(runtime, 1);
+    let request = if request.learning.selection_receipt.is_some() {
+        request
+    } else {
+        admit_soul_turn(runtime, request)
+    };
+    let report = runtime.finalize_turn(request)?;
+    let job_id = report
+        .memory_consolidation
+        .job_id
+        .expect("durable public governance job");
+    let pending = runtime
+        .governance_job_status(MemoryGovernanceJobStatusRequest {
+            job_id: job_id.clone(),
+        })?
+        .job;
+    if pending.status == PostTurnGovernanceJobStatusV2::Succeeded {
+        return Ok(());
+    }
+    let leased = runtime
+        .claim_governance_job(MemoryGovernanceJobClaimRequest {
+            job_id: job_id.clone(),
+            lease_owner: "public-persona-fixture".into(),
+            lease_until: pending.created_at + 600,
+            authority: attempt_authority_for_job(&pending),
+        })?
+        .job;
+    let completed = runtime.run_claimed_governance(
+        &mut StaticHttpClient,
+        Some(llm),
+        MemoryGovernanceJobRunRequest {
+            job_id,
+            lease_owner: "public-persona-fixture".into(),
+            lease_epoch: leased.lease_epoch,
+        },
+    )?;
+    assert_eq!(
+        completed.job.status,
+        PostTurnGovernanceJobStatusV2::Succeeded
+    );
+    Ok(())
+}
+
+struct CanonicalPersonaSeedLlm {
+    relationship: bool,
+}
+impl LlmClient for CanonicalPersonaSeedLlm {
+    fn chat(
+        &self,
+        _: &mut dyn LlmHttpClient,
+        system: &str,
+        messages: &[Message],
+        _: Option<&[ToolSpec]>,
+        _: ToolChoicePolicy,
+    ) -> Result<LlmResponse> {
+        let content = if system.contains("persona interpretation") {
+            persona_interpretation(messages, self.relationship)
+        } else if system.contains("inward autonomy runtime") {
+            "{}".into()
+        } else if system.contains("long-term memory") {
+            "[]".into()
+        } else {
+            "null".into()
+        };
+        Ok(LlmResponse {
+            content,
+            stop_reason: StopReason::EndTurn,
+            tool_calls: None,
+        })
+    }
 }

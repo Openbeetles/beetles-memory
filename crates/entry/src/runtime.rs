@@ -20,7 +20,7 @@ use bm_sdk::{
     RuntimeBudgetReport, RuntimeLifecycleModeInput, RuntimeMetricsQuery, RuntimeSkillDetailRequest,
     RuntimeSkillEditRequest, RuntimeSkillListRequest, RuntimeSkillOwnerLocator,
     RuntimeSkillOwningScope, RuntimeSkillRetireRequest, RuntimeSkillSetEnabledRequest,
-    StoreBackendConfig, StoreOpenReport, WorkbenchApiMap, WorkbenchSurface,
+    StoreBackendConfig, StoreOpenReport, UserLocalTimeProvider, WorkbenchApiMap, WorkbenchSurface,
 };
 use sha2::{Digest, Sha256};
 
@@ -97,6 +97,7 @@ impl EntryRuntimeConfig {
 pub struct EntryRuntimeFactory {
     base: EntryRuntimeBaseConfig,
     store: MemoryStoreHandle,
+    user_local_time_provider: Option<Arc<dyn UserLocalTimeProvider>>,
     learning_services: Mutex<Vec<EntryLearningServiceGroup>>,
 }
 
@@ -113,8 +114,24 @@ impl EntryRuntimeFactory {
         Ok(Self {
             base,
             store,
+            user_local_time_provider: None,
             learning_services: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Supplies trusted user-local time for every runtime mounted by this
+    /// factory. The provider is an in-process host capability, not a persisted
+    /// time-zone configuration. Without an override the SDK chooses its
+    /// profile default; a server's OS time zone is not the user's time zone.
+    /// Hosts serving users with different local-time contexts must bind a
+    /// separate factory/provider for each such context.
+    pub fn open_with_user_local_time_provider(
+        base: EntryRuntimeBaseConfig,
+        provider: Arc<dyn UserLocalTimeProvider>,
+    ) -> Result<Self> {
+        let mut factory = Self::open(base)?;
+        factory.user_local_time_provider = Some(provider);
+        Ok(factory)
     }
 
     pub fn runtime_for_scope(&self, scope: EntryRuntimeScope) -> Result<EntryRuntime> {
@@ -128,7 +145,12 @@ impl EntryRuntimeFactory {
             privacy: self.base.privacy.clone(),
             capability: self.base.capability.clone(),
         };
-        EntryRuntime::from_store_handle(config, self.store.clone(), &self.learning_services)
+        EntryRuntime::from_store_handle(
+            config,
+            self.store.clone(),
+            self.user_local_time_provider.clone(),
+            &self.learning_services,
+        )
     }
 
     pub fn runtime_budget(&self) -> RuntimeBudgetReport {
@@ -166,10 +188,24 @@ struct EntryRuntimeManagerState {
 
 impl EntryRuntimeManager {
     pub fn open(base: EntryRuntimeBaseConfig) -> Result<Self> {
-        let factory = EntryRuntimeFactory::open(base)?;
+        Self::from_factory(EntryRuntimeFactory::open(base)?, None)
+    }
+
+    /// Uses an existing factory, including its Store and trusted local-time
+    /// provider, for cached, evicted and subsequently remounted runtimes.
+    pub fn from_factory(
+        factory: EntryRuntimeFactory,
+        requested_max_runtimes: Option<usize>,
+    ) -> Result<Self> {
+        if requested_max_runtimes == Some(0) {
+            return Err(Error::config(
+                "entry_runtime_manager",
+                "requested_max_runtimes must be greater than zero",
+            ));
+        }
         Ok(Self {
             factory,
-            requested_max_runtimes: None,
+            requested_max_runtimes,
             state: Mutex::new(EntryRuntimeManagerState::default()),
         })
     }
@@ -184,12 +220,10 @@ impl EntryRuntimeManager {
                 "requested_max_runtimes must be greater than zero",
             ));
         }
-        let factory = EntryRuntimeFactory::open(base)?;
-        Ok(Self {
-            factory,
-            requested_max_runtimes: Some(requested_max_runtimes),
-            state: Mutex::new(EntryRuntimeManagerState::default()),
-        })
+        Self::from_factory(
+            EntryRuntimeFactory::open(base)?,
+            Some(requested_max_runtimes),
+        )
     }
 
     pub fn runtime_budget(&self) -> RuntimeBudgetReport {
@@ -335,6 +369,7 @@ fn governor_control_runtime(
         .subject_id(runtime.subject_id().to_string())
         .scoped_runtime(scoped_runtime)
         .clock(Arc::clone(&runtime.config().clock))
+        .user_local_time_provider(Arc::clone(&runtime.config().user_local_time_provider))
         .capability_policy(runtime.config().capability_policy.clone())
         .privacy_policy(runtime.config().privacy_policy.clone())
         .audit_sink(Arc::clone(&runtime.config().audit_sink))
@@ -382,9 +417,23 @@ impl EntryRuntime {
         factory.runtime_for_scope(config.runtime_scope())
     }
 
+    /// Opens a standalone Entry runtime using the host's trusted user-local
+    /// presentation of UTC instants. Governance remounts retain this provider.
+    pub fn open_with_user_local_time_provider(
+        config: EntryRuntimeConfig,
+        provider: Arc<dyn UserLocalTimeProvider>,
+    ) -> Result<Self> {
+        let factory = EntryRuntimeFactory::open_with_user_local_time_provider(
+            config.base_config(),
+            provider,
+        )?;
+        factory.runtime_for_scope(config.runtime_scope())
+    }
+
     fn from_store_handle(
         config: EntryRuntimeConfig,
         store: MemoryStoreHandle,
+        user_local_time_provider: Option<Arc<dyn UserLocalTimeProvider>>,
         learning_services: &Mutex<Vec<EntryLearningServiceGroup>>,
     ) -> Result<Self> {
         let capability_policy = enabled_capability_policy(config.capability.clone());
@@ -394,20 +443,22 @@ impl EntryRuntime {
         if let Some(conversation_id) = &config.scope.conversation_id {
             scope = scope.with_conversation_id(conversation_id.clone())?;
         }
-        let runtime = Arc::new(
-            MemoryRuntime::builder()
-                .identity(MemoryIdentity::new(
-                    config.identity.agent_id.clone(),
-                    config.identity.owner_id.clone(),
-                )?)
-                .scope(scope)
-                .store(store.clone())
-                .agent_skill_dirs(agent_skill_dirs_from_env())
-                .capability_policy(capability_policy.clone())
-                .privacy_policy(privacy.clone())
-                .audit_sink(Arc::new(NoopMemoryAuditSink))
-                .build()?,
-        );
+        let builder = MemoryRuntime::builder()
+            .identity(MemoryIdentity::new(
+                config.identity.agent_id.clone(),
+                config.identity.owner_id.clone(),
+            )?)
+            .scope(scope)
+            .store(store.clone())
+            .agent_skill_dirs(agent_skill_dirs_from_env())
+            .capability_policy(capability_policy.clone())
+            .privacy_policy(privacy.clone())
+            .audit_sink(Arc::new(NoopMemoryAuditSink));
+        let builder = match user_local_time_provider {
+            Some(provider) => builder.user_local_time_provider(provider),
+            None => builder,
+        };
+        let runtime = Arc::new(builder.build()?);
         let runtime_budget = runtime.runtime_budget();
         let capability = entry_capability_view(
             runtime_budget.profile,
@@ -1369,7 +1420,7 @@ impl EntryRuntime {
                 lease.report().clone(),
             ));
         }
-        if matches!(&command, AdapterCommand::FinalizeTurn(request) if request.learning.has_feedback())
+        if matches!(&command, AdapterCommand::FinalizeTurn(request) if request.learning.has_authorized_content())
         {
             if let Some(capability) = services.procedural_submission {
                 let matches_principal = context.auth().bearer_principal().is_some_and(|principal|
@@ -1616,3 +1667,7 @@ mod runtime_cache_budget_tests {
 #[cfg(test)]
 #[path = "runtime/procedural_authority_tests.rs"]
 mod procedural_authority_tests;
+
+#[cfg(test)]
+#[path = "runtime/local_time_tests.rs"]
+mod local_time_tests;

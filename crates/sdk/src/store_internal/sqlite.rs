@@ -1398,6 +1398,29 @@ impl SqliteStoreEngine {
                 touched.json.insert((namespace.clone(), key), value);
             }
         }
+        super::transaction::expand_owner_transaction_dependencies(
+            request,
+            capacity,
+            &mut touched,
+            |namespace, key, remaining| {
+                let row: Option<(usize, String)> = connection.query_row(
+                    "SELECT length(CAST(value_json AS BLOB)), value_json FROM bm_kv WHERE namespace = ?1 AND key = ?2",
+                    params![namespace, key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                ).optional().map_err(|error| map_transaction_error("memory_write_transaction", error))?;
+                row.map(|(bytes, raw)| {
+                    if bytes > remaining {
+                        return Err(store_budget_error(
+                            "Soul dependency exceeds remaining transaction bytes",
+                        ));
+                    }
+                    serde_json::from_str(&raw).map_err(|error| {
+                        Error::config("memory_write_transaction", error.to_string())
+                    })
+                })
+                .transpose()
+            },
+        )?;
         let mut touched_blob_bytes = 0_usize;
         for (namespace, key) in &request.read_set().blobs {
             enforce_logical_key_budget(capacity, namespace, key, "memory_write_transaction")?;

@@ -89,6 +89,10 @@ impl TestRuntime {
                 expected_revision: None,
                 state: ProceduralProducerStateV1::Active,
                 spec: ProceduralProducerSpecV1 {
+                    method_evaluators: vec![MethodTaskEvaluatorV1 {
+                        id: "archive-manifest-verifier".into(),
+                        revision: 1,
+                    }],
                     binding_id: "test-executor".into(),
                     scope: ProceduralProducerScopeV1 {
                         memory_space_id: memory.memory_space_id().into(),
@@ -101,6 +105,9 @@ impl TestRuntime {
                     },
                     source_authority: ProceduralProducerSourceAuthorityV1::RuntimeObservation,
                     claims: ProceduralProducerClaimsV1 {
+                        method_learning_materials: false,
+                        method_adoptions: true,
+                        method_task_evaluations: true,
                         execution_facts: true,
                         method_declarations: true,
                         usage_feedback: true,
@@ -150,6 +157,9 @@ impl TestRuntime {
         };
         spec.claims.execution_facts = false;
         spec.claims.usage_feedback = false;
+        spec.claims.method_adoptions = false;
+        spec.claims.method_task_evaluations = false;
+        spec.method_evaluators.clear();
         let registered = self
             .governor
             .control_procedural_producer(MemoryProceduralProducerControlRequest {
@@ -207,8 +217,14 @@ fn request(runtime: &MemoryRuntime, turn_id: &str) -> MemoryTurnFinalizeRequest 
             turn_id: turn_id.into(),
             conversation: ConversationScope {
                 channel: "sdk.direct".into(),
-                chat_id: "promotion-chat".into(),
-                conversation_id: Some("promotion-chat".into()),
+                chat_id: runtime.scope().chat_id.clone(),
+                conversation_id: Some(
+                    runtime
+                        .scope()
+                        .conversation_id
+                        .clone()
+                        .unwrap_or_else(|| runtime.scope().chat_id.clone()),
+                ),
             },
             subject: runtime.subject_id().into(),
             delivery_status: MemoryTurnDeliveryStatus::Delivered,
@@ -230,10 +246,13 @@ fn request(runtime: &MemoryRuntime, turn_id: &str) -> MemoryTurnFinalizeRequest 
             external_content_used: false,
             candidate_ids: Vec::new(),
         },
-        learning: PostTurnLearningInputV2 {
+        learning: PostTurnLearningInputV3 {
+            method_learning_inputs: Vec::new(),
+            method_adoptions: Vec::new(),
+            method_task_evaluations: Vec::new(),
             tool_call_count: 2,
             agent_tool_feedback: vec![AgentToolUsageFeedbackV3 {
-                registry_ref: registry().registry_ref(),
+                registry_ref: runtime.agent_tool_registries()[0].registry_ref(),
                 tool_id: "archive.unpack".into(),
                 schema_fingerprint: "schema-archive-v1".into(),
                 method_evidence: vec![ToolMethodEvidenceV1 {
@@ -249,11 +268,102 @@ fn request(runtime: &MemoryRuntime, turn_id: &str) -> MemoryTurnFinalizeRequest 
                 }],
                 execution_facts: facts,
             }],
-            ..PostTurnLearningInputV2::empty()
+            ..PostTurnLearningInputV3::empty()
         },
         pressure: PressureLevel::Normal,
         mode_input: RuntimeLifecycleModeInput::default(),
     }
+}
+
+// A declaration only creates a Candidate. Actual task inputs below never create
+// their own authority or reinterpret a tool's success as a task evaluation.
+fn seed_method_candidate(memory: &TestRuntime) {
+    complete_request(memory, request(memory, "method-candidate-declaration"), 1);
+    assert!(
+        skills(memory).is_empty(),
+        "a declared method is not a promoted skill"
+    );
+    let candidates = memory
+        .discover_method_trials(MemoryMethodTrialRequest {
+            tool: ProceduralProducerToolV1 {
+                registry_ref: memory.agent_tool_registries()[0].registry_ref(),
+                tool_id: "archive.unpack".into(),
+                schema_fingerprint: "schema-archive-v1".into(),
+            },
+            max_candidates: 8,
+        })
+        .unwrap();
+    assert!(
+        candidates
+            .candidates
+            .iter()
+            .any(|candidate| candidate.procedure == METHOD),
+        "candidate declaration must genuinely persist before adoption"
+    );
+}
+
+fn task_request(runtime: &MemoryRuntime, turn_id: &str) -> MemoryTurnFinalizeRequest {
+    let mut input = request(runtime, turn_id);
+    let candidates = runtime
+        .discover_method_trials(MemoryMethodTrialRequest {
+            tool: ProceduralProducerToolV1 {
+                registry_ref: runtime.agent_tool_registries()[0].registry_ref(),
+                tool_id: "archive.unpack".into(),
+                schema_fingerprint: "schema-archive-v1".into(),
+            },
+            max_candidates: 8,
+        })
+        .unwrap();
+    let method = match candidates
+        .candidates
+        .into_iter()
+        .find(|candidate| candidate.procedure == METHOD)
+    {
+        Some(candidate) => candidate.method,
+        None => {
+            let projected = project(runtime, turn_id);
+            let receipt = projected
+                .report()
+                .selection_receipt()
+                .expect("active method selection");
+            let selected = receipt
+                .agent_tool_experiences
+                .iter()
+                .find(|selection| selection.tool_id == "archive.unpack")
+                .expect("exact active method");
+            let method = MethodContentRefV1::from_selection(receipt, selected).unwrap();
+            input.learning.selection_receipt = Some(receipt.clone());
+            method
+        }
+    };
+    let observations = input.learning.agent_tool_feedback[0]
+        .execution_facts
+        .iter()
+        .map(|fact| fact.observation_id.clone())
+        .collect::<Vec<_>>();
+    input
+        .learning
+        .method_adoptions
+        .push(MethodAdoptionEvidenceV1 {
+            method: method.clone(),
+            task_id: turn_id.into(),
+            adoption: MethodAdoptionStatusV1::Adopted,
+            observation_refs: observations.clone(),
+        });
+    input
+        .learning
+        .method_task_evaluations
+        .push(MethodTaskEvaluationV1 {
+            method,
+            task_id: turn_id.into(),
+            task_root_id: format!("archive-task-root-{turn_id}"),
+            independence_group: format!("archive-independent-scenario-{turn_id}"),
+            evaluator_id: "archive-manifest-verifier".into(),
+            evaluator_revision: 1,
+            outcome: MethodTaskOutcomeV1::Passed,
+            observation_refs: observations,
+        });
+    input
 }
 
 fn project(runtime: &MemoryRuntime, turn_id: &str) -> MemoryProjectionOutput {
@@ -269,7 +379,7 @@ fn project(runtime: &MemoryRuntime, turn_id: &str) -> MemoryProjectionOutput {
             pressure: PressureLevel::Normal,
             mode_input: RuntimeLifecycleModeInput::default(),
             structured_query_facets: Vec::new(),
-            tool_registry_refs: vec![registry().registry_ref()],
+            tool_registry_refs: vec![runtime.agent_tool_registries()[0].registry_ref()],
         })
         .unwrap()
 }
@@ -303,6 +413,10 @@ fn complete_request_using(
     accepted: u32,
     capability: &MemoryProceduralSubmissionCapability,
 ) -> (String, u32) {
+    // Caller expectation covers feedback groups. Independently submitted task
+    // facts are separate receipt items, and each must actually be accepted.
+    let task_items =
+        input.learning.method_adoptions.len() + input.learning.method_task_evaluations.len();
     let finalized = memory
         .finalize_turn_with_procedural_evidence(capability, input)
         .unwrap();
@@ -321,7 +435,10 @@ fn complete_request_using(
         panic!("official procedural completion required: {outcome:?}");
     };
     assert_eq!(report.job.job_id, expected_job);
-    assert_eq!(report.receipt.accepted_count, accepted);
+    assert_eq!(
+        report.receipt.accepted_count,
+        accepted + u32::try_from(task_items).unwrap()
+    );
     assert_eq!(
         report.receipt.partially_accepted_count,
         u32::from(accepted == 0),
@@ -394,8 +511,9 @@ fn two_accepted_production_turns_create_one_runtime_skill_and_project_it_after_r
         skills(&memory).is_empty(),
         "the production Store starts empty"
     );
+    seed_method_candidate(&memory);
     for turn_id in ["method-source-one", "method-source-two"] {
-        let finalized = memory.submit(request(&memory, turn_id)).unwrap();
+        let finalized = memory.submit(task_request(&memory, turn_id)).unwrap();
         let expected_job = finalized.procedural_learning.job_id.unwrap();
         let engine = MemoryLearningEngine::attach(memory.memory.clone()).unwrap();
         let outcome = engine
@@ -411,16 +529,21 @@ fn two_accepted_production_turns_create_one_runtime_skill_and_project_it_after_r
             panic!("official procedural worker must complete: {outcome:?}");
         };
         assert_eq!(report.job.job_id, expected_job);
-        assert_eq!(report.receipt.accepted_count, 1);
+        assert_eq!(
+            report.receipt.accepted_count,
+            report.job.feedback_source().unwrap().submitted_count,
+            "all actual adoption, evaluation and feedback items must be accepted"
+        );
         assert!(
             report.receipt.changed_count > 0,
             "real accepted owner mutation"
         );
         clock.0.fetch_add(2, Ordering::SeqCst);
         let delivered = project(&memory, "next-execution");
-        assert!(
+        assert_eq!(
             !delivered.provider_payload().agent_tool_hints().is_empty(),
-            "each source produces real governed AgentTool experience, not an empty fixture"
+            turn_id == "method-source-two",
+            "only two independently evaluated adoptions establish a method"
         );
         if turn_id == "method-source-one" {
             assert!(
@@ -430,7 +553,7 @@ fn two_accepted_production_turns_create_one_runtime_skill_and_project_it_after_r
         }
     }
     let promoted = skills(&memory);
-    assert_eq!(promoted.len(), 1, "two accepted independent turns must create one Runtime owner without a seed or public create");
+    assert_eq!(promoted.len(), 1, "two independently evaluated task turns must promote the actual Candidate through the official owner");
     let locator = promoted[0].locator.clone();
     assert_eq!(locator.owner_revision(), 1);
     assert!(promoted[0].enabled);
@@ -444,7 +567,7 @@ fn two_accepted_production_turns_create_one_runtime_skill_and_project_it_after_r
         .provider_payload()
         .system_memory_block()
         .contains("Verify extracted files"));
-    complete_request(&memory, request(&memory, "method-source-three"), 1);
+    complete_request(&memory, task_request(&memory, "method-source-three"), 1);
     assert_eq!(
         skills(&memory)[0].locator,
         locator,
@@ -461,7 +584,10 @@ fn two_accepted_production_turns_create_one_runtime_skill_and_project_it_after_r
         .clone();
     let mut use_request = request(&memory, "promoted-usage");
     use_request.turn.tool_observations.clear();
-    use_request.learning = PostTurnLearningInputV2 {
+    use_request.learning = PostTurnLearningInputV3 {
+        method_learning_inputs: Vec::new(),
+        method_adoptions: Vec::new(),
+        method_task_evaluations: Vec::new(),
         selection_receipt: Some(selection),
         runtime_skill_feedback: vec![RuntimeSkillUsageFeedbackV1 {
             locator: selected.locator,
@@ -469,7 +595,7 @@ fn two_accepted_production_turns_create_one_runtime_skill_and_project_it_after_r
             outcome: ProceduralExecutionOutcomeV1::Succeeded,
             observation_ref: "execution-promoted-usage".into(),
         }],
-        ..PostTurnLearningInputV2::empty()
+        ..PostTurnLearningInputV3::empty()
     };
     assert_eq!(complete_request(&memory, use_request, 1).1, 1);
     let used = skills(&memory).remove(0);
@@ -509,8 +635,9 @@ fn pfi2_governed_method_source_cannot_register_as_a_usage_witness() {
         let mut store = support::open_memory_store(config.clone()).unwrap();
         let clock = Arc::new(Clock(AtomicU64::new(1_800_000_000)));
         let memory = runtime(store.clone(), clock.clone());
+        seed_method_candidate(&memory);
         for id in ["witness-positive-a", "witness-positive-b"] {
-            complete_request(&memory, request(&memory, id), 1);
+            complete_request(&memory, task_request(&memory, id), 1);
             clock.0.fetch_add(2, Ordering::SeqCst);
         }
         assert!(!skills(&memory).is_empty(), "real selectable runtime skill");
@@ -577,6 +704,9 @@ fn pfi2_governed_method_source_cannot_register_as_a_usage_witness() {
             "rejected grant writes nothing"
         );
         spec.claims.usage_feedback = false;
+        spec.claims.method_adoptions = false;
+        spec.claims.method_task_evaluations = false;
+        spec.method_evaluators.clear();
         let registered = memory
             .governor
             .control_procedural_producer(MemoryProceduralProducerControlRequest {
@@ -615,7 +745,10 @@ fn pfi2_governed_method_source_cannot_register_as_a_usage_witness() {
                 .clone();
             let mut input = request(&memory, "source-usage-negative");
             input.turn.tool_observations.clear();
-            input.learning = PostTurnLearningInputV2 {
+            input.learning = PostTurnLearningInputV3 {
+                method_learning_inputs: Vec::new(),
+                method_adoptions: Vec::new(),
+                method_task_evaluations: Vec::new(),
                 selection_receipt: Some(selection),
                 runtime_skill_feedback: vec![RuntimeSkillUsageFeedbackV1 {
                     locator: selected.locator,
@@ -623,7 +756,7 @@ fn pfi2_governed_method_source_cannot_register_as_a_usage_witness() {
                     outcome: ProceduralExecutionOutcomeV1::Succeeded,
                     observation_ref: "not-executed".into(),
                 }],
-                ..PostTurnLearningInputV2::empty()
+                ..PostTurnLearningInputV3::empty()
             };
             let before_submission = store.export_replay_snapshot().unwrap();
             assert!(memory
@@ -850,8 +983,9 @@ fn production_promotion_keeps_one_owner_and_its_sources_on_three_backends() {
         let clock = Arc::new(Clock(AtomicU64::new(1_800_000_000)));
         let memory = Arc::new(runtime(store.clone(), clock.clone()));
         assert!(skills(&memory).is_empty());
+        seed_method_candidate(&memory);
         for turn in ["backend-first", "backend-second"] {
-            let (_, changed) = complete_request(&memory, request(&memory, turn), 1);
+            let (_, changed) = complete_request(&memory, task_request(&memory, turn), 1);
             assert!(changed > 0);
             clock.0.fetch_add(2, Ordering::SeqCst);
         }
@@ -862,7 +996,7 @@ fn production_promotion_keeps_one_owner_and_its_sources_on_three_backends() {
             "each backend materializes the same real production owner"
         );
         assert_eq!(before[0].locator.owner_revision(), 1);
-        complete_request(&memory, request(&memory, "backend-third"), 1);
+        complete_request(&memory, task_request(&memory, "backend-third"), 1);
         assert_eq!(skills(&memory)[0].locator, before[0].locator);
         if config.backend() != StoreBackendKind::InMemory {
             drop(memory);
@@ -886,8 +1020,9 @@ fn pfi2_runtime_usage_requires_its_exact_retained_application_on_reopen() {
         support::open_memory_store(config.clone()).unwrap(),
         clock.clone(),
     );
+    seed_method_candidate(&memory);
     for turn in ["usage-proof-first", "usage-proof-second"] {
-        complete_request(&memory, request(&memory, turn), 1);
+        complete_request(&memory, task_request(&memory, turn), 1);
         clock.0.fetch_add(2, Ordering::SeqCst);
     }
     let projection = project(&memory, "usage-proof-observation");
@@ -899,7 +1034,10 @@ fn pfi2_runtime_usage_requires_its_exact_retained_application_on_reopen() {
         .clone();
     let mut input = request(&memory, "usage-proof-observation");
     input.turn.tool_observations.clear();
-    input.learning = PostTurnLearningInputV2 {
+    input.learning = PostTurnLearningInputV3 {
+        method_learning_inputs: Vec::new(),
+        method_adoptions: Vec::new(),
+        method_task_evaluations: Vec::new(),
         selection_receipt: Some(receipt),
         runtime_skill_feedback: vec![RuntimeSkillUsageFeedbackV1 {
             locator: selected.locator,
@@ -907,7 +1045,7 @@ fn pfi2_runtime_usage_requires_its_exact_retained_application_on_reopen() {
             outcome: ProceduralExecutionOutcomeV1::Succeeded,
             observation_ref: "synthetic-usage-proof".into(),
         }],
-        ..PostTurnLearningInputV2::empty()
+        ..PostTurnLearningInputV3::empty()
     };
     let (usage_job, _) = complete_request(&memory, input, 1);
     assert_eq!(skills(&memory)[0].validated_success_count, 1);
@@ -1014,9 +1152,17 @@ fn weak_different_method_model_and_private_sources_do_not_create_runtime_skills(
         // An unrelated valid source is a real nonempty experience control, but
         // cannot satisfy the other case's exact task/authority/method evidence.
         complete_request(&memory, request(&memory, "positive-control"), 1);
-        assert!(!project(&memory, "before-negative")
-            .provider_payload()
-            .agent_tool_hints()
+        assert!(!memory
+            .discover_method_trials(MemoryMethodTrialRequest {
+                tool: ProceduralProducerToolV1 {
+                    registry_ref: registry().registry_ref(),
+                    tool_id: "archive.unpack".into(),
+                    schema_fingerprint: "schema-archive-v1".into()
+                },
+                max_candidates: 8
+            })
+            .unwrap()
+            .candidates
             .is_empty());
         assert!(skills(&memory).is_empty());
         for turn in ["negative-one", "negative-two"] {
@@ -1075,8 +1221,9 @@ fn pfi2_producer_revocation_fences_current_and_historical_delivery_immediately()
     .unwrap();
     let clock = Arc::new(Clock(AtomicU64::new(1_800_000_000)));
     let memory = runtime(store, clock.clone());
+    seed_method_candidate(&memory);
     for turn in ["first-authorized-source", "second-authorized-source"] {
-        complete_request(&memory, request(&memory, turn), 1);
+        complete_request(&memory, task_request(&memory, turn), 1);
         clock.0.fetch_add(2, Ordering::SeqCst);
     }
     assert!(
@@ -1176,8 +1323,9 @@ fn revoked_inspection_fixture(
     .unwrap();
     let clock = Arc::new(Clock(AtomicU64::new(1_800_000_000)));
     let memory = runtime(store, clock.clone());
+    seed_method_candidate(&memory);
     for turn in ["inspection-source-a", "inspection-source-b"] {
-        complete_request(&memory, request(&memory, turn), 1);
+        complete_request(&memory, task_request(&memory, turn), 1);
         clock.0.fetch_add(2, Ordering::SeqCst);
     }
     let locator = skills(&memory)
@@ -1270,8 +1418,9 @@ fn pfi2_public_skill_detail_exposes_content_not_internal_source_commitments() {
     .unwrap();
     let clock = Arc::new(Clock(AtomicU64::new(1_800_000_000)));
     let memory = runtime(store, clock.clone());
+    seed_method_candidate(&memory);
     for turn in ["detail-proof-a", "detail-proof-b"] {
-        complete_request(&memory, request(&memory, turn), 1);
+        complete_request(&memory, task_request(&memory, turn), 1);
         clock.0.fetch_add(2, Ordering::SeqCst);
     }
     let detail = memory
@@ -1403,8 +1552,9 @@ fn verify_controlled_skill_revision(control: &str) {
     let store = support::open_memory_store(config.clone()).unwrap();
     let clock = Arc::new(Clock(AtomicU64::new(1_800_000_000)));
     let memory = runtime(store.clone(), clock.clone());
+    seed_method_candidate(&memory);
     for turn in ["lifecycle-source-a", "lifecycle-source-b"] {
-        complete_request(&memory, request(&memory, turn), 1);
+        complete_request(&memory, task_request(&memory, turn), 1);
         clock.0.fetch_add(2, Ordering::SeqCst);
     }
     let initial = skills(&memory).remove(0);
@@ -1538,8 +1688,9 @@ fn pfi2_skill_availability_changes_reconcile_exact_revisions_without_losing_the_
         let mut store = support::open_memory_store(config.clone()).unwrap();
         let clock = Arc::new(Clock(AtomicU64::new(1_800_000_000)));
         let memory = runtime(store.clone(), clock.clone());
+        seed_method_candidate(&memory);
         for turn in ["control-source-a", "control-source-b"] {
-            complete_request(&memory, request(&memory, turn), 1);
+            complete_request(&memory, task_request(&memory, turn), 1);
             clock.0.fetch_add(2, Ordering::SeqCst);
         }
         let original = skills(&memory).remove(0);
@@ -1773,8 +1924,9 @@ fn pfi2_reconciliation_pages_reopen_without_reauthorizing_withdrawn_history() {
         let mut store = support::open_memory_store(config.clone()).unwrap();
         let clock = Arc::new(Clock(AtomicU64::new(1_800_000_000)));
         let fixture = runtime(store.clone(), clock.clone());
+        seed_method_candidate(&fixture);
         for turn in ["reconcile-source-a", "reconcile-source-b"] {
-            complete_request(&fixture, request(&fixture, turn), 1);
+            complete_request(&fixture, task_request(&fixture, turn), 1);
             clock.0.fetch_add(2, Ordering::SeqCst);
         }
         let positive = project(&fixture, "reconcile-positive");
@@ -1911,7 +2063,7 @@ fn pfi2_reconciliation_pages_reopen_without_reauthorizing_withdrawn_history() {
 #[cfg(feature = "nonproduction-replay-harness")]
 fn pfi2_new_feedback_never_reuses_fully_withdrawn_method_sources() {
     use bm_core::skills::{
-        AgentToolExperienceBodyV1, AgentToolExperienceRevisionMaterialV3, AgentToolExperienceStatus,
+        AgentToolExperienceBodyV1, AgentToolExperienceRevisionMaterialV4, AgentToolExperienceStatus,
     };
     let path = test_directory("new-feedback-after-withdrawal");
     for backend in ["memory", "file", "sqlite"] {
@@ -1929,17 +2081,21 @@ fn pfi2_new_feedback_never_reuses_fully_withdrawn_method_sources() {
             let mut store = support::open_memory_store(config.clone()).unwrap();
             let clock = Arc::new(Clock(AtomicU64::new(1_800_000_000)));
             let memory = runtime(store.clone(), clock.clone());
-            complete_request(&memory, request(&memory, "withdrawn-a-first"), 1);
+            seed_method_candidate(&memory);
+            complete_request(&memory, task_request(&memory, "withdrawn-a-first"), 1);
             clock.0.fetch_add(2, Ordering::SeqCst);
             if previously_promoted {
-                complete_request(&memory, request(&memory, "withdrawn-a-second"), 1);
+                complete_request(&memory, task_request(&memory, "withdrawn-a-second"), 1);
                 clock.0.fetch_add(2, Ordering::SeqCst);
             }
             assert_eq!(!skills(&memory).is_empty(), previously_promoted);
-            assert!(!project(&memory, "before-withdrawal")
-                .provider_payload()
-                .agent_tool_hints()
-                .is_empty());
+            assert_eq!(
+                !project(&memory, "before-withdrawal")
+                    .provider_payload()
+                    .agent_tool_hints()
+                    .is_empty(),
+                previously_promoted
+            );
             let as_of_time = clock.now_secs();
             let original = memory
                 .governor
@@ -2030,7 +2186,7 @@ fn pfi2_new_feedback_never_reuses_fully_withdrawn_method_sources() {
                         document.namespace == "agent_tool_experience_revision_materials"
                     })
                     .map(|document| {
-                        serde_json::from_value::<AgentToolExperienceRevisionMaterialV3>(
+                        serde_json::from_value::<AgentToolExperienceRevisionMaterialV4>(
                             document.value,
                         )
                         .unwrap()
@@ -2052,7 +2208,7 @@ fn pfi2_new_feedback_never_reuses_fully_withdrawn_method_sources() {
             };
             assert!(!sources.is_empty(), "positive: B was actually accepted");
             assert!(sources.iter().all(|source| {
-                source.source_job_id == new_job && source.execution_refs.is_empty()
+                source.source_job_id() == new_job && source.execution_refs().is_empty()
             }));
             drop(memory);
             if backend != "memory" {
@@ -2101,10 +2257,10 @@ fn pfi2_new_feedback_never_reuses_fully_withdrawn_method_sources() {
 #[cfg(feature = "nonproduction-replay-harness")]
 fn pfi2_reversible_claim_narrowing_restores_exact_applied_method_sources() {
     use bm_core::skills::{
-        AgentToolExperienceBodyV1, AgentToolExperienceRevisionMaterialV3, AgentToolExperienceStatus,
+        AgentToolExperienceBodyV1, AgentToolExperienceRevisionMaterialV4, AgentToolExperienceStatus,
     };
     fn one_call(memory: &MemoryRuntime, id: &str) -> MemoryTurnFinalizeRequest {
-        let mut input = request(memory, id);
+        let mut input = task_request(memory, id);
         input.turn.tool_observations.truncate(1);
         input.learning.tool_call_count = 1;
         input.learning.agent_tool_feedback[0]
@@ -2113,9 +2269,15 @@ fn pfi2_reversible_claim_narrowing_restores_exact_applied_method_sources() {
         input.learning.agent_tool_feedback[0].method_evidence[0]
             .execution_refs
             .truncate(1);
+        for adoption in &mut input.learning.method_adoptions {
+            adoption.observation_refs.truncate(1);
+        }
+        for evaluation in &mut input.learning.method_task_evaluations {
+            evaluation.observation_refs.truncate(1);
+        }
         input
     }
-    fn current_method(store: &MemoryStoreHandle) -> AgentToolExperienceRevisionMaterialV3 {
+    fn current_method(store: &MemoryStoreHandle) -> AgentToolExperienceRevisionMaterialV4 {
         store
             .export_replay_snapshot()
             .unwrap()
@@ -2123,7 +2285,7 @@ fn pfi2_reversible_claim_narrowing_restores_exact_applied_method_sources() {
             .into_iter()
             .filter(|document| document.namespace == "agent_tool_experience_revision_materials")
             .map(|document| {
-                serde_json::from_value::<AgentToolExperienceRevisionMaterialV3>(document.value)
+                serde_json::from_value::<AgentToolExperienceRevisionMaterialV4>(document.value)
                     .unwrap()
             })
             .filter(|material| matches!(material.body, AgentToolExperienceBodyV1::Method { .. }))
@@ -2168,6 +2330,7 @@ fn pfi2_reversible_claim_narrowing_restores_exact_applied_method_sources() {
         let mut store = support::open_memory_store(config.clone()).unwrap();
         let clock = Arc::new(Clock(AtomicU64::new(1_800_000_000)));
         let memory = runtime(store.clone(), clock.clone());
+        seed_method_candidate(&memory);
         complete_request(&memory, one_call(&memory, "restore-source-a"), 1);
         clock.0.fetch_add(2, Ordering::SeqCst);
         let mut spec_b = memory.producer_spec.clone();
@@ -2198,10 +2361,16 @@ fn pfi2_reversible_claim_narrowing_restores_exact_applied_method_sources() {
         else {
             unreachable!()
         };
+        assert!(
+            original_sources
+                .iter()
+                .any(|source| source.source_job_id() != original_sources[0].source_job_id()),
+            "distinct real declaration sources support the method"
+        );
         assert_eq!(
-            original_sources.len(),
+            positive.body.method_usage_contributions().len(),
             2,
-            "two different real producers support the same method"
+            "two independently evaluated tasks support the method"
         );
         let original = memory
             .governor
@@ -2225,9 +2394,13 @@ fn pfi2_reversible_claim_narrowing_restores_exact_applied_method_sources() {
             .unwrap();
         finish_reconciliation(&memory);
         let reduced = current_method(&store);
-        assert_eq!(reduced.status, AgentToolExperienceStatus::Candidate);
+        assert_eq!(reduced.status, AgentToolExperienceStatus::Active,
+            "{backend}: removing one declaration author must preserve independently authorized task outcomes");
+        assert_eq!(reduced.body.method_usage_contributions(), positive.body.method_usage_contributions(),
+            "{backend}: declaration narrowing must preserve every exact adopted and evaluated task witness");
         assert!(
-            matches!(&reduced.body, AgentToolExperienceBodyV1::Method { sources, .. } if sources.len() == 1)
+            matches!(&reduced.body, AgentToolExperienceBodyV1::Method { sources, .. }
+                if sources.len() == 1 && sources.iter().all(|source| original_sources.contains(source)))
         );
         memory
             .governor
@@ -2249,6 +2422,8 @@ fn pfi2_reversible_claim_narrowing_restores_exact_applied_method_sources() {
             matches!(&restored.body, AgentToolExperienceBodyV1::Method { sources, .. } if sources == original_sources)
         );
         assert_eq!(restored.owner_ref, positive.owner_ref);
+        assert_eq!(restored.body.method_usage_contributions(), positive.body.method_usage_contributions(),
+            "{backend}: restoring the declaration cannot invent or replace immutable task witnesses");
         assert!(!project(&memory, "restored-positive")
             .provider_payload()
             .agent_tool_hints()
@@ -2339,8 +2514,9 @@ fn verify_usage_authority_restoration(retired: bool, attack_retained: bool) {
     let clock = Arc::new(Clock(AtomicU64::new(1_800_000_000)));
     let mut store = support::open_memory_store(config.clone()).unwrap();
     let memory = runtime(store.clone(), clock.clone());
+    seed_method_candidate(&memory);
     for id in ["usage-restore-method-a", "usage-restore-method-b"] {
-        complete_request(&memory, request(&memory, id), 1);
+        complete_request(&memory, task_request(&memory, id), 1);
         clock.0.fetch_add(2, Ordering::SeqCst);
     }
     for id in ["usage-restore-fact-a", "usage-restore-fact-b"] {
@@ -2353,7 +2529,10 @@ fn verify_usage_authority_restoration(retired: bool, attack_retained: bool) {
             .clone();
         let mut input = request(&memory, id);
         input.turn.tool_observations.clear();
-        input.learning = PostTurnLearningInputV2 {
+        input.learning = PostTurnLearningInputV3 {
+            method_learning_inputs: Vec::new(),
+            method_adoptions: Vec::new(),
+            method_task_evaluations: Vec::new(),
             selection_receipt: Some(receipt),
             runtime_skill_feedback: vec![RuntimeSkillUsageFeedbackV1 {
                 locator: selected.locator,
@@ -2361,7 +2540,7 @@ fn verify_usage_authority_restoration(retired: bool, attack_retained: bool) {
                 outcome: ProceduralExecutionOutcomeV1::Succeeded,
                 observation_ref: id.into(),
             }],
-            ..PostTurnLearningInputV2::empty()
+            ..PostTurnLearningInputV3::empty()
         };
         complete_request(&memory, input, 1);
         clock.0.fetch_add(2, Ordering::SeqCst);
@@ -2632,7 +2811,7 @@ fn pfi2_finalize_operation_does_not_grant_producer_authority() {
     );
     // A correctly scoped ordinary conversation remains usable without learning authority.
     let mut ordinary = request(&memory, "without-feedback");
-    ordinary.learning = PostTurnLearningInputV2::with_tool_call_count(2);
+    ordinary.learning = PostTurnLearningInputV3::with_tool_call_count(2);
     assert!(
         memory
             .finalize_turn(ordinary)
@@ -2717,8 +2896,9 @@ fn withdrawing_an_earlier_promotion_source_retires_current_and_historical_projec
     let store = support::open_memory_store(config.clone()).unwrap();
     let clock = Arc::new(Clock(AtomicU64::new(1_800_000_000)));
     let memory = Arc::new(runtime(store.clone(), clock.clone()));
+    seed_method_candidate(&memory);
     for turn in ["old-source", "promotion-source"] {
-        complete_request(&memory, request(&memory, turn), 1);
+        complete_request(&memory, task_request(&memory, turn), 1);
         clock.0.fetch_add(2, Ordering::SeqCst);
     }
     let positive = project(&memory, "before-withdrawal");
@@ -2729,6 +2909,30 @@ fn withdrawing_an_earlier_promotion_source_retires_current_and_historical_projec
         .runtime_skills
         .is_empty());
     let before = skills(&memory).remove(0);
+    #[cfg(feature = "nonproduction-replay-harness")]
+    let method_owner = {
+        let image = store.export_replay_snapshot().unwrap();
+        let owner: bm_core::skills::RuntimeSkillOwnerRecord = serde_json::from_value(
+            image
+                .json_docs
+                .iter()
+                .find(|document| {
+                    document.namespace == "runtime_skill_records"
+                        && document.value["owner_ref"]["owner_id"] == before.owner_id
+                })
+                .expect("real promoted owner positive control")
+                .value
+                .clone(),
+        )
+        .unwrap();
+        let bm_core::skills::RuntimeSkillCreationRef::AgentToolExperiencePromotion {
+            experience_owner_ref,
+        } = owner.creation_ref
+        else {
+            panic!("real method promotion required");
+        };
+        experience_owner_ref.owner_id
+    };
     let as_of_time = clock.now_secs();
     // Raw archive/import is available only in the dedicated nonproduction
     // harness profile. Production still exercises withdrawal, history and reopen.
@@ -2764,28 +2968,23 @@ fn withdrawing_an_earlier_promotion_source_retires_current_and_historical_projec
         })
         .is_err());
     #[cfg(feature = "nonproduction-replay-harness")]
-    let retired = {
+    {
         let image = store.export_replay_snapshot().unwrap();
-        let record: bm_core::skills::RuntimeSkillOwnerRecord = serde_json::from_value(
+        assert!(
             image
                 .json_docs
                 .iter()
-                .find(|document| {
-                    document.namespace == "runtime_skill_records"
-                        && document.value["owner_ref"]["owner_id"] == before.owner_id
-                })
-                .expect("actual retained owner, not a public read bypass")
-                .value
-                .clone(),
-        )
-        .unwrap();
-        assert_eq!(
-            record.lifecycle.state,
-            bm_core::skills::RuntimeSkillLifecycleState::Retired
+                .all(|document| document.namespace != "runtime_skill_records"
+                    || document.value["owner_ref"]["owner_id"] != before.owner_id),
+            "DeleteRaw erases the derived owner rather than retaining retired raw"
         );
-        assert!(record.owner_revision > before.locator.owner_revision());
-        record
-    };
+        assert!(
+            image.json_docs.iter().all(|document| document.namespace
+                != "agent_tool_experience_revision_materials"
+                || document.value["owner_ref"]["owner_id"] != method_owner),
+            "the method's immutable raw revisions are erased as well"
+        );
+    }
     #[cfg(feature = "nonproduction-replay-harness")]
     {
         let terminal = store.export_replay_snapshot().unwrap();
@@ -2855,21 +3054,17 @@ fn withdrawing_an_earlier_promotion_source_retires_current_and_historical_projec
     #[cfg(feature = "nonproduction-replay-harness")]
     {
         let image = reopened.export_replay_snapshot().unwrap();
-        let persisted = image
-            .json_docs
-            .iter()
-            .find(|document| {
-                document.namespace == "runtime_skill_records"
-                    && document.key == retired.physical_key
-            })
-            .unwrap();
-        assert_eq!(
-            serde_json::from_value::<bm_core::skills::RuntimeSkillOwnerRecord>(
-                persisted.value.clone()
-            )
-            .unwrap(),
-            retired
+        assert!(
+            image
+                .json_docs
+                .iter()
+                .all(|document| document.namespace != "runtime_skill_records"
+                    || document.value["owner_ref"]["owner_id"] != before.owner_id),
+            "reopen must not reconstruct the deleted derived owner"
         );
+        assert!(image.json_docs.iter().all(|document| document.namespace
+            != "agent_tool_experience_revision_materials"
+            || document.value["owner_ref"]["owner_id"] != method_owner));
     }
     drop(memory);
     drop(reopened);
@@ -2950,8 +3145,9 @@ fn scoped_production_promotions_keep_project_workspace_and_conversation_boundari
             store.clone(),
             scoped_registry.clone(),
         ));
+        seed_method_candidate(&memory);
         for turn in ["scope-first", "scope-second"] {
-            let mut input = request(&memory, turn);
+            let mut input = task_request(&memory, turn);
             input.turn.conversation.conversation_id = Some("conversation-a".into());
             input.learning.agent_tool_feedback[0].registry_ref = scoped_registry.registry_ref();
             complete_request(&memory, input, 1);
@@ -3042,8 +3238,10 @@ fn production_sources_from_different_subjects_never_combine_into_a_runtime_skill
     };
     let a = build("promotion-agent", "promotion-chat");
     let b = build("agent-b", "other-chat");
-    complete_request(&a, request(&a, "a-first"), 1);
-    let mut b_input = request(&b, "b-first");
+    seed_method_candidate(&a);
+    seed_method_candidate(&b);
+    complete_request(&a, task_request(&a, "a-first"), 1);
+    let mut b_input = task_request(&b, "b-first");
     b_input.turn.conversation.chat_id = "other-chat".into();
     b_input.turn.conversation.conversation_id = Some("other-chat".into());
     complete_request(&b, b_input, 1);
@@ -3053,7 +3251,7 @@ fn production_sources_from_different_subjects_never_combine_into_a_runtime_skill
         "two subjects' independent accepted turns do not form repeated evidence"
     );
     clock.0.fetch_add(2, Ordering::SeqCst);
-    complete_request(&a, request(&a, "a-second"), 1);
+    complete_request(&a, task_request(&a, "a-second"), 1);
     assert_eq!(
         skills(&a).len(),
         1,
@@ -3155,8 +3353,9 @@ fn file_and_sqlite_reopen_reject_forged_runtime_promotion_source_commitments() {
             let store = support::open_memory_store(config.clone()).unwrap();
             let clock = Arc::new(Clock(AtomicU64::new(1_800_000_000)));
             let memory = Arc::new(runtime(store.clone(), clock.clone()));
+            seed_method_candidate(&memory);
             for turn in ["open-first", "open-second"] {
-                complete_request(&memory, request(&memory, turn), 1);
+                complete_request(&memory, task_request(&memory, turn), 1);
                 clock.0.fetch_add(2, Ordering::SeqCst);
             }
             assert_eq!(
@@ -3325,4 +3524,249 @@ fn file_and_sqlite_reopen_reject_forged_runtime_promotion_source_commitments() {
         }
     }
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(feature = "nonproduction-replay-harness")]
+fn deleting_only_usage_source_preserves_independently_authored_runtime_skill_content() {
+    use bm_core::skills::{RuntimeSkillLifecycleState, RuntimeSkillOwnerRecord};
+    let path = test_directory("usage-only-source-raw-deletion");
+    let config =
+        StoreBackendConfig::sqlite(path.join("synthetic.db"), support::host_test_profile())
+            .unwrap();
+    let store = support::open_memory_store(config.clone()).unwrap();
+    let clock = Arc::new(Clock(AtomicU64::new(1_800_000_000)));
+    let memory = runtime(store.clone(), clock.clone());
+    const INDEPENDENT_BODY: &str = "1. Inspect the archive manifest\n2. Unpack archive into the selected workspace\n3. Verify extracted files using the independently authored recipe";
+    memory
+        .seed_runtime_skills_for_replay(
+            vec![support::governed_runtime_skill_write(RuntimeSkillWrite {
+                name: "runtime_skill__unpack_archive".into(),
+                topic: "unpack archive".into(),
+                title: "Independent archive recipe".into(),
+                summary: "Unpack archive with validation".into(),
+                content: INDEPENDENT_BODY.into(),
+                citations: vec!["synthetic independently authored recipe".into()],
+                source_chat_id: Some("independent-authoring-chat".into()),
+                observed_at: clock.now_secs(),
+            })],
+            RuntimeSkillOwningScope::Subject {
+                mounted_subject_id: memory.subject_id().into(),
+            },
+        )
+        .unwrap();
+    let delivered = project(&memory, "usage-only-source");
+    let selection = delivered.report().selection_receipt().unwrap().clone();
+    let selected = selection
+        .runtime_skills
+        .first()
+        .expect("the independently authored skill is really delivered")
+        .clone();
+    let mut input = request(&memory, "usage-only-source");
+    input.turn.tool_observations.clear();
+    input.learning = PostTurnLearningInputV3 {
+        selection_receipt: Some(selection),
+        runtime_skill_feedback: vec![RuntimeSkillUsageFeedbackV1 {
+            locator: selected.locator,
+            selected_content_digest: selected.content_digest,
+            outcome: ProceduralExecutionOutcomeV1::Succeeded,
+            observation_ref: "usage-only-observation".into(),
+        }],
+        ..PostTurnLearningInputV3::empty()
+    };
+    complete_request(&memory, input, 1);
+    let owner = |store: &MemoryStoreHandle| {
+        store
+            .export_replay_snapshot()
+            .unwrap()
+            .json_docs
+            .into_iter()
+            .filter(|document| document.namespace == "runtime_skill_records")
+            .map(|document| {
+                serde_json::from_value::<RuntimeSkillOwnerRecord>(document.value).unwrap()
+            })
+            .find(|record| record.procedural_content.procedure == INDEPENDENT_BODY)
+            .expect("deleting only a usage source must preserve the independently authored body")
+    };
+    let before = owner(&store);
+    assert_eq!(
+        before.lifecycle.usage_outcome.succeeded_count, 1,
+        "actual signed usage was committed"
+    );
+    clock.0.fetch_add(2, Ordering::SeqCst);
+    memory
+        .request_transcript_lifecycle(MemoryTranscriptLifecycleRequest {
+            memory_space_id: memory.memory_space_id().into(),
+            channel_id: memory.scope().channel.clone(),
+            conversation_id: memory
+                .scope()
+                .conversation_id
+                .clone()
+                .unwrap_or_else(|| memory.scope().chat_id.clone()),
+            turn_id: Some("usage-only-source".into()),
+            transition: TranscriptLifecycleTransition::DeleteRaw,
+            reason: "delete usage observation, not the independent recipe".into(),
+        })
+        .unwrap();
+    let after = owner(&store);
+    assert_eq!(after.procedural_content, before.procedural_content);
+    assert_eq!(after.intrinsic_contract, before.intrinsic_contract);
+    assert_eq!(after.creation_ref, before.creation_ref);
+    assert_eq!(after.owner_ref, before.owner_ref);
+    assert_eq!(
+        after.lifecycle.state,
+        RuntimeSkillLifecycleState::Retired,
+        "existing usage withdrawal lifecycle remains unchanged"
+    );
+    drop(memory);
+    drop(store);
+    let reopened = support::open_memory_store(config).unwrap();
+    assert_eq!(
+        owner(&reopened),
+        after,
+        "independent content and safe lifecycle survive actual reopen"
+    );
+    drop(reopened);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+#[cfg(feature = "nonproduction-replay-harness")]
+fn successive_source_deletion_accepts_a_proven_already_erased_promotion() {
+    let path = test_directory("successive-source-delete");
+    let config =
+        StoreBackendConfig::sqlite(path.join("synthetic.db"), support::host_test_profile())
+            .unwrap();
+    let store = support::open_memory_store(config.clone()).unwrap();
+    let clock = Arc::new(Clock(AtomicU64::new(1_800_000_000)));
+    let memory = runtime(store.clone(), clock.clone());
+    seed_method_candidate(&memory);
+    for turn in ["successive-source-a", "successive-source-b"] {
+        complete_request(&memory, task_request(&memory, turn), 1);
+        clock.0.fetch_add(2, Ordering::SeqCst);
+    }
+    assert!(
+        !skills(&memory).is_empty(),
+        "a real task-promoted skill precedes deletion"
+    );
+    for turn in ["method-candidate-declaration", "successive-source-b"] {
+        memory
+            .request_transcript_lifecycle(MemoryTranscriptLifecycleRequest {
+                memory_space_id: memory.memory_space_id().into(),
+                channel_id: "sdk.direct".into(),
+                conversation_id: "promotion-chat".into(),
+                turn_id: Some(turn.into()),
+                transition: TranscriptLifecycleTransition::DeleteRaw,
+                reason: "successive removal of two actual source turns".into(),
+            })
+            .expect("an already erased derivation must not prevent deleting its remaining source");
+        clock.0.fetch_add(2, Ordering::SeqCst);
+    }
+    let final_state = store.export_replay_snapshot().unwrap();
+    assert!(final_state
+        .json_docs
+        .iter()
+        .all(|doc| doc.namespace != "runtime_skill_records"));
+    assert!(final_state
+        .json_docs
+        .iter()
+        .all(|doc| doc.namespace != "agent_tool_experience_revision_materials"));
+    drop(memory);
+    drop(store);
+    let reopened = support::open_memory_store(config).unwrap();
+    let mut reopened_state = reopened.export_replay_snapshot().unwrap();
+    let open_event = reopened_state
+        .events
+        .pop()
+        .expect("Store-open lifecycle event");
+    let initial_open = final_state
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == nonproduction_replay_harness::MemoryStoreEventKind::RuntimeLifecycle
+                && event.scope == nonproduction_replay_harness::StoreEventScope::system("open")
+        })
+        .expect("original Store-open event is the nonempty lifecycle control");
+    assert!(
+        !final_state
+            .events
+            .iter()
+            .any(|event| event.event_id == open_event.event_id),
+        "reopen records a fresh lifecycle event identity"
+    );
+    let mut expected_open = initial_open.clone();
+    expected_open.event_id.clone_from(&open_event.event_id);
+    expected_open.timestamp_unix_secs = open_event.timestamp_unix_secs;
+    assert_eq!(
+        open_event, expected_open,
+        "only the normal open event id/time may change; scope, schema and payload remain exact"
+    );
+    assert_eq!(
+        reopened_state, final_state,
+        "all documents, blobs, receipt/tombstone and historical events survive reopen exactly"
+    );
+    drop(reopened);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+#[cfg(feature = "nonproduction-replay-harness")]
+fn successive_source_deletion_rejects_missing_owner_without_creation_withdrawal() {
+    let path = test_directory("missing-promotion-without-source-proof");
+    let database = path.join("synthetic.db");
+    let config = StoreBackendConfig::sqlite(&database, support::host_test_profile()).unwrap();
+    let store = support::open_memory_store(config).unwrap();
+    let clock = Arc::new(Clock(AtomicU64::new(1_800_000_000)));
+    let memory = runtime(store.clone(), clock.clone());
+    seed_method_candidate(&memory);
+    for turn in ["unproven-source-a", "unproven-source-b"] {
+        complete_request(&memory, task_request(&memory, turn), 1);
+        clock.0.fetch_add(2, Ordering::SeqCst);
+    }
+    assert!(
+        !skills(&memory).is_empty(),
+        "the missing owner is an actual committed promotion"
+    );
+    // Synthetic external corruption removes both current lookup rows, but does
+    // not perform any source lifecycle, tombstone or governed deletion.
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    assert!(
+        connection
+            .execute(
+                "DELETE FROM bm_kv WHERE namespace = 'runtime_skill_records'",
+                []
+            )
+            .unwrap()
+            > 0
+    );
+    assert!(
+        connection
+            .execute(
+                "DELETE FROM bm_kv WHERE namespace = 'runtime_skill_scope_manifests'",
+                []
+            )
+            .unwrap()
+            > 0
+    );
+    drop(connection);
+    let before = store.export_replay_snapshot().unwrap();
+    let error = memory
+        .request_transcript_lifecycle(MemoryTranscriptLifecycleRequest {
+            memory_space_id: memory.memory_space_id().into(),
+            channel_id: "sdk.direct".into(),
+            conversation_id: "promotion-chat".into(),
+            turn_id: Some("unproven-source-b".into()),
+            transition: TranscriptLifecycleTransition::DeleteRaw,
+            reason: "missing current owner is not evidence of prior lawful erasure".into(),
+        })
+        .expect_err("missing owner without its exact deleted creation must fail closed");
+    assert_eq!(error.stage(), "procedural_runtime_skill_source_withdrawal");
+    assert_eq!(
+        store.export_replay_snapshot().unwrap(),
+        before,
+        "corruption cannot authorize a partial source deletion"
+    );
+    drop(memory);
+    drop(store);
+    std::fs::remove_dir_all(path).unwrap();
 }
