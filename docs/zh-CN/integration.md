@@ -1,6 +1,8 @@
 # 集成文档
 
-本文描述如何通过 `bm-sdk` 接入0.10.0 源码：post-turn input V3、semantic Job V4、Store v15。已发布 0.9.0 源码使用 input V2 与 Store v14，不提供本文的新合同。当前没有兼容读取或自动迁移；发布源码身份由对应 Git tag 确定。
+本文描述如何通过 `bm-sdk` 接入0.11.0 源码：post-turn input V3、semantic Job V4、Store v16。已发布 0.9.0 源码使用 input V2 与 Store v14，不提供本文的新合同。当前没有兼容读取或自动迁移；发布源码身份由对应 Git tag 确定。
+
+[API 变更](api.md#runtime-操作)所述 0.11.0 合同使用 Store v16 / material v6 / control revision v4，不改变历史 v0.10.0 tag。
 
 ## 1. 选择 Profile
 
@@ -30,7 +32,7 @@ bm-sdk = { path = "crates/sdk", features = ["profile-desktop-macos-embedded-sdk"
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.10.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.10.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.11.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.11.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 每次构建只使用一个 profile feature。Linux desktop、Linux device 与 Linux server 是三个不同部署目标，禁止相互替代。
@@ -174,7 +176,7 @@ Linux/Windows 配置分别增加 `--no-default-features --features desktop-linux
 示例的 `expected_revision: None` 只用于本次新建的易失 Store。持久宿主应保存/查询既有 binding 引用并显式管理其 revision，
 不能在每次启动或每个回合自动重授权限。真实模型配置与凭证分别通过既有 `GovernanceBindingSource`、
 `GovernanceCredentialResolver` 接入产品的同一配置真源；本示例刻意不配置它们。
-当前 API 与 Store 边界见 [0.10.0 源码发布说明](release-notes-0.10.0.md)。
+当前 API 与 Store 边界见 [0.11.0 源码发布说明](release-notes-0.11.0.md)。
 
 system、developer、user、tool message 的最终排序仍归宿主 prompt assembly。
 
@@ -250,7 +252,7 @@ raw credential 永不持久化。
 
 宿主不得自行 claim job、运行 governance transition、拼装 memory mutation，也不得维护第二套
 queue/worker/retry policy。Operator 与 attachment status read 必须携带 SDK 铸造的 typed inspection authority；
-无权或跨主体请求必须在返回 job identity 或 reason detail 前失败。0.10.0 源码只接受 Store v15，对 v14 及更早 schema
+无权或跨主体请求必须在返回 job identity 或 reason detail 前失败。0.11.0 源码只接受 Store v16，对 v15 及更早 schema
 只读拒绝；可丢弃的开发 Store 由 owner 明确重建。Runtime 不自动删除真实数据，也不提供自动迁移或兼容 reader。
 
 `project()` 返回的 `MemoryProjectionReport.audit` 是投影诊断真源，包含 source plane、selected ids、
@@ -307,12 +309,12 @@ control revision；`Supersede` 会清除 confirmation，不把它转移给另一
 
 ### Adapter V2 持久 mutation 结果
 
-Adapter V2 为 `Write` 与 `LongTermMutate` 提供 Store-owned durable operation receipt。
+Adapter V2 为 `Write`、`LongTermMutate` 与 `LongTermPolicy` 提供 Store-owned durable operation receipt。
 首次成功执行返回带 receipt 的 `Accepted`；相同 operation identity 与相同 canonical
 intent 的重试返回带同一 receipt 的终态成功 `Replayed`，不会追加第二次 effect、revision、
 audit 或 event；同 identity 对应不同 intent 则 typed conflict。
 
-durable `Write` 与 `LongTermMutate` 必须由 transport 调用方提供稳定、非敏感的 idempotency
+durable `Write`、`LongTermMutate` 与 `LongTermPolicy` 必须由 transport 调用方提供稳定、非敏感的 idempotency
 key；Adapter 在持久化前对它做哈希，缺 key 时直接拒绝，不会代填一个响应丢失后无法复现的
 一次性 identity。Adapter V1 只接受读取。其它 V2 mutation 被明确标为 non-durable，或由独立
 domain receipt 拥有；调用方应同时读取 Adapter capability report 与 SDK mutation inventory，
@@ -321,7 +323,7 @@ closed，绝不静默驱逐旧 receipt。
 
 `forget_by_query` 这类批量遗忘必须先 dry-run preview，再带 confirmation token 执行。`MemoryLongTermPolicyRequest` 用于“以后不要记这类事情”或暂停某个 scope 的未来长期记忆更新；policy 不 retroactively 删除已接受记录。
 
-Transcript lifecycle 的 raw delete/mask 只处理 conversation evidence。它会报告受影响的 `DerivedMemoryRef`，但撤销对应长期记忆仍然要走 `mutate_long_term_memory`。运行时 Skill 的 edit/retire 只管理 procedural memory 中的 runtime skill，不是普通长期记忆管理面；retire 追加 terminal revision 并保留 lineage，不物理删除 owner。
+0.11.0 中，Transcript raw delete/mask 会原子撤回派生事实证据和 facet/graph 关联。accepted fact 及独立有效证据保留，删除事实仍走 `mutate_long_term_memory`。禁记规则通过 `list_memory_governance_policies` / `get_memory_governance_policy` 查询，再用 exact policy ID/revision 与稳定 operation ID 恢复；多个 Agent 共享 HumanUser actor 不会共享禁记规则。运行时 Skill 的 edit/retire 只管理 procedural memory 中的 runtime skill，不是普通长期记忆管理面；retire 追加 terminal revision 并保留 lineage，不物理删除 owner。
 
 ## 10. 宿主回合生命周期
 
@@ -427,4 +429,4 @@ if catalog.adapter.http.visible {
 8. 导出 opaque archive，将其导入具有完全相同 typed scope 与 policy 的 runtime，并检查 governed archive root。
 9. 对替换后的 scope 运行 operator inspect 和 replay。
 
-历史 [0.9.0 源码说明](release-notes-0.9.0.md)记录了保留 Store v14 的投影变更。0.10.0 源码要求 Store v15，不能把历史“不必重建”结论套用到本次 clean break。
+历史 [0.9.0 源码说明](release-notes-0.9.0.md)记录了保留 Store v14 的投影变更。0.11.0 源码要求 Store v16，不能把历史“不必重建”结论套用到本次 clean break。

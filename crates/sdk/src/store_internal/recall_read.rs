@@ -843,6 +843,11 @@ impl<'a> RecallImmutableReadContext<'a> {
                 ));
             }
         }
+        for material in owner_materials.iter().chain(&dependency_materials) {
+            for source in &material.governed_content.transcript_sources {
+                self.materialize_long_term_transcript_source(source)?;
+            }
+        }
         let closure = MaterializedLongTermOwnerClosure {
             scope_manifest: root,
             head,
@@ -854,6 +859,93 @@ impl<'a> RecallImmutableReadContext<'a> {
         self.long_term_owner_closures
             .insert(owner_ref.clone(), closure.clone());
         Ok(Some(closure))
+    }
+
+    fn materialize_long_term_transcript_source(
+        &mut self,
+        source: &bm_core::memory::TranscriptEvidenceRef,
+    ) -> Result<()> {
+        let subject = source
+            .subject_id
+            .as_deref()
+            .ok_or_else(|| Error::config("recall_source_closure", "source has no exact subject"))?;
+        let key = ConversationKey::new(
+            &source.memory_space_id,
+            &source.channel_id,
+            &source.conversation_id,
+        )?;
+        let physical_key =
+            crate::store_internal::transcript_turn_storage_key(&key, subject, &source.turn_id);
+        let value = self
+            .read_json_value("conversation_transcript", &physical_key)?
+            .ok_or_else(|| Error::config("recall_source_closure", "bound source is missing"))?;
+        let record: TranscriptTurnRecord = serde_json::from_value(value.clone())
+            .map_err(|error| Error::config("recall_source_closure", error.to_string()))?;
+        if record.key != key
+            || record.subject != subject
+            || record.turn_id != source.turn_id
+            || record.sequence == 0
+        {
+            return Err(Error::config(
+                "recall_source_closure",
+                "bound source identity differs",
+            ));
+        }
+        let head_key = ConversationRecallManifest::build(
+            1,
+            &key.memory_space_id,
+            subject,
+            &key.channel_id,
+            &key.conversation_id,
+            0,
+            0,
+        )?
+        .physical_key;
+        let head = self
+            .read_typed_index::<ConversationRecallManifest>(&head_key)?
+            .ok_or_else(|| Error::config("recall_source_closure", "source head is missing"))?;
+        head.validate()?;
+        let page_id = (record.sequence - 1)
+            / u64::try_from(CONVERSATION_TRANSCRIPT_PAGE_SIZE).unwrap_or(u64::MAX);
+        if record.sequence > head.last_sequence || page_id >= head.page_count {
+            return Err(Error::config(
+                "recall_source_closure",
+                "source lies outside its head",
+            ));
+        }
+        let page_key = ConversationTranscriptPageIndex::build(
+            1,
+            &key.memory_space_id,
+            subject,
+            &key.channel_id,
+            &key.conversation_id,
+            &format!("{page_id:020}"),
+            std::iter::empty(),
+        )?
+        .physical_key;
+        let page = self
+            .read_typed_index::<ConversationTranscriptPageIndex>(&page_key)?
+            .ok_or_else(|| Error::config("recall_source_closure", "source page is missing"))?;
+        page.validate()?;
+        let address = page
+            .entries
+            .iter()
+            .find(|entry| entry.namespace == "conversation_transcript" && entry.key == physical_key)
+            .ok_or_else(|| Error::config("recall_source_closure", "source page omits the owner"))?;
+        let expected = super::recall_index::RecallIndexAddress::json(
+            "conversation_transcript",
+            &physical_key,
+            address.revision,
+            record.updated_at,
+            &value,
+        )?;
+        if &expected != address {
+            return Err(Error::config(
+                "recall_source_closure",
+                "source page digest differs",
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn materialize_long_term_historical_scope(
@@ -2625,6 +2717,9 @@ impl RecallReadView {
                 )?
                 .material
                 .to_current_projection()
+                .and_then(|entry| {
+                    crate::runtime::governed_indexes::project_long_term_evidence(self, &entry, &[])
+                })
             })
             .collect()
     }
@@ -4084,6 +4179,8 @@ mod tests {
             owner_ref: long_term_owner_ref(),
             owner_revision,
             governed_content: LongTermMemoryGovernedContent {
+                transcript_sources: Vec::new(),
+                control_barrier_scope_revision: None,
                 kind: LongTermMemoryKind::Fact,
                 topic: "deployment".into(),
                 content: format!("active generation {owner_revision}"),
@@ -4134,6 +4231,7 @@ mod tests {
             successor: Some(second.owner_revision_ref()),
         };
         let mut revision = LongTermMemoryControlRevision {
+            basis: bm_core::memory::LongTermTransitionBasis::ExplicitControl,
             schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
             revision_id: "correct-state-1-r1".into(),
             memory_space_id: "space-1".into(),

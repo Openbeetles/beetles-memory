@@ -101,6 +101,7 @@ fn create_sets_owner_revision_one_and_preserves_optional_source_revision() {
         None,
         &draft("v1", Some(7)),
         NOW,
+        None,
     ));
 
     assert_eq!(entry.owner_revision, 1);
@@ -122,7 +123,7 @@ fn canonical_entity_preserves_only_structured_optional_evidence_family() {
             .into_string();
     governed.canonical_entities[0].evidence_refs[0].evidence_family_group = Some(family.clone());
 
-    let entry = created(plan_long_term_memory_upsert(None, &governed, NOW));
+    let entry = created(plan_long_term_memory_upsert(None, &governed, NOW, None));
     assert_eq!(
         entry.canonical_entities[0].evidence_refs[0].evidence_family_group,
         Some(family)
@@ -132,7 +133,7 @@ fn canonical_entity_preserves_only_structured_optional_evidence_family() {
     invalid.canonical_entities[0].evidence_refs[0].evidence_family_group =
         Some("chat-a".to_string());
     assert_eq!(
-        plan_long_term_memory_upsert(None, &invalid, NOW),
+        plan_long_term_memory_upsert(None, &invalid, NOW, None),
         LongTermMemoryEntryPlan::Rejected(LongTermMemoryEntryRejection::InvalidCanonicalEntity)
     );
 }
@@ -143,10 +144,11 @@ fn exact_source_replay_is_noop_and_does_not_advance_owner_revision() {
         None,
         &draft("v1", Some(7)),
         NOW,
+        None,
     ));
 
     assert!(matches!(
-        plan_long_term_memory_upsert(Some(&entry), &draft("v1", Some(7)), NOW + 100),
+        plan_long_term_memory_upsert(Some(&entry), &draft("v1", Some(7)), NOW + 100, None),
         LongTermMemoryEntryPlan::Noop
     ));
     assert_eq!(entry.owner_revision, 1);
@@ -158,14 +160,15 @@ fn same_lineage_rejects_older_revision_and_same_revision_payload_conflict() {
         None,
         &draft("v1", Some(7)),
         NOW,
+        None,
     ));
 
     assert!(matches!(
-        plan_long_term_memory_upsert(Some(&entry), &draft("older", Some(6)), NOW + 1),
+        plan_long_term_memory_upsert(Some(&entry), &draft("older", Some(6)), NOW + 1, None),
         LongTermMemoryEntryPlan::Rejected(LongTermMemoryEntryRejection::OlderSourceRevision)
     ));
     assert!(matches!(
-        plan_long_term_memory_upsert(Some(&entry), &draft("conflict", Some(7)), NOW + 1),
+        plan_long_term_memory_upsert(Some(&entry), &draft("conflict", Some(7)), NOW + 1, None),
         LongTermMemoryEntryPlan::Rejected(LongTermMemoryEntryRejection::SourceRevisionConflict)
     ));
 }
@@ -176,6 +179,7 @@ fn higher_source_revision_updates_payload_and_advances_owner_once() {
         None,
         &draft("v1", Some(7)),
         NOW,
+        None,
     ));
     let mut incoming = draft("v2", Some(8));
     incoming.canonical_entities = vec![entity(
@@ -190,6 +194,7 @@ fn higher_source_revision_updates_payload_and_advances_owner_once() {
         Some(&entry),
         &incoming,
         NOW + 1,
+        None,
     ));
 
     assert_eq!(updated.owner_revision, 2);
@@ -208,6 +213,7 @@ fn absent_revision_preserves_same_lineage_but_binds_none_to_new_lineage() {
         None,
         &draft("v1", Some(7)),
         NOW,
+        None,
     ));
     let mut same_lineage = draft("v2", None);
     same_lineage.observed_at = Some(NOW + 1);
@@ -215,6 +221,7 @@ fn absent_revision_preserves_same_lineage_but_binds_none_to_new_lineage() {
         Some(&entry),
         &same_lineage,
         NOW + 1,
+        None,
     ));
     assert_eq!(updated.source_revision, Some(7));
 
@@ -225,6 +232,7 @@ fn absent_revision_preserves_same_lineage_but_binds_none_to_new_lineage() {
         Some(&updated),
         &new_lineage,
         NOW + 2,
+        None,
     ));
     assert_eq!(rebound.source_revision, None);
     assert_eq!(rebound.owner_revision, 3);
@@ -236,6 +244,7 @@ fn unspecified_lineage_fields_preserve_existing_source_lineage() {
         None,
         &draft("v1", Some(7)),
         NOW,
+        None,
     ));
     let mut incoming = draft("v2", None);
     incoming.source_chat_id = None;
@@ -247,6 +256,7 @@ fn unspecified_lineage_fields_preserve_existing_source_lineage() {
         Some(&entry),
         &incoming,
         NOW + 1,
+        None,
     ));
 
     assert_eq!(updated.source_chat_id, entry.source_chat_id);
@@ -260,7 +270,7 @@ fn entity_display_label_is_optional_and_blank_normalizes_to_none() {
     let mut incoming = draft("v1", None);
     incoming.canonical_entities[0].display_label = Some("   ".to_string());
 
-    let entry = created(plan_long_term_memory_upsert(None, &incoming, NOW));
+    let entry = created(plan_long_term_memory_upsert(None, &incoming, NOW, None));
 
     assert_eq!(entry.canonical_entities[0].display_label, None);
 }
@@ -271,7 +281,7 @@ fn same_content_reinforcement_unions_entity_aliases_and_evidence() {
     initial
         .supporting_citations
         .push("archive:release#turn=7".to_string());
-    let entry = created(plan_long_term_memory_upsert(None, &initial, NOW));
+    let entry = created(plan_long_term_memory_upsert(None, &initial, NOW, None));
     let mut reinforcement = draft("v1", None);
     reinforcement.observed_at = Some(NOW + 1);
     reinforcement
@@ -289,6 +299,7 @@ fn same_content_reinforcement_unions_entity_aliases_and_evidence() {
         Some(&entry),
         &reinforcement,
         NOW + 1,
+        None,
     ));
 
     assert_eq!(updated.owner_revision, 2);
@@ -302,7 +313,7 @@ fn draft_rejects_forged_or_cross_draft_entity_evidence_and_label_conflicts() {
     let mut forged = draft("v1", None);
     forged.canonical_entities[0].evidence_refs[0].source_kind = "forged".to_string();
     assert!(matches!(
-        plan_long_term_memory_upsert(None, &forged, NOW),
+        plan_long_term_memory_upsert(None, &forged, NOW, None),
         LongTermMemoryEntryPlan::Rejected(LongTermMemoryEntryRejection::InvalidCanonicalEntity)
     ));
 
@@ -310,21 +321,21 @@ fn draft_rejects_forged_or_cross_draft_entity_evidence_and_label_conflicts() {
     forged_group.canonical_entities[0].evidence_refs[0].canonical_evidence_group =
         "forged-group".to_string();
     assert!(matches!(
-        plan_long_term_memory_upsert(None, &forged_group, NOW),
+        plan_long_term_memory_upsert(None, &forged_group, NOW, None),
         LongTermMemoryEntryPlan::Rejected(LongTermMemoryEntryRejection::InvalidCanonicalEntity)
     ));
 
     let mut forged_authority = draft("v1", None);
     forged_authority.canonical_entities[0].evidence_refs[0].source_authority_score += 1;
     assert!(matches!(
-        plan_long_term_memory_upsert(None, &forged_authority, NOW),
+        plan_long_term_memory_upsert(None, &forged_authority, NOW, None),
         LongTermMemoryEntryPlan::Rejected(LongTermMemoryEntryRejection::InvalidCanonicalEntity)
     ));
 
     let mut cross_draft = draft("v1", None);
     cross_draft.canonical_entities[0].evidence_refs = vec![evidence("archive:other#turn=9")];
     assert!(matches!(
-        plan_long_term_memory_upsert(None, &cross_draft, NOW),
+        plan_long_term_memory_upsert(None, &cross_draft, NOW, None),
         LongTermMemoryEntryPlan::Rejected(LongTermMemoryEntryRejection::InvalidCanonicalEntity)
     ));
 
@@ -337,7 +348,7 @@ fn draft_rejects_forged_or_cross_draft_entity_evidence_and_label_conflicts() {
         "transcript:space-a:chat-a:turn-1",
     ));
     assert!(matches!(
-        plan_long_term_memory_upsert(None, &conflicting, NOW),
+        plan_long_term_memory_upsert(None, &conflicting, NOW, None),
         LongTermMemoryEntryPlan::Rejected(LongTermMemoryEntryRejection::EntityLabelConflict)
     ));
 }
@@ -348,6 +359,7 @@ fn old_entry_schema_and_unknown_entity_kind_do_not_decode() {
         None,
         &draft("v1", Some(7)),
         NOW,
+        None,
     ));
     let mut old_entry = serde_json::to_value(entry).expect("serialize entry");
     let object = old_entry.as_object_mut().expect("entry object");
@@ -364,6 +376,7 @@ fn owner_control_mutations_preserve_source_revision_and_noop_on_same_value() {
         None,
         &draft("v1", Some(7)),
         NOW,
+        None,
     ));
 
     assert!(matches!(
@@ -390,6 +403,7 @@ fn evidence_compaction_is_an_owner_mutation_not_a_source_replay() {
         None,
         &draft("v1", Some(7)),
         NOW,
+        None,
     ));
     entry.supporting_citations = vec![
         "turn-2".to_string(),
@@ -413,4 +427,19 @@ fn evidence_compaction_is_an_owner_mutation_not_a_source_replay() {
     assert_eq!(updated.last_confirmed_at, Some(NOW));
     assert_eq!(updated.source_revision, Some(7));
     assert_eq!(updated.owner_revision, entry.owner_revision + 1);
+}
+
+#[test]
+fn factual_citations_preserve_full_identity_and_reject_over_budget() {
+    let mut input = draft("v1", Some(1));
+    let citation = format!(
+        "transcript:space-a/channel/{}/conversation#turn=exact-turn",
+        "x".repeat(160)
+    );
+    input.supporting_citations = vec![citation.clone()];
+    input.canonical_entities.clear();
+    let entry = created(plan_long_term_memory_upsert(None, &input, NOW, None));
+    assert_eq!(entry.supporting_citations, vec![citation]);
+    input.supporting_citations = vec!["x".repeat(2049)];
+    assert!(input.normalized().is_none());
 }

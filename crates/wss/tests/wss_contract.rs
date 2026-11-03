@@ -23,6 +23,8 @@ fn inbound_messages_map_to_adapter_commands() {
             "command.long_term.detail",
             "command.long_term.mutate",
             "command.long_term.policy",
+            "command.long_term.policy.list",
+            "command.long_term.policy.detail",
             "command.transcript.attrs",
             "command.capabilities",
             "subscribe.projection",
@@ -48,6 +50,8 @@ fn inbound_messages_map_to_adapter_commands() {
     assert!(operations.contains(&AdapterOperation::LongTermDetail));
     assert!(operations.contains(&AdapterOperation::LongTermMutate));
     assert!(operations.contains(&AdapterOperation::LongTermPolicy));
+    assert!(operations.contains(&AdapterOperation::LongTermPolicyList));
+    assert!(operations.contains(&AdapterOperation::LongTermPolicyDetail));
     assert!(operations.contains(&AdapterOperation::TranscriptAttrWrite));
     assert!(operations.contains(&AdapterOperation::Capabilities));
 }

@@ -443,6 +443,8 @@ fn parse_capability(raw: &str) -> bm_sdk::Result<EntryOperationCapability> {
         "long_term_list" => EntryOperationCapability::LongTermList,
         "long_term_detail" => EntryOperationCapability::LongTermDetail,
         "long_term_mutate" => EntryOperationCapability::LongTermMutate,
+        "long_term_policy_list" => EntryOperationCapability::LongTermPolicyList,
+        "long_term_policy_detail" => EntryOperationCapability::LongTermPolicyDetail,
         "long_term_policy" => EntryOperationCapability::LongTermPolicy,
         "transcript_attr_write" => EntryOperationCapability::TranscriptAttrWrite,
         "capabilities" => EntryOperationCapability::Capabilities,

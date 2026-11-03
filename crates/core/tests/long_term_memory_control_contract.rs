@@ -61,7 +61,7 @@ impl LongTermMemoryStore for InMemoryLongTermStore {
         let mut changed = 0usize;
         for draft in drafts {
             let id = draft.stable_id().expect("stable id");
-            match plan_long_term_memory_upsert(entries.get(&id), draft, now_secs) {
+            match plan_long_term_memory_upsert(entries.get(&id), draft, now_secs, None) {
                 LongTermMemoryEntryPlan::Created(entry)
                 | LongTermMemoryEntryPlan::Updated(entry) => {
                     entries.insert(id, entry);
@@ -340,6 +340,20 @@ fn apply_long_term_memory_control_mutation(
     Ok(plan.report)
 }
 
+fn policy_identity(
+    operation: bm_core::memory::LongTermControlOperation,
+    time: u64,
+) -> bm_core::memory::MemoryMutationOperationIdentity {
+    bm_core::memory::MemoryMutationOperationIdentity::new(
+        format!("policy-{time}"),
+        "space-user",
+        "agent:assistant-main",
+        "agent:assistant-main",
+        bm_core::memory::MemoryMutationOperationKind::LongTermControl { operation },
+    )
+    .unwrap()
+}
+
 fn apply_long_term_memory_governance_policy_mutation(
     control: &InMemoryControlStore,
     operation: MemoryGovernancePolicyMutation,
@@ -349,7 +363,8 @@ fn apply_long_term_memory_governance_policy_mutation(
 ) -> Result<MemoryGovernancePolicyMutationReport> {
     let plan = plan_long_term_memory_governance_policy_mutation(
         &ReadOnlyControlView(control),
-        operation,
+        operation.clone(),
+        &policy_identity(operation.control_operation(), now_secs),
         reason,
         dry_run,
         now_secs,
@@ -570,6 +585,10 @@ fn governance_planner_returns_write_intent_without_mutating_read_store() {
             },
             expires_at: None,
         },
+        &policy_identity(
+            bm_core::memory::LongTermControlOperation::PolicyPause,
+            NOW_SECS + 2,
+        ),
         "pause_temporary_preference_memory".to_string(),
         false,
         NOW_SECS + 2,
@@ -1520,7 +1539,7 @@ fn resume_and_remove_suppression_only_remove_matching_policy_kind() {
     let resume = apply_long_term_memory_governance_policy_mutation(
         &control,
         MemoryGovernancePolicyMutation::Resume {
-            selector: selector.clone(),
+            target: policy_ref(&control, "pause"),
         },
         "resume_paused_temporary_preference_memory".to_string(),
         false,
@@ -1536,7 +1555,9 @@ fn resume_and_remove_suppression_only_remove_matching_policy_kind() {
 
     let remove_suppression = apply_long_term_memory_governance_policy_mutation(
         &control,
-        MemoryGovernancePolicyMutation::RemoveSuppression { selector },
+        MemoryGovernancePolicyMutation::RemoveSuppression {
+            target: policy_ref(&control, "suppress"),
+        },
         "remove_suppression_temporary_preference_memory".to_string(),
         false,
         NOW_SECS + 11,
@@ -1552,4 +1573,198 @@ fn resume_and_remove_suppression_only_remove_matching_policy_kind() {
         .list_long_term_governance_policies(10)
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn control_pagination_visits_every_matching_record_once_with_default_query() {
+    let store = InMemoryLongTermStore::default();
+    let control = InMemoryControlStore::default();
+    let read_control = ReadOnlyControlView(&control);
+    let mut expected = std::collections::BTreeSet::new();
+    for index in 0..9 {
+        expected.insert(store.seed(draft(
+            LongTermMemoryKind::Preference,
+            &format!("page-topic-{index}"),
+            &format!("Page preference {index}"),
+        )));
+    }
+    for query_limit in [0, 1, 96] {
+        for page_size in [1, 2, 8, 9, 10] {
+            let mut cursor = None;
+            let mut seen = std::collections::BTreeSet::new();
+            loop {
+                let page = list_long_term_memory_control_page(
+                    &store,
+                    &read_control,
+                    LongTermMemoryControlListRequest {
+                        query: LongTermMemoryQuery {
+                            limit: query_limit,
+                            ..Default::default()
+                        },
+                        cursor,
+                        limit: page_size,
+                        view: MemoryLongTermControlView::HostUi,
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    page.total_visible,
+                    expected.len(),
+                    "query limit must not truncate control pagination"
+                );
+                for row in page.records {
+                    assert!(seen.insert(row.record.id), "duplicate record");
+                }
+                cursor = page.next_cursor;
+                if cursor.is_none() {
+                    break;
+                }
+                assert!(seen.len() < expected.len(), "cursor must terminate");
+            }
+            assert_eq!(seen, expected, "pagination skipped a matching owner");
+        }
+    }
+}
+
+#[test]
+fn control_pagination_rejects_unknown_cursor_instead_of_restarting() {
+    let store = InMemoryLongTermStore::default();
+    let control = InMemoryControlStore::default();
+    store.seed(draft(
+        LongTermMemoryKind::Preference,
+        "cursor-topic",
+        "Cursor preference",
+    ));
+    let result = list_long_term_memory_control_page(
+        &store,
+        &ReadOnlyControlView(&control),
+        LongTermMemoryControlListRequest {
+            query: LongTermMemoryQuery::default(),
+            cursor: Some("unknown-anchor".into()),
+            limit: 1,
+            view: MemoryLongTermControlView::HostUi,
+        },
+    );
+    assert!(
+        result.is_err(),
+        "unknown cursor must not replay the first page"
+    );
+}
+
+#[test]
+fn policy_recreation_has_distinct_incarnation() {
+    let control = InMemoryControlStore::default();
+    let selector = MemoryGovernanceSelector {
+        memory_space_id: Some("space-user".into()),
+        subject_id: Some("agent:assistant-main".into()),
+        kind: None,
+        topic_pattern: Some("sensitive-*".into()),
+        source_chat_id: None,
+        source_scope: None,
+    };
+    let create = |time| {
+        apply_long_term_memory_governance_policy_mutation(
+            &control,
+            MemoryGovernancePolicyMutation::Suppress {
+                selector: selector.clone(),
+                duration: MemoryGovernanceSuppressionDuration::UntilManualResume,
+            },
+            "suppress".into(),
+            false,
+            time,
+        )
+        .unwrap()
+    };
+    let first = create(NOW_SECS);
+    apply_long_term_memory_governance_policy_mutation(
+        &control,
+        MemoryGovernancePolicyMutation::RemoveSuppression {
+            target: policy_ref(&control, "suppress"),
+        },
+        "resume".into(),
+        false,
+        NOW_SECS + 1,
+    )
+    .unwrap();
+    let second = create(NOW_SECS + 2);
+    assert_ne!(
+        first.policy_id, second.policy_id,
+        "new policy must not alias removed policy"
+    );
+}
+
+#[test]
+fn policy_revision_survives_clock_rollback_without_invalid_persistent_times() {
+    for pause in [false, true] {
+        let control = InMemoryControlStore::default();
+        let selector = MemoryGovernanceSelector {
+            memory_space_id: Some("space-user".into()),
+            subject_id: Some("agent:assistant-main".into()),
+            kind: None,
+            topic_pattern: Some("clock-*".into()),
+            source_chat_id: None,
+            source_scope: None,
+        };
+        let operation = if pause {
+            MemoryGovernancePolicyMutation::Pause {
+                selector,
+                expires_at: None,
+            }
+        } else {
+            MemoryGovernancePolicyMutation::Suppress {
+                selector,
+                duration: MemoryGovernanceSuppressionDuration::UntilManualResume,
+            }
+        };
+        apply_long_term_memory_governance_policy_mutation(
+            &control,
+            operation.clone(),
+            "initial policy".into(),
+            false,
+            NOW_SECS,
+        )
+        .unwrap();
+        let before = control
+            .list_long_term_governance_policies(8)
+            .unwrap()
+            .pop()
+            .unwrap();
+        apply_long_term_memory_governance_policy_mutation(
+            &control,
+            operation,
+            "updated policy".into(),
+            false,
+            NOW_SECS - 1,
+        )
+        .unwrap();
+        let after = control
+            .list_long_term_governance_policies(8)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(after.policy_id, before.policy_id);
+        assert_eq!(after.policy_revision, before.policy_revision + 1);
+        assert_eq!(after.created_at, before.created_at);
+        assert_eq!(after.updated_at, before.updated_at);
+        after.validate_contract().unwrap();
+        let mut invalid = after;
+        invalid.updated_at = invalid.created_at - 1;
+        assert!(invalid.validate_contract().is_err());
+    }
+}
+
+fn policy_ref(
+    control: &InMemoryControlStore,
+    kind: &str,
+) -> bm_core::memory::MemoryGovernancePolicyRef {
+    let policy = control
+        .list_long_term_governance_policies(usize::MAX)
+        .unwrap()
+        .into_iter()
+        .find(|policy| policy.kind == kind)
+        .unwrap();
+    bm_core::memory::MemoryGovernancePolicyRef {
+        policy_id: policy.policy_id,
+        policy_revision: policy.policy_revision,
+    }
 }

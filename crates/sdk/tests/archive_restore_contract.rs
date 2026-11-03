@@ -110,21 +110,31 @@ fn write_project_candidate_with_privacy(
 
 fn write_subject_policy(runtime: &bm_sdk::MemoryRuntime) {
     runtime
-        .mutate_memory_governance_policy(MemoryLongTermPolicyRequest {
-            operation: MemoryGovernancePolicyMutation::Suppress {
-                selector: MemoryGovernanceSelector {
-                    memory_space_id: Some(runtime.memory_space_id().to_string()),
-                    subject_id: Some(runtime.subject_id().to_string()),
-                    kind: Some(LongTermMemoryKind::Preference),
-                    topic_pattern: Some("temporary-*".to_string()),
-                    source_chat_id: None,
-                    source_scope: None,
+        .mutate_memory_governance_policy(
+            "archive_restore_contract-policy-1",
+            MemoryLongTermPolicyRequest {
+                operation: MemoryGovernancePolicyMutation::Suppress {
+                    selector: MemoryGovernanceSelector {
+                        memory_space_id: Some(runtime.memory_space_id().to_string()),
+                        subject_id: Some(runtime.subject_id().to_string()),
+                        kind: Some(LongTermMemoryKind::Preference),
+                        topic_pattern: Some("temporary-*".to_string()),
+                        source_chat_id: None,
+                        source_scope: None,
+                    },
+                    duration: MemoryGovernanceSuppressionDuration::UntilManualResume,
                 },
-                duration: MemoryGovernanceSuppressionDuration::UntilManualResume,
+                reason: "archive_restore_policy".to_string(),
+                dry_run: false,
+                mode_input: RuntimeLifecycleModeInput::default(),
             },
-            reason: "archive_restore_policy".to_string(),
-            dry_run: false,
-            mode_input: RuntimeLifecycleModeInput::default(),
+        )
+        .map(|execution| match execution {
+            bm_sdk::MemoryMutationExecution::Committed { report, .. }
+            | bm_sdk::MemoryMutationExecution::Rejected { report } => report,
+            bm_sdk::MemoryMutationExecution::Replayed { .. } => {
+                panic!("fresh test operation unexpectedly replayed")
+            }
         })
         .expect("write subject policy");
 }

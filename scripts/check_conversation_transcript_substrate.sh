@@ -119,7 +119,8 @@ require_regex "affected_turns=0.*changed=false|changed=false.*affected_turns=0" 
 require_fixed "long_term_extraction_records_transcript_derived_ref_for_lifecycle_impact" dev-docs/conversation-transcript-governance-hardening-plan.md crates/sdk/tests/conversation_transcript_runtime_contract.rs
 require_fixed "automatic_post_turn_extraction_records_transcript_derived_ref_for_lifecycle_impact" dev-docs/conversation-transcript-governance-hardening-plan.md crates/sdk/tests/conversation_transcript_runtime_contract.rs
 require_fixed "candidate_write_records_only_second_stage_accepted_derived_refs" dev-docs/conversation-transcript-governance-hardening-plan.md crates/sdk/tests/conversation_transcript_runtime_contract.rs
-require_fixed "plan_long_term_extraction_derived_memory_ref_mutations" crates/sdk/src/runtime.rs
+require_fixed "for source in &entry.transcript_sources" crates/sdk/src/runtime.rs
+require_fixed "candidate_derived_memory_ref_mutation" crates/sdk/src/runtime.rs
 require_fixed "SessionMessageRecord" dev-docs/conversation-transcript-governance-hardening-plan.md crates/core/src/memory/mod.rs crates/core/src/memory/archive_search.rs
 require_fixed "transcript_ref" dev-docs/conversation-transcript-governance-hardening-plan.md crates/core/src/memory/mod.rs crates/sdk/src/runtime.rs
 require_fixed "live_archive_transcript_hit_preserves_structured_transcript_evidence_ref" dev-docs/conversation-transcript-governance-hardening-plan.md crates/core/src/memory/archive_search.rs

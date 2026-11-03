@@ -174,6 +174,8 @@ pub struct LongTermMemoryExtractionApplyReport {
     pub changed: usize,
     pub deleted_slots: Vec<LongTermMemorySlot>,
     pub deleted_entry_ids: Vec<String>,
+    pub rejected_deletions: Vec<(String, super::LongTermMemoryEntryRejection)>,
+    pub rejected_causal_upserts: Vec<super::SharedMemoryWriteReason>,
     pub accepted_upserts: Vec<LongTermMemoryDraft>,
     pub accepted_entries: Vec<LongTermMemoryEntry>,
     pub accepted_skill_writes: Vec<RuntimeSkillWrite>,
@@ -887,6 +889,15 @@ pub(crate) fn apply_long_term_memory_extraction_with_report(
                 .filter(|draft| accepted.contains(&(draft.kind.clone(), draft.topic.clone()))),
         );
     }
+    for slot in accepted_upsert_superseded_slots(
+        &store.list(MAX_LONG_TERM_MEMORY_ITEMS)?,
+        &accepted_upserts,
+    ) {
+        if store.delete_slot(&slot)? {
+            changed += 1;
+            deleted_slots.push(slot);
+        }
+    }
     let mut accepted_skill_writes = Vec::new();
     if !extraction.skill_writes.is_empty() {
         let outcome = write_governed_runtime_skills(
@@ -925,14 +936,6 @@ pub fn plan_long_term_memory_extraction_with_report(
     now_secs: u64,
 ) -> Result<LongTermMemoryExtractionApplyReport> {
     let mut report = LongTermMemoryExtractionApplyReport::default();
-    for slot in &extraction.deletes {
-        let Some(entry) = store.get_slot(slot)? else {
-            continue;
-        };
-        report.deleted_slots.push(slot.clone());
-        report.deleted_entry_ids.push(entry.id);
-        report.changed = report.changed.saturating_add(1);
-    }
     if !extraction.upserts.is_empty() {
         let plan = plan_governed_shared_memory(
             store,
@@ -941,8 +944,45 @@ pub fn plan_long_term_memory_extraction_with_report(
             SharedMemoryWriteSource::Extraction,
         )?;
         report.changed = report.changed.saturating_add(plan.outcome.changed);
+        report.rejected_causal_upserts = plan
+            .outcome
+            .reports
+            .iter()
+            .filter_map(|item| {
+                matches!(
+                    item.reason,
+                    super::SharedMemoryWriteReason::SourcePredatesExplicitControl
+                        | super::SharedMemoryWriteReason::FactualSourceAuthorityRequired
+                )
+                .then_some(item.reason)
+            })
+            .collect();
         report.accepted_upserts = plan.accepted_drafts;
         report.accepted_entries = plan.accepted_entries;
+    }
+    let mut deletion_slots = extraction.deletes.clone();
+    deletion_slots.extend(accepted_upsert_superseded_slots(
+        &store.list(MAX_LONG_TERM_MEMORY_ITEMS)?,
+        &report.accepted_upserts,
+    ));
+    let mut visited = HashSet::new();
+    for slot in &deletion_slots {
+        if !visited.insert(slot.stable_id()) {
+            continue;
+        }
+        let Some(entry) = store.get_slot(slot)? else {
+            continue;
+        };
+        if let Err(reason) = super::validate_long_term_factual_admission(
+            entry.control_barrier_scope_revision,
+            store.factual_deletion_admission_revision(&entry)?,
+        ) {
+            report.rejected_deletions.push((entry.id, reason));
+            continue;
+        }
+        report.deleted_slots.push(slot.clone());
+        report.deleted_entry_ids.push(entry.id);
+        report.changed = report.changed.saturating_add(1);
     }
     if !extraction.skill_writes.is_empty() {
         let plan = plan_governed_runtime_skills(
@@ -1046,16 +1086,35 @@ pub fn prepare_long_term_memory_extraction(
         delete_slots.insert(slot_id, deletes.len());
         deletes.push(normalized);
     }
-    for draft in &upserts {
+
+    ParsedLongTermMemoryExtraction {
+        upserts,
+        deletes,
+        skill_writes,
+    }
+}
+
+fn accepted_upsert_superseded_slots(
+    existing_entries: &[LongTermMemoryEntry],
+    accepted_upserts: &[LongTermMemoryDraft],
+) -> Vec<LongTermMemorySlot> {
+    let mut deletes = Vec::new();
+    let mut delete_slots = HashMap::new();
+    for draft in accepted_upserts {
         let Some(draft_slot_id) = draft.stable_id() else {
             continue;
         };
         let primary_entry = existing_entries
             .iter()
             .find(|entry| entry_slot_id(entry).as_deref() == Some(draft_slot_id.as_str()));
-        for entry in &existing_entries {
-            if !should_delete_superseded_entry(entry, draft, primary_entry, &draft_slot_id, chat_id)
-            {
+        for entry in existing_entries {
+            if !should_delete_superseded_entry(
+                entry,
+                draft,
+                primary_entry,
+                &draft_slot_id,
+                draft.source_chat_id.as_deref().unwrap_or(""),
+            ) {
                 continue;
             }
             let slot = LongTermMemorySlot {
@@ -1073,11 +1132,7 @@ pub fn prepare_long_term_memory_extraction(
         }
     }
 
-    ParsedLongTermMemoryExtraction {
-        upserts,
-        deletes,
-        skill_writes,
-    }
+    deletes
 }
 
 fn resolve_existing_slot_match<'a>(
@@ -1458,6 +1513,7 @@ pub struct LongTermMemoryRefreshContext<'a> {
     pub memory_store: &'a dyn MemoryStore,
     pub session_store: &'a dyn SessionStore,
     pub session_summary_store: &'a dyn SessionSummaryStore,
+    pub canonical_turn_only: bool,
     pub long_term_memory_store: &'a dyn LongTermMemoryReadStore,
     pub extraction_state_store: &'a dyn LongTermMemoryExtractionStateStore,
     pub turn_ledger_store: &'a dyn TurnLedgerStore,
@@ -1602,14 +1658,19 @@ fn extract_long_term_memory(
     if recent.len() < 2 {
         return Ok(LongTermMemoryExtractionApplyReport::default());
     }
-    let session_summary = ctx.session_summary_store.get(chat_id).ok().flatten();
+    let session_summary = if ctx.canonical_turn_only {
+        None
+    } else {
+        ctx.session_summary_store.get(chat_id).ok().flatten()
+    };
     let archive_query = recent
         .iter()
         .rev()
         .find(|message| message.role.eq_ignore_ascii_case("user"))
         .map(|message| message.content.as_str())
         .unwrap_or("");
-    let include_thick_grounding = long_term_memory_extraction_uses_thick_grounding(profile);
+    let include_thick_grounding =
+        !ctx.canonical_turn_only && long_term_memory_extraction_uses_thick_grounding(profile);
     let archive_evidence = if include_thick_grounding {
         build_archive_evidence_block(
             ctx.session_store,
@@ -2067,6 +2128,9 @@ mod tests {
         updated_at: u64,
     ) -> LongTermMemoryEntry {
         crate::memory::canonicalize_long_term_memory_entry(LongTermMemoryEntry {
+            transcript_sources: Vec::new(),
+            control_barrier_scope_revision: None,
+
             id: id.to_string(),
             kind,
             privacy: MemoryPrivacyClass::SharedWithSubject,
@@ -2910,8 +2974,8 @@ mod tests {
     }
 
     #[test]
-    fn prepare_extraction_adds_delete_for_parallel_conflicting_slot() {
-        let store = StubLongTermMemoryStore {
+    fn extraction_deletes_parallel_conflicting_slot_only_after_upsert_admission() {
+        let mut store = StubLongTermMemoryStore {
             recall_entries: vec![
                 test_entry(
                     "ltm-1",
@@ -2936,6 +3000,15 @@ mod tests {
             ],
             ..Default::default()
         };
+        for entry in &mut store.recall_entries {
+            entry.id = LongTermMemorySlot {
+                kind: entry.kind.clone(),
+                topic: entry.topic.clone(),
+            }
+            .stable_id()
+            .unwrap();
+        }
+        let duplicate_id = store.recall_entries[1].id.clone();
         let extraction = ParsedLongTermMemoryExtraction {
             upserts: vec![test_draft(
                 LongTermMemoryKind::Preference,
@@ -2952,8 +3025,33 @@ mod tests {
 
         assert_eq!(prepared.upserts.len(), 1);
         assert_eq!(prepared.upserts[0].topic, "response_style");
-        assert_eq!(prepared.deletes.len(), 1);
-        assert_eq!(prepared.deletes[0].topic, "reply_style");
+        assert!(prepared.deletes.is_empty());
+        let skills = StubSkillStorage::default();
+        let accepted =
+            plan_long_term_memory_extraction_with_report(&store, &skills, &prepared, 30).unwrap();
+        assert_eq!(accepted.accepted_entries.len(), 1);
+        assert_eq!(accepted.deleted_entry_ids, vec![duplicate_id]);
+        assert_eq!(accepted.deleted_slots[0].topic, "reply_style");
+
+        store.recall_entries[1].control_barrier_scope_revision = Some(7);
+        let protected_duplicate =
+            plan_long_term_memory_extraction_with_report(&store, &skills, &prepared, 30).unwrap();
+        assert_eq!(protected_duplicate.accepted_entries.len(), 1);
+        assert!(protected_duplicate.deleted_entry_ids.is_empty());
+        assert_eq!(protected_duplicate.rejected_deletions.len(), 1);
+        assert_eq!(
+            protected_duplicate.rejected_deletions[0].0,
+            store.recall_entries[1].id
+        );
+
+        store.recall_entries[0].control_barrier_scope_revision = Some(7);
+        let rejected =
+            plan_long_term_memory_extraction_with_report(&store, &skills, &prepared, 30).unwrap();
+        assert!(rejected.accepted_entries.is_empty());
+        assert!(!rejected.rejected_causal_upserts.is_empty());
+        assert!(rejected.deleted_entry_ids.is_empty());
+        assert!(rejected.deleted_slots.is_empty());
+        assert_eq!(rejected.changed, 0);
     }
 
     #[test]
@@ -3083,6 +3181,7 @@ mod tests {
             memory_store: &archive_memory_store,
             session_store: &session_store,
             session_summary_store: &summary_store,
+            canonical_turn_only: false,
             long_term_memory_store: &memory_store,
             extraction_state_store: &extraction_state_store,
             turn_ledger_store: &turn_ledger_store,

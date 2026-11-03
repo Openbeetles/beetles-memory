@@ -87,10 +87,14 @@ pub fn tool_specs() -> Vec<McpToolSpec> {
             AdapterOperation::LongTermMutate,
             &["operation", "reason", "dry_run"],
         ),
-        tool(
-            "memory_long_term_policy",
-            AdapterOperation::LongTermPolicy,
-            &["operation", "reason", "dry_run"],
+        governed_tool("memory_long_term_policy", AdapterOperation::LongTermPolicy),
+        governed_tool(
+            "memory_long_term_policy_list",
+            AdapterOperation::LongTermPolicyList,
+        ),
+        governed_tool(
+            "memory_long_term_policy_detail",
+            AdapterOperation::LongTermPolicyDetail,
         ),
         tool(
             "memory_transcript_attr_write",
@@ -296,9 +300,10 @@ fn mcp_operation_visible(catalog: &MemoryCapabilityCatalog, operation: AdapterOp
         AdapterOperation::Inspect => catalog.inspection.visible,
         AdapterOperation::Recover => catalog.inspection.visible,
         AdapterOperation::Replay => catalog.replay.visible,
-        AdapterOperation::LongTermList | AdapterOperation::LongTermDetail => {
-            catalog.long_term_control_inspect.visible
-        }
+        AdapterOperation::LongTermList
+        | AdapterOperation::LongTermDetail
+        | AdapterOperation::LongTermPolicyList
+        | AdapterOperation::LongTermPolicyDetail => catalog.long_term_control_inspect.visible,
         AdapterOperation::LongTermMutate => catalog.long_term_control_mutation.visible,
         AdapterOperation::LongTermPolicy => catalog.long_term_control_policy.visible,
         AdapterOperation::Capabilities => catalog.communication_adapter.visible,

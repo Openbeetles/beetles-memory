@@ -71,6 +71,8 @@ Memory routes declared by the crate:
 | `/memory/long-term/list` | `POST` | accepted long-term memory list/search |
 | `/memory/long-term/detail` | `POST` | accepted long-term memory detail |
 | `/memory/long-term/mutate` | `POST` | accepted long-term memory mutation |
+| `/memory/long-term/policy/list` | `POST` | mounted-subject policy list |
+| `/memory/long-term/policy/detail` | `POST` | exact policy detail |
 | `/memory/long-term/policy` | `POST` | long-term governance policy mutation |
 
 The `server-std` decoder uses the shared JSON adapter decoder for write, recall, project, maintain, inspect, recover, replay, long-term list/detail/mutate/policy, capabilities, and close. Generic continuity snapshot export/import is not a protocol operation. `Subscribe` is a stream operation, not an HTTP memory command. `Maintain` needs `handle_http_in_process_request_with_services` with injected LLM/HTTP services; `handle_http_in_process_request` uses no injected services and returns a structured rejection for maintain. Project and inspect payloads must provide `system_max_len`; the adapter never invents a fallback render budget.
@@ -79,7 +81,7 @@ Headers consumed by the standard-library HTTP helper:
 
 | Header | Purpose |
 | --- | --- |
-| `x-idempotency-key` | Required stable, non-sensitive caller material for Adapter V2 durable `Write` and `LongTermMutate`; the transport derives its internal key and never echoes the raw value. |
+| `x-idempotency-key` | Required stable, non-sensitive caller material for Adapter V2 durable `Write`, `LongTermMutate`, and `LongTermPolicy`; the transport derives its internal key and never echoes the raw value. |
 | `authorization: Bearer ...` | Verified against the configured typed principal, owner, tenant, and operation capabilities. |
 
 Loopback trust comes only from the accepted socket peer address. Forwarded identity, subject, and `x-loopback` headers are untrusted and cannot grant authentication or capabilities. A non-loopback listener requires `BM_HTTP_BEARER_TOKEN`, `BM_HTTP_BEARER_PRINCIPAL_ID`, a globally unique `BM_HTTP_BEARER_OWNER_ID`, and `BM_HTTP_BEARER_CAPABILITIES`; `owner_id` is the tenancy namespace. Startup fails closed when the verifier or nonzero read/write timeouts are missing.
@@ -205,7 +207,7 @@ Inbound command frame kinds:
 - `command.long_term.list`
 - `command.long_term.detail`
 - `command.long_term.mutate`
-- `command.long_term.policy`
+- `command.long_term.policy.list`, `command.long_term.policy.detail`, `command.long_term.policy`
 - `command.capabilities`
 
 Subscription frame kinds:
@@ -245,6 +247,8 @@ Published tool specs include:
 - `memory_long_term_list`
 - `memory_long_term_detail`
 - `memory_long_term_mutate`
+- `memory_long_term_policy_list`
+- `memory_long_term_policy_detail`
 - `memory_long_term_policy`
 
 The stdio helper uses the shared JSON adapter decoder for all listed tools. Maintain is not listed as an MCP tool because maintain requires explicit service injection.
@@ -290,6 +294,8 @@ Bridge message names:
 - `memory_long_term_list_request`
 - `memory_long_term_detail_request`
 - `memory_long_term_mutation_request`
+- `memory_long_term_policy_list_request`
+- `memory_long_term_policy_detail_request`
 - `memory_long_term_policy_request`
 - `memory_report`
 - `runtime_lifecycle_event`
@@ -322,7 +328,7 @@ Example message:
 3. Set a stable `agent_id`, `owner_id`, `channel`, and `chat_id` policy.
 4. Configure transport visibility through `EntryTransportConfig`.
 5. Derive `EntryAuthDecision` from the real transport boundary before constructing `EntryTransportContext`; never accept caller-controlled booleans or loopback headers as trust evidence.
-6. Supply stable, non-sensitive idempotency keys for every Adapter V2 durable `Write` and `LongTermMutate`; inspect capabilities for explicitly non-durable or domain-owned mutations.
+6. Supply stable, non-sensitive idempotency keys for every Adapter V2 durable `Write`, `LongTermMutate`, and `LongTermPolicy`; inspect capabilities for explicitly non-durable or domain-owned mutations.
 7. Persist file/sqlite stores under a path owned by the runtime process.
 8. Run `memory capabilities` or the platform capability snapshot before exposing a protocol.
 9. Add a deployment smoke test that writes, recalls, and checks capabilities through the selected entry surface.

@@ -108,6 +108,8 @@ fn predecessor_material() -> LongTermMemoryVersionMaterial {
         owner_ref: owner_ref(OWNER_ID),
         owner_revision: 1,
         governed_content: LongTermMemoryGovernedContent {
+            transcript_sources: Vec::new(),
+            control_barrier_scope_revision: None,
             kind: LongTermMemoryKind::Fact,
             topic: "deployment".into(),
             content: "The active region is cn-east-2".into(),

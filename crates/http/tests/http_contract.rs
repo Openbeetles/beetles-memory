@@ -7,7 +7,6 @@ use bm_http::{
 #[test]
 fn route_catalog_declares_method_body_auth_and_profile_gate() {
     let routes = route_specs();
-    assert_eq!(routes.len(), 14);
     assert_eq!(
         routes.iter().map(|route| route.path).collect::<Vec<_>>(),
         vec![
@@ -23,6 +22,8 @@ fn route_catalog_declares_method_body_auth_and_profile_gate() {
             "/memory/long-term/list",
             "/memory/long-term/detail",
             "/memory/long-term/mutate",
+            "/memory/long-term/policy/list",
+            "/memory/long-term/policy/detail",
             "/memory/long-term/policy",
             "/memory/transcript/attrs",
         ]
@@ -43,6 +44,14 @@ fn route_catalog_declares_method_body_auth_and_profile_gate() {
         ("/memory/long-term/detail", AdapterOperation::LongTermDetail),
         ("/memory/long-term/mutate", AdapterOperation::LongTermMutate),
         ("/memory/long-term/policy", AdapterOperation::LongTermPolicy),
+        (
+            "/memory/long-term/policy/list",
+            AdapterOperation::LongTermPolicyList,
+        ),
+        (
+            "/memory/long-term/policy/detail",
+            AdapterOperation::LongTermPolicyDetail,
+        ),
         (
             "/memory/transcript/attrs",
             AdapterOperation::TranscriptAttrWrite,

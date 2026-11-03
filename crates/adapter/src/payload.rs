@@ -48,6 +48,22 @@ pub fn governed_adapter_json_command_schema(
         ]
     });
     match operation {
+        AdapterOperation::LongTermPolicyList => Some(GovernedAdapterJsonCommandSchema {
+            field_names: &["cursor", "limit"],
+            input_schema: json!({"type":"object", "properties": {
+                "cursor":{"type":["string","null"]}, "limit":{"type":"integer","minimum":1}}, "required":["limit"], "additionalProperties":false}),
+        }),
+        AdapterOperation::LongTermPolicyDetail => Some(GovernedAdapterJsonCommandSchema {
+            field_names: &["policy_id"],
+            input_schema: json!({"type":"object", "properties": {
+                "policy_id":{"type":"string"}}, "required":["policy_id"], "additionalProperties":false}),
+        }),
+        AdapterOperation::LongTermPolicy => Some(GovernedAdapterJsonCommandSchema {
+            field_names: &["operation", "reason", "dry_run", "mode_input"],
+            input_schema: json!({"type":"object", "properties": {
+                "operation":{"type":"object"}, "reason":{"type":"string"}, "dry_run":{"type":"boolean"}, "mode_input":{"type":"object"}},
+                "required":["operation","reason"], "additionalProperties":false}),
+        }),
         AdapterOperation::Write => Some(GovernedAdapterJsonCommandSchema {
             field_names: &["kind", "candidates", "extraction", "mutations"],
             input_schema: json!({
@@ -285,6 +301,12 @@ pub fn decode_json_adapter_command(
                     mode_input: payload.mode_input,
                 },
             )))
+        }
+        AdapterOperation::LongTermPolicyList => {
+            Ok(AdapterCommand::LongTermPolicyList(parse_json(body)?))
+        }
+        AdapterOperation::LongTermPolicyDetail => {
+            Ok(AdapterCommand::LongTermPolicyDetail(parse_json(body)?))
         }
         AdapterOperation::LongTermPolicy => {
             let payload: LongTermPolicyPayload = parse_json(body)?;

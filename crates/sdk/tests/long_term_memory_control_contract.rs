@@ -914,21 +914,31 @@ fn runtime_policy_mutation_persists_suppression_policy() {
         support::test_runtime_with_scope(platform, support::host_test_profile(), "local", "chat-1");
 
     let report = runtime
-        .mutate_memory_governance_policy(MemoryLongTermPolicyRequest {
-            operation: MemoryGovernancePolicyMutation::Suppress {
-                selector: MemoryGovernanceSelector {
-                    memory_space_id: Some(runtime.memory_space_id().to_string()),
-                    subject_id: Some(runtime.subject_id().to_string()),
-                    kind: Some(LongTermMemoryKind::Preference),
-                    topic_pattern: Some("temporary-*".to_string()),
-                    source_chat_id: None,
-                    source_scope: None,
+        .mutate_memory_governance_policy(
+            "long_term_memory_control_contract-policy-1",
+            MemoryLongTermPolicyRequest {
+                operation: MemoryGovernancePolicyMutation::Suppress {
+                    selector: MemoryGovernanceSelector {
+                        memory_space_id: Some(runtime.memory_space_id().to_string()),
+                        subject_id: Some(runtime.subject_id().to_string()),
+                        kind: Some(LongTermMemoryKind::Preference),
+                        topic_pattern: Some("temporary-*".to_string()),
+                        source_chat_id: None,
+                        source_scope: None,
+                    },
+                    duration: MemoryGovernanceSuppressionDuration::UntilManualResume,
                 },
-                duration: MemoryGovernanceSuppressionDuration::UntilManualResume,
+                reason: "user_declined_temporary_preference_memory".to_string(),
+                dry_run: false,
+                mode_input: RuntimeLifecycleModeInput::default(),
             },
-            reason: "user_declined_temporary_preference_memory".to_string(),
-            dry_run: false,
-            mode_input: RuntimeLifecycleModeInput::default(),
+        )
+        .map(|execution| match execution {
+            bm_sdk::MemoryMutationExecution::Committed { report, .. }
+            | bm_sdk::MemoryMutationExecution::Rejected { report } => report,
+            bm_sdk::MemoryMutationExecution::Replayed { .. } => {
+                panic!("fresh test operation unexpectedly replayed")
+            }
         })
         .expect("policy mutation");
 
@@ -944,7 +954,7 @@ fn runtime_policy_mutation_persists_suppression_policy() {
 }
 
 #[test]
-fn runtime_rejects_space_wide_policy_before_persistence_and_scoped_export() {
+fn runtime_rejects_foreign_subject_policy_before_persistence_and_scoped_export() {
     let platform = support::empty_store_platform(support::host_test_profile());
     let runtime = support::test_runtime_with_scope(
         platform.clone(),
@@ -954,24 +964,34 @@ fn runtime_rejects_space_wide_policy_before_persistence_and_scoped_export() {
     );
 
     let error = runtime
-        .mutate_memory_governance_policy(MemoryLongTermPolicyRequest {
-            operation: MemoryGovernancePolicyMutation::Suppress {
-                selector: MemoryGovernanceSelector {
-                    memory_space_id: Some(runtime.memory_space_id().to_string()),
-                    subject_id: None,
-                    kind: Some(LongTermMemoryKind::Preference),
-                    topic_pattern: None,
-                    source_chat_id: None,
-                    source_scope: None,
+        .mutate_memory_governance_policy(
+            "long_term_memory_control_contract-policy-2",
+            MemoryLongTermPolicyRequest {
+                operation: MemoryGovernancePolicyMutation::Suppress {
+                    selector: MemoryGovernanceSelector {
+                        memory_space_id: Some(runtime.memory_space_id().to_string()),
+                        subject_id: Some("subject-other".into()),
+                        kind: Some(LongTermMemoryKind::Preference),
+                        topic_pattern: None,
+                        source_chat_id: None,
+                        source_scope: None,
+                    },
+                    duration: MemoryGovernanceSuppressionDuration::UntilManualResume,
                 },
-                duration: MemoryGovernanceSuppressionDuration::UntilManualResume,
+                reason: "foreign subject policy is outside scoped runtime storage".to_string(),
+                dry_run: false,
+                mode_input: RuntimeLifecycleModeInput::default(),
             },
-            reason: "space-wide policy is outside scoped runtime storage".to_string(),
-            dry_run: false,
-            mode_input: RuntimeLifecycleModeInput::default(),
+        )
+        .map(|execution| match execution {
+            bm_sdk::MemoryMutationExecution::Committed { report, .. }
+            | bm_sdk::MemoryMutationExecution::Rejected { report } => report,
+            bm_sdk::MemoryMutationExecution::Replayed { .. } => {
+                panic!("fresh test operation unexpectedly replayed")
+            }
         })
-        .expect_err("space-wide policy must fail before persistence");
-    assert_eq!(error.stage(), "long_term_control_policy_subject_required");
+        .expect_err("foreign subject policy must fail before persistence");
+    assert_eq!(error.stage(), "long_term_policy_authority");
 
     let control_store = platform
         .replay_harness()
@@ -2032,21 +2052,31 @@ fn runtime_suppression_policy_blocks_future_candidate_long_term_writes() {
         "chat-1",
     );
     runtime
-        .mutate_memory_governance_policy(MemoryLongTermPolicyRequest {
-            operation: MemoryGovernancePolicyMutation::Suppress {
-                selector: MemoryGovernanceSelector {
-                    memory_space_id: Some(runtime.memory_space_id().to_string()),
-                    subject_id: Some(runtime.subject_id().to_string()),
-                    kind: Some(LongTermMemoryKind::Preference),
-                    topic_pattern: Some("temporary-*".to_string()),
-                    source_chat_id: None,
-                    source_scope: None,
+        .mutate_memory_governance_policy(
+            "long_term_memory_control_contract-policy-3",
+            MemoryLongTermPolicyRequest {
+                operation: MemoryGovernancePolicyMutation::Suppress {
+                    selector: MemoryGovernanceSelector {
+                        memory_space_id: Some(runtime.memory_space_id().to_string()),
+                        subject_id: Some(runtime.subject_id().to_string()),
+                        kind: Some(LongTermMemoryKind::Preference),
+                        topic_pattern: Some("temporary-*".to_string()),
+                        source_chat_id: None,
+                        source_scope: None,
+                    },
+                    duration: MemoryGovernanceSuppressionDuration::UntilManualResume,
                 },
-                duration: MemoryGovernanceSuppressionDuration::UntilManualResume,
+                reason: "user_declined_temporary_preference_memory".to_string(),
+                dry_run: false,
+                mode_input: RuntimeLifecycleModeInput::default(),
             },
-            reason: "user_declined_temporary_preference_memory".to_string(),
-            dry_run: false,
-            mode_input: RuntimeLifecycleModeInput::default(),
+        )
+        .map(|execution| match execution {
+            bm_sdk::MemoryMutationExecution::Committed { report, .. }
+            | bm_sdk::MemoryMutationExecution::Rejected { report } => report,
+            bm_sdk::MemoryMutationExecution::Replayed { .. } => {
+                panic!("fresh test operation unexpectedly replayed")
+            }
         })
         .expect("policy mutation");
 
@@ -2107,21 +2137,31 @@ fn runtime_suppression_policy_blocks_long_term_extraction_writes() {
         "chat-1",
     );
     runtime
-        .mutate_memory_governance_policy(MemoryLongTermPolicyRequest {
-            operation: MemoryGovernancePolicyMutation::Suppress {
-                selector: MemoryGovernanceSelector {
-                    memory_space_id: Some(runtime.memory_space_id().to_string()),
-                    subject_id: Some(runtime.subject_id().to_string()),
-                    kind: Some(LongTermMemoryKind::Preference),
-                    topic_pattern: Some("temporary-*".to_string()),
-                    source_chat_id: None,
-                    source_scope: None,
+        .mutate_memory_governance_policy(
+            "long_term_memory_control_contract-policy-4",
+            MemoryLongTermPolicyRequest {
+                operation: MemoryGovernancePolicyMutation::Suppress {
+                    selector: MemoryGovernanceSelector {
+                        memory_space_id: Some(runtime.memory_space_id().to_string()),
+                        subject_id: Some(runtime.subject_id().to_string()),
+                        kind: Some(LongTermMemoryKind::Preference),
+                        topic_pattern: Some("temporary-*".to_string()),
+                        source_chat_id: None,
+                        source_scope: None,
+                    },
+                    duration: MemoryGovernanceSuppressionDuration::UntilManualResume,
                 },
-                duration: MemoryGovernanceSuppressionDuration::UntilManualResume,
+                reason: "user_declined_temporary_preference_memory".to_string(),
+                dry_run: false,
+                mode_input: RuntimeLifecycleModeInput::default(),
             },
-            reason: "user_declined_temporary_preference_memory".to_string(),
-            dry_run: false,
-            mode_input: RuntimeLifecycleModeInput::default(),
+        )
+        .map(|execution| match execution {
+            bm_sdk::MemoryMutationExecution::Committed { report, .. }
+            | bm_sdk::MemoryMutationExecution::Rejected { report } => report,
+            bm_sdk::MemoryMutationExecution::Replayed { .. } => {
+                panic!("fresh test operation unexpectedly replayed")
+            }
         })
         .expect("policy mutation");
 
@@ -2144,7 +2184,7 @@ fn runtime_suppression_policy_blocks_long_term_extraction_writes() {
                     confidence: None,
                     freshness: None,
                     stale_hint: None,
-                    supporting_citations: vec!["transcript:chat-1#message=1".to_string()],
+                    supporting_citations: vec!["operator:temporary-tone".to_string()],
                     canonical_entities: Vec::new(),
                     evidence_count: Some(1),
                     observed_at: Some(1_800_000_000),
@@ -2180,21 +2220,31 @@ fn runtime_suppression_policy_blocks_automatic_post_turn_long_term_refresh() {
         "subject-default",
     );
     runtime
-        .mutate_memory_governance_policy(MemoryLongTermPolicyRequest {
-            operation: MemoryGovernancePolicyMutation::Suppress {
-                selector: MemoryGovernanceSelector {
-                    memory_space_id: Some(runtime.memory_space_id().to_string()),
-                    subject_id: Some(runtime.subject_id().to_string()),
-                    kind: Some(LongTermMemoryKind::Preference),
-                    topic_pattern: Some("temporary-*".to_string()),
-                    source_chat_id: None,
-                    source_scope: None,
+        .mutate_memory_governance_policy(
+            "long_term_memory_control_contract-policy-5",
+            MemoryLongTermPolicyRequest {
+                operation: MemoryGovernancePolicyMutation::Suppress {
+                    selector: MemoryGovernanceSelector {
+                        memory_space_id: Some(runtime.memory_space_id().to_string()),
+                        subject_id: Some(runtime.subject_id().to_string()),
+                        kind: Some(LongTermMemoryKind::Preference),
+                        topic_pattern: Some("temporary-*".to_string()),
+                        source_chat_id: None,
+                        source_scope: None,
+                    },
+                    duration: MemoryGovernanceSuppressionDuration::UntilManualResume,
                 },
-                duration: MemoryGovernanceSuppressionDuration::UntilManualResume,
+                reason: "user_declined_temporary_preference_memory".to_string(),
+                dry_run: false,
+                mode_input: RuntimeLifecycleModeInput::default(),
             },
-            reason: "user_declined_temporary_preference_memory".to_string(),
-            dry_run: false,
-            mode_input: RuntimeLifecycleModeInput::default(),
+        )
+        .map(|execution| match execution {
+            bm_sdk::MemoryMutationExecution::Committed { report, .. }
+            | bm_sdk::MemoryMutationExecution::Rejected { report } => report,
+            bm_sdk::MemoryMutationExecution::Replayed { .. } => {
+                panic!("fresh test operation unexpectedly replayed")
+            }
         })
         .expect("policy mutation");
     let mut http = StaticHttpClient;

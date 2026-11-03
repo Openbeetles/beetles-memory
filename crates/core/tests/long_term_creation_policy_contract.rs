@@ -47,7 +47,7 @@ fn rev1_create_persists_exact_only_and_hidden_visibility() {
         MemorySubjectVisibilityPolicy::HiddenFromSubjects(vec!["agent-b".into()]),
     ] {
         let draft = draft_from_public_json(serde_json::to_value(&policy).unwrap());
-        let entry = created(plan_long_term_memory_upsert(None, &draft, NOW));
+        let entry = created(plan_long_term_memory_upsert(None, &draft, NOW, None));
         assert_eq!(entry.owner_revision, 1);
         assert_eq!(entry.subject_visibility, policy);
     }
@@ -61,7 +61,7 @@ fn ordinary_same_slot_policy_transition_is_typed_rejection_without_revision_chan
         ]))
         .unwrap(),
     );
-    let existing = created(plan_long_term_memory_upsert(None, &first, NOW));
+    let existing = created(plan_long_term_memory_upsert(None, &first, NOW, None));
     let second = draft_from_public_json(
         serde_json::to_value(MemorySubjectVisibilityPolicy::HiddenFromSubjects(vec![
             "agent-b".into(),
@@ -69,7 +69,7 @@ fn ordinary_same_slot_policy_transition_is_typed_rejection_without_revision_chan
         .unwrap(),
     );
 
-    let plan = plan_long_term_memory_upsert(Some(&existing), &second, NOW + 1);
+    let plan = plan_long_term_memory_upsert(Some(&existing), &second, NOW + 1, None);
     match plan {
         LongTermMemoryEntryPlan::Rejected(reason) => assert_eq!(
             format!("{reason:?}"),
@@ -83,7 +83,7 @@ fn ordinary_same_slot_policy_transition_is_typed_rejection_without_revision_chan
 #[test]
 fn same_content_model_inference_remains_unconfirmed_without_a_correct_lifecycle() {
     let initial = draft_from_public_json(serde_json::json!("all_subjects"));
-    let existing = created(plan_long_term_memory_upsert(None, &initial, NOW));
+    let existing = created(plan_long_term_memory_upsert(None, &initial, NOW, None));
     let mut inferred = initial;
     inferred.provenance = LongTermMemoryProvenance {
         source_authority: MemoryEvidenceAuthority::ModelInferred,
@@ -92,7 +92,7 @@ fn same_content_model_inference_remains_unconfirmed_without_a_correct_lifecycle(
     inferred.source_revision = Some(2);
     inferred.observed_at = Some(NOW + 1);
 
-    let updated = match plan_long_term_memory_upsert(Some(&existing), &inferred, NOW + 1) {
+    let updated = match plan_long_term_memory_upsert(Some(&existing), &inferred, NOW + 1, None) {
         LongTermMemoryEntryPlan::Updated(entry) => entry,
         other => panic!("expected Updated, got {other:?}"),
     };
@@ -107,7 +107,7 @@ fn same_content_model_inference_remains_unconfirmed_without_a_correct_lifecycle(
 #[test]
 fn same_content_provenance_transition_clears_an_existing_confirmation() {
     let initial = draft_from_public_json(serde_json::json!("all_subjects"));
-    let mut existing = created(plan_long_term_memory_upsert(None, &initial, NOW));
+    let mut existing = created(plan_long_term_memory_upsert(None, &initial, NOW, None));
     existing.last_confirmed_at = Some(NOW);
     let mut inferred = initial;
     inferred.provenance = LongTermMemoryProvenance {
@@ -117,7 +117,7 @@ fn same_content_provenance_transition_clears_an_existing_confirmation() {
     inferred.source_revision = Some(2);
     inferred.observed_at = Some(NOW + 1);
 
-    let updated = match plan_long_term_memory_upsert(Some(&existing), &inferred, NOW + 1) {
+    let updated = match plan_long_term_memory_upsert(Some(&existing), &inferred, NOW + 1, None) {
         LongTermMemoryEntryPlan::Updated(entry) => entry,
         other => panic!("expected Updated, got {other:?}"),
     };
@@ -136,7 +136,7 @@ fn correct_replaces_provenance_and_clears_low_level_confirmation() {
         source_authority: MemoryEvidenceAuthority::ModelInferred,
         semantic_judgment_source: Some(MemorySemanticJudgmentSource::LlmGovernance),
     };
-    let existing = created(plan_long_term_memory_upsert(None, &inferred, NOW));
+    let existing = created(plan_long_term_memory_upsert(None, &inferred, NOW, None));
     let mut correction = inferred;
     correction.content = "The user confirmed deployment region cn-west-1.".to_string();
     correction.provenance = LongTermMemoryProvenance {
@@ -164,7 +164,7 @@ fn correct_replaces_provenance_and_clears_low_level_confirmation() {
 #[test]
 fn correct_cannot_implicitly_change_subject_visibility() {
     let initial = draft_from_public_json(serde_json::json!("all_subjects"));
-    let existing = created(plan_long_term_memory_upsert(None, &initial, NOW));
+    let existing = created(plan_long_term_memory_upsert(None, &initial, NOW, None));
     let mut correction = initial;
     correction.subject_visibility =
         MemorySubjectVisibilityPolicy::OnlySubjects(vec!["agent-a".to_string()]);
@@ -386,6 +386,6 @@ fn model_inferred_is_a_distinct_unconfirmed_authority() {
 }
 
 #[test]
-fn immutable_long_term_material_contract_is_v5() {
-    assert_eq!(LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION, 5);
+fn immutable_long_term_material_contract_is_v6() {
+    assert_eq!(LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION, 6);
 }

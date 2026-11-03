@@ -339,6 +339,8 @@ fn mcp_auth_from_env() -> Result<(bm_entry::EntryAuthConfig, String, String), St
             "long_term_list" => Ok(EntryOperationCapability::LongTermList),
             "long_term_detail" => Ok(EntryOperationCapability::LongTermDetail),
             "long_term_mutate" => Ok(EntryOperationCapability::LongTermMutate),
+            "long_term_policy_list" => Ok(EntryOperationCapability::LongTermPolicyList),
+            "long_term_policy_detail" => Ok(EntryOperationCapability::LongTermPolicyDetail),
             "long_term_policy" => Ok(EntryOperationCapability::LongTermPolicy),
             "transcript_attr_write" => Ok(EntryOperationCapability::TranscriptAttrWrite),
             "capabilities" => Ok(EntryOperationCapability::Capabilities),

@@ -273,11 +273,20 @@ pub(crate) struct StoreMutationOperationPlan {
     committed_at_unix_secs: u64,
     transaction_id: String,
     subject_soul_authorized: bool,
+    long_term_control_authority: Option<crate::runtime::LongTermControlAuthorization>,
     procedural_mutation_authority:
         Option<super::procedural_feedback::ProceduralMutationAuthorization>,
 }
 
 impl StoreMutationOperationPlan {
+    pub(crate) fn with_long_term_control_authority(
+        mut self,
+        authority: Option<crate::runtime::LongTermControlAuthorization>,
+    ) -> Self {
+        self.long_term_control_authority = authority;
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         identity: MemoryMutationOperationIdentity,
@@ -320,6 +329,7 @@ impl StoreMutationOperationPlan {
             committed_at_unix_secs,
             transaction_id,
             subject_soul_authorized: false,
+            long_term_control_authority: None,
             procedural_mutation_authority: None,
         })
     }
@@ -513,11 +523,16 @@ struct StoreBatchEventContext<'a> {
 struct StoreCommitPreconditions<'a> {
     json: &'a [StoreJsonPrecondition],
     blobs: &'a [StoreBlobPrecondition],
+    long_term_control_authority: Option<&'a crate::runtime::LongTermControlAuthorization>,
 }
 
 impl<'a> StoreCommitPreconditions<'a> {
     const fn new(json: &'a [StoreJsonPrecondition], blobs: &'a [StoreBlobPrecondition]) -> Self {
-        Self { json, blobs }
+        Self {
+            json,
+            blobs,
+            long_term_control_authority: None,
+        }
     }
 }
 
@@ -1168,6 +1183,28 @@ impl StorePlatform {
         )
     }
 
+    pub(crate) fn commit_authorized_long_term_control_transaction(
+        &self,
+        batch: StoreMutationBatch,
+        json: &[StoreJsonPrecondition],
+        blobs: &[StoreBlobPrecondition],
+        authority: &crate::runtime::LongTermControlAuthorization,
+        budget: &RuntimeBudgetReport,
+    ) -> Result<StoreMutationBatchReport> {
+        self.commit_governed_memory_transaction_authorized(
+            batch,
+            StoreCommitPreconditions {
+                json,
+                blobs,
+                long_term_control_authority: Some(authority),
+            },
+            None,
+            Some(budget),
+            None,
+            None,
+        )
+    }
+
     pub(crate) fn commit_governed_memory_transaction_with_runtime_budget_at(
         &self,
         batch: StoreMutationBatch,
@@ -1778,6 +1815,15 @@ impl StorePlatform {
             },
         )
         .include_governed_json_reads(governed_json_reads);
+        if let Some(authority) = commit_preconditions
+            .long_term_control_authority
+            .or_else(|| {
+                mutation_operation
+                    .and_then(|operation| operation.long_term_control_authority.as_ref())
+            })
+        {
+            request = request.authorize_long_term_control(authority.clone());
+        }
         if let Some(authority) = intake_authority {
             if authority.store_authority_digest != self.learning_store_authority_digest()
                 || authority.store_incarnation
@@ -1808,6 +1854,23 @@ impl StorePlatform {
                     crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE,
                     crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_HEAD_NAMESPACE,
                     crate::store_internal::schema::AGENT_TOOL_EXPERIENCE_SCOPE_MANIFEST_NAMESPACE,
+                ]
+                .into_iter()
+                .map(|namespace| (namespace.to_string(), String::new())),
+            );
+        }
+        if batch_withdraws_transcript_sources(&batch) {
+            request = request.include_governed_json_prefix_reads(
+                [
+                    MEMORY_GRAPH_MANIFEST_NAMESPACE,
+                    MEMORY_GRAPH_REVISION_NAMESPACE,
+                    MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE,
+                    MEMORY_GRAPH_EDGE_MEMBERSHIP_NAMESPACE,
+                    MEMORY_GRAPH_BACKLINK_MEMBERSHIP_NAMESPACE,
+                    MEMORY_GRAPH_INDEX_NAMESPACE,
+                    MEMORY_GRAPH_NODE_NAMESPACE,
+                    MEMORY_GRAPH_EDGE_NAMESPACE,
+                    MEMORY_GRAPH_BACKLINK_NAMESPACE,
                 ]
                 .into_iter()
                 .map(|namespace| (namespace.to_string(), String::new())),
@@ -3667,8 +3730,10 @@ impl StorePlatform {
         preconditions: &mut Vec<StoreJsonPrecondition>,
         canonical_updated_at: u64,
     ) -> Result<()> {
-        let mut groups =
-            BTreeMap::<(String, String, String, String), Vec<(String, serde_json::Value)>>::new();
+        let mut groups = BTreeMap::<
+            (String, String, String, String, String),
+            Vec<(String, serde_json::Value)>,
+        >::new();
         for mutation in &batch.mutations {
             let StoreMutation::PutJson {
                 namespace,
@@ -3696,13 +3761,41 @@ impl StorePlatform {
                         "derived memory ref requires an exact subject owner",
                     )
                 })?;
+            let bound_factual_source = matches!(
+                derived.plane,
+                DerivedMemoryPlane::LongTerm | DerivedMemoryPlane::SharedFact
+            ) && batch.mutations.iter().any(|mutation| match mutation {
+                StoreMutation::PutJson {
+                    namespace, value, ..
+                } if namespace == crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE => {
+                    serde_json::from_value::<LongTermMemoryVersionMaterial>(value.clone())
+                        .is_ok_and(|material| {
+                            derived.store_key
+                                == format!(
+                                    "{}:{}",
+                                    if derived.plane == DerivedMemoryPlane::SharedFact {
+                                        "shared_fact"
+                                    } else {
+                                        "long_term"
+                                    },
+                                    material.owner_ref.owner_id
+                                )
+                                && material.memory_space_id == batch.scope.memory_space_id
+                                && material
+                                    .governed_content
+                                    .transcript_sources
+                                    .contains(&derived.source)
+                        })
+                }
+                _ => false,
+            });
             if derived
                 .subject_id
                 .as_deref()
                 .zip(derived.source.subject_id.as_deref())
                 .is_some_and(|(owner, source_owner)| owner != source_owner)
                 || derived.source.memory_space_id != batch.scope.memory_space_id
-                || subject_id != batch.scope.subject_id
+                || (subject_id != batch.scope.subject_id && !bound_factual_source)
             {
                 return Err(Error::config(
                     "conversation_recall_manifest",
@@ -3715,18 +3808,21 @@ impl StorePlatform {
                     derived.source.channel_id,
                     derived.source.conversation_id,
                     derived.source.turn_id,
+                    subject_id.to_string(),
                 ))
                 .or_default()
                 .push((key.clone(), value.clone()));
         }
 
-        for ((memory_space_id, channel_id, conversation_id, turn_id), owners) in groups {
+        for ((memory_space_id, channel_id, conversation_id, turn_id, source_subject), owners) in
+            groups
+        {
             let conversation_key =
                 ConversationKey::new(memory_space_id, channel_id, conversation_id)?;
             let manifest_key = ConversationTranscriptAuxManifest::build(
                 1,
                 &conversation_key.memory_space_id,
-                &batch.scope.subject_id,
+                &source_subject,
                 &conversation_key.channel_id,
                 &conversation_key.conversation_id,
                 &turn_id,
@@ -3781,7 +3877,7 @@ impl StorePlatform {
             let next = ConversationTranscriptAuxManifest::build(
                 revision,
                 &conversation_key.memory_space_id,
-                &batch.scope.subject_id,
+                &source_subject,
                 &conversation_key.channel_id,
                 &conversation_key.conversation_id,
                 &turn_id,
@@ -5915,6 +6011,7 @@ pub(crate) fn validate_governed_transaction_post_image(
         validate_post_turn_governance_transaction_closure(&before.json, &after.json)?;
     }
     validate_confirmation_evidence_post_image(batch, before, after)?;
+    validate_long_term_factual_clock_post_image(batch, before, after)?;
     validate_evidence_source_ref_post_image(
         batch,
         before,
@@ -6037,6 +6134,456 @@ fn validate_confirmation_evidence_post_image(
     Ok(())
 }
 
+fn batch_withdraws_transcript_sources(batch: &StoreMutationBatch) -> bool {
+    batch.mutations.iter().any(|mutation| {
+        matches!(mutation,
+        StoreMutation::PutJson { namespace, value, .. } if namespace == "conversation_transcript"
+            && serde_json::from_value::<TranscriptTurnRecord>(value.clone()).is_ok_and(|record|
+                record.redaction_state != TranscriptRedactionState::RawAvailable))
+    })
+}
+
+pub(crate) fn long_term_source_dependency_addresses(
+    namespace: &str,
+    value: &serde_json::Value,
+) -> Result<Vec<(String, String)>> {
+    let mut reads = Vec::new();
+    match namespace {
+        "conversation_transcript" => {
+            let record: TranscriptTurnRecord = decode_transaction_dependency(value, "source")?;
+            if record.redaction_state != TranscriptRedactionState::RawAvailable {
+                reads.push((
+                    crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE.to_string(),
+                    long_term_version_scope_manifest_key(
+                        &record.key.memory_space_id,
+                        &record.key.memory_space_id,
+                    )?,
+                ));
+            }
+        }
+        MEMORY_GRAPH_NODE_MEMBERSHIP_NAMESPACE => {
+            let membership: MemoryGraphNodeMembership =
+                decode_transaction_dependency(value, "graph membership")?;
+            if membership.owner_ref.owner_plane == GovernedMemoryOwnerPlane::LongTerm {
+                reads.push((
+                    crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE.to_string(),
+                    long_term_version_head_key(
+                        &membership.memory_space_id,
+                        &membership.memory_space_id,
+                        &membership.owner_ref,
+                    )?,
+                ));
+            }
+        }
+        MEMORY_FACET_POSTING_NAMESPACE => {
+            if let Ok(manifest) = serde_json::from_value::<MemoryFacetIndexManifest>(value.clone())
+            {
+                reads.extend(manifest.posting_revisions.into_iter().map(|posting| {
+                    (
+                        MEMORY_FACET_POSTING_NAMESPACE.to_string(),
+                        posting.posting_key,
+                    )
+                }));
+            }
+        }
+        crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE => {
+            let material: LongTermMemoryVersionMaterial =
+                decode_transaction_dependency(value, "long-term material")?;
+            for source in material.governed_content.transcript_sources {
+                let subject = source.subject_id.as_deref().ok_or_else(|| {
+                    Error::config("long_term_source_closure", "source lacks subject")
+                })?;
+                let key = ConversationKey::new(
+                    &source.memory_space_id,
+                    &source.channel_id,
+                    &source.conversation_id,
+                )?;
+                reads.push((
+                    "conversation_transcript".to_string(),
+                    transcript_turn_storage_key(&key, subject, &source.turn_id),
+                ));
+            }
+        }
+        crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE => {
+            let head: LongTermMemoryHeadManifest =
+                decode_transaction_dependency(value, "long-term head")?;
+            reads.push((
+                MEMORY_FACET_INDEX_NAMESPACE.to_string(),
+                scoped_memory_facet_owner_storage_key(
+                    &head.memory_space_id,
+                    &head.memory_space_id,
+                    &head.owner_ref,
+                )
+                .map_err(|error| Error::config("long_term_source_closure", error.to_string()))?,
+            ));
+            for retained in head.retained_revision_digests {
+                reads.push((
+                    crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
+                    long_term_version_material_key(
+                        &head.memory_space_id,
+                        &head.factual_owner_id,
+                        &head.owner_ref,
+                        retained.owner_revision,
+                    )?,
+                ));
+            }
+        }
+        crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE => {
+            let root: LongTermMemoryVersionScopeManifest =
+                decode_transaction_dependency(value, "long-term scope")?;
+            reads.push((
+                MEMORY_FACET_POSTING_NAMESPACE.to_string(),
+                memory_facet_manifest_key(&root.memory_space_id, &root.memory_space_id).map_err(
+                    |error| Error::config("long_term_source_closure", error.to_string()),
+                )?,
+            ));
+            reads.extend(root.head_bindings.into_iter().map(|binding| {
+                (
+                    crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE.to_string(),
+                    binding.head_physical_key,
+                )
+            }));
+            reads.extend(root.transition_bindings.into_iter().map(|binding| {
+                (
+                    LONG_TERM_CONTROL_REVISION_NAMESPACE.to_string(),
+                    binding.control_revision_physical_key,
+                )
+            }));
+        }
+        LONG_TERM_CONTROL_REVISION_NAMESPACE => {
+            let revision: LongTermMemoryControlRevision =
+                decode_transaction_dependency(value, "control revision")?;
+            reads.push((
+                crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
+                long_term_version_material_key(
+                    &revision.memory_space_id,
+                    &revision.factual_owner_id,
+                    &revision.transition.predecessor.owner_ref,
+                    revision.transition.predecessor.owner_revision,
+                )?,
+            ));
+            if let bm_core::memory::LongTermTransitionBasis::SourceGoverned {
+                authoritative_sources,
+            } = revision.basis
+            {
+                for source in authoritative_sources {
+                    let subject = source.subject_id.as_deref().ok_or_else(|| {
+                        Error::config("long_term_source_closure", "authority lacks subject")
+                    })?;
+                    let key = ConversationKey::new(
+                        &source.memory_space_id,
+                        &source.channel_id,
+                        &source.conversation_id,
+                    )?;
+                    reads.push((
+                        "conversation_transcript".to_string(),
+                        transcript_turn_storage_key(&key, subject, &source.turn_id),
+                    ));
+                }
+            }
+        }
+        CONTROL_PLANE_SCOPE_MANIFEST_NAMESPACE => {
+            let root: ControlPlaneScopeManifest =
+                decode_transaction_dependency(value, "control scope")?;
+            reads.extend(
+                root.entries
+                    .into_iter()
+                    .map(|entry| (entry.namespace, entry.key)),
+            );
+        }
+        _ => {}
+    }
+    Ok(reads)
+}
+
+fn factual_source_from_image(
+    image: &BackendTransactionState,
+    source: &bm_core::memory::TranscriptEvidenceRef,
+) -> Result<TranscriptTurnRecord> {
+    let stage = "long_term_source_closure";
+    let subject = source
+        .subject_id
+        .as_deref()
+        .ok_or_else(|| Error::config(stage, "source lacks exact subject"))?;
+    let key = ConversationKey::new(
+        &source.memory_space_id,
+        &source.channel_id,
+        &source.conversation_id,
+    )?;
+    let record: TranscriptTurnRecord = image
+        .json
+        .get(&(
+            "conversation_transcript".to_string(),
+            transcript_turn_storage_key(&key, subject, &source.turn_id),
+        ))
+        .ok_or_else(|| Error::config(stage, "bound source is absent from transaction image"))
+        .and_then(|value| decode_transaction_dependency(value, "source record"))?;
+    if record.key != key || record.subject != subject || record.turn_id != source.turn_id {
+        return Err(Error::config(
+            stage,
+            "source identity does not match its physical address",
+        ));
+    }
+    Ok(record)
+}
+
+fn project_long_term_evidence_from_image(
+    image: &BackendTransactionState,
+    material: &LongTermMemoryVersionMaterial,
+) -> Result<bm_core::memory::LongTermMemoryEntry> {
+    let entry = material.to_current_projection()?;
+    let mut available = BTreeSet::new();
+    for source in &entry.transcript_sources {
+        if source.is_available_in(&factual_source_from_image(image, source)?) {
+            available.insert(source.display_citation());
+        }
+    }
+    Ok(entry.project_transcript_evidence(|source| available.contains(&source.display_citation())))
+}
+
+fn validate_long_term_factual_clock_post_image(
+    batch: &StoreMutationBatch,
+    before: &BackendTransactionState,
+    after: &BackendTransactionState,
+) -> Result<()> {
+    let stage = "long_term_factual_clock";
+    let root_ns = crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE;
+    for mutation in &batch.mutations {
+        let StoreMutation::PutJson {
+            namespace,
+            key,
+            value,
+            ..
+        } = mutation
+        else {
+            continue;
+        };
+        if namespace == "conversation_transcript" {
+            let next: TranscriptTurnRecord =
+                decode_transaction_dependency(value, "transcript intake")?;
+            if let Some(old) = before.json.get(&(namespace.clone(), key.clone())) {
+                let old: TranscriptTurnRecord =
+                    decode_transaction_dependency(old, "transcript intake")?;
+                if old.factual_admission_revision != next.factual_admission_revision {
+                    return Err(Error::config(
+                        stage,
+                        "canonical source admission is immutable",
+                    ));
+                }
+            } else {
+                let root_key = long_term_version_scope_manifest_key(
+                    &next.key.memory_space_id,
+                    &next.key.memory_space_id,
+                )?;
+                let revision = before
+                    .json
+                    .get(&(root_ns.to_string(), root_key))
+                    .map(|value| {
+                        decode_transaction_dependency::<LongTermMemoryVersionScopeManifest>(
+                            value,
+                            "factual root",
+                        )
+                    })
+                    .transpose()?
+                    .map(|root| root.manifest_revision)
+                    .unwrap_or(0);
+                if revision != next.factual_admission_revision {
+                    return Err(Error::config(
+                        stage,
+                        "canonical intake differs from locked factual root",
+                    ));
+                }
+            }
+        }
+        if namespace == LONG_TERM_CONTROL_REVISION_NAMESPACE
+            && before.json.get(&(namespace.clone(), key.clone())) != Some(value)
+        {
+            let revision: LongTermMemoryControlRevision =
+                decode_transaction_dependency(value, "control revision")?;
+            if let bm_core::memory::LongTermTransitionBasis::SourceGoverned {
+                authoritative_sources,
+            } = &revision.basis
+            {
+                let predecessor = &revision.transition.predecessor;
+                let material_key = long_term_version_material_key(
+                    &revision.memory_space_id,
+                    &revision.factual_owner_id,
+                    &predecessor.owner_ref,
+                    predecessor.owner_revision,
+                )?;
+                let previous: LongTermMemoryVersionMaterial = before
+                    .json
+                    .get(&(
+                        crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE.to_string(),
+                        material_key,
+                    ))
+                    .ok_or_else(|| {
+                        Error::config(stage, "factual mutation has no exact predecessor")
+                    })
+                    .and_then(|value| decode_transaction_dependency(value, "predecessor"))?;
+                let mut admission: Option<u64> = None;
+                for source in authoritative_sources {
+                    let record = factual_source_from_image(after, source)?;
+                    if !source.is_available_in(&record) {
+                        return Err(Error::config(
+                            stage,
+                            "factual transition source has been withdrawn",
+                        ));
+                    }
+                    admission = Some(
+                        admission.map_or(record.factual_admission_revision, |prior| {
+                            prior.min(record.factual_admission_revision)
+                        }),
+                    );
+                }
+                let successor = revision
+                    .transition
+                    .successor
+                    .as_ref()
+                    .map(|reference| {
+                        let key = long_term_version_material_key(
+                            &revision.memory_space_id,
+                            &revision.factual_owner_id,
+                            &reference.owner_ref,
+                            reference.owner_revision,
+                        )?;
+                        after
+                            .json
+                            .get(&(
+                                crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE
+                                    .to_string(),
+                                key,
+                            ))
+                            .ok_or_else(|| {
+                                Error::config(stage, "factual transition successor is missing")
+                            })
+                            .and_then(|value| {
+                                decode_transaction_dependency::<LongTermMemoryVersionMaterial>(
+                                    value,
+                                    "successor",
+                                )
+                            })
+                    })
+                    .transpose()?;
+                let factual_change = successor.as_ref().is_none_or(|next| {
+                    next.governed_content.content != previous.governed_content.content
+                        || next.governed_content.kind != previous.governed_content.kind
+                        || next.governed_content.topic != previous.governed_content.topic
+                        || next.governed_content.provenance != previous.governed_content.provenance
+                        || next.governed_content.correction_evidence
+                            != previous.governed_content.correction_evidence
+                        || next.governed_content.confirmation_evidence
+                            != previous.governed_content.confirmation_evidence
+                });
+                if factual_change {
+                    bm_core::memory::validate_long_term_factual_admission(
+                        previous.governed_content.control_barrier_scope_revision,
+                        admission,
+                    )
+                    .map_err(|reason| {
+                        Error::config(stage, format!("factual transition rejected: {reason:?}"))
+                    })?;
+                }
+            }
+        }
+        if namespace == root_ns {
+            let next: LongTermMemoryVersionScopeManifest =
+                decode_transaction_dependency(value, "factual root")?;
+            let previous = before
+                .json
+                .get(&(namespace.clone(), key.clone()))
+                .map(|value| {
+                    decode_transaction_dependency::<LongTermMemoryVersionScopeManifest>(
+                        value,
+                        "factual root",
+                    )
+                })
+                .transpose()?
+                .map(|root| root.manifest_revision)
+                .unwrap_or(0);
+            if previous.checked_add(1) != Some(next.manifest_revision) {
+                return Err(Error::config(
+                    stage,
+                    "factual root must advance exactly once",
+                ));
+            }
+        }
+        if namespace == crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE {
+            let next: LongTermMemoryVersionMaterial =
+                decode_transaction_dependency(value, "long-term material")?;
+            // Immutable retained material is never reinterpreted as a new effect.
+            if before.json.get(&(namespace.clone(), key.clone())) == Some(value) {
+                continue;
+            }
+            let root_key = long_term_version_scope_manifest_key(
+                &next.memory_space_id,
+                &next.factual_owner_id,
+            )?;
+            let root: LongTermMemoryVersionScopeManifest = after
+                .json
+                .get(&(root_ns.to_string(), root_key))
+                .ok_or_else(|| Error::config(stage, "material has no factual root"))
+                .and_then(|value| decode_transaction_dependency(value, "factual root"))?;
+            let control = batch
+                .mutations
+                .iter()
+                .filter_map(|mutation| match mutation {
+                    StoreMutation::PutJson {
+                        namespace, value, ..
+                    } if namespace == LONG_TERM_CONTROL_REVISION_NAMESPACE => {
+                        serde_json::from_value::<LongTermMemoryControlRevision>(value.clone()).ok()
+                    }
+                    _ => None,
+                })
+                .find(|revision| {
+                    revision.transition.successor.as_ref() == Some(&next.owner_revision_ref())
+                });
+            let predecessor = control
+                .as_ref()
+                .map(|revision| &revision.transition.predecessor);
+            let previous_material = if let Some(reference) = predecessor {
+                let key = long_term_version_material_key(
+                    &next.memory_space_id,
+                    &next.factual_owner_id,
+                    &reference.owner_ref,
+                    reference.owner_revision,
+                )?;
+                before
+                    .json
+                    .get(&(namespace.clone(), key))
+                    .map(|value| {
+                        decode_transaction_dependency::<LongTermMemoryVersionMaterial>(
+                            value,
+                            "predecessor material",
+                        )
+                    })
+                    .transpose()?
+            } else {
+                None
+            };
+            let expected = if control.as_ref().is_some_and(|revision| {
+                matches!(
+                    revision.operation,
+                    LongTermControlOperation::Correct | LongTermControlOperation::Supersede
+                )
+            }) {
+                Some(root.manifest_revision)
+            } else {
+                previous_material
+                    .as_ref()
+                    .and_then(|old| old.governed_content.control_barrier_scope_revision)
+            };
+            if next.governed_content.control_barrier_scope_revision != expected {
+                return Err(Error::config(
+                    stage,
+                    "control barrier differs from its exact transition",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_long_term_version_root_post_image(
     batch: &StoreMutationBatch,
     after: &BackendTransactionState,
@@ -6138,6 +6685,17 @@ fn validate_long_term_version_scope_image(
                 && material.factual_owner_id == factual_owner_id
         })
         .collect::<Vec<_>>();
+    if materials.iter().any(|material| {
+        material
+            .governed_content
+            .control_barrier_scope_revision
+            .is_some_and(|revision| revision == 0 || revision > root.manifest_revision)
+    }) {
+        return Err(Error::config(
+            stage,
+            "material control barrier exceeds its factual root",
+        ));
+    }
     let scoped_control_revisions = state
         .json
         .iter()
@@ -6563,6 +7121,19 @@ fn governed_transaction_dependency_json_reads(
         // Soul/source/relationship dependencies are resolved from both old
         // and proposed values under each backend's transaction fence.
         match namespace {
+            CONTROL_PLANE_SCOPE_MANIFEST_NAMESPACE => {
+                let manifest = decode_transaction_dependency::<ControlPlaneScopeManifest>(
+                    value,
+                    "control plane scope manifest",
+                )?;
+                reads.extend(
+                    manifest
+                        .entries
+                        .into_iter()
+                        .map(|entry| (entry.namespace, entry.key)),
+                );
+            }
+
             GOVERNED_EVIDENCE_SOURCE_CLAIM_MANIFEST_NAMESPACE => {
                 let manifest = decode_transaction_dependency::<GovernedEvidenceSourceClaimManifest>(
                     value,
@@ -7324,13 +7895,17 @@ fn validate_facet_post_image(
     before: &BackendTransactionState,
     after: &BackendTransactionState,
 ) -> Result<()> {
-    let facet_touched = batch_mutates_namespace(
-        batch,
-        crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
-    ) || batch_mutates_namespace(
-        batch,
-        crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
-    ) || batch_mutates_namespace(batch, GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE)
+    let source_withdrawal = batch_withdraws_transcript_sources(batch);
+    let facet_touched = source_withdrawal
+        || batch_mutates_namespace(
+            batch,
+            crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+        )
+        || batch_mutates_namespace(
+            batch,
+            crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+        )
+        || batch_mutates_namespace(batch, GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE)
         || batch_mutates_namespace(batch, MEMORY_FACET_INDEX_NAMESPACE)
         || batch_mutates_namespace(batch, MEMORY_FACET_POSTING_NAMESPACE);
     if !facet_touched {
@@ -7339,33 +7914,41 @@ fn validate_facet_post_image(
     let memory_space_id = batch.scope.memory_space_id.as_str();
     let facet_owner_keys = batch_json_keys(batch, MEMORY_FACET_INDEX_NAMESPACE);
     let facet_posting_keys = batch_json_keys(batch, MEMORY_FACET_POSTING_NAMESPACE);
-    let long_term_facet_transaction = batch_mutates_namespace(
-        batch,
-        crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
-    ) || batch_mutates_namespace(
-        batch,
-        crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
-    ) || facet_owner_keys.iter().any(|key| {
-        [after, before].into_iter().any(|state| {
-            state
-                .json
-                .get(&(MEMORY_FACET_INDEX_NAMESPACE.to_string(), key.clone()))
-                .and_then(|value| serde_json::from_value::<MemoryFacetIndexDoc>(value.clone()).ok())
-                .is_some_and(|doc| doc.owner_ref.owner_plane == GovernedMemoryOwnerPlane::LongTerm)
-        })
-    }) || facet_posting_keys.iter().any(|key| {
-        [after, before].into_iter().any(|state| {
-            let value = state
-                .json
-                .get(&(MEMORY_FACET_POSTING_NAMESPACE.to_string(), key.clone()));
-            value.is_some_and(|value| {
-                serde_json::from_value::<MemoryFacetIndexManifest>(value.clone())
-                    .is_ok_and(|manifest| manifest.subject_id == memory_space_id)
-                    || serde_json::from_value::<MemoryFacetPostingDoc>(value.clone())
-                        .is_ok_and(|posting| posting.subject_id == memory_space_id)
+    let long_term_facet_transaction = source_withdrawal
+        || batch_mutates_namespace(
+            batch,
+            crate::store_internal::schema::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+        )
+        || batch_mutates_namespace(
+            batch,
+            crate::store_internal::schema::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
+        )
+        || facet_owner_keys.iter().any(|key| {
+            [after, before].into_iter().any(|state| {
+                state
+                    .json
+                    .get(&(MEMORY_FACET_INDEX_NAMESPACE.to_string(), key.clone()))
+                    .and_then(|value| {
+                        serde_json::from_value::<MemoryFacetIndexDoc>(value.clone()).ok()
+                    })
+                    .is_some_and(|doc| {
+                        doc.owner_ref.owner_plane == GovernedMemoryOwnerPlane::LongTerm
+                    })
             })
         })
-    });
+        || facet_posting_keys.iter().any(|key| {
+            [after, before].into_iter().any(|state| {
+                let value = state
+                    .json
+                    .get(&(MEMORY_FACET_POSTING_NAMESPACE.to_string(), key.clone()));
+                value.is_some_and(|value| {
+                    serde_json::from_value::<MemoryFacetIndexManifest>(value.clone())
+                        .is_ok_and(|manifest| manifest.subject_id == memory_space_id)
+                        || serde_json::from_value::<MemoryFacetPostingDoc>(value.clone())
+                            .is_ok_and(|posting| posting.subject_id == memory_space_id)
+                })
+            })
+        });
     let subject_id = if long_term_facet_transaction {
         memory_space_id
     } else {
@@ -7543,6 +8126,32 @@ fn validate_facet_post_image(
         }
     }
 
+    for image in &long_term_owners {
+        let Some(material) = image.after.as_ref() else {
+            continue;
+        };
+        if let Some(facet) = facet_owners
+            .iter()
+            .filter_map(|image| image.after.as_ref())
+            .find(|facet| facet.owner_ref == material.owner_ref)
+        {
+            let projected = project_long_term_evidence_from_image(after, material)?;
+            let expected = build_long_term_memory_facet_index_doc(
+                &projected,
+                memory_space_id.to_string(),
+                facet.subject_ids.clone(),
+                facet.facet_index_revision,
+            )
+            .map_err(|error| Error::config("long_term_source_facet", error.to_string()))?;
+            if facet != &expected {
+                return Err(Error::config(
+                    "long_term_source_facet",
+                    "facet differs from available owner evidence",
+                ));
+            }
+        }
+    }
+
     ensure_post_image_validation(
         "memory_write_transaction_owner_facet_post_image_invalid",
         validate_memory_facet_post_image(&MemoryFacetPostImageClosure {
@@ -7621,11 +8230,22 @@ fn validate_graph_post_image(
         .any(|namespace| batch_mutates_namespace(batch, namespace));
     let evidence_owner_touched =
         batch_mutates_namespace(batch, GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE);
-    if !graph_touched && !evidence_owner_touched {
+    let source_withdrawal = batch_withdraws_transcript_sources(batch);
+    if !graph_touched && !evidence_owner_touched && !source_withdrawal {
         return Ok(());
     }
-    let manifest_keys = batch_json_keys(batch, MEMORY_GRAPH_MANIFEST_NAMESPACE);
-    if manifest_keys.is_empty() {
+    let mut manifest_keys = batch_json_keys(batch, MEMORY_GRAPH_MANIFEST_NAMESPACE);
+    if source_withdrawal {
+        for ((namespace, key), value) in &after.json {
+            if namespace == MEMORY_GRAPH_MANIFEST_NAMESPACE
+                && serde_json::from_value::<MemoryGraphScopeManifest>(value.clone())
+                    .is_ok_and(|manifest| manifest.memory_space_id == batch.scope.memory_space_id)
+            {
+                manifest_keys.insert(key.clone());
+            }
+        }
+    }
+    if manifest_keys.is_empty() && !source_withdrawal {
         return Err(Error::config(
             "memory_write_transaction_graph_post_image_invalid",
             "governed graph effects require a typed graph manifest mutation",
@@ -8065,6 +8685,93 @@ fn validate_graph_scope_post_image(
         }
     }
 
+    let mut source_availability_by_owner = BTreeMap::new();
+    for image in &long_term_owners {
+        if let Some(material) = &image.after {
+            let projected = project_long_term_evidence_from_image(after, material)?;
+            source_availability_by_owner.insert(
+                material.owner_ref.clone(),
+                material
+                    .governed_content
+                    .transcript_sources
+                    .iter()
+                    .map(|source| {
+                        (
+                            source.display_citation(),
+                            projected.transcript_sources.contains(source),
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>(),
+            );
+        }
+    }
+    let sources_by_node = node_memberships
+        .iter()
+        .filter_map(|image| image.after.as_ref())
+        .filter_map(|member| {
+            source_availability_by_owner
+                .get(&member.owner_ref)
+                .map(|sources| (&member.node_id, sources))
+        })
+        .collect::<BTreeMap<_, _>>();
+    for node in nodes.iter().filter_map(|image| image.after.as_ref()) {
+        if let Some(sources) = sources_by_node.get(&node.node_id) {
+            if node.evidence_refs.iter().any(|reference| {
+                reference.starts_with("transcript:") && sources.get(reference) != Some(&true)
+            }) {
+                return Err(Error::config(
+                    "long_term_source_graph",
+                    "node evidence has no available exact owner source",
+                ));
+            }
+        }
+    }
+    for edge in edges.iter().filter_map(|image| image.after.as_ref()) {
+        for reference in edge
+            .evidence_refs
+            .iter()
+            .filter(|reference| reference.starts_with("transcript:"))
+        {
+            let sources = [&edge.from_node_id, &edge.to_node_id]
+                .iter()
+                .filter_map(|id| sources_by_node.get(*id))
+                .filter_map(|sources| sources.get(reference))
+                .copied()
+                .collect::<Vec<_>>();
+            if sources.contains(&false) || (!sources_by_node.is_empty() && sources.is_empty()) {
+                return Err(Error::config(
+                    "long_term_source_graph",
+                    "edge evidence has no available exact owner source",
+                ));
+            }
+        }
+    }
+
+    let referenced = nodes
+        .iter()
+        .filter_map(|image| image.after.as_ref())
+        .flat_map(|node| node.evidence_refs.iter())
+        .chain(
+            edges
+                .iter()
+                .filter_map(|image| image.after.as_ref())
+                .flat_map(|edge| edge.evidence_refs.iter()),
+        )
+        .collect::<BTreeSet<_>>();
+    if backlinks
+        .iter()
+        .filter_map(|image| image.after.as_ref())
+        .any(|backlink| {
+            backlink.source_id.starts_with("transcript:")
+                && !referenced.contains(&backlink.source_id)
+        })
+    {
+        return Err(Error::config(
+            "long_term_source_graph",
+            "orphan transcript backlink has no governed consumer",
+        ));
+    }
+
     ensure_post_image_validation(
         "memory_write_transaction_graph_post_image_invalid",
         validate_memory_graph_post_image(&MemoryGraphPostImageClosure {
@@ -8088,6 +8795,34 @@ fn validate_graph_scope_post_image(
     )
 }
 
+pub(crate) fn validate_unique_governance_policies(
+    json: &BTreeMap<(String, String), serde_json::Value>,
+) -> Result<()> {
+    let mut identities = BTreeSet::new();
+    for ((namespace, _), value) in json {
+        if namespace != LONG_TERM_GOVERNANCE_POLICY_NAMESPACE {
+            continue;
+        }
+        let policy: MemoryLongTermGovernancePolicy = serde_json::from_value(value.clone())
+            .map_err(|error| Error::config("long_term_policy_closure", error.to_string()))?;
+        let identity = serde_json::to_string(&(
+            &policy.memory_space_id,
+            &policy.kind,
+            &policy.selector,
+            &policy.duration,
+            &policy.expires_at,
+        ))
+        .map_err(|error| Error::config("long_term_policy_closure", error.to_string()))?;
+        if !identities.insert(identity) {
+            return Err(Error::conflict(
+                "long_term_policy_duplicate",
+                "policy logical identity is already present",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_control_post_image(
     batch: &StoreMutationBatch,
     before: &BackendTransactionState,
@@ -8104,6 +8839,9 @@ fn validate_control_post_image(
         .any(|namespace| batch_mutates_namespace(batch, namespace))
     {
         return Ok(());
+    }
+    if batch_mutates_namespace(batch, LONG_TERM_GOVERNANCE_POLICY_NAMESPACE) {
+        validate_unique_governance_policies(&after.json)?;
     }
     let memory_space_id = batch.scope.memory_space_id.as_str();
     let revisions = batch_json_keys(batch, LONG_TERM_CONTROL_REVISION_NAMESPACE)
@@ -11318,6 +12056,23 @@ impl StorePlatform {
             });
         }
         let mut record = record.clone();
+        let factual_root_key = long_term_version_scope_manifest_key(
+            &record.key.memory_space_id,
+            &record.key.memory_space_id,
+        )?;
+        let factual_root_before = self.engine.get_json_value(
+            crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
+            &factual_root_key,
+        )?;
+        record.factual_admission_revision = factual_root_before
+            .as_ref()
+            .map(|value| {
+                serde_json::from_value::<LongTermMemoryVersionScopeManifest>(value.clone())
+            })
+            .transpose()
+            .map_err(|error| Error::config("transcript_factual_admission", error.to_string()))?
+            .map(|root| root.manifest_revision)
+            .unwrap_or(0);
         let next_sequence = head
             .as_ref()
             .map(|head| head.last_sequence.saturating_add(1))
@@ -11430,7 +12185,19 @@ impl StorePlatform {
         scope.subject_id.clone_from(&record.subject);
         scope.channel.clone_from(&record.key.channel_id);
         scope.conversation_id = Some(record.key.conversation_id.clone());
-        let mut owner_preconditions = Vec::new();
+        let mut owner_preconditions = vec![match factual_root_before {
+            Some(value) => StoreJsonPrecondition::Exact {
+                namespace: crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE
+                    .to_string(),
+                key: factual_root_key,
+                value,
+            },
+            None => StoreJsonPrecondition::Absent {
+                namespace: crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE
+                    .to_string(),
+                key: factual_root_key,
+            },
+        }];
         if let Some(canonical) = canonical {
             scope.chat_id.clone_from(&canonical.session_chat_id);
             let before = self
@@ -13398,6 +14165,15 @@ impl ConversationTranscriptStore for StorePlatform {
                 });
             }
             let runtime_budget = self.current_runtime_budget(current_unix_secs());
+            let factual =
+                crate::runtime::governed_indexes::plan_transcript_factual_source_withdrawal(
+                    self,
+                    &scope.memory_space_id,
+                    &changed_records,
+                    &runtime_budget,
+                )?;
+            mutations.extend(factual.mutations);
+            super::merge_json_preconditions(&mut preconditions, factual.preconditions)?;
             if let Some(soul_plan) = super::subject_soul::plan_transcript_subject_soul_withdrawal(
                 self,
                 &scope,

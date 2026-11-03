@@ -9,13 +9,14 @@ mod policy;
 pub use contract::{
     AdapterAuthContext, AdapterCapabilityReportV2, AdapterCommand, AdapterEnvelope, AdapterEvent,
     AdapterGovernedProjectSafeReportV1, AdapterGovernedRecallSafeReportV1,
-    AdapterGovernedSafeReportV1, AdapterMutationOperationCapability, AdapterMutationReceiptV1,
-    AdapterMutationReliability, AdapterOperation, AdapterProceduralLearningCapabilityBinding,
-    AdapterProjectionAuditSummary, AdapterProjectionReport, AdapterProtocolBinding,
-    AdapterProtocolCapabilityBinding, AdapterProtocolPrivacyBinding,
-    AdapterProtocolRenderBudgetBinding, AdapterRequestIdentity, AdapterRequestIdentityError,
-    AdapterRequestIdentityOwner, AdapterResponse, AdapterSdkReport, AdapterSource,
-    AdapterTurnFinalizeReport, ExternalAiMemoryProtocolVersion, TransportKind, TransportMode,
+    AdapterGovernedSafeReportV1, AdapterLongTermPolicySafeReportV1,
+    AdapterMutationOperationCapability, AdapterMutationReceiptV1, AdapterMutationReliability,
+    AdapterOperation, AdapterProceduralLearningCapabilityBinding, AdapterProjectionAuditSummary,
+    AdapterProjectionReport, AdapterProtocolBinding, AdapterProtocolCapabilityBinding,
+    AdapterProtocolPrivacyBinding, AdapterProtocolRenderBudgetBinding, AdapterRequestIdentity,
+    AdapterRequestIdentityError, AdapterRequestIdentityOwner, AdapterResponse, AdapterSdkReport,
+    AdapterSource, AdapterTurnFinalizeReport, ExternalAiMemoryProtocolVersion, TransportKind,
+    TransportMode,
 };
 pub use dispatch::{
     dispatch_adapter_command, dispatch_adapter_command_with_services, project_adapter_report,

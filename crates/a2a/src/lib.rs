@@ -78,6 +78,14 @@ pub fn bridge_message_specs() -> Vec<A2aBridgeMessageSpec> {
             Some(AdapterOperation::LongTermMutate),
         ),
         message(
+            "memory_long_term_policy_list_request",
+            Some(AdapterOperation::LongTermPolicyList),
+        ),
+        message(
+            "memory_long_term_policy_detail_request",
+            Some(AdapterOperation::LongTermPolicyDetail),
+        ),
+        message(
             "memory_long_term_policy_request",
             Some(AdapterOperation::LongTermPolicy),
         ),

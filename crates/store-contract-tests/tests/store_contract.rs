@@ -210,21 +210,26 @@ fn core_revision_planner_rejects_stale_and_same_revision_conflicts() {
         source_revision: Some(source_revision),
     };
 
-    let owner = match plan_long_term_memory_upsert(None, &make_draft("v3", 3), 100) {
+    let owner = match plan_long_term_memory_upsert(None, &make_draft("v3", 3), 100, None) {
         LongTermMemoryEntryPlan::Created(owner) => owner,
         other => panic!("expected create, got {other:?}"),
     };
     assert_eq!(owner.owner_revision, 1);
     assert_eq!(
-        plan_long_term_memory_upsert(Some(&owner), &make_draft("v3", 3), 200),
+        plan_long_term_memory_upsert(Some(&owner), &make_draft("v3", 3), 200, None),
         LongTermMemoryEntryPlan::Noop
     );
     assert!(matches!(
-        plan_long_term_memory_upsert(Some(&owner), &make_draft("v2", 2), 200),
+        plan_long_term_memory_upsert(Some(&owner), &make_draft("v2", 2), 200, None),
         LongTermMemoryEntryPlan::Rejected(_)
     ));
     assert!(matches!(
-        plan_long_term_memory_upsert(Some(&owner), &make_draft("same-revision-conflict", 3), 200),
+        plan_long_term_memory_upsert(
+            Some(&owner),
+            &make_draft("same-revision-conflict", 3),
+            200,
+            None
+        ),
         LongTermMemoryEntryPlan::Rejected(_)
     ));
 }

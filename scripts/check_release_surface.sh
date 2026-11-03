@@ -53,6 +53,7 @@ required_docs=(
   "docs/en/adapters.md"
   "docs/en/operator-guide.md"
   "docs/en/release-checklist.md"
+  "docs/en/release-notes-0.11.0.md"
   "docs/en/release-notes-0.10.0.md"
   "docs/en/release-notes-0.9.0.md"
   "docs/en/release-notes-0.8.0.md"
@@ -72,6 +73,7 @@ required_docs=(
   "docs/zh-CN/adapters.md"
   "docs/zh-CN/operator-guide.md"
   "docs/zh-CN/release-checklist.md"
+  "docs/zh-CN/release-notes-0.11.0.md"
   "docs/zh-CN/release-notes-0.10.0.md"
   "docs/zh-CN/release-notes-0.9.0.md"
   "docs/zh-CN/release-notes-0.8.0.md"
@@ -96,7 +98,7 @@ for doc in "${required_docs[@]}"; do
   fi
 done
 
-release_version="0.10.0"
+release_version="0.11.0"
 version_manifests=(
   "crates/core/Cargo.toml"
   "crates/store-contract-tests/Cargo.toml"
@@ -181,6 +183,15 @@ for desktop_identity in apps/desktop/package.json apps/desktop/package-lock.json
     echo "desktop identity is not on the release version: $desktop_identity" >&2
     exit 1
   }
+done
+
+for doc in docs/en/release-notes-0.11.0.md docs/zh-CN/release-notes-0.11.0.md; do
+  for marker in 'Store v16' 'material v6' 'control revision v4' 'Adapter V2' 'automatic migration' 'MemoryGovernancePolicyRef' 'factual_admission_revision' 'LongTermTransitionBasis'; do
+    rg -F -q "$marker" "$doc" || {
+      echo "0.11.0 source notes omit required compatibility marker: doc=$doc marker=$marker" >&2
+      exit 1
+    }
+  done
 done
 
 for doc in docs/en/release-notes-0.10.0.md docs/zh-CN/release-notes-0.10.0.md; do

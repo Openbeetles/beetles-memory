@@ -998,6 +998,9 @@ mod tests {
         .expect("owner id");
         let store = StubLongTermMemoryStore {
             entries: Mutex::new(vec![LongTermMemoryEntry {
+                transcript_sources: Vec::new(),
+                control_barrier_scope_revision: None,
+
                 id: owner_id.clone(),
                 kind: LongTermMemoryKind::Fact,
                 privacy: MemoryPrivacyClass::SharedWithSubject,

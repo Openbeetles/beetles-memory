@@ -86,7 +86,7 @@ Transcript attrs 会跟随 target turn/message 一起 replay。`TranscriptAttrEn
 
 `HostUi` transcript replay 由 SDK `transcript_replay` capability 控制。桌面和 embedded SDK 宿主可以提交 transcript turn 后，把同一个 conversation 读回给 UI 展示；这不要求打开 `MemoryRuntime::replay`、仅开发验收的 `nonproduction-replay-harness`、raw owner replay 或 deep inspection。
 
-`TranscriptLifecycleReport.derived_memory_refs` 可以作为下一步长期记忆控制的 target 来源。比如 raw transcript 被 mask 或 delete 后，report 会列出受影响的 `DerivedMemoryRef`；宿主或 operator 若要撤销某条 accepted long-term memory，应把对应 `DerivedMemoryRef` 传给 `MemoryLongTermTarget::TranscriptDerivedRef`，再调用 `MemoryRuntime::mutate_long_term_memory`。Transcript lifecycle 不会自动级联删除 accepted long-term memory、shared fact、procedural skill、private garden 或 soul handoff。
+`TranscriptLifecycleReport.derived_memory_refs` 可以作为下一步长期记忆控制的 target 来源。比如 raw transcript 被 mask 或 delete 后，report 会列出受影响的 `DerivedMemoryRef`；宿主或 operator 若要撤销某条 accepted long-term memory，应把对应 `DerivedMemoryRef` 传给 `MemoryLongTermTarget::TranscriptDerivedRef`，再调用 `MemoryRuntime::mutate_long_term_memory`。Transcript lifecycle 不会自动删除 accepted long-term fact 正文。0.11.0 会原子撤回失效事实证据与 facet/graph 关联，程序性记忆及 Soul 的依赖继续由各自来源治理处理。current/as-of recall 与 projection 不能复活撤回来源，独立有效证据仍可使用。
 
 ## 受治理的 Archive Replacement
 

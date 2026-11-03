@@ -91,6 +91,7 @@ fn typed_control_revision(
         memory_space_id: "system".to_string(),
         factual_owner_id: factual_owner_id.to_string(),
         operation: LongTermControlOperation::Correct,
+        basis: bm_core::memory::LongTermTransitionBasis::ExplicitControl,
         invalidation_reason_code: None,
         transition,
         predecessor_material_digest: "a".repeat(64),
@@ -135,6 +136,9 @@ fn put_graph_json(namespace: &str, key: &str) -> StoreMutation {
 
 fn graph_owner_for(owner_id: &str) -> LongTermMemoryEntry {
     LongTermMemoryEntry {
+        transcript_sources: Vec::new(),
+        control_barrier_scope_revision: None,
+
         id: owner_id.to_string(),
         kind: LongTermMemoryKind::Project,
         topic: "graph exact closure".to_string(),
@@ -1039,6 +1043,8 @@ fn forged_confirmation_material() -> LongTermMemoryVersionMaterial {
         owner_ref,
         owner_revision: 2,
         governed_content: LongTermMemoryGovernedContent {
+            transcript_sources: Vec::new(),
+            control_barrier_scope_revision: None,
             kind: LongTermMemoryKind::Fact,
             topic: "forged confirmation".to_string(),
             content: "An ordinary Store batch must not mint confirmation.".to_string(),

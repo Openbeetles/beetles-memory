@@ -178,6 +178,37 @@ pub struct MemoryLongTermPolicyRequest {
     pub mode_input: RuntimeLifecycleModeInput,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryLongTermPolicyListRequest {
+    pub cursor: Option<String>,
+    pub limit: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryLongTermPolicyDetailRequest {
+    pub policy_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryLongTermPolicyView {
+    pub policy: bm_core::memory::MemoryLongTermGovernancePolicy,
+    pub effective: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryLongTermPolicyListReport {
+    pub policies: Vec<MemoryLongTermPolicyView>,
+    pub next_cursor: Option<String>,
+    pub total_visible: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryLongTermPolicyDetailReport {
+    pub policy: Option<MemoryLongTermPolicyView>,
+}
+
 pub type MemoryLongTermListReport = CoreMemoryLongTermListReport;
 pub type MemoryLongTermDetailReport = CoreMemoryLongTermDetailReport;
 

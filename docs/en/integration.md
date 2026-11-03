@@ -1,6 +1,8 @@
 # Integration Guide
 
-This guide describes how to embed Beetle Memory 0.10.0 source into a Rust project through `bm-sdk`: post-turn input V3, semantic Job V4 and Store v15. These contracts are not available in the published 0.9.0 source, which uses input V2 and Store v14. No compatibility reader or automatic migration is provided; the Git tag identifies the released source.
+This guide describes how to embed Beetle Memory 0.11.0 source into a Rust project through `bm-sdk`: post-turn input V3, semantic Job V4 and Store v16. These contracts are not available in the published 0.9.0 source, which uses input V2 and Store v14. No compatibility reader or automatic migration is provided; the Git tag identifies the released source.
+
+The 0.11.0 contract described in [API changes](api.md#runtime-operations) requires Store v16 / material v6 / control revision v4. The historical v0.10.0 tag remains unchanged.
 
 ## 1. Choose A Profile
 
@@ -30,7 +32,7 @@ Use the same source tag for every Beetle crate. Source release does not mean cra
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.10.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.10.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.11.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.11.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 Use exactly one profile feature for a build. Linux desktop, Linux device, and Linux server are distinct deployment targets; do not substitute one for another.
@@ -184,7 +186,7 @@ Its `expected_revision: None` is only for this fresh ephemeral Store. Persistent
 existing binding references and manage revisions explicitly, never automatically regrant on each
 startup or turn. Adapt `GovernanceBindingSource` and `GovernanceCredentialResolver` to the product's
 one configuration owner for real model execution; they are deliberately unconfigured here.
-See [0.10.0 source release notes](release-notes-0.10.0.md) for the current API and Store boundary.
+See [0.11.0 source release notes](release-notes-0.11.0.md) for the current API and Store boundary.
 
 The host remains responsible for final ordering of system, developer, user, and
 tool messages.
@@ -267,7 +269,7 @@ Hosts must not claim jobs, run governance transitions, assemble memory
 mutations, or implement a second queue/worker/retry policy. Operator and
 attachment status reads must use the SDK-minted typed inspection authority;
 unauthorized or cross-subject requests fail before job identity or reason detail
-is returned. The 0.10.0 source accepts only Store v15 and rejects v14 and earlier without writing. Owners may explicitly
+is returned. The 0.11.0 source accepts only Store v16 and rejects v15 and earlier without writing. Owners may explicitly
 recreate disposable development stores; the runtime neither deletes real data nor
 provides automatic migration or a compatibility reader.
 
@@ -328,13 +330,13 @@ clears confirmation instead of transferring it to another owner.
 
 ### Durable mutation results (Adapter V2)
 
-Adapter V2 gives `Write` and `LongTermMutate` a Store-owned durable operation receipt.
+Adapter V2 gives `Write`, `LongTermMutate`, and `LongTermPolicy` a Store-owned durable operation receipt.
 The first successful execution returns `Accepted` with a receipt. Retrying the same
 operation identity with the same canonical intent returns terminal-success `Replayed`
 with that same receipt and does not add another effect, revision, audit, or event. Reusing
 the identity for a different intent is a conflict.
 
-Durable `Write` and `LongTermMutate` requests must provide a stable, non-sensitive
+Durable `Write`, `LongTermMutate`, and `LongTermPolicy` requests must provide a stable, non-sensitive
 idempotency key through the transport. The Adapter hashes that key before persistence and
 rejects a durable mutation when the key is absent; it never substitutes a one-shot generated
 identity that the caller could not reproduce after a lost response. Adapter V1 accepts reads
@@ -346,7 +348,7 @@ silently.
 
 Bulk `forget_by_query` must run a dry-run preview before execution and then pass the confirmation token. Use `MemoryLongTermPolicyRequest` for "do not remember this kind of thing again" or pausing future long-term memory updates for a scope; policies do not retroactively delete accepted records.
 
-Transcript lifecycle raw delete/mask only affects conversation evidence. It reports affected `DerivedMemoryRef` values, but revoking the corresponding long-term memory still goes through `mutate_long_term_memory`. Runtime Skill edit/retire only manages procedural runtime skill memory and is not the control surface for ordinary long-term memory; retire appends a terminal revision and preserves owner lineage.
+In 0.11.0, Transcript raw delete/mask atomically withdraws derived factual evidence and facet/graph associations. Accepted facts and independent evidence remain; deleting the fact still goes through `mutate_long_term_memory`. Inspect suppression rules through `list_memory_governance_policies` / `get_memory_governance_policy`, then resume using the exact policy ID/revision and a stable operation ID. Rules apply to the mounted subject, even when multiple Agents share one HumanUser actor. Runtime Skill edit/retire only manages procedural runtime skill memory and is not the control surface for ordinary long-term memory; retire appends a terminal revision and preserves owner lineage.
 
 ## 10. Host Turn Lifecycle
 
@@ -454,4 +456,4 @@ Add a smoke test in the integrating project that:
 8. Exports an opaque archive, imports it into a runtime with the same exact typed scope and policy, and checks the governed archive root.
 9. Runs operator inspect and replay against the replaced scope.
 
-The historical [0.9.0 source notes](release-notes-0.9.0.md) describe projection changes that retained Store v14. The 0.10.0 source instead requires Store v15; never apply the historical no-rebuild statement to this clean break.
+The historical [0.9.0 source notes](release-notes-0.9.0.md) describe projection changes that retained Store v14. The 0.11.0 source instead requires Store v16; never apply the historical no-rebuild statement to this clean break.

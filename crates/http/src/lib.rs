@@ -113,6 +113,14 @@ const ROUTES: &[RouteSpec] = &[
     memory_post("/memory/long-term/list", AdapterOperation::LongTermList),
     memory_post("/memory/long-term/detail", AdapterOperation::LongTermDetail),
     memory_post("/memory/long-term/mutate", AdapterOperation::LongTermMutate),
+    memory_post(
+        "/memory/long-term/policy/list",
+        AdapterOperation::LongTermPolicyList,
+    ),
+    memory_post(
+        "/memory/long-term/policy/detail",
+        AdapterOperation::LongTermPolicyDetail,
+    ),
     memory_post("/memory/long-term/policy", AdapterOperation::LongTermPolicy),
     memory_post(
         "/memory/transcript/attrs",
@@ -1614,6 +1622,9 @@ fn render_report(report: AdapterSdkReport) -> bm_sdk::Result<String> {
         })
         .to_string(),
         AdapterSdkReport::Project(_) => unreachable!("governed project DTO handled above"),
+        AdapterSdkReport::LongTermPolicyList(_) | AdapterSdkReport::LongTermPolicyDetail(_) => {
+            unreachable!("governed policy DTO handled above")
+        }
         AdapterSdkReport::LongTermList(report) => json!({
             "status": "accepted",
             "records": report.records,

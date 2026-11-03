@@ -121,7 +121,7 @@ fn domain_separated_sha256(domain: &str, fields: &[&str]) -> String {
     format!("{:x}", hasher.finalize())
 }
 /// 单条支持性引用字节上限。
-pub const MAX_LONG_TERM_MEMORY_CITATION_LEN: usize = 96;
+pub const MAX_LONG_TERM_MEMORY_CITATION_LEN: usize = 2048;
 /// 注入 prompt 的长期记忆块上限。
 pub const MAX_LONG_TERM_MEMORY_BLOCK_LEN: usize = 1024;
 /// 长期记忆治理：任务超时后视为陈旧。
@@ -694,6 +694,10 @@ enum LongTermMemoryAgeState {
 /// 持久化后的长期记忆条目。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LongTermMemoryEntry {
+    /// Exact canonical sources, resolved by the SDK and retained as provenance after withdrawal.
+    pub transcript_sources: Vec<super::TranscriptEvidenceRef>,
+    /// Space-wide factual revision at the last explicit content control transition.
+    pub control_barrier_scope_revision: Option<u64>,
     pub id: String,
     pub kind: LongTermMemoryKind,
     #[serde(default)]
@@ -733,6 +737,41 @@ pub struct LongTermMemoryEntry {
 }
 
 /// 待写入的长期记忆草稿。
+impl LongTermMemoryEntry {
+    /// A read-only evidence projection. Accepted content and immutable provenance stay owned by the material.
+    pub fn project_transcript_evidence(
+        &self,
+        available: impl Fn(&super::TranscriptEvidenceRef) -> bool,
+    ) -> Self {
+        let allowed = self
+            .transcript_sources
+            .iter()
+            .filter(|source| available(source))
+            .map(super::TranscriptEvidenceRef::display_citation)
+            .collect::<std::collections::BTreeSet<_>>();
+        let permits =
+            |citation: &str| !citation.starts_with("transcript:") || allowed.contains(citation);
+        let mut projected = self.clone();
+        projected
+            .supporting_citations
+            .retain(|citation| permits(citation));
+        for entity in &mut projected.canonical_entities {
+            entity
+                .evidence_refs
+                .retain(|evidence| permits(&evidence.source_ref));
+        }
+        projected
+            .canonical_entities
+            .retain(|entity| !entity.evidence_refs.is_empty());
+        projected
+            .transcript_sources
+            .retain(|source| allowed.contains(&source.display_citation()));
+        projected.evidence_count =
+            u32::try_from(projected.supporting_citations.len()).unwrap_or(u32::MAX);
+        projected
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LongTermMemoryDraft {
@@ -832,6 +871,13 @@ impl LongTermMemoryDraft {
                 break;
             }
         }
+        if self
+            .supporting_citations
+            .iter()
+            .any(|citation| citation.trim().len() > MAX_LONG_TERM_MEMORY_CITATION_LEN)
+        {
+            return Err(LongTermMemoryEntryRejection::InvalidDraft);
+        }
         let supporting_citations = normalize_supporting_citations(&self.supporting_citations);
         let canonical_entities =
             normalize_canonical_entities(&self.canonical_entities, &supporting_citations)?;
@@ -913,6 +959,17 @@ impl LongTermMemoryQuery {
 
     pub fn filter_sort_entries(
         &self,
+        entries: Vec<LongTermMemoryEntry>,
+        now_secs: u64,
+    ) -> Vec<LongTermMemoryEntry> {
+        let mut entries = self.filter_sort_all_entries(entries, now_secs);
+        entries.truncate(self.normalized().limit);
+        entries
+    }
+
+    /// The control catalog owns pagination; query.limit is a recall budget, not a catalog cap.
+    pub fn filter_sort_all_entries(
+        &self,
         mut entries: Vec<LongTermMemoryEntry>,
         now_secs: u64,
     ) -> Vec<LongTermMemoryEntry> {
@@ -921,7 +978,6 @@ impl LongTermMemoryQuery {
         entries.sort_by(|left, right| {
             compare_long_term_memory_query_results(left, right, &normalized)
         });
-        entries.truncate(normalized.limit);
         entries
     }
 }
@@ -944,7 +1000,7 @@ fn normalize_supporting_citations(values: &[String]) -> Vec<String> {
     let mut citations =
         Vec::with_capacity(values.len().min(MAX_LONG_TERM_MEMORY_SUPPORTING_CITATIONS));
     for raw in values {
-        let normalized = truncate_utf8_bytes(raw.trim(), MAX_LONG_TERM_MEMORY_CITATION_LEN);
+        let normalized = raw.trim().to_string();
         if normalized.is_empty() || citations.iter().any(|item| item == &normalized) {
             continue;
         }
@@ -1242,6 +1298,8 @@ pub enum LongTermMemoryEntryRejection {
     SlotMismatch,
     PrivacyTransitionRequiresControl,
     SubjectVisibilityTransitionRequiresControl,
+    SourcePredatesExplicitControl,
+    FactualSourceAuthorityRequired,
     OlderSourceRevision,
     SourceRevisionConflict,
     OlderObservation,
@@ -1293,6 +1351,9 @@ fn long_term_memory_entry_from_normalized_draft(
         normalized.evidence_count.unwrap_or(0),
     );
     LongTermMemoryEntry {
+        transcript_sources: Vec::new(),
+        control_barrier_scope_revision: None,
+
         id,
         kind: normalized.kind,
         topic: normalized.topic,
@@ -1384,10 +1445,24 @@ fn merge_same_content_entities(
     Ok(())
 }
 
+pub fn validate_long_term_factual_admission(
+    barrier: Option<u64>,
+    admission: Option<u64>,
+) -> std::result::Result<(), LongTermMemoryEntryRejection> {
+    match (barrier, admission) {
+        (Some(barrier), Some(admission)) if admission < barrier => {
+            Err(LongTermMemoryEntryRejection::SourcePredatesExplicitControl)
+        }
+        (Some(_), None) => Err(LongTermMemoryEntryRejection::FactualSourceAuthorityRequired),
+        _ => Ok(()),
+    }
+}
+
 pub fn plan_long_term_memory_upsert(
     existing: Option<&LongTermMemoryEntry>,
     draft: &LongTermMemoryDraft,
     now_secs: u64,
+    factual_admission_revision: Option<u64>,
 ) -> LongTermMemoryEntryPlan {
     let normalized = match draft.normalized_with_rejection() {
         Ok(normalized) => normalized,
@@ -1401,6 +1476,12 @@ pub fn plan_long_term_memory_upsert(
             normalized, id, now_secs,
         ));
     };
+    if let Err(reason) = validate_long_term_factual_admission(
+        existing.control_barrier_scope_revision,
+        factual_admission_revision,
+    ) {
+        return LongTermMemoryEntryPlan::Rejected(reason);
+    }
     if existing.kind != normalized.kind || existing.topic != normalized.topic {
         return LongTermMemoryEntryPlan::Rejected(LongTermMemoryEntryRejection::SlotMismatch);
     }
@@ -1657,6 +1738,16 @@ pub(crate) fn long_term_memory_entry_from_draft(
 
 /// 结构化长期记忆存储接口。实现负责持久化、去重与轻量召回。
 pub trait LongTermMemoryStore: Send + Sync {
+    fn factual_admission_revision(&self, _draft: &LongTermMemoryDraft) -> Result<Option<u64>> {
+        Ok(None)
+    }
+    fn factual_deletion_admission_revision(
+        &self,
+        _entry: &LongTermMemoryEntry,
+    ) -> Result<Option<u64>> {
+        Ok(None)
+    }
+
     fn upsert_many(&self, drafts: &[LongTermMemoryDraft], now_secs: u64) -> Result<usize>;
     fn create_exact_owner(&self, _entry: &LongTermMemoryEntry) -> Result<()> {
         Err(Error::config(
@@ -1699,6 +1790,16 @@ pub trait LongTermMemoryStore: Send + Sync {
 
 /// Production-facing long-term owner access. This capability cannot mutate owner state.
 pub trait LongTermMemoryReadStore: Send + Sync {
+    fn factual_admission_revision(&self, _draft: &LongTermMemoryDraft) -> Result<Option<u64>> {
+        Ok(None)
+    }
+    fn factual_deletion_admission_revision(
+        &self,
+        _entry: &LongTermMemoryEntry,
+    ) -> Result<Option<u64>> {
+        Ok(None)
+    }
+
     fn recall(
         &self,
         query: &str,
@@ -1715,6 +1816,9 @@ pub trait LongTermMemoryReadStore: Send + Sync {
     fn query(&self, query: &LongTermMemoryQuery) -> Result<Vec<LongTermMemoryEntry>> {
         Ok(query.filter_sort_entries(self.list(usize::MAX)?, crate::util::current_unix_secs()))
     }
+    fn query_all(&self, query: &LongTermMemoryQuery) -> Result<Vec<LongTermMemoryEntry>> {
+        Ok(query.filter_sort_all_entries(self.list(usize::MAX)?, crate::util::current_unix_secs()))
+    }
     fn list(&self, limit: usize) -> Result<Vec<LongTermMemoryEntry>>;
     fn count(&self) -> Result<usize>;
 }
@@ -1723,6 +1827,16 @@ impl<T> LongTermMemoryReadStore for T
 where
     T: LongTermMemoryStore + ?Sized,
 {
+    fn factual_admission_revision(&self, draft: &LongTermMemoryDraft) -> Result<Option<u64>> {
+        LongTermMemoryStore::factual_admission_revision(self, draft)
+    }
+    fn factual_deletion_admission_revision(
+        &self,
+        entry: &LongTermMemoryEntry,
+    ) -> Result<Option<u64>> {
+        LongTermMemoryStore::factual_deletion_admission_revision(self, entry)
+    }
+
     fn recall(
         &self,
         query: &str,
@@ -1780,6 +1894,13 @@ pub fn canonicalize_long_term_memory_entry(
         }
     }
     entry.keywords = keywords;
+    if entry
+        .supporting_citations
+        .iter()
+        .any(|citation| citation.trim().len() > MAX_LONG_TERM_MEMORY_CITATION_LEN)
+    {
+        return None;
+    }
     entry.supporting_citations = normalize_supporting_citations(&entry.supporting_citations);
     entry.canonical_entities =
         normalize_canonical_entities(&entry.canonical_entities, &entry.supporting_citations)
@@ -2019,6 +2140,7 @@ pub(crate) fn compare_long_term_memory_query_results(
         .then_with(|| entry_observed_at(right).cmp(&entry_observed_at(left)))
         .then_with(|| right.updated_at.cmp(&left.updated_at))
         .then_with(|| right.created_at.cmp(&left.created_at))
+        .then_with(|| left.id.cmp(&right.id))
 }
 
 fn query_exactness_priority(entry: &LongTermMemoryEntry, query: &LongTermMemoryQuery) -> u8 {
@@ -2054,7 +2176,7 @@ pub fn merge_long_term_memory_entry(
     draft: &LongTermMemoryDraft,
     now_secs: u64,
 ) -> bool {
-    match plan_long_term_memory_upsert(Some(existing), draft, now_secs) {
+    match plan_long_term_memory_upsert(Some(existing), draft, now_secs, None) {
         LongTermMemoryEntryPlan::Updated(entry) => {
             *existing = entry;
             true
@@ -2078,7 +2200,7 @@ pub(crate) fn inspect_long_term_memory_merge_guard(
     draft: &LongTermMemoryDraft,
     now_secs: u64,
 ) -> LongTermMemoryMergeGuardDecision {
-    match plan_long_term_memory_upsert(Some(existing), draft, now_secs) {
+    match plan_long_term_memory_upsert(Some(existing), draft, now_secs, None) {
         LongTermMemoryEntryPlan::Rejected(
             LongTermMemoryEntryRejection::PrivacyTransitionRequiresControl,
         ) => LongTermMemoryMergeGuardDecision::RejectPrivacyClassTransition,
@@ -3156,6 +3278,9 @@ mod tests {
         updated_at: u64,
     ) -> LongTermMemoryEntry {
         canonicalize_long_term_memory_entry(LongTermMemoryEntry {
+            transcript_sources: Vec::new(),
+            control_barrier_scope_revision: None,
+
             id: id.to_string(),
             kind,
             privacy: MemoryPrivacyClass::SharedWithSubject,
@@ -3377,6 +3502,9 @@ mod tests {
     #[test]
     fn canonicalize_long_term_memory_entry_fills_updated_at() {
         let entry = canonicalize_long_term_memory_entry(LongTermMemoryEntry {
+            transcript_sources: Vec::new(),
+            control_barrier_scope_revision: None,
+
             id: "ltm-1".to_string(),
             kind: LongTermMemoryKind::Profile,
             privacy: MemoryPrivacyClass::SharedWithSubject,
@@ -3411,6 +3539,9 @@ mod tests {
     #[test]
     fn canonicalize_long_term_memory_entry_rejects_missing_typed_topic() {
         let entry = canonicalize_long_term_memory_entry(LongTermMemoryEntry {
+            transcript_sources: Vec::new(),
+            control_barrier_scope_revision: None,
+
             id: "ltm-1".to_string(),
             kind: LongTermMemoryKind::Fact,
             privacy: MemoryPrivacyClass::SharedWithSubject,
@@ -3742,6 +3873,9 @@ mod tests {
     #[test]
     fn canonicalize_long_term_memory_entry_defaults_evidence_fields() {
         let entry = canonicalize_long_term_memory_entry(LongTermMemoryEntry {
+            transcript_sources: Vec::new(),
+            control_barrier_scope_revision: None,
+
             id: "ltm-1".to_string(),
             kind: LongTermMemoryKind::Fact,
             privacy: MemoryPrivacyClass::SharedWithSubject,

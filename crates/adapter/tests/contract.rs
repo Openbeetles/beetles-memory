@@ -188,8 +188,18 @@ fn mutation_reliability_inventory_is_exhaustive_and_distinguishes_durable_receip
             true,
         ),
         (
+            AdapterOperation::LongTermPolicyList,
+            AdapterMutationReliability::NotMutation,
+            false,
+        ),
+        (
+            AdapterOperation::LongTermPolicyDetail,
+            AdapterMutationReliability::NotMutation,
+            false,
+        ),
+        (
             AdapterOperation::LongTermPolicy,
-            AdapterMutationReliability::ExplicitlyNonDurable,
+            AdapterMutationReliability::DurableStoreReceipt,
             true,
         ),
         (
@@ -284,8 +294,8 @@ fn long_term_mutation_and_policy_fingerprints_are_stable_and_field_sensitive() {
         ),
         (
             AdapterOperation::LongTermPolicy,
-            r#"{"operation":{"resume":{"selector":{"topic_pattern":"release-*"}}},"reason":"resume release memory","dry_run":true}"#,
-            r#"{"operation":{"resume":{"selector":{"topic_pattern":"security-*"}}},"reason":"resume release memory","dry_run":true}"#,
+            r#"{"operation":{"resume":{"target":{"policy_id":"policy-release","policy_revision":1}}},"reason":"resume release memory","dry_run":true}"#,
+            r#"{"operation":{"resume":{"target":{"policy_id":"policy-release","policy_revision":2}}},"reason":"resume release memory","dry_run":true}"#,
         ),
     ] {
         let first = decode_json_adapter_command(operation, body).expect("first command");
@@ -1772,4 +1782,37 @@ fn adapter_crate_manifest_has_no_direct_core_or_store_dependency() {
     assert!(!dependencies.contains("bm-core"));
     assert!(!dependencies.contains("bm-store"));
     assert!(dependencies.contains("bm-sdk"));
+}
+
+#[test]
+fn policy_mutation_safe_result_returns_exact_identity_for_management() {
+    let runtime = runtime();
+    let command = decode_json_adapter_command(AdapterOperation::LongTermPolicy,
+        r#"{"operation":{"suppress":{"selector":{"kind":"preference","topic_pattern":"temporary-*"},"duration":"until_manual_resume"}},"reason":"synthetic policy management"}"#).unwrap();
+    let response = dispatch_adapter_command(
+        &runtime,
+        envelope(&runtime, AdapterOperation::LongTermPolicy, command),
+    )
+    .unwrap();
+    let AdapterResponse::Accepted {
+        report,
+        receipt: Some(_),
+        ..
+    } = response
+    else {
+        panic!("policy creation requires receipt and safe report");
+    };
+    let safe = report
+        .governed_safe_report()
+        .expect("all thin transports receive policy identity");
+    let value = serde_json::to_value(safe).unwrap();
+    assert_eq!(value["operation"], "long_term_policy");
+    assert_eq!(value["report"]["accepted"], true);
+    let id = value["report"]["policy_id"].as_str().unwrap();
+    let detail = runtime
+        .get_memory_governance_policy(bm_sdk::MemoryLongTermPolicyDetailRequest {
+            policy_id: id.into(),
+        })
+        .unwrap();
+    assert_eq!(detail.policy.unwrap().policy.policy_id, id);
 }

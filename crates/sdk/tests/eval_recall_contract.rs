@@ -441,7 +441,7 @@ fn governed_read_filters_private_records_before_source_recall_limit() {
     let private = (0..17)
         .map(|index| {
             let mut draft = long_term_draft(
-                &format!("visibility displacement sentinel private {index}"),
+                &format!("visibility displacement sentinel {index}"),
                 "A newer private record must not consume a governed source slot.",
                 &format!("private://visibility/{index}"),
             );
@@ -458,6 +458,14 @@ fn governed_read_filters_private_records_before_source_recall_limit() {
         .expect("scoped long-term read store")
         .list(96)
         .expect("list records");
+    assert_eq!(
+        observed_records
+            .iter()
+            .filter(|entry| entry.privacy == MemoryPrivacyClass::SoulPrivate)
+            .count(),
+        17,
+        "the source-limit negative control requires all private owners to exist"
+    );
     let public_id = observed_records
         .into_iter()
         .find(|entry| {
@@ -543,14 +551,55 @@ fn delivery_and_loss_reports_never_expose_archive_or_transcript_locators() {
         .expect("valid recall delivery budget");
     let platform = empty_store_platform_with_budget(profile, limits);
     let runtime = test_runtime_with_scope_and_subject(
-        platform,
+        platform.clone(),
         profile,
         "llm.gateway",
         "opaque-report",
         "subject-opaque-report",
     );
     let archive_locator = "archive:/private/releases.md#turn=7";
-    let transcript_locator = "transcript:private-chat#message=9";
+    runtime
+        .commit_transcript(bm_sdk::MemoryTranscriptCommitRequest {
+            turn: bm_sdk::CanonicalTurnDelta {
+                turn_id: "private-turn".into(),
+                conversation: bm_sdk::ConversationScope {
+                    channel: "llm.gateway".into(),
+                    chat_id: "opaque-report".into(),
+                    conversation_id: Some("private-chat".into()),
+                },
+                subject: runtime.subject_id().into(),
+                delivery_status: bm_sdk::MemoryTurnDeliveryStatus::Delivered,
+                source: bm_sdk::MemoryTurnSource {
+                    ingress: bm_sdk::IngressKind::User,
+                    channel: "llm.gateway".into(),
+                    provider: None,
+                    protocol: bm_sdk::MemoryTurnProtocol::OllamaChat,
+                    endpoint: None,
+                    model_alias: None,
+                    model_resolved: None,
+                    request_id: None,
+                    client_conversation_hint: None,
+                },
+                actor: None,
+                input_messages: vec![bm_sdk::TranscriptInputMessage::user("Synthetic source.")],
+                assistant_message: Some(bm_sdk::TranscriptInputMessage::assistant("Recorded.")),
+                tool_observations: Vec::new(),
+                external_content_used: false,
+                candidate_ids: Vec::new(),
+            },
+            host_refs: Vec::new(),
+        })
+        .expect("persist the authoritative transcript source");
+    let transcript_locator = bm_sdk::TranscriptEvidenceRef {
+        memory_space_id: runtime.memory_space_id().into(),
+        channel_id: "llm.gateway".into(),
+        conversation_id: "private-chat".into(),
+        turn_id: "private-turn".into(),
+        message_id: None,
+        subject_id: Some(runtime.subject_id().into()),
+        authority: None,
+    }
+    .display_citation();
     seed_governed_long_term(
         &runtime,
         vec![
@@ -562,7 +611,7 @@ fn delivery_and_loss_reports_never_expose_archive_or_transcript_locators() {
             long_term_draft(
                 "opaque report transcript evidence",
                 "Opaque report evidence beta remains governed and attributable.",
-                transcript_locator,
+                &transcript_locator,
             ),
         ],
     );
@@ -588,13 +637,37 @@ fn delivery_and_loss_reports_never_expose_archive_or_transcript_locators() {
             tool_registry_refs: Vec::new(),
         })
         .expect("opaque report eval recall");
+    let records = platform
+        .replay_harness()
+        .memory_space_long_term_memory_read_store(runtime.memory_space_id())
+        .expect("scoped owner read")
+        .list(10)
+        .expect("persisted source owners");
+    for citation in [archive_locator, transcript_locator.as_str()] {
+        let owner = records
+            .iter()
+            .find(|owner| {
+                owner
+                    .supporting_citations
+                    .iter()
+                    .any(|value| value == citation)
+            })
+            .expect("each locator must back an accepted owner");
+        assert!(
+            report
+                .source_candidates
+                .iter()
+                .any(|candidate| { candidate.candidate_id == long_term_candidate_id(&owner.id) }),
+            "both locator families must actually enter recall before redaction"
+        );
+    }
     let disclosure = format!(
         "{:?}{:?}",
         report.delivery_report, report.stage_diagnostics.loss_ledger
     );
 
     assert!(!disclosure.contains(archive_locator));
-    assert!(!disclosure.contains(transcript_locator));
+    assert!(!disclosure.contains(&transcript_locator));
     assert!(!disclosure.contains("private/releases.md"));
     assert!(!disclosure.contains("private-chat"));
     assert!(disclosure.contains("opaque:recall-group:sha256:"));

@@ -87,9 +87,12 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         usage: "bm memory long-term-delete --idempotency-key <stable-non-sensitive-key> --record-id <id> --reason <reason>",
         operation: AdapterOperation::LongTermMutate,
     },
+    CommandSpec { name: "long-term-policy-list", usage: "bm memory long-term-policy-list --input <request.json>", operation: AdapterOperation::LongTermPolicyList },
+    CommandSpec { name: "long-term-policy-detail", usage: "bm memory long-term-policy-detail --input <request.json>", operation: AdapterOperation::LongTermPolicyDetail },
+    CommandSpec { name: "long-term-policy", usage: "bm memory long-term-policy --idempotency-key <key> --input <request.json>", operation: AdapterOperation::LongTermPolicy },
     CommandSpec {
         name: "long-term-policy-suppress",
-        usage: "bm memory long-term-policy-suppress --topic <pattern> --reason <reason>",
+        usage: "bm memory long-term-policy-suppress --idempotency-key <key> --topic <pattern> --reason <reason>",
         operation: AdapterOperation::LongTermPolicy,
     },
     CommandSpec {
@@ -717,6 +720,19 @@ impl CliOptions {
                     mode_input: RuntimeLifecycleModeInput::default(),
                 },
             ))),
+            "long-term-policy-list" | "long-term-policy-detail" | "long-term-policy" => {
+                let path = self
+                    .input_path
+                    .as_ref()
+                    .ok_or_else(|| "policy command requires --input".to_string())?;
+                let raw = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+                let operation = match command {
+                    "long-term-policy-list" => AdapterOperation::LongTermPolicyList,
+                    "long-term-policy-detail" => AdapterOperation::LongTermPolicyDetail,
+                    _ => AdapterOperation::LongTermPolicy,
+                };
+                decode_json_adapter_command(operation, &raw).map_err(|error| error.to_string())
+            }
             "long-term-policy-suppress" => Ok(AdapterCommand::LongTermPolicy(
                 MemoryLongTermPolicyRequest {
                     operation: MemoryGovernancePolicyMutation::Suppress {
@@ -911,6 +927,9 @@ fn render_sdk_report(report: AdapterSdkReport) -> Result<String, String> {
             "turns": report.inspection.total_turns,
             "lifecycle": report.lifecycle_report.result_summary,
         }),
+        AdapterSdkReport::LongTermPolicyList(_) | AdapterSdkReport::LongTermPolicyDetail(_) => {
+            unreachable!("governed policy DTO handled above")
+        }
         AdapterSdkReport::LongTermList(report) => json!({
             "status": "accepted",
             "records": report.records,

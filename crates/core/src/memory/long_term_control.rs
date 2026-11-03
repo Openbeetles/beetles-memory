@@ -48,7 +48,7 @@ pub const LONG_TERM_CONTROL_REVISION_NAMESPACE: &str = "long_term_control_revisi
 pub const LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE: &str = "long_term_control_tombstone";
 pub const LONG_TERM_GOVERNANCE_POLICY_NAMESPACE: &str = "long_term_governance_policy";
 pub const LONG_TERM_CONTROL_AUDIT_NAMESPACE: &str = "long_term_control_audit";
-pub const LONG_TERM_CONTROL_SCHEMA_VERSION: u32 = 3;
+pub const LONG_TERM_CONTROL_SCHEMA_VERSION: u32 = 4;
 pub const LONG_TERM_CONTROL_TOMBSTONE_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash)]
@@ -246,15 +246,33 @@ pub enum MemoryGovernancePolicyMutation {
         expires_at: Option<u64>,
     },
     Resume {
-        selector: MemoryGovernanceSelector,
+        target: MemoryGovernancePolicyRef,
     },
     Suppress {
         selector: MemoryGovernanceSelector,
         duration: MemoryGovernanceSuppressionDuration,
     },
     RemoveSuppression {
-        selector: MemoryGovernanceSelector,
+        target: MemoryGovernancePolicyRef,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryGovernancePolicyRef {
+    pub policy_id: String,
+    pub policy_revision: u64,
+}
+
+impl MemoryGovernancePolicyMutation {
+    pub fn control_operation(&self) -> LongTermControlOperation {
+        match self {
+            Self::Pause { .. } => LongTermControlOperation::PolicyPause,
+            Self::Resume { .. } => LongTermControlOperation::PolicyResume,
+            Self::Suppress { .. } => LongTermControlOperation::PolicySuppress,
+            Self::RemoveSuppression { .. } => LongTermControlOperation::PolicyRemoveSuppression,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -405,6 +423,55 @@ pub struct MemoryLongTermMutationReport {
     pub reason: String,
 }
 
+/// The authority for this transition, distinct from retained historical provenance.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LongTermTransitionBasis {
+    ExplicitControl,
+    SourceGoverned {
+        authoritative_sources: Vec<super::TranscriptEvidenceRef>,
+    },
+}
+
+impl LongTermTransitionBasis {
+    pub fn validate(&self, space: &str, operation: LongTermControlOperation) -> Result<()> {
+        if matches!(self, Self::ExplicitControl) && operation == LongTermControlOperation::Refresh {
+            return Err(Error::config(
+                "long_term_transition_basis",
+                "ordinary refresh cannot claim explicit control",
+            ));
+        }
+        if let Self::SourceGoverned {
+            authoritative_sources,
+        } = self
+        {
+            if !matches!(
+                operation,
+                LongTermControlOperation::Refresh | LongTermControlOperation::Delete
+            ) || authoritative_sources.iter().any(|source| {
+                source.memory_space_id != space
+                    || source
+                        .subject_id
+                        .as_deref()
+                        .is_none_or(|id| id.is_empty() || id.trim() != id)
+                    || super::TranscriptEvidenceRef::parse_display_citation(
+                        &source.display_citation(),
+                    )
+                    .is_none()
+            }) || authoritative_sources
+                .windows(2)
+                .any(|pair| pair[0].display_citation() >= pair[1].display_citation())
+            {
+                return Err(Error::config(
+                    "long_term_transition_basis",
+                    "noncanonical factual transition authority",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LongTermMemoryControlRevisionIntent {
@@ -412,6 +479,7 @@ pub struct LongTermMemoryControlRevisionIntent {
     pub memory_space_id: String,
     pub factual_owner_id: MemorySpaceId,
     pub operation: LongTermControlOperation,
+    pub basis: LongTermTransitionBasis,
     pub invalidation_reason_code: Option<LongTermInvalidationReasonCode>,
     pub transition: GovernedOwnerTransition,
     pub governed_evidence_refs: Vec<GovernedOwnerRevisionRef>,
@@ -533,6 +601,13 @@ impl LongTermMemoryControlRevisionIntent {
             memory_space_id: memory_space_id.into(),
             factual_owner_id,
             operation,
+            basis: if operation == LongTermControlOperation::Refresh {
+                LongTermTransitionBasis::SourceGoverned {
+                    authoritative_sources: Vec::new(),
+                }
+            } else {
+                LongTermTransitionBasis::ExplicitControl
+            },
             invalidation_reason_code,
             transition: GovernedOwnerTransition {
                 predecessor,
@@ -550,6 +625,7 @@ impl LongTermMemoryControlRevisionIntent {
     }
 
     pub fn validate_contract(&self) -> Result<()> {
+        self.basis.validate(&self.memory_space_id, self.operation)?;
         if self.revision_id.trim().is_empty()
             || self.revision_id != self.revision_id.trim()
             || self.memory_space_id.trim().is_empty()
@@ -589,6 +665,7 @@ pub struct LongTermMemoryControlRevision {
     pub memory_space_id: String,
     pub factual_owner_id: MemorySpaceId,
     pub operation: LongTermControlOperation,
+    pub basis: LongTermTransitionBasis,
     pub invalidation_reason_code: Option<LongTermInvalidationReasonCode>,
     pub transition: GovernedOwnerTransition,
     pub predecessor_material_digest: String,
@@ -638,6 +715,7 @@ impl LongTermMemoryControlRevision {
             memory_space_id: intent.memory_space_id,
             factual_owner_id: intent.factual_owner_id,
             operation: intent.operation,
+            basis: intent.basis,
             invalidation_reason_code: intent.invalidation_reason_code,
             transition: intent.transition,
             predecessor_material_digest: predecessor.content_digest.clone(),
@@ -660,6 +738,7 @@ impl LongTermMemoryControlRevision {
             memory_space_id: &'a str,
             factual_owner_id: &'a str,
             operation: LongTermControlOperation,
+            basis: &'a LongTermTransitionBasis,
             invalidation_reason_code: Option<LongTermInvalidationReasonCode>,
             transition: &'a GovernedOwnerTransition,
             predecessor_material_digest: &'a str,
@@ -675,6 +754,7 @@ impl LongTermMemoryControlRevision {
             memory_space_id: &self.memory_space_id,
             factual_owner_id: &self.factual_owner_id,
             operation: self.operation,
+            basis: &self.basis,
             invalidation_reason_code: self.invalidation_reason_code,
             transition: &self.transition,
             predecessor_material_digest: &self.predecessor_material_digest,
@@ -686,12 +766,13 @@ impl LongTermMemoryControlRevision {
         })
         .map_err(|error| Error::config("long_term_control_revision", error.to_string()))?;
         let mut hasher = Sha256::new();
-        hash_control_field(&mut hasher, b"long_term_control_revision_v3");
+        hash_control_field(&mut hasher, b"long_term_control_revision_v4");
         hash_control_field(&mut hasher, &encoded);
         Ok(format!("{:x}", hasher.finalize()))
     }
 
     pub fn validate_contract(&self) -> Result<()> {
+        self.basis.validate(&self.memory_space_id, self.operation)?;
         if self.schema_version != LONG_TERM_CONTROL_SCHEMA_VERSION
             || self.revision_id.trim().is_empty()
             || self.memory_space_id.trim().is_empty()
@@ -806,6 +887,35 @@ pub struct MemoryLongTermGovernancePolicy {
 }
 
 impl MemoryLongTermGovernancePolicy {
+    pub fn validate_contract(&self) -> Result<()> {
+        if self.schema_version != LONG_TERM_CONTROL_SCHEMA_VERSION
+            || self.policy_revision == 0
+            || [
+                &self.memory_space_id,
+                &self.policy_id,
+                &self.kind,
+                &self.reason,
+            ]
+            .iter()
+            .any(|value| value.is_empty() || value.trim() != value.as_str())
+            || self.created_at == 0
+            || self.updated_at < self.created_at
+        {
+            return Err(Error::config(
+                "long_term_policy_contract",
+                "long-term governance policy structure is invalid",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn effective_at(&self, now_secs: u64) -> bool {
+        if self.expires_at.is_some_and(|until| now_secs >= until) {
+            return false;
+        }
+        !matches!(self.duration, Some(MemoryGovernanceSuppressionDuration::UntilUnixSecs(until)) if now_secs >= until)
+    }
+
     pub fn matches_candidate(
         &self,
         memory_space_id: Option<&str>,
@@ -1668,7 +1778,7 @@ pub fn validate_long_term_control_post_image(
             "long_term_control_policy_physical_key_drift",
             &mut failures,
         );
-        if policy.schema_version != LONG_TERM_CONTROL_SCHEMA_VERSION
+        if policy.validate_contract().is_err()
             || policy.memory_space_id != memory_space_id
             || policy.selector.memory_space_id.as_deref() != Some(memory_space_id)
         {
@@ -1923,7 +2033,7 @@ impl LongTermMemoryStore for PlanningLongTermMemoryStore<'_> {
                 continue;
             };
             let previous = LongTermMemoryStore::get(self, &record_id)?;
-            match plan_long_term_memory_upsert(previous.as_ref(), draft, now_secs) {
+            match plan_long_term_memory_upsert(previous.as_ref(), draft, now_secs, None) {
                 LongTermMemoryEntryPlan::Created(entry)
                 | LongTermMemoryEntryPlan::Updated(entry) => {
                     self.overlay
@@ -2281,19 +2391,49 @@ pub fn list_long_term_memory_control_page(
     control_store: &dyn LongTermMemoryControlReadStore,
     request: LongTermMemoryControlListRequest,
 ) -> Result<MemoryLongTermListReport> {
-    let mut records = store.query(&request.query)?;
+    let mut records = store.query_all(&request.query)?;
     records.retain(|entry| !is_tombstoned(control_store, &entry.id));
     let total_visible = records.len();
-    let start = request
-        .cursor
-        .as_deref()
-        .and_then(|cursor| records.iter().position(|entry| entry.id == cursor))
-        .map(|index| index.saturating_add(1))
-        .unwrap_or(0);
+    let mut query_identity = request.query.normalized();
+    query_identity.limit = 0;
+    let snapshot_bytes = serde_json::to_vec(&(
+        "long_term_control_page_v1",
+        query_identity,
+        request.view,
+        &records,
+    ))
+    .map_err(|error| Error::config("long_term_control_cursor", error.to_string()))?;
+    let snapshot = format!("{:x}", Sha256::digest(snapshot_bytes));
+    let start = if let Some(cursor) = request.cursor.as_deref() {
+        let (expected, anchor): (String, String) = serde_json::from_str(cursor).map_err(|_| {
+            Error::invalid_input("long_term_control_cursor", "invalid catalog cursor")
+        })?;
+        if expected != snapshot {
+            return Err(Error::conflict(
+                "long_term_control_cursor",
+                "catalog changed; restart pagination",
+            ));
+        }
+        records
+            .iter()
+            .position(|entry| entry.id == anchor)
+            .map(|index| index + 1)
+            .ok_or_else(|| {
+                Error::invalid_input("long_term_control_cursor", "unknown catalog anchor")
+            })?
+    } else {
+        0
+    };
     let limit = request.limit.clamp(1, super::MAX_LONG_TERM_MEMORY_ITEMS);
-    let next_cursor = records
-        .get(start.saturating_add(limit))
-        .map(|entry| entry.id.clone());
+    let end = start.saturating_add(limit).min(total_visible);
+    let next_cursor = if end < total_visible {
+        Some(
+            serde_json::to_string(&(snapshot, &records[end - 1].id))
+                .map_err(|error| Error::config("long_term_control_cursor", error.to_string()))?,
+        )
+    } else {
+        None
+    };
     let records = records
         .into_iter()
         .skip(start)
@@ -2429,6 +2569,7 @@ fn plan_long_term_memory_control_mutation_with_sinks(
 pub fn plan_long_term_memory_governance_policy_mutation(
     control_store: &dyn LongTermMemoryControlReadStore,
     operation: MemoryGovernancePolicyMutation,
+    identity: &super::MemoryMutationOperationIdentity,
     reason: String,
     dry_run: bool,
     now_secs: u64,
@@ -2437,6 +2578,7 @@ pub fn plan_long_term_memory_governance_policy_mutation(
     let report = plan_long_term_memory_governance_policy_mutation_with_sink(
         &planning_control_store,
         operation,
+        identity,
         reason,
         dry_run,
         now_secs,
@@ -2451,6 +2593,7 @@ pub fn plan_long_term_memory_governance_policy_mutation(
 pub(crate) fn apply_long_term_memory_governance_policy_mutation(
     control_store: &dyn LongTermMemoryControlStore,
     operation: MemoryGovernancePolicyMutation,
+    identity: &super::MemoryMutationOperationIdentity,
     reason: String,
     dry_run: bool,
     now_secs: u64,
@@ -2458,6 +2601,7 @@ pub(crate) fn apply_long_term_memory_governance_policy_mutation(
     plan_long_term_memory_governance_policy_mutation_with_sink(
         control_store,
         operation,
+        identity,
         reason,
         dry_run,
         now_secs,
@@ -2467,26 +2611,69 @@ pub(crate) fn apply_long_term_memory_governance_policy_mutation(
 fn plan_long_term_memory_governance_policy_mutation_with_sink(
     control_store: &dyn LongTermMemoryControlStore,
     operation: MemoryGovernancePolicyMutation,
+    identity: &super::MemoryMutationOperationIdentity,
     reason: String,
     dry_run: bool,
     now_secs: u64,
 ) -> Result<MemoryGovernancePolicyMutationReport> {
-    let selector = match &operation {
-        MemoryGovernancePolicyMutation::Suppress { selector, .. }
-        | MemoryGovernancePolicyMutation::Pause { selector, .. }
-        | MemoryGovernancePolicyMutation::Resume { selector }
-        | MemoryGovernancePolicyMutation::RemoveSuppression { selector } => selector,
-    };
-    required_policy_memory_space(selector)?;
-    required_policy_factual_owner(selector)?;
+    identity.validate_contract()?;
+    if identity.operation_kind()
+        != (super::MemoryMutationOperationKind::LongTermControl {
+            operation: operation.control_operation(),
+        })
+    {
+        return Err(Error::invalid_input(
+            "long_term_policy_identity",
+            "operation kind mismatch",
+        ));
+    }
+    if reason.trim().is_empty() || reason != reason.trim() || now_secs == 0 {
+        return Err(Error::invalid_input(
+            "long_term_policy",
+            "canonical reason and time required",
+        ));
+    }
+    if let MemoryGovernancePolicyMutation::Suppress { selector, .. }
+    | MemoryGovernancePolicyMutation::Pause { selector, .. } = &operation
+    {
+        let space = required_policy_memory_space(selector)?;
+        required_policy_factual_owner(selector)?;
+        if space != identity.memory_space_id()
+            || selector.subject_id.as_deref() != Some(identity.mounted_subject_id())
+            || [&selector.topic_pattern, &selector.source_chat_id]
+                .into_iter()
+                .flatten()
+                .any(|value| value.is_empty() || value != value.trim())
+        {
+            return Err(Error::invalid_input(
+                "long_term_policy_scope",
+                "policy scope must match operation authority",
+            ));
+        }
+    }
     match operation {
         MemoryGovernancePolicyMutation::Suppress { selector, duration } => {
             let memory_space_id = required_policy_memory_space(&selector)?;
-            let policy_id = stable_id("ltmp", &("suppress", &selector, &duration));
-            let previous = control_store
+            let matching = control_store
                 .list_long_term_governance_policies(usize::MAX)?
                 .into_iter()
-                .find(|policy| policy.policy_id == policy_id);
+                .filter(|policy| {
+                    policy.kind == "suppress"
+                        && policy.selector == selector
+                        && policy.duration.as_ref() == Some(&duration)
+                })
+                .collect::<Vec<_>>();
+            if matching.len() > 1 {
+                return Err(Error::config(
+                    "long_term_policy_closure",
+                    "duplicate active policy identity",
+                ));
+            }
+            let previous = matching.into_iter().next();
+            let policy_id = previous
+                .as_ref()
+                .map(|policy| policy.policy_id.clone())
+                .unwrap_or_else(|| format!("ltmp-{}", identity.storage_key()));
             let policy = MemoryLongTermGovernancePolicy {
                 schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
                 policy_revision: previous
@@ -2504,8 +2691,11 @@ fn plan_long_term_memory_governance_policy_mutation_with_sink(
                     .as_ref()
                     .map(|policy| policy.created_at)
                     .unwrap_or(now_secs),
-                updated_at: now_secs,
+                updated_at: previous
+                    .as_ref()
+                    .map_or(now_secs, |policy| now_secs.max(policy.updated_at)),
             };
+            policy.validate_contract()?;
             if !dry_run {
                 control_store.put_long_term_governance_policy(&policy)?;
             }
@@ -2538,11 +2728,26 @@ fn plan_long_term_memory_governance_policy_mutation_with_sink(
             expires_at,
         } => {
             let memory_space_id = required_policy_memory_space(&selector)?;
-            let policy_id = stable_id("ltmp", &("pause", &selector, expires_at));
-            let previous = control_store
+            let matching = control_store
                 .list_long_term_governance_policies(usize::MAX)?
                 .into_iter()
-                .find(|policy| policy.policy_id == policy_id);
+                .filter(|policy| {
+                    policy.kind == "pause"
+                        && policy.selector == selector
+                        && policy.expires_at == expires_at
+                })
+                .collect::<Vec<_>>();
+            if matching.len() > 1 {
+                return Err(Error::config(
+                    "long_term_policy_closure",
+                    "duplicate active policy identity",
+                ));
+            }
+            let previous = matching.into_iter().next();
+            let policy_id = previous
+                .as_ref()
+                .map(|policy| policy.policy_id.clone())
+                .unwrap_or_else(|| format!("ltmp-{}", identity.storage_key()));
             let policy = MemoryLongTermGovernancePolicy {
                 schema_version: LONG_TERM_CONTROL_SCHEMA_VERSION,
                 policy_revision: previous
@@ -2560,8 +2765,11 @@ fn plan_long_term_memory_governance_policy_mutation_with_sink(
                     .as_ref()
                     .map(|policy| policy.created_at)
                     .unwrap_or(now_secs),
-                updated_at: now_secs,
+                updated_at: previous
+                    .as_ref()
+                    .map_or(now_secs, |policy| now_secs.max(policy.updated_at)),
             };
+            policy.validate_contract()?;
             if !dry_run {
                 control_store.put_long_term_governance_policy(&policy)?;
             }
@@ -2589,45 +2797,64 @@ fn plan_long_term_memory_governance_policy_mutation_with_sink(
                 reason,
             })
         }
-        MemoryGovernancePolicyMutation::Resume { selector } => {
-            remove_policies_by_selector_and_kind(
-                control_store,
-                selector,
-                "pause",
-                "policy.resume",
-                reason,
-                dry_run,
-                now_secs,
-            )
-        }
-        MemoryGovernancePolicyMutation::RemoveSuppression { selector } => {
-            remove_policies_by_selector_and_kind(
-                control_store,
-                selector,
-                "suppress",
-                "policy.remove_suppression",
-                reason,
-                dry_run,
-                now_secs,
-            )
-        }
+        MemoryGovernancePolicyMutation::Resume { target } => remove_exact_policy(
+            control_store,
+            target,
+            identity,
+            LongTermControlOperation::PolicyResume,
+            reason,
+            dry_run,
+            now_secs,
+        ),
+        MemoryGovernancePolicyMutation::RemoveSuppression { target } => remove_exact_policy(
+            control_store,
+            target,
+            identity,
+            LongTermControlOperation::PolicyRemoveSuppression,
+            reason,
+            dry_run,
+            now_secs,
+        ),
     }
 }
 
-fn remove_policies_by_selector_and_kind(
+fn remove_exact_policy(
     control_store: &dyn LongTermMemoryControlStore,
-    selector: MemoryGovernanceSelector,
-    policy_kind: &str,
-    operation: &'static str,
+    target: MemoryGovernancePolicyRef,
+    identity: &super::MemoryMutationOperationIdentity,
+    operation: LongTermControlOperation,
     reason: String,
     dry_run: bool,
     now_secs: u64,
 ) -> Result<MemoryGovernancePolicyMutationReport> {
+    let policy_kind = match operation {
+        LongTermControlOperation::PolicyResume => "pause",
+        LongTermControlOperation::PolicyRemoveSuppression => "suppress",
+        _ => {
+            return Err(Error::config(
+                "long_term_policy_operation",
+                "policy removal requires a removal operation",
+            ))
+        }
+    };
+    let operation = operation.as_str();
     let policies = control_store.list_long_term_governance_policies(usize::MAX)?;
     let matched = policies
         .into_iter()
-        .filter(|policy| policy.kind == policy_kind && policy.selector == selector)
+        .filter(|policy| {
+            policy.policy_id == target.policy_id
+                && policy.kind == policy_kind
+                && policy.policy_revision == target.policy_revision
+                && policy.memory_space_id == identity.memory_space_id()
+                && policy.selector.subject_id.as_deref() == Some(identity.mounted_subject_id())
+        })
         .collect::<Vec<_>>();
+    if matched.len() != 1 || target.policy_revision == 0 {
+        return Err(Error::conflict(
+            "long_term_policy_revision",
+            "policy reference is missing or changed",
+        ));
+    }
     if !dry_run {
         for policy in &matched {
             control_store.delete_long_term_governance_policy(&policy.policy_id)?;
@@ -2856,7 +3083,7 @@ fn apply_supersede(
             None,
         ));
     }
-    let replacement_plan = plan_long_term_memory_upsert(None, replacement, request.now_secs);
+    let replacement_plan = plan_long_term_memory_upsert(None, replacement, request.now_secs, None);
     let mut replacement_entry = match replacement_plan {
         LongTermMemoryEntryPlan::Created(entry) => entry,
         LongTermMemoryEntryPlan::Rejected(reason) => {
@@ -4082,6 +4309,9 @@ mod digest_tests {
 
     fn owner_fixture() -> LongTermMemoryEntry {
         LongTermMemoryEntry {
+            transcript_sources: Vec::new(),
+            control_barrier_scope_revision: None,
+
             id: "ltm-owner".to_string(),
             kind: LongTermMemoryKind::Fact,
             topic: "release-contract".to_string(),

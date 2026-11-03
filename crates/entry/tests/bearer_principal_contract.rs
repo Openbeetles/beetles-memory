@@ -222,6 +222,8 @@ fn operation_capability_public_labels_are_stable_snake_case() {
             "long_term_list",
             "long_term_detail",
             "long_term_mutate",
+            "long_term_policy_list",
+            "long_term_policy_detail",
             "long_term_policy",
             "transcript_attr_write",
             "capabilities",

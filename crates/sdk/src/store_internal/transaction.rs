@@ -444,6 +444,7 @@ pub struct StoreTransactionRequest {
     pub mutations: Vec<StoreEngineMutation>,
     pub governed_batch: Option<Box<StoreMutationBatch>>,
     graph_repair_authority: Option<GraphRepairAuthority>,
+    long_term_control_authority: Option<crate::runtime::LongTermControlAuthorization>,
     procedural_authority_initialization: bool,
     procedural_mutation_authority:
         Option<super::procedural_feedback::ProceduralMutationAuthorization>,
@@ -470,6 +471,7 @@ impl StoreTransactionRequest {
             mutations,
             governed_batch,
             graph_repair_authority: None,
+            long_term_control_authority: None,
             procedural_authority_initialization: false,
             procedural_mutation_authority: None,
             procedural_intake_authority: None,
@@ -478,6 +480,14 @@ impl StoreTransactionRequest {
             agent_tool_experience_budget: None,
             read_set,
         }
+    }
+
+    pub(crate) fn authorize_long_term_control(
+        mut self,
+        authority: crate::runtime::LongTermControlAuthorization,
+    ) -> Self {
+        self.long_term_control_authority = Some(authority);
+        self
     }
 
     pub(crate) fn with_procedural_authority_initialization(mut self) -> Self {
@@ -1008,6 +1018,9 @@ pub(crate) fn expand_owner_transaction_dependencies(
             }
             Ok(())
         };
+        for address in super::platform::long_term_source_dependency_addresses(namespace, value)? {
+            emit(address)?;
+        }
         super::subject_soul::subject_soul_transaction_dependencies(namespace, value, &mut emit)?;
         let node = super::procedural_feedback::procedural_dependency_node(namespace, value, false)?;
         for address in node.addresses {
@@ -1435,6 +1448,37 @@ pub(crate) fn apply_transaction(
         ));
     }
     if let Some(batch) = effective.governed_batch.as_deref() {
+        for mutation in &batch.mutations {
+            if let crate::StoreMutation::PutJson {
+                namespace,
+                key,
+                value,
+                ..
+            } = mutation
+            {
+                if namespace == bm_core::memory::LONG_TERM_CONTROL_REVISION_NAMESPACE
+                    && current.json.get(&(namespace.clone(), key.clone())) != Some(value)
+                {
+                    let revision: bm_core::memory::LongTermMemoryControlRevision =
+                        serde_json::from_value(value.clone()).map_err(|error| {
+                            Error::config("long_term_control_authority", error.to_string())
+                        })?;
+                    if matches!(
+                        revision.basis,
+                        bm_core::memory::LongTermTransitionBasis::ExplicitControl
+                    ) && !request
+                        .long_term_control_authority
+                        .as_ref()
+                        .is_some_and(|authority| authority.authorizes(&revision))
+                    {
+                        return Err(Error::config(
+                            "long_term_control_authority",
+                            "explicit transition lacks exact runtime control authority",
+                        ));
+                    }
+                }
+            }
+        }
         crate::store_internal::platform::validate_governed_transaction_post_image(
             batch,
             current,
@@ -3914,6 +3958,7 @@ pub(crate) fn validate_control_plane_manifest_set(
     json: &BTreeMap<(String, String), Value>,
     max_entries: usize,
 ) -> Result<()> {
+    super::platform::validate_unique_governance_policies(json)?;
     let control_namespaces = BTreeSet::from([
         "long_term_control_revision",
         "long_term_control_tombstone",
@@ -5059,6 +5104,7 @@ mod tests {
         let memory_space_id = "space-a";
         let mounted_subject_id = "subject-a";
         let revision = bm_core::memory::LongTermMemoryControlRevision {
+            basis: bm_core::memory::LongTermTransitionBasis::ExplicitControl,
             schema_version: bm_core::memory::LONG_TERM_CONTROL_SCHEMA_VERSION,
             revision_id: "revision-b".to_string(),
             memory_space_id: memory_space_id.to_string(),

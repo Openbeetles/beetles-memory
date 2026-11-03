@@ -686,6 +686,8 @@ impl TranscriptMessageRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscriptTurnRecord {
+    /// Captured by Store at first intake, never refreshed by a job retry.
+    pub factual_admission_revision: u64,
     pub key: ConversationKey,
     pub turn_id: String,
     /// Digest of the full original canonical intake, before Session deduplication.
@@ -783,6 +785,7 @@ impl TranscriptTurnRecord {
             key: key.clone(),
             turn_id: delta.turn_id.clone(),
             canonical_turn_digest: super::canonical_turn_learning_digest(delta)?,
+            factual_admission_revision: 0,
             sequence,
             delivery_status: delta.delivery_status,
             source: delta.source.clone(),
@@ -842,6 +845,7 @@ impl TranscriptTurnRecord {
             key: key.clone(),
             turn_id: delta.turn_id.clone(),
             canonical_turn_digest: super::canonical_turn_learning_digest(delta)?,
+            factual_admission_revision: 0,
             sequence,
             delivery_status: delta.delivery_status,
             source: delta.source.clone(),
@@ -982,6 +986,29 @@ pub struct TranscriptEvidenceRef {
 }
 
 impl TranscriptEvidenceRef {
+    pub fn is_available_in(&self, record: &TranscriptTurnRecord) -> bool {
+        self.memory_space_id == record.key.memory_space_id
+            && self.channel_id == record.key.channel_id
+            && self.conversation_id == record.key.conversation_id
+            && self.turn_id == record.turn_id
+            && self.subject_id.as_deref() == Some(record.subject.as_str())
+            && record.redaction_state == TranscriptRedactionState::RawAvailable
+            && matches!(
+                record.lifecycle_state,
+                TranscriptLifecycleState::Active | TranscriptLifecycleState::Archived
+            )
+            && match self.message_id.as_deref() {
+                Some(id) => record
+                    .input_messages
+                    .iter()
+                    .chain(record.assistant_message.iter())
+                    .any(|message| {
+                        message.message_id == id && self.authority == Some(message.authority)
+                    }),
+                None => self.authority.is_none(),
+            }
+    }
+
     pub fn from_message(
         key: &ConversationKey,
         record: &TranscriptTurnRecord,

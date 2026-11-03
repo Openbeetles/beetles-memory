@@ -1346,9 +1346,9 @@ fn candidate_write_records_transcript_derived_ref_for_lifecycle_impact() {
             transition: TranscriptLifecycleTransition::Mask,
             reason: "review_preference_source".to_string(),
         })
-        .expect_err("facet-backed transcript source redaction must fail closed");
+        .expect("facet-backed transcript source withdrawal must compose with lifecycle");
 
-    assert_eq!(err.stage(), "transcript_lifecycle_facet_preflight");
+    assert_eq!(err.transcript.affected_turns, 1);
 }
 
 #[test]
@@ -1598,9 +1598,9 @@ fn long_term_extraction_records_transcript_derived_ref_for_lifecycle_impact() {
             transition: TranscriptLifecycleTransition::Mask,
             reason: "review_extraction_source".to_string(),
         })
-        .expect_err("facet-backed transcript source redaction must fail closed");
+        .expect("facet-backed transcript source withdrawal commits atomically");
 
-    assert_eq!(err.stage(), "transcript_lifecycle_facet_preflight");
+    assert_eq!(err.transcript.affected_turns, 1);
 }
 
 #[test]
@@ -1679,9 +1679,9 @@ fn automatic_post_turn_extraction_records_transcript_derived_ref_for_lifecycle_i
             transition: TranscriptLifecycleTransition::Mask,
             reason: "review_automatic_extraction_source".to_string(),
         })
-        .expect_err("facet-backed transcript source redaction must fail closed");
+        .expect("facet-backed transcript source withdrawal commits atomically");
 
-    assert_eq!(err.stage(), "transcript_lifecycle_facet_preflight");
+    assert_eq!(err.transcript.affected_turns, 1);
 }
 
 #[test]

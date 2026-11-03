@@ -259,10 +259,11 @@ fn public_fact_admission_and_core_procedural_shape_rejection_keep_distinct_owner
 #[test]
 fn candidate_write_rejects_duplicate_durable_owner_identity_before_commit() {
     let profile = support::host_test_profile();
+    let platform = empty_store_platform(profile);
     let runtime = MemoryRuntime::builder()
         .identity(MemoryIdentity::new("agent-alpha", "owner-a").expect("identity"))
         .scope(MemoryScope::new("sdk.direct", "chat-a").expect("scope"))
-        .store(empty_store_platform(profile))
+        .store(platform.clone())
         .build()
         .expect("runtime");
     let mut first = accepted_fact_candidate(
@@ -285,14 +286,35 @@ fn candidate_write_rejects_duplicate_durable_owner_identity_before_commit() {
         }
     }
 
-    let error = runtime
-        .write(MemoryWriteRequest::Candidates {
+    let mut first_draft = conflicting_shared_fact("The release owner is Agent A.");
+    let mut second_draft = conflicting_shared_fact("The release owner is Agent B.");
+    first_draft.topic = "duplicate-durable-owner".into();
+    second_draft.topic = first_draft.topic.clone();
+    #[cfg(feature = "nonproduction-replay-harness")]
+    let before = platform.replay_harness().export_store_snapshot().unwrap();
+    for request in [
+        MemoryWriteRequest::Candidates {
             candidates: vec![first, second],
-        })
-        .expect_err("duplicate durable owner must fail closed");
-
-    assert_eq!(error.stage(), "memory_facet_index_plan");
-    assert!(error.to_string().contains("duplicate"));
+        },
+        MemoryWriteRequest::LongTermExtraction {
+            extraction: ParsedLongTermMemoryExtraction {
+                upserts: vec![first_draft, second_draft],
+                deletes: Vec::new(),
+                skill_writes: Vec::new(),
+            },
+        },
+    ] {
+        let error = runtime
+            .write(request)
+            .expect_err("duplicate durable owner must fail closed");
+        assert_eq!(error.stage(), "long_term_version_plan");
+        assert!(error.to_string().contains("duplicate"));
+        #[cfg(feature = "nonproduction-replay-harness")]
+        assert_eq!(
+            platform.replay_harness().export_store_snapshot().unwrap(),
+            before
+        );
+    }
 }
 
 #[test]

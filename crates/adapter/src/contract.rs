@@ -182,6 +182,8 @@ pub enum AdapterOperation {
     LongTermList,
     LongTermDetail,
     LongTermMutate,
+    LongTermPolicyList,
+    LongTermPolicyDetail,
     LongTermPolicy,
     TranscriptAttrWrite,
     Capabilities,
@@ -190,7 +192,7 @@ pub enum AdapterOperation {
 }
 
 impl AdapterOperation {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 18] = [
         Self::Write,
         Self::FinalizeTurn,
         Self::Recall,
@@ -202,6 +204,8 @@ impl AdapterOperation {
         Self::LongTermList,
         Self::LongTermDetail,
         Self::LongTermMutate,
+        Self::LongTermPolicyList,
+        Self::LongTermPolicyDetail,
         Self::LongTermPolicy,
         Self::TranscriptAttrWrite,
         Self::Capabilities,
@@ -222,6 +226,8 @@ impl AdapterOperation {
             Self::LongTermList => "long_term_list",
             Self::LongTermDetail => "long_term_detail",
             Self::LongTermMutate => "long_term_mutate",
+            Self::LongTermPolicyList => "long_term_policy_list",
+            Self::LongTermPolicyDetail => "long_term_policy_detail",
             Self::LongTermPolicy => "long_term_policy",
             Self::TranscriptAttrWrite => "transcript_attr_write",
             Self::Capabilities => "capabilities",
@@ -246,6 +252,8 @@ impl AdapterOperation {
             | Self::Replay
             | Self::LongTermList
             | Self::LongTermDetail
+            | Self::LongTermPolicyList
+            | Self::LongTermPolicyDetail
             | Self::Capabilities
             | Self::Subscribe => false,
         }
@@ -253,11 +261,12 @@ impl AdapterOperation {
 
     pub const fn mutation_reliability(self) -> AdapterMutationReliability {
         match self {
-            Self::Write | Self::LongTermMutate => AdapterMutationReliability::DurableStoreReceipt,
+            Self::Write | Self::LongTermMutate | Self::LongTermPolicy => {
+                AdapterMutationReliability::DurableStoreReceipt
+            }
             Self::FinalizeTurn
             | Self::Maintain
             | Self::Recover
-            | Self::LongTermPolicy
             | Self::TranscriptAttrWrite
             | Self::Close => AdapterMutationReliability::ExplicitlyNonDurable,
             Self::Recall
@@ -266,6 +275,8 @@ impl AdapterOperation {
             | Self::Replay
             | Self::LongTermList
             | Self::LongTermDetail
+            | Self::LongTermPolicyList
+            | Self::LongTermPolicyDetail
             | Self::Capabilities
             | Self::Subscribe => AdapterMutationReliability::NotMutation,
         }
@@ -641,6 +652,8 @@ pub enum AdapterCommand {
     LongTermList(MemoryLongTermListRequest),
     LongTermDetail(MemoryLongTermDetailRequest),
     LongTermMutate(Box<MemoryLongTermMutationRequest>),
+    LongTermPolicyList(bm_sdk::MemoryLongTermPolicyListRequest),
+    LongTermPolicyDetail(bm_sdk::MemoryLongTermPolicyDetailRequest),
     LongTermPolicy(MemoryLongTermPolicyRequest),
     TranscriptAttrWrite(MemoryTranscriptAttrWriteRequest),
     Capabilities,
@@ -732,6 +745,15 @@ pub struct AdapterGovernedProjectSafeReportV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterLongTermPolicySafeReportV1 {
+    pub accepted: bool,
+    pub dry_run: bool,
+    pub operation: String,
+    pub policy_id: Option<String>,
+    pub policy_decision: bm_sdk::MemoryLongTermControlDecision,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "operation",
     content = "report",
@@ -739,6 +761,9 @@ pub struct AdapterGovernedProjectSafeReportV1 {
     deny_unknown_fields
 )]
 pub enum AdapterGovernedSafeReportV1 {
+    LongTermPolicy(Box<AdapterLongTermPolicySafeReportV1>),
+    LongTermPolicyList(Box<bm_sdk::MemoryLongTermPolicyListReport>),
+    LongTermPolicyDetail(Box<bm_sdk::MemoryLongTermPolicyDetailReport>),
     Recall(Box<AdapterGovernedRecallSafeReportV1>),
     Project(Box<AdapterGovernedProjectSafeReportV1>),
 }
@@ -765,6 +790,8 @@ impl AdapterCommand {
             Self::LongTermList(_) => AdapterOperation::LongTermList,
             Self::LongTermDetail(_) => AdapterOperation::LongTermDetail,
             Self::LongTermMutate(_) => AdapterOperation::LongTermMutate,
+            Self::LongTermPolicyList(_) => AdapterOperation::LongTermPolicyList,
+            Self::LongTermPolicyDetail(_) => AdapterOperation::LongTermPolicyDetail,
             Self::LongTermPolicy(_) => AdapterOperation::LongTermPolicy,
             Self::TranscriptAttrWrite(_) => AdapterOperation::TranscriptAttrWrite,
             Self::Capabilities => AdapterOperation::Capabilities,
@@ -787,6 +814,8 @@ impl AdapterCommand {
             Self::LongTermList(request) => serde_json::to_vec(request)?,
             Self::LongTermDetail(request) => serde_json::to_vec(request)?,
             Self::LongTermMutate(request) => serde_json::to_vec(request)?,
+            Self::LongTermPolicyList(request) => serde_json::to_vec(request)?,
+            Self::LongTermPolicyDetail(request) => serde_json::to_vec(request)?,
             Self::LongTermPolicy(request) => serde_json::to_vec(request)?,
             Self::TranscriptAttrWrite(request) => serde_json::to_vec(request)?,
             Self::Capabilities => Vec::new(),
@@ -876,6 +905,8 @@ pub enum AdapterSdkReport {
     LongTermList(Box<MemoryLongTermListReport>),
     LongTermDetail(Box<MemoryLongTermDetailReport>),
     LongTermMutate(Box<MemoryLongTermMutationReport>),
+    LongTermPolicyList(Box<bm_sdk::MemoryLongTermPolicyListReport>),
+    LongTermPolicyDetail(Box<bm_sdk::MemoryLongTermPolicyDetailReport>),
     LongTermPolicy(Box<MemoryGovernancePolicyMutationReport>),
     TranscriptAttrWrite(Box<MemoryTranscriptAttrWriteReport>),
     Capabilities(Box<AdapterCapabilityReportV2>),
@@ -896,6 +927,8 @@ impl AdapterSdkReport {
             Self::LongTermList(_) => "long_term_list",
             Self::LongTermDetail(_) => "long_term_detail",
             Self::LongTermMutate(_) => "long_term_mutate",
+            Self::LongTermPolicyList(_) => "long_term_policy_list",
+            Self::LongTermPolicyDetail(_) => "long_term_policy_detail",
             Self::LongTermPolicy(_) => "long_term_policy",
             Self::TranscriptAttrWrite(_) => "transcript_attr_write",
             Self::Capabilities(_) => "capabilities",
@@ -905,6 +938,21 @@ impl AdapterSdkReport {
 
     pub fn governed_safe_report(&self) -> Option<AdapterGovernedSafeReportV1> {
         match self {
+            Self::LongTermPolicy(report) => Some(AdapterGovernedSafeReportV1::LongTermPolicy(
+                Box::new(AdapterLongTermPolicySafeReportV1 {
+                    accepted: report.accepted,
+                    dry_run: report.dry_run,
+                    operation: report.operation.to_string(),
+                    policy_id: report.policy_id.clone(),
+                    policy_decision: report.policy_decision.clone(),
+                }),
+            )),
+            Self::LongTermPolicyList(report) => Some(
+                AdapterGovernedSafeReportV1::LongTermPolicyList(report.clone()),
+            ),
+            Self::LongTermPolicyDetail(report) => Some(
+                AdapterGovernedSafeReportV1::LongTermPolicyDetail(report.clone()),
+            ),
             Self::Recall(report) => Some(AdapterGovernedSafeReportV1::Recall(Box::new(
                 AdapterGovernedRecallSafeReportV1 {
                     query: report.query.clone(),
@@ -942,6 +990,8 @@ impl std::fmt::Debug for AdapterSdkReport {
             Self::LongTermList(_) => "LongTermList",
             Self::LongTermDetail(_) => "LongTermDetail",
             Self::LongTermMutate(_) => "LongTermMutate",
+            Self::LongTermPolicyList(_) => "LongTermPolicyList",
+            Self::LongTermPolicyDetail(_) => "LongTermPolicyDetail",
             Self::LongTermPolicy(_) => "LongTermPolicy",
             Self::TranscriptAttrWrite(_) => "TranscriptAttrWrite",
             Self::Capabilities(_) => "Capabilities",

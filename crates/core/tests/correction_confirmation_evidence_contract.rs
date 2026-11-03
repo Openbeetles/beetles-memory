@@ -57,6 +57,7 @@ fn low_level_correct_is_a_neutral_transition_not_a_human_confirmation() {
         None,
         &user_draft("The deployment region is cn-east-2."),
         NOW,
+        None,
     ));
     let mut forged = user_draft("The deployment region is cn-east-3.");
     forged.provenance = LongTermMemoryProvenance::new(MemoryEvidenceAuthority::ModelInferred);
@@ -82,7 +83,7 @@ fn low_level_correct_is_a_neutral_transition_not_a_human_confirmation() {
 fn arbitrary_citation_cannot_forge_creation_confirmation() {
     let mut forged = user_draft("The deployment region is cn-east-3.");
     forged.supporting_citations = vec!["host-log:any-string-is-not-confirmation".to_string()];
-    let plan = plan_long_term_memory_upsert(None, &forged, NOW + 1);
+    let plan = plan_long_term_memory_upsert(None, &forged, NOW + 1, None);
     let created = created(plan);
     assert_eq!(created.last_confirmed_at, None);
 }

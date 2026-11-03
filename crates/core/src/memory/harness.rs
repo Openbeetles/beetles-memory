@@ -1013,6 +1013,7 @@ fn run_memory_harness_l2_production_replay() -> MemoryHarnessL2ReplayResult {
             memory_store: stores.memory.as_ref(),
             session_store: stores.session.as_ref(),
             session_summary_store: &stores.summary,
+            canonical_turn_only: false,
             long_term_memory_store: stores.long_term.as_ref(),
             extraction_state_store: &stores.extraction_state,
             turn_ledger_store: &stores.turn_ledger,

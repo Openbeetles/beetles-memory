@@ -1,6 +1,6 @@
 [package]
 name = "bm-sdk"
-version = "0.10.0"
+version = "0.11.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -98,6 +98,11 @@ required-features = ["nonproduction-replay-harness"]
 [[test]]
 name = "long_term_memory_control_contract"
 path = "tests/long_term_memory_control_contract.rs"
+required-features = ["nonproduction-replay-harness"]
+
+[[test]]
+name = "long_term_control_integrity_contract"
+path = "tests/long_term_control_integrity_contract.rs"
 required-features = ["nonproduction-replay-harness"]
 
 [[test]]

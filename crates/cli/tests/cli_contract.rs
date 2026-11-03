@@ -146,6 +146,9 @@ fn command_catalog_covers_adapter_plan_without_core_store_bypass() {
             "long-term-list",
             "long-term-detail",
             "long-term-delete",
+            "long-term-policy-list",
+            "long-term-policy-detail",
+            "long-term-policy",
             "long-term-policy-suppress",
             "transcript-attr-write",
             "skill-list",
@@ -247,6 +250,8 @@ fn long_term_destructive_commands_require_explicit_reason() {
             "long-term-policy-suppress",
             "--profile",
             host_profile_name(),
+            "--idempotency-key",
+            "cli-suppress-missing-reason",
             "--topic",
             "temporary-*",
         ]

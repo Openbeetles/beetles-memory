@@ -62,6 +62,14 @@ const MESSAGE_SPECS: &[WssMessageSpec] = &[
     inbound("command.long_term.mutate", AdapterOperation::LongTermMutate),
     inbound("command.long_term.policy", AdapterOperation::LongTermPolicy),
     inbound(
+        "command.long_term.policy.list",
+        AdapterOperation::LongTermPolicyList,
+    ),
+    inbound(
+        "command.long_term.policy.detail",
+        AdapterOperation::LongTermPolicyDetail,
+    ),
+    inbound(
         "command.transcript.attrs",
         AdapterOperation::TranscriptAttrWrite,
     ),

@@ -1833,7 +1833,7 @@ fn long_term_extraction_plans_delete_and_upsert_against_one_facet_manifest_state
 }
 
 #[test]
-fn transcript_mask_fails_closed_when_facet_source_ref_would_be_redacted() {
+fn transcript_mask_atomically_withdraws_facet_source_ref() {
     let platform = store_with_transaction_budget(128, 256);
     let runtime = test_runtime_with_scope(
         platform.clone(),
@@ -1842,6 +1842,15 @@ fn transcript_mask_fails_closed_when_facet_source_ref_would_be_redacted() {
         "chat-a",
     );
     let turn_id = "turn-redact";
+    let request = feedback_finalize_request(&runtime, turn_id, feedback(&registry()));
+    let mut turn = request.turn;
+    turn.tool_observations.clear();
+    runtime
+        .commit_transcript(bm_sdk::MemoryTranscriptCommitRequest {
+            turn,
+            host_refs: Vec::new(),
+        })
+        .unwrap();
     let mut draft = extraction_draft();
     draft.supporting_citations = vec![format!(
         "transcript:{}/{}/{}#turn={}",
@@ -1872,7 +1881,7 @@ fn transcript_mask_fails_closed_when_facet_source_ref_would_be_redacted() {
         .id;
     assert_facet_index_doc_for_owner(&platform, &owner_id);
 
-    let err = runtime
+    runtime
         .request_transcript_lifecycle(MemoryTranscriptLifecycleRequest {
             memory_space_id: runtime.memory_space_id().to_string(),
             channel_id: "llm.gateway".to_string(),
@@ -1881,9 +1890,16 @@ fn transcript_mask_fails_closed_when_facet_source_ref_would_be_redacted() {
             transition: TranscriptLifecycleTransition::Mask,
             reason: "mask_must_update_facet_source_ref".to_string(),
         })
-        .expect_err("facet source impact must fail closed until redaction is supported");
+        .expect("facet source is withdrawn atomically");
 
-    assert_eq!(err.stage(), "transcript_lifecycle_facet_preflight");
+    let detail = runtime
+        .get_long_term_memory(bm_sdk::MemoryLongTermDetailRequest {
+            target: MemoryLongTermTarget::RecordId(owner_id.clone()),
+            view: MemoryLongTermControlView::Operator,
+        })
+        .unwrap();
+    assert!(detail.record.unwrap().supporting_citations.is_empty());
+    assert!(detail.transcript_refs.is_empty());
     assert_facet_index_doc_for_owner(&platform, &owner_id);
 }
 
@@ -3017,21 +3033,31 @@ fn long_term_policy_event_budget_rejects_without_partial_policy() {
         .expect("events before");
 
     let err = runtime
-        .mutate_memory_governance_policy(MemoryLongTermPolicyRequest {
-            operation: MemoryGovernancePolicyMutation::Suppress {
-                selector: MemoryGovernanceSelector {
-                    memory_space_id: Some(runtime.memory_space_id().to_string()),
-                    subject_id: Some(runtime.subject_id().to_string()),
-                    kind: Some(LongTermMemoryKind::Preference),
-                    topic_pattern: Some("temporary-*".to_string()),
-                    source_chat_id: None,
-                    source_scope: None,
+        .mutate_memory_governance_policy(
+            "memory_write_transaction_contract-policy-1",
+            MemoryLongTermPolicyRequest {
+                operation: MemoryGovernancePolicyMutation::Suppress {
+                    selector: MemoryGovernanceSelector {
+                        memory_space_id: Some(runtime.memory_space_id().to_string()),
+                        subject_id: Some(runtime.subject_id().to_string()),
+                        kind: Some(LongTermMemoryKind::Preference),
+                        topic_pattern: Some("temporary-*".to_string()),
+                        source_chat_id: None,
+                        source_scope: None,
+                    },
+                    duration: MemoryGovernanceSuppressionDuration::UntilManualResume,
                 },
-                duration: MemoryGovernanceSuppressionDuration::UntilManualResume,
+                reason: "policy_must_be_transactional".to_string(),
+                dry_run: false,
+                mode_input: RuntimeLifecycleModeInput::default(),
             },
-            reason: "policy_must_be_transactional".to_string(),
-            dry_run: false,
-            mode_input: RuntimeLifecycleModeInput::default(),
+        )
+        .map(|execution| match execution {
+            bm_sdk::MemoryMutationExecution::Committed { report, .. }
+            | bm_sdk::MemoryMutationExecution::Rejected { report } => report,
+            bm_sdk::MemoryMutationExecution::Replayed { .. } => {
+                panic!("fresh test operation unexpectedly replayed")
+            }
         })
         .expect_err("event budget should reject policy mutation as one transaction");
 

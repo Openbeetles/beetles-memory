@@ -63,7 +63,7 @@ candidate_body="$(
   ' crates/sdk/src/runtime.rs
 )"
 
-runtime_sources=(crates/sdk/src/runtime.rs crates/sdk/src/runtime/procedural.rs)
+runtime_sources=(crates/sdk/src/runtime.rs crates/sdk/src/runtime/procedural.rs crates/sdk/src/runtime/governed_indexes.rs crates/sdk/src/runtime/long_term_sources.rs)
 runtime_source="$(cat "${runtime_sources[@]}")"
 
 for required in \
@@ -107,9 +107,11 @@ for required in \
   "commit_memory_mutation_batch" \
   "plan_long_term_extraction_transaction" \
   "plan_governed_owner_facet_index_changes" \
-  "plan_long_term_facet_index_upsert_mutations" \
+  "project_long_term_evidence" \
   "plan_long_term_facet_index_mutations_for_store_mutations" \
-  "ensure_transcript_lifecycle_has_facet_impact_or_fails_closed" \
+  "plan_transcript_factual_source_withdrawal" \
+  "LongTermControlAuthorization" \
+  "LongTermSourceContext" \
   "plan_agent_tool_feedback_application" \
   "plan_long_term_control_mutation" \
   "plan_memory_governance_policy_mutation" \
@@ -229,7 +231,7 @@ for required in \
   "long_term_control_delete_removes_facet_index_in_same_transaction" \
   "long_term_control_supersede_replaces_owner_facet_index_in_same_transaction" \
   "long_term_control_change_scope_persists_visibility_with_owner_and_facet_revision" \
-  "transcript_mask_fails_closed_when_facet_source_ref_would_be_redacted" \
+  "transcript_mask_atomically_withdraws_facet_source_ref" \
   "same_scope_restore_preserves_v6_long_term_facet_and_control_closure" \
   "same_scope_restore_replaces_only_that_scope"; do
   if ! rg -n "${required}" crates/sdk/src/runtime.rs crates/sdk/src/lib.rs crates/sdk/tests/memory_write_transaction_contract.rs crates/sdk/tests/archive_restore_contract.rs >/dev/null; then

@@ -52,6 +52,8 @@ pub enum SharedMemoryWriteReason {
     WeakCanonicalStatement,
     PrivacyClassTransitionRequiresExplicitGovernance,
     SubjectVisibilityTransitionRequiresControl,
+    SourcePredatesExplicitControl,
+    FactualSourceAuthorityRequired,
     OlderThanExisting,
     SourceRevisionConflict,
     LowerConfidenceThanExisting,
@@ -72,6 +74,8 @@ impl SharedMemoryWriteReason {
             Self::SubjectVisibilityTransitionRequiresControl => {
                 "subject_visibility_transition_requires_control"
             }
+            Self::SourcePredatesExplicitControl => "source_predates_explicit_control",
+            Self::FactualSourceAuthorityRequired => "factual_source_authority_required",
             Self::OlderThanExisting => "older_than_existing",
             Self::SourceRevisionConflict => "source_revision_conflict",
             Self::LowerConfidenceThanExisting => "lower_confidence_than_existing",
@@ -290,7 +294,12 @@ where
         let existing = factual_draft
             .stable_id()
             .and_then(|stable_id| existing_by_id.get(&stable_id));
-        match plan_long_term_memory_upsert(existing, &factual_draft, now_secs) {
+        match plan_long_term_memory_upsert(
+            existing,
+            &factual_draft,
+            now_secs,
+            store.factual_admission_revision(&factual_draft)?,
+        ) {
             LongTermMemoryEntryPlan::Created(entry) | LongTermMemoryEntryPlan::Updated(entry) => {
                 accepted_entries.push(entry)
             }
@@ -302,6 +311,12 @@ where
                     }
                     LongTermMemoryEntryRejection::SubjectVisibilityTransitionRequiresControl => {
                         SharedMemoryWriteReason::SubjectVisibilityTransitionRequiresControl
+                    }
+                    LongTermMemoryEntryRejection::SourcePredatesExplicitControl => {
+                        SharedMemoryWriteReason::SourcePredatesExplicitControl
+                    }
+                    LongTermMemoryEntryRejection::FactualSourceAuthorityRequired => {
+                        SharedMemoryWriteReason::FactualSourceAuthorityRequired
                     }
                     LongTermMemoryEntryRejection::OlderSourceRevision
                     | LongTermMemoryEntryRejection::OlderObservation => {
@@ -548,6 +563,9 @@ mod tests {
     fn rejects_lower_confidence_overwrite_before_persisting() {
         let store = MemoryStoreStub {
             entries: Mutex::new(vec![LongTermMemoryEntry {
+                transcript_sources: Vec::new(),
+                control_barrier_scope_revision: None,
+
                 id: draft("Owner timezone is Asia/Shanghai.")
                     .stable_id()
                     .unwrap(),
@@ -607,13 +625,13 @@ mod tests {
             .map(|index| {
                 let mut decoy = draft(&format!("Decoy profile fact {index}."));
                 decoy.topic = format!("decoy_{index}");
-                match plan_long_term_memory_upsert(None, &decoy, 10) {
+                match plan_long_term_memory_upsert(None, &decoy, 10, None) {
                     LongTermMemoryEntryPlan::Created(entry) => entry,
                     plan => panic!("unexpected decoy plan: {plan:?}"),
                 }
             })
             .collect::<Vec<_>>();
-        let mut existing = match plan_long_term_memory_upsert(None, &target_draft, 10) {
+        let mut existing = match plan_long_term_memory_upsert(None, &target_draft, 10, None) {
             LongTermMemoryEntryPlan::Created(entry) => entry,
             plan => panic!("unexpected target plan: {plan:?}"),
         };
@@ -642,6 +660,9 @@ mod tests {
     fn rejects_implicit_privacy_class_transition_for_existing_slot() {
         let store = MemoryStoreStub {
             entries: Mutex::new(vec![LongTermMemoryEntry {
+                transcript_sources: Vec::new(),
+                control_barrier_scope_revision: None,
+
                 id: draft("Owner timezone is private.").stable_id().unwrap(),
                 kind: LongTermMemoryKind::Profile,
                 privacy: MemoryPrivacyClass::SoulPrivate,
@@ -698,7 +719,7 @@ mod tests {
         let mut initial = draft("Owner timezone is Asia/Shanghai.");
         initial.subject_visibility =
             crate::memory::MemorySubjectVisibilityPolicy::OnlySubjects(vec!["agent:a".to_string()]);
-        let existing = match plan_long_term_memory_upsert(None, &initial, 10) {
+        let existing = match plan_long_term_memory_upsert(None, &initial, 10, None) {
             LongTermMemoryEntryPlan::Created(entry) => entry,
             plan => panic!("unexpected initial plan: {plan:?}"),
         };
@@ -800,6 +821,9 @@ mod tests {
 
         let existing_store = MemoryStoreStub {
             entries: Mutex::new(vec![LongTermMemoryEntry {
+                transcript_sources: Vec::new(),
+                control_barrier_scope_revision: None,
+
                 id: draft("Owner timezone is Asia/Shanghai.")
                     .stable_id()
                     .unwrap(),

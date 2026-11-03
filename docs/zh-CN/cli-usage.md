@@ -51,6 +51,8 @@ Commands：
 | `long-term-list` | 列出或按 topic 查询 accepted long-term memory。 |
 | `long-term-detail` | 通过 `--record-id` 查看一条长期记忆详情。 |
 | `long-term-delete` | 通过 `--record-id` 删除一条长期记忆并产生 tombstone/audit report。 |
+| `long-term-policy-list` / `long-term-policy-detail` | 用 `--input <request.json>` 查询当前 mounted subject 的规则或精确 ID。 |
+| `long-term-policy` | 用 `--input <request.json>` 提交 typed policy 请求，mutation 必填 `--idempotency-key`；恢复/解除使用查询所得 exact ID/revision。 |
 | `long-term-policy-suppress` | 用 `--topic <pattern>` 添加“以后不要记这类偏好”的 suppression policy。 |
 | `transcript-attr-write` | 从 JSON request 文件写入受治理的 transcript turn/message attrs；必须显式传 `--reason`。 |
 | `skill-list` | 列出运行时 Skill 记忆。 |
@@ -111,9 +113,10 @@ bm \
 ```bash
 bm \
   memory long-term-policy-suppress \
+  --idempotency-key suppress-temporary-preferences-1 \
   --profile "$BM_HOST_PROFILE" \
   --store-file /tmp/beetle-memory-store \
-  --topic temporary-* \
+  --topic 'temporary-*' \
   --reason "user does not want temporary preferences remembered"
 ```
 

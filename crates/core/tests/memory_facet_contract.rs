@@ -116,6 +116,9 @@ fn governed_recall_candidate_id_never_collides_across_planes() {
 
 fn fixture_long_term_entry() -> LongTermMemoryEntry {
     LongTermMemoryEntry {
+        transcript_sources: Vec::new(),
+        control_barrier_scope_revision: None,
+
         id: "ltm:project:agent-memory-w4".to_string(),
         kind: LongTermMemoryKind::Project,
         topic: "agent-memory/w4/facet-index".to_string(),

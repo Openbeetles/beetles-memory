@@ -71,6 +71,7 @@ impl MemoryMutationSurface {
         match self {
             Self::WriteWithOperation
             | Self::LongTermMutateWithOperation
+            | Self::MemoryGovernancePolicy
             | Self::SubjectSoulEvidence
             | Self::SubjectSoulProvision
             | Self::SubjectSoulRevision
@@ -86,7 +87,6 @@ impl MemoryMutationSurface {
             }
             Self::WriteWithoutOperation
             | Self::LongTermMutateWithoutOperation
-            | Self::MemoryGovernancePolicy
             | Self::AgentToolRegistry
             | Self::RuntimeSkill
             | Self::SemanticClosure
@@ -168,6 +168,7 @@ mod tests {
             HashSet::from([
                 MemoryMutationSurface::WriteWithOperation,
                 MemoryMutationSurface::LongTermMutateWithOperation,
+                MemoryMutationSurface::MemoryGovernancePolicy,
                 MemoryMutationSurface::SubjectSoulEvidence,
                 MemoryMutationSurface::SubjectSoulProvision,
                 MemoryMutationSurface::SubjectSoulRevision,

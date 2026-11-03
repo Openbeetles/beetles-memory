@@ -31,10 +31,14 @@ Operators can inspect and govern accepted long-term memory through the SDK:
 - `MemoryRuntime::get_long_term_memory`
 - `MemoryRuntime::mutate_long_term_memory`
 - `MemoryRuntime::mutate_memory_governance_policy`
+- `MemoryRuntime::list_memory_governance_policies`
+- `MemoryRuntime::get_memory_governance_policy`
 
 These entry points return affected records, tombstones, transcript refs, projection impact, deferred governance impact, policy decision, and lifecycle reports. Operator surfaces may display the report or trigger follow-up governance, but they must not read the `long_term` namespace and mutate content directly.
 
-`forget_by_query` must run a dry-run preview before execution and then pass the confirmation token. `mutate_memory_governance_policy` handles pause/resume/suppress rules for future long-term memory writes; policies do not automatically delete already accepted memory. `DerivedMemoryRef` entries in transcript lifecycle reports are impact lists only; revoking derived long-term memory still calls `mutate_long_term_memory`.
+`forget_by_query` must run a dry-run preview before execution and then pass the confirmation token. `mutate_memory_governance_policy` handles pause/resume/suppress rules for future long-term memory writes; policies do not automatically delete already accepted memory. Inspect rules through list/detail, then resume with the exact policy ID/revision and a stable operation ID. Rules remain manageable after fact deletion or runtime reopening. They apply to the mounted subject, not every Agent sharing the HumanUser actor.
+
+Transcript Mask/DeleteRaw atomically withdraws affected `DerivedMemoryRef` evidence and facet/graph associations. Subsequent recall and historical projection cannot restore that evidence. Accepted factual content and independent valid evidence remain; deleting the fact still requires `mutate_long_term_memory`. Delayed learning from sources admitted before an explicit correction produces a durable rejection receipt, while genuinely new sources can still be learned.
 
 ## Transcript Attr Inspection
 

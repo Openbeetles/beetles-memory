@@ -97,6 +97,8 @@ cargo test --locked -p bm-sdk --features nonproduction-replay-harness --test cap
 cargo test --locked -p bm-sdk --features nonproduction-replay-harness --test platform_capability_snapshot_shape
 cargo test --locked -p bm-sdk --features nonproduction-replay-harness --test platform_capability_snapshots
 cargo test --locked -p bm-sdk --features nonproduction-replay-harness --test long_term_memory_control_contract
+cargo test --locked -p bm-sdk --features nonproduction-replay-harness,sqlite-store --test long_term_control_integrity_contract
+cargo test --locked -p bm-sdk --features nonproduction-replay-harness,sqlite-store --test post_turn_deferred_governance_contract
 cargo test --locked -p bm-adapter --test contract
 cargo test --locked -p bm-http --test http_contract
 cargo test --locked -p bm-mcp --test mcp_contract

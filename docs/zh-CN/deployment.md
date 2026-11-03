@@ -71,6 +71,8 @@ Crate 声明的 memory routes：
 | `/memory/long-term/list` | `POST` | accepted long-term memory list/search |
 | `/memory/long-term/detail` | `POST` | accepted long-term memory detail |
 | `/memory/long-term/mutate` | `POST` | accepted long-term memory mutation |
+| `/memory/long-term/policy/list` | `POST` | mounted-subject policy list |
+| `/memory/long-term/policy/detail` | `POST` | exact policy detail |
 | `/memory/long-term/policy` | `POST` | long-term governance policy mutation |
 
 `server-std` decoder 使用共享 JSON adapter decoder，支持 write、recall、project、maintain、inspect、recover、replay、long-term list/detail/mutate/policy、capabilities、close。通用 continuity snapshot export/import 不属于协议操作。`Subscribe` 是 stream operation，不是 HTTP memory command。`Maintain` 需要通过 `handle_http_in_process_request_with_services` 注入 LLM/HTTP services；`handle_http_in_process_request` 不注入 services，会对 maintain 返回结构化拒绝。project 与 inspect payload 必须显式提供 `system_max_len`，adapter 不得发明 fallback render budget。
@@ -79,7 +81,7 @@ Standard-library HTTP helper 会读取这些 headers：
 
 | Header | 用途 |
 | --- | --- |
-| `x-idempotency-key` | Adapter V2 durable `Write` 与 `LongTermMutate` 必填的稳定、非敏感调用方材料；transport 派生内部 key，响应不会回显原值。 |
+| `x-idempotency-key` | Adapter V2 durable `Write`、`LongTermMutate` 与 `LongTermPolicy` 必填的稳定、非敏感调用方材料；transport 派生内部 key，响应不会回显原值。 |
 | `authorization: Bearer ...` | 按已配置的 typed principal、owner、tenant 与 operation capabilities 验证。 |
 
 loopback 信任只来自已接受 socket 的真实 peer address。转发的 identity、subject 与 `x-loopback` headers 均是不可信输入，不能授予认证或 capability。非 loopback listener 必须配置 `BM_HTTP_BEARER_TOKEN`、全局唯一的 `BM_HTTP_BEARER_OWNER_ID` 与 `BM_HTTP_BEARER_CAPABILITIES`；`owner_id` 是唯一租户命名空间。缺少 verifier 或非零 read/write timeout 时启动必须 fail closed。
@@ -205,7 +207,7 @@ Inbound command frame kinds：
 - `command.long_term.list`
 - `command.long_term.detail`
 - `command.long_term.mutate`
-- `command.long_term.policy`
+- `command.long_term.policy.list`, `command.long_term.policy.detail`, `command.long_term.policy`
 - `command.capabilities`
 
 Subscription frame kinds：
@@ -245,6 +247,8 @@ Tool specs 包含：
 - `memory_long_term_list`
 - `memory_long_term_detail`
 - `memory_long_term_mutate`
+- `memory_long_term_policy_list`
+- `memory_long_term_policy_detail`
 - `memory_long_term_policy`
 
 Stdio helper 对所有已列 tools 使用共享 JSON adapter decoder。Maintain 不在 MCP tool list 中，因为 maintain 需要显式 service injection。
@@ -290,6 +294,8 @@ Bridge message names：
 - `memory_long_term_list_request`
 - `memory_long_term_detail_request`
 - `memory_long_term_mutation_request`
+- `memory_long_term_policy_list_request`
+- `memory_long_term_policy_detail_request`
 - `memory_long_term_policy_request`
 - `memory_report`
 - `runtime_lifecycle_event`
@@ -322,7 +328,7 @@ Message 示例：
 3. 制定稳定的 `agent_id`、`owner_id`、`channel`、`chat_id` 策略。
 4. 通过 `EntryTransportConfig` 配置 transport visibility。
 5. 在构造 `EntryTransportContext` 前，从真实 transport 边界派生 `EntryAuthDecision`；禁止把调用方可控布尔值或 loopback header 当成信任证据。
-6. 每个 Adapter V2 durable `Write` 与 `LongTermMutate` 都提供稳定、非敏感的 idempotency key；其它 mutation 以 capability 声明的 non-durable 或 domain-owned 合同为准。
+6. 每个 Adapter V2 durable `Write`、`LongTermMutate` 与 `LongTermPolicy` 都提供稳定、非敏感的 idempotency key；其它 mutation 以 capability 声明的 non-durable 或 domain-owned 合同为准。
 7. file/sqlite store 持久化到 runtime 进程拥有的路径。
 8. 暴露协议前运行 `memory capabilities` 或 platform capability snapshot。
 9. 增加部署 smoke test：通过选定 entry surface 写入、召回并检查 capabilities。

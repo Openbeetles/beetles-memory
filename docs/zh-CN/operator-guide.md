@@ -31,10 +31,14 @@ Operator 可以通过 SDK 查看和治理已接受长期记忆：
 - `MemoryRuntime::get_long_term_memory`
 - `MemoryRuntime::mutate_long_term_memory`
 - `MemoryRuntime::mutate_memory_governance_policy`
+- `MemoryRuntime::list_memory_governance_policies`
+- `MemoryRuntime::get_memory_governance_policy`
 
 这些入口返回 affected records、tombstones、transcript refs、projection impact、deferred governance impact、policy decision 和 lifecycle report。Operator surface 可以展示 report 或发起下一步治理，但不能读取 `long_term` namespace 后直接改内容。
 
-`forget_by_query` 必须先 dry-run preview，再用 confirmation token 执行。`mutate_memory_governance_policy` 用于 pause/resume/suppress 未来长期记忆写入；policy 不会自动删除已有 accepted memory。Transcript lifecycle report 中的 `DerivedMemoryRef` 只是影响清单，撤销派生长期记忆仍需调用 `mutate_long_term_memory`。
+`forget_by_query` 必须先 dry-run preview，再用 confirmation token 执行。`mutate_memory_governance_policy` 用于 pause/resume/suppress 未来长期记忆写入；policy 不会自动删除已有 accepted memory。先通过正式 list/detail 查询规则，恢复时提交精确 policy ID/revision 和稳定 operation ID；原事实删除或 runtime 重开后规则仍可管理。规则按 mounted subject 生效，不按共享 HumanUser actor 扩散。
+
+Transcript Mask/DeleteRaw 会原子撤回 `DerivedMemoryRef` 对应的失效来源证据及 facet/graph 关联，后续召回与历史投影都不能恢复这些依据。accepted fact 正文及独立有效依据保留；删除该事实仍需调用 `mutate_long_term_memory`。人工纠正后的旧后台学习会得到持久拒绝回执，不会静默覆盖纠正；真正新入场来源仍可继续学习。
 
 ## Transcript Attr 检查
 

@@ -15,7 +15,7 @@ From an external repository, use the source tag (this does not require a crates.
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.10.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.10.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.11.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.11.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 Select exactly one desktop embedded feature for the host OS: `profile-desktop-macos-embedded-sdk`, `profile-desktop-windows-embedded-sdk`, or `profile-desktop-linux-embedded-sdk`. Linux desktop hosts must not use a server or dev-full profile.

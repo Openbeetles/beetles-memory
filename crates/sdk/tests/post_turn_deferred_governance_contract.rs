@@ -261,6 +261,59 @@ struct PlaneAwareStaticLlm {
     long_term_content: &'static str,
 }
 
+struct CorrectionDuringExtractionLlm {
+    runtime: Arc<MemoryRuntime>,
+    store: MemoryStoreHandle,
+    correction: std::sync::Mutex<Option<bm_sdk::MemoryLongTermMutationRequest>>,
+    corrected_truth: std::sync::Mutex<Option<serde_json::Value>>,
+    delegate: PlaneAwareStaticLlm,
+}
+
+fn factual_truth(store: &MemoryStoreHandle) -> serde_json::Value {
+    let docs = store
+        .replay_harness()
+        .export_store_snapshot()
+        .unwrap()
+        .json_docs
+        .into_iter()
+        .filter(|doc| {
+            matches!(
+                doc.namespace.as_str(),
+                "long_term_version_materials"
+                    | "long_term_head_manifests"
+                    | "long_term_control_revision"
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(docs
+        .iter()
+        .any(|doc| doc.namespace == "long_term_version_materials"));
+    assert!(docs
+        .iter()
+        .any(|doc| doc.namespace == "long_term_head_manifests"));
+    serde_json::to_value(docs).unwrap()
+}
+
+impl LlmClient for CorrectionDuringExtractionLlm {
+    fn chat(
+        &self,
+        http: &mut dyn LlmHttpClient,
+        system: &str,
+        messages: &[Message],
+        tools: Option<&[ToolSpec]>,
+        choice: ToolChoicePolicy,
+    ) -> Result<LlmResponse> {
+        if system.starts_with("You extract durable memory updates") {
+            if let Some(request) = self.correction.lock().unwrap().take() {
+                self.runtime
+                    .mutate_long_term_memory_operation("correct-drink", request)?;
+                *self.corrected_truth.lock().unwrap() = Some(factual_truth(&self.store));
+            }
+        }
+        self.delegate.chat(http, system, messages, tools, choice)
+    }
+}
+
 struct AdjustableMemoryClock {
     now_secs: AtomicUsize,
 }
@@ -5586,4 +5639,350 @@ impl LlmClient for CanonicalPersonaSeedLlm {
             tool_calls: None,
         })
     }
+}
+
+#[test]
+fn old_pending_learning_cannot_replace_an_explicit_correction() {
+    assert_old_pending_learning_preserves_correction(false, None, false);
+}
+
+#[test]
+fn old_pending_learning_cannot_delete_an_explicit_correction() {
+    assert_old_pending_learning_preserves_correction(true, None, false);
+}
+
+fn assert_old_pending_learning_preserves_correction(
+    delete: bool,
+    backend: Option<StoreBackendConfig>,
+    during_execution: bool,
+) {
+    let profile = support::host_test_profile();
+    let store = backend
+        .as_ref()
+        .map(|config| support::open_memory_store(config.clone()).unwrap())
+        .unwrap_or_else(|| empty_store_platform(profile));
+    let runtime = Arc::new(test_runtime_with_scope_and_subject(
+        store.clone(),
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    ));
+    install_learning_binding(&runtime, 1);
+    let llm = PlaneAwareStaticLlm {
+        long_term_content: r#"[{"plane":"factual","op":"upsert","kind":"preference","source_authority":"user_asserted","topic":"drink_preference","content":"用户喜欢冷萃。","keywords":["drink"]}]"#,
+    };
+    let engine = MemoryLearningEngine::attach(Arc::clone(&runtime)).unwrap();
+    let mut http = StaticHttpClient;
+    let mut observed_error = None;
+    let mut port = ObservedLearningPort {
+        http: &mut http,
+        llm: &llm,
+        error: &mut observed_error,
+    };
+    runtime
+        .finalize_turn(finalize_request(
+            "subject-default",
+            "window-causal",
+            "turn-causal-1",
+            "我喜欢冷萃。",
+        ))
+        .unwrap();
+    let first_cycle = engine
+        .run_due_cycle(learning_cycle_request(1), &mut port)
+        .unwrap();
+    assert!(
+        matches!(first_cycle, MemoryLearningCycleOutcome::Completed(_)),
+        "{first_cycle:?}; error={:?}",
+        port.error
+    );
+    let list = |runtime: &MemoryRuntime| {
+        runtime
+            .list_long_term_memory(bm_sdk::MemoryLongTermListRequest {
+                query: bm_sdk::LongTermMemoryQuery {
+                    include_stale: true,
+                    ..Default::default()
+                },
+                cursor: None,
+                limit: 20,
+                view: bm_sdk::MemoryLongTermControlView::Operator,
+            })
+            .unwrap()
+    };
+    let before = list(&runtime)
+        .records
+        .into_iter()
+        .find(|row| row.record.topic == "drink_preference")
+        .unwrap()
+        .record;
+    runtime
+        .finalize_turn(finalize_request(
+            "subject-default",
+            "window-causal",
+            "turn-causal-2",
+            "还是冷萃。",
+        ))
+        .unwrap();
+    let correction_request = bm_sdk::MemoryLongTermMutationRequest {
+        operation: bm_sdk::MemoryLongTermMutation::Correct {
+            target: bm_sdk::MemoryLongTermTarget::RecordId(before.id.clone()),
+            replacement: bm_sdk::LongTermMemoryDraft {
+                content: "用户现在只喝温水。".into(),
+                kind: before.kind.clone(),
+                topic: before.topic.clone(),
+                keywords: before.keywords.clone(),
+                privacy: before.privacy,
+                source_chat_id: before.source_chat_id.clone(),
+                source_type: Some(before.source_type),
+                source_scope: Some(before.source_scope),
+                subject_visibility: before.subject_visibility.clone(),
+                provenance: before.provenance,
+                confidence: Some(before.confidence),
+                freshness: Some(before.freshness),
+                stale_hint: Some(before.stale_hint),
+                supporting_citations: before.supporting_citations.clone(),
+                canonical_entities: before.canonical_entities.clone(),
+                evidence_count: Some(before.evidence_count),
+                observed_at: None,
+                source_revision: None,
+            },
+        },
+        reason: "explicit correction".into(),
+        dry_run: false,
+        mode_input: Default::default(),
+    };
+    if !during_execution {
+        runtime
+            .mutate_long_term_memory_operation("correct-drink", correction_request.clone())
+            .unwrap();
+    }
+    let corrected = list(&runtime)
+        .records
+        .into_iter()
+        .find(|row| row.record.id == before.id)
+        .unwrap()
+        .record;
+    if !during_execution {
+        assert_eq!(corrected.content, "用户现在只喝温水。");
+    }
+    let corrected_truth = factual_truth(&store);
+    let (runtime, engine, store) = if let Some(config) = &backend {
+        drop(engine);
+        drop(runtime);
+        drop(store);
+        let store = support::open_memory_store(config.clone()).unwrap();
+        assert_eq!(factual_truth(&store), corrected_truth);
+        let runtime = Arc::new(test_runtime_with_scope_and_subject(
+            store.clone(),
+            profile,
+            "llm.gateway",
+            "chat-a",
+            "subject-default",
+        ));
+        assert_eq!(
+            list(&runtime)
+                .records
+                .into_iter()
+                .find(|row| row.record.id == before.id)
+                .unwrap()
+                .record,
+            corrected
+        );
+        let engine = MemoryLearningEngine::attach(Arc::clone(&runtime)).unwrap();
+        (runtime, engine, store)
+    } else {
+        (runtime, engine, store)
+    };
+    let deletion_llm = PlaneAwareStaticLlm {
+        long_term_content: r#"[{"plane":"factual","op":"delete","kind":"preference","source_authority":"user_asserted","topic":"drink_preference"}]"#,
+    };
+    let inflight_llm = CorrectionDuringExtractionLlm {
+        runtime: runtime.clone(),
+        store: store.clone(),
+        correction: std::sync::Mutex::new(Some(correction_request)),
+        corrected_truth: std::sync::Mutex::new(None),
+        delegate: PlaneAwareStaticLlm {
+            long_term_content: if delete {
+                deletion_llm.long_term_content
+            } else {
+                llm.long_term_content
+            },
+        },
+    };
+    let mut retry_port = SyntheticLearningPort {
+        http: &mut http,
+        llm: if during_execution {
+            &inflight_llm
+        } else if delete {
+            &deletion_llm
+        } else {
+            &llm
+        },
+    };
+    let retry = engine
+        .run_due_cycle(learning_cycle_request(2), &mut retry_port)
+        .unwrap();
+    let MemoryLearningCycleOutcome::Completed(completed) = retry else {
+        panic!("old job did not reach its formal terminal state: {retry:?}");
+    };
+    assert_eq!(
+        completed.job.status,
+        PostTurnGovernanceJobStatusV2::Succeeded
+    );
+    assert!(completed
+        .semantic_governance
+        .plane_reports
+        .iter()
+        .any(|plane| plane.reason == "source_predates_explicit_control"));
+    let receipt = completed
+        .job
+        .receipt
+        .as_ref()
+        .expect("durable rejection receipt");
+    assert_eq!(receipt.decision_summary.accepted_count, 0);
+    assert!(receipt.decision_summary.rejected_count > 0);
+    let persisted = runtime
+        .governance_job_status(MemoryGovernanceJobStatusRequest {
+            job_id: completed.job.job_id.clone(),
+        })
+        .unwrap()
+        .job;
+    assert_eq!(persisted.receipt, completed.job.receipt);
+    let after = list(&runtime)
+        .records
+        .into_iter()
+        .find(|row| row.record.id == before.id)
+        .unwrap()
+        .record;
+    let corrected = if during_execution {
+        assert!(
+            inflight_llm.correction.lock().unwrap().is_none(),
+            "the correction must happen inside extraction"
+        );
+        assert_eq!(after.content, "用户现在只喝温水。");
+        assert_eq!(after.owner_revision, before.owner_revision + 1);
+        assert!(after.control_barrier_scope_revision.is_some());
+        assert_eq!(
+            factual_truth(&store),
+            *inflight_llm
+                .corrected_truth
+                .lock()
+                .unwrap()
+                .as_ref()
+                .expect("truth captured immediately after correction")
+        );
+        after
+    } else {
+        assert_eq!(
+            factual_truth(&store),
+            corrected_truth,
+            "old job cannot alter material, head or confirmation history"
+        );
+        assert_eq!(
+            after, corrected,
+            "old durable job must not replace an explicit correction"
+        );
+        corrected
+    };
+    drop(inflight_llm);
+    install_learning_binding(&runtime, 1);
+    runtime
+        .finalize_turn(finalize_request(
+            "subject-default",
+            "window-causal",
+            "turn-causal-3",
+            "我又改了，现在明确喜欢热茶。",
+        ))
+        .unwrap();
+    let new_llm = PlaneAwareStaticLlm {
+        long_term_content: r#"[{"plane":"factual","op":"upsert","kind":"preference","source_authority":"user_asserted","topic":"drink_preference","content":"用户现在喜欢热茶。","keywords":["drink"]}]"#,
+    };
+    let mut fresh_port = SyntheticLearningPort {
+        http: &mut http,
+        llm: &new_llm,
+    };
+    let fresh = engine
+        .run_due_cycle(learning_cycle_request(3), &mut fresh_port)
+        .unwrap();
+    let MemoryLearningCycleOutcome::Completed(fresh) = fresh else {
+        panic!("new canonical source must remain learnable: {fresh:?}");
+    };
+    assert!(
+        fresh
+            .job
+            .receipt
+            .as_ref()
+            .unwrap()
+            .decision_summary
+            .accepted_count
+            > 0
+    );
+    let updated = list(&runtime)
+        .records
+        .into_iter()
+        .find(|row| row.record.id == before.id)
+        .unwrap()
+        .record;
+    assert_eq!(updated.content, "用户现在喜欢热茶。");
+    assert!(updated.owner_revision > corrected.owner_revision);
+    assert_eq!(
+        updated.control_barrier_scope_revision,
+        corrected.control_barrier_scope_revision
+    );
+    if let Some(config) = backend {
+        let updated_truth = factual_truth(&store);
+        drop(engine);
+        drop(runtime);
+        drop(store);
+        let store = support::open_memory_store(config).unwrap();
+        assert_eq!(factual_truth(&store), updated_truth);
+        let reopened = test_runtime_with_scope_and_subject(
+            store,
+            profile,
+            "llm.gateway",
+            "chat-a",
+            "subject-default",
+        );
+        assert_eq!(
+            list(&reopened)
+                .records
+                .into_iter()
+                .find(|row| row.record.id == before.id)
+                .unwrap()
+                .record,
+            updated
+        );
+    }
+}
+
+#[test]
+fn file_reopen_fences_pending_learning_after_correction_and_allows_new_source() {
+    let root = std::env::temp_dir().join(format!("bm-lci-causal-file-{}", std::process::id()));
+    assert_old_pending_learning_preserves_correction(
+        false,
+        Some(StoreBackendConfig::file(&root, support::host_test_profile()).unwrap()),
+        false,
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(feature = "sqlite-store")]
+#[test]
+fn sqlite_reopen_fences_pending_deletion_after_correction_and_allows_new_source() {
+    let root = std::env::temp_dir().join(format!("bm-lci-causal-sqlite-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    assert_old_pending_learning_preserves_correction(
+        true,
+        Some(
+            StoreBackendConfig::sqlite(root.join("store.sqlite"), support::host_test_profile())
+                .unwrap(),
+        ),
+        false,
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn correction_during_learning_execution_fences_the_original_source() {
+    assert_old_pending_learning_preserves_correction(false, None, true);
 }

@@ -2,9 +2,11 @@
 
 The SDK API is the primary entry point. Host projects should enter through `bm-sdk` or through `bm-entry` plus a protocol adapter. They should not implement their own memory schema, store envelope, replay format, or adapter dispatch rules.
 
-## 0.10.0: production learning and local time
+## 0.11.0: long-term control integrity
 
-The 0.10.0 source uses Store v15. The historical 0.9.0 release uses Store v14. There is no compatibility reader or automatic migration; use the same source tag for every Beetle crate.
+The 0.11.0 source uses Store v16; 0.10.0 uses Store v15 and 0.9.0 uses Store v14. There is no compatibility reader or automatic migration; use the same source tag for every Beetle crate.
+
+Long-term pagination, durable policy inspection/removal, factual source withdrawal and correction barriers are described under [Runtime operations](#runtime-operations). The production learning and time contracts introduced in 0.10.0 remain available:
 
 - `PostTurnLearningInputV3` accepts sourced `MethodLearningInputV1`, `MethodAdoptionEvidenceV1` and `MethodTaskEvaluationV1`. Trusted producer claims and evaluator revisions must match. Hosts submit actual facts; Memory owns extraction, governance, persistence and promotion.
 - `MemoryRuntime::discover_method_trials(MemoryMethodTrialRequest)` returns a bounded `MemoryMethodTrialReport` with exact `MethodContentRefV1` references. Candidates support explicit trials, not ordinary mature-method projection. Selection, successful tool execution and successful tasks are distinct facts; promotion requires actual adoption and independent task evaluations.
@@ -19,7 +21,7 @@ The 0.10.0 source uses Store v15. The historical 0.9.0 release uses Store v14. T
 `runtime_constraints` is now `Vec<RuntimeProjectionSourceBlock>`, preserving content provenance and protection.
 Explicit struct-literal consumers of the envelope, Core `InhabitedSubjectProjection` or
 `SubjectSoulRelationshipRuntimeViewV1` must update to the new fields; the latter runtime view also has a changed
-serialized shape. The 0.9.0 release kept Store v14; 0.10.0 requires Store v15.
+serialized shape. The 0.9.0 release kept Store v14; 0.11.0 requires Store v16.
 Use `projection.provider_payload().system_memory_block()` for the model; use `projection.report()` safe
 UI/operator/Gateway methods for display and diagnostics. Do not log the raw envelope or rebuild a renderer.
 See [0.9.0 API changes and Store boundaries](release-notes-0.9.0.md).
@@ -40,6 +42,14 @@ See [0.9.0 API changes and Store boundaries](release-notes-0.9.0.md).
 | `bm-ollama-transparent` | Published macOS-local controller for Ollama App transparent mode: cross-process OS transition lease, exact PID/start/executable receipts, verified executable launch with recoverable `launchd` job authority, and bounded process/probe reports. Its caller must provide an explicit absolute gateway path and typed memory authority; model and memory semantics remain owned by `bm-llm-gateway`. |
 
 ## Runtime Operations
+
+The 0.11.0 source uses Store v16, long-term material v6, and control revision v4 for the long-term control contract. The historical v0.10.0 contract remains Store v15. Older stores require explicit handling; there is no implicit migration or permissive missing-field read.
+
+Long-term lists paginate after subject visibility filtering. Continuation cursors bind the query, subject, and snapshot; restart the query if a cursor expires. A cursor is not an authorization credential. Query suppression rules through `list_memory_governance_policies(MemoryLongTermPolicyListRequest)` and `get_memory_governance_policy(MemoryLongTermPolicyDetailRequest)`, even after the original fact is deleted. Rules govern future long-term factual writes for the mounted subject in the same MemorySpace. Sharing a HumanUser actor does not extend one Agent's rules to another Agent or hide existing facts.
+
+`mutate_memory_governance_policy(operation_id, request)` requires a stable operation ID. Omitted selector space/subject fields resolve to the current Runtime space/mounted subject, never to every subject; explicit foreign scope is rejected before persistence. Resume/removal takes the exact `MemoryGovernancePolicyRef { policy_id, policy_revision }` returned by inspection. Re-query stale revisions; do not remove by selector. Success returns `Committed`; the same operation and intent returns `Replayed`; reusing an operation with a different intent is rejected. An old removal cannot remove a later incarnation of the same rule. List/detail decisions reflect expiration, after which the rule no longer blocks matching writes.
+
+Transcript Mask/DeleteRaw atomically withdraws derived factual evidence and its facet/graph associations. Current, as-of, and projection reads honor current source withdrawal. Accepted factual content remains; deleting the fact requires explicit governance. Correct/Supersede establishes a causal barrier against delayed learning, retries, and dedupe deletion from older canonical turns. Newly admitted sources can still update the fact, and reopening does not refresh source admission order.
 
 | Operation | SDK method | Purpose |
 | --- | --- | --- |
@@ -86,7 +96,7 @@ Status and recovery controls require opaque SDK-minted capabilities. `MemoryRunt
 
 ## Procedural Evidence Authority
 
-The 0.10.0 source uses `PostTurnLearningInputV3`; the published 0.9.0 `PostTurnLearningInputV2` contract is historical and is not an alias or compatibility path. Ordinary turns use `PostTurnLearningInputV3::empty()` or `with_tool_call_count(n)` and `finalize_turn`; no producer registration is required, and an empty feedback set creates no procedural job. A selection receipt proves an exact projection, not permission to report execution.
+The 0.11.0 source uses `PostTurnLearningInputV3`; the published 0.9.0 `PostTurnLearningInputV2` contract is historical and is not an alias or compatibility path. Ordinary turns use `PostTurnLearningInputV3::empty()` or `with_tool_call_count(n)` and `finalize_turn`; no producer registration is required, and an empty feedback set creates no procedural job. A selection receipt proves an exact projection, not permission to report execution.
 
 For feedback, a trusted composition root uses an active governing `SystemGovernor` runtime with the same Store, SubjectRegistry, MemorySpace and mounted scope:
 
@@ -110,7 +120,7 @@ Only `RuntimeObservation` and `HumanUser` producer authorities may claim executi
 
 ## Subject Soul Provisioning
 
-`bm-sdk` 0.10.0 exposes a host-neutral Subject Soul provisioning and lifecycle contract. Hosts submit typed intent only; Core, SDK, and Store own Soul revisions, generations, material, manifests, ledgers, audit records, events, and durable operation receipts in one transaction. Adapters, HTTP, MCP, Console, and host databases must not maintain a second Soul state or create a default personality and overwrite it later.
+`bm-sdk` 0.11.0 exposes a host-neutral Subject Soul provisioning and lifecycle contract. Hosts submit typed intent only; Core, SDK, and Store own Soul revisions, generations, material, manifests, ledgers, audit records, events, and durable operation receipts in one transaction. Adapters, HTTP, MCP, Console, and host databases must not maintain a second Soul state or create a default personality and overwrite it later.
 
 | Operation | SDK surface | Contract |
 | --- | --- | --- |
@@ -159,11 +169,11 @@ CTQ1 query surfaces use the Store-owned `TranscriptQueryCursor`. Treat it as opa
 
 `HostUi` is only the host-presentable redacted disclosure view. It is not a chat-window API, pagination direction, product name, transcript index owner, or authorization token. Catalog, timeline, search, and activity return only candidates that remain visible after Runtime hydration and redaction for the requested view. Search hits contain a governed Unicode-safe excerpt and durable `TranscriptAnchor`; pass that anchor to `TranscriptTimelineAnchor::Around` instead of asking the host UI to scan or re-match transcript text.
 
-0.10.0 accepts Store v15 only; 0.9.0 uses Store v14 and 0.7.0 uses Store v13. There is no public Store migration API, compatibility reader, dual write, or automatic migration. Older, partial, and foreign schema payloads fail closed. Development data from an older generation must be explicitly discarded and recreated by its owner; archive export/import is not schema migration.
+0.11.0 accepts Store v16 only; 0.9.0 uses Store v14 and 0.7.0 uses Store v13. There is no public Store migration API, compatibility reader, dual write, or automatic migration. Older, partial, and foreign schema payloads fail closed. Development data from an older generation must be explicitly discarded and recreated by its owner; archive export/import is not schema migration.
 
 Timeline supports latest, before, after, around-anchor, around-sequence, around-time, and first-visible-in-range queries. Page turns stay in sequence order and reports may carry opaque older/newer cursors. Calendar conversion stays with the host: resolve the user's IANA time zone and local date into a canonical UTC `[start_inclusive, end_exclusive)` range before calling Memory. Do not assume every local day is 86,400 seconds; DST days can be 23 or 25 hours. Transcript queries consume explicit UTC ranges and do not persist calendar time zones; the model-context local-time provider is a separate presentation input.
 
-The 0.10.0 source keeps the CTQ1 public query shapes and capability snapshot v5. Store v15 adds the required method/task provenance and Soul source-review closure; it does not add a second transcript query model. Local automated contracts do not establish real-data, Provider, GUI/UAT, crates.io or hosted Release evidence.
+The 0.11.0 source keeps the CTQ1 public query shapes and capability snapshot v5. Store v16 adds factual source admission/barriers and atomic evidence-withdrawal closure while retaining the method/task provenance and Soul source-review guarantees; it does not add a second transcript query model. Local automated contracts do not establish real-data, Provider, GUI/UAT, crates.io or hosted Release evidence.
 
 Transcript attrs are Memory-owned transcript metadata, not a host business object store. Every attr has a `TranscriptAttrTarget`, namespaced key, `TranscriptAttrValueKind`, JSON value, `HostRefVisibility`, `TranscriptAttrSource`, `TranscriptAttrGovernance`, and optional `TranscriptAttrLink` refs. `HostUi` replay returns only HostUi-visible attrs, `ModelContext` returns only model-context attrs, `OperatorAudit` returns audit-visible attrs, and `Export` returns only export-visible attrs with `export_allowed=true`. `RawOwnerOnly` remains internal. Store repair reports missing target turns/messages, mismatched attr source keys, invalid keys, oversized values, and corrupt attr records as fail-closed issues. `DeleteRaw` hides attrs by default; `OperatorAuditOnlyAfterMask` may leave only redacted audit metadata and never returns the original attr value after raw deletion.
 
@@ -256,12 +266,14 @@ Transport helper crates use the shared JSON adapter decoder for their declared m
 
 Accepted long-term memory is owned by `MemoryRuntime`. Hosts may translate user-facing natural-language commands into SDK requests, but they must not maintain a shadow memory editor in their own SQLite database, local JSON files, or UI state.
 
+Source withdrawal removes invalid evidence from current/as-of candidates and model delivery. Operator detail may retain source identity metadata in immutable control revision history for audit; withdrawal does not erase that history or imply deletion of accepted factual content.
+
 The control plane is separate from the automatic write path:
 
 - `MemoryWriteRequest::Candidates` / `LongTermExtraction` submit candidate content for Memory-owned governance, merge, and storage.
 - `MemoryLongTermMutationRequest` handles user or operator correction, supersede, delete, forget, and scope-change actions for already accepted long-term memory.
 - `MemoryLongTermPolicyRequest` handles "do not remember this kind of thing again" and "pause memory updates for this scope".
-- Transcript lifecycle `DeleteRaw` / `Mask` affects conversation evidence only. It reports `DerivedMemoryRef` impact, but it does not automatically delete accepted long-term memory. Revoking derived long-term memory must go through the long-term control surface.
+- Transcript lifecycle `DeleteRaw` / `Mask` reports `DerivedMemoryRef` impact and atomically withdraws invalid source evidence and facet/graph associations. It does not automatically delete accepted long-term factual content; deleting the fact still requires the long-term control surface.
 - Runtime Skill management is limited to procedural runtime skill memory and is not the edit/retire surface for ordinary long-term memory.
 
 Every mutation report must be audit-ready: affected records, tombstones, transcript refs, projection impact, deferred governance impact, policy decision, and lifecycle report are returned by the SDK. If a profile denies an operation, the SDK returns a structured rejection; the host must not fall back to direct local store edits.

@@ -20,6 +20,8 @@ Use this checklist for maintainer release candidates.
 
 ## Verification
 
+For a source tag, select checks by the changed contract and reuse applicable engineering evidence. A version bump alone does not require the full workspace or every platform profile. Record skipped checks as unverified. Run the broader matrix below when the affected surface or a real platform integration requires it.
+
 ```bash
 cargo fmt --all -- --check
 cargo test --locked --workspace --exclude bm-desktop
@@ -70,9 +72,7 @@ bash scripts/check_release_surface.sh
 
 When build cache space must live on another volume, set `BM_RELEASE_SURFACE_WORK_ROOT` to an existing absolute directory while keeping `TMPDIR` on the host filesystem for macOS launchd fixtures.
 
-An engineering handoff from a host that lacks a required target toolchain may record that row as
-`deferred_not_passed`. Every release candidate must provision all required target toolchains and
-obtain strict GREEN; a missing toolchain blocks release and is not a pass:
+When a target platform is actually being integrated or changed, provision its toolchain and obtain its target gate result. A missing toolchain is `deferred_not_passed`, never a pass. Run the full strict matrix when all target platforms are in scope:
 
 ```bash
 bash scripts/check_cross_target_compile_gates.sh --strict
@@ -98,11 +98,11 @@ bm-mcp
 bm-a2a
 ```
 
-Run staged `cargo publish --dry-run -p <crate>` through `scripts/check_release_surface.sh`. The release gate runs production hardening checks, uses temporary Cargo target directories, and fails if repository ignored artifacts change.
+Before uploading crates to crates.io, run staged `cargo publish --dry-run -p <crate>` through `scripts/check_release_surface.sh`. The release gate runs production hardening checks, uses temporary Cargo target directories, and fails if repository ignored artifacts change. A source tag without crate upload does not require those 13 package dry-runs.
 
 ## Rollback
 
-- Before the first real publish, stop on any failed gate, fix on `dev`, and freeze a new candidate; do not move `main` or a release tag to hide a failed candidate.
+- Before the first crates.io upload, stop on any failed crate publish gate, fix on `dev`, and freeze a new candidate; do not move `main` or a release tag to hide a failed crate candidate.
 - crates.io versions are immutable. If a published package is defective, do not overwrite the version or delete the tag as a rollback; stop announcing the release, fix the defect, and publish a new patch version in the same dependency order.
 - Before deploying a binary that may open an existing store, back up that exact store outside the data path. Deployment rollback restores the previous signed binary and its matching store backup; archive import/export is not an implicit schema migration or rollback path.
 - Create a release tag only from the verified `main` commit. Never retarget an existing release tag.
@@ -113,6 +113,6 @@ Run staged `cargo publish --dry-run -p <crate>` through `scripts/check_release_s
 - Adapter crates keep memory write, recall, projection, and store semantics inside `MemoryRuntime`.
 - Standalone deployment covers memory runtime entry points. Product-specific surfaces and deployment infrastructure are supplied by the host deployment.
 
-## 0.10.0 candidate scope
+## 0.11.0 candidate scope
 
-Verify production method extraction/adoption/independent task evaluation, governed persona growth and user-device local time together. Require Store v15; long-term material v5 and Adapter V2 remain unchanged. Run the formal SDK method/persona/time suites without `nonproduction-replay-harness`, plus the official Entry learning service with `governance-model-client-std`. Keep the full File/SQLite reopen, withdrawal, current/as-of and privacy matrices. Run strict target gates and all package dry-runs. Preserve previous notes/tags; no compatibility reader, automatic migration, real-data deletion, comparative-learning implementation, real Provider or GUI claims.
+Verify subject-filtered long-term pagination, durable policy list/detail/exact removal and replay, atomic Transcript evidence withdrawal, and factual admission barriers against stale queued/in-flight learning. Require Store v16 / material v6 / control revision v4. Use the LCI1 InMemory/File/SQLite reopen, current/as-of/delivery privacy, CAS/budget/closure evidence and affected contract reruns; check the macOS desktop contract, versions, public docs and source inventory. Windows/Linux/ESP integration and 13 crate dry-runs are deferred until those surfaces or crates.io publication are in scope. Keep all third-party lock records and old tags unchanged. There is no compatibility reader or automatic migration. Full comparative-learning experiments, real Provider quality and GUI/UAT are separate evidence planes.

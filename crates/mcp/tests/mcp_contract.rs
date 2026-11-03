@@ -18,6 +18,8 @@ fn tool_schema_maps_to_adapter_commands_not_memory_planes() {
             "memory_long_term_detail",
             "memory_long_term_mutate",
             "memory_long_term_policy",
+            "memory_long_term_policy_list",
+            "memory_long_term_policy_detail",
             "memory_transcript_attr_write",
         ]
     );
@@ -41,6 +43,20 @@ fn tool_schema_maps_to_adapter_commands_not_memory_planes() {
     assert!(tools.iter().any(|tool| {
         tool.name == "memory_long_term_policy" && tool.operation == AdapterOperation::LongTermPolicy
     }));
+    for (name, operation) in [
+        (
+            "memory_long_term_policy_list",
+            AdapterOperation::LongTermPolicyList,
+        ),
+        (
+            "memory_long_term_policy_detail",
+            AdapterOperation::LongTermPolicyDetail,
+        ),
+    ] {
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == name && tool.operation == operation));
+    }
     assert!(tools.iter().any(|tool| {
         tool.name == "memory_transcript_attr_write"
             && tool.operation == AdapterOperation::TranscriptAttrWrite

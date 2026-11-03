@@ -61,8 +61,8 @@ use crate::store_internal::recall_index::{
     TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE,
 };
 
-pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema_v15";
-pub const STORE_SCHEMA_VERSION: u32 = 15;
+pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema_v16";
+pub const STORE_SCHEMA_VERSION: u32 = 16;
 pub(crate) const LONG_TERM_VERSION_MATERIAL_NAMESPACE: &str = "long_term_version_materials";
 pub(crate) const LONG_TERM_HEAD_MANIFEST_NAMESPACE: &str = "long_term_head_manifests";
 pub(crate) const LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE: &str =
@@ -2068,19 +2068,9 @@ fn validate_control_document(
                 invalid,
             )?;
             let policy = decode_json::<MemoryLongTermGovernancePolicy>(value, invalid)?;
-            if policy.schema_version != LONG_TERM_CONTROL_SCHEMA_VERSION
-                || policy.policy_revision == 0
-                || !canonical_nonempty(&policy.memory_space_id)
-                || !canonical_nonempty(&policy.policy_id)
-                || !canonical_nonempty(&policy.kind)
-                || !canonical_nonempty(&policy.reason)
-                || policy.created_at == 0
-                || policy.updated_at < policy.created_at
-            {
-                return Err(invalid(
-                    "long-term governance policy structure is invalid".to_string(),
-                ));
-            }
+            policy
+                .validate_contract()
+                .map_err(|error| invalid(error.to_string()))?;
             (policy.memory_space_id, policy.policy_id)
         }
         StoreJsonDecoderKind::LongTermControlAudit => {
@@ -3350,11 +3340,14 @@ mod tests {
     }
 
     #[test]
-    fn store_schema_identity_is_exactly_v15_and_rejects_v14() {
-        assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v15");
-        assert_eq!(STORE_SCHEMA_VERSION, 15);
+    fn store_schema_identity_is_exactly_v16_and_rejects_v15() {
+        assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v16");
+        assert_eq!(STORE_SCHEMA_VERSION, 16);
         assert!(
             validate_store_schema_identity(STORE_SCHEMA_ID, STORE_SCHEMA_VERSION, "test").is_ok()
+        );
+        assert!(
+            validate_store_schema_identity("beetle_memory_store_schema_v15", 15, "test").is_err()
         );
         assert!(
             validate_store_schema_identity("beetle_memory_store_schema_v14", 14, "test").is_err()
@@ -3366,7 +3359,7 @@ mod tests {
     }
 
     #[test]
-    fn store_v15_rejects_v2_governance_job_and_scope_payloads() {
+    fn store_v16_rejects_v2_governance_job_and_scope_payloads() {
         let identity = PostTurnGovernanceIdentityV2::new(
             "space:v2-reject",
             "subject:v2-reject",

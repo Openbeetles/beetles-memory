@@ -271,9 +271,58 @@ fn dispatch_adapter_command_with_services_in_lease(
                 Err(error) => return Err(error),
             }
         }
-        AdapterCommand::LongTermPolicy(request) => AdapterSdkReport::LongTermPolicy(Box::new(
-            runtime.mutate_memory_governance_policy(request)?,
-        )),
+        AdapterCommand::LongTermPolicyList(request) => AdapterSdkReport::LongTermPolicyList(
+            Box::new(runtime.list_memory_governance_policies(request)?),
+        ),
+        AdapterCommand::LongTermPolicyDetail(request) => AdapterSdkReport::LongTermPolicyDetail(
+            Box::new(runtime.get_memory_governance_policy(request)?),
+        ),
+        AdapterCommand::LongTermPolicy(request) => {
+            let operation_id = mutation_operation_id
+                .as_deref()
+                .expect("V2 durable mutation identity validated before dispatch");
+            match runtime.mutate_memory_governance_policy(operation_id, request) {
+                Ok(MemoryMutationExecution::Committed { report, receipt }) => {
+                    committed_receipt = Some(AdapterMutationReceiptV1::from_operation_id(
+                        operation_id,
+                        &receipt,
+                    ));
+                    AdapterSdkReport::LongTermPolicy(Box::new(report))
+                }
+                Ok(MemoryMutationExecution::Replayed { receipt }) => {
+                    return Ok(AdapterResponse::Replayed {
+                        request_id,
+                        audit_id,
+                        mutation_operation_id: operation_id.to_string(),
+                        receipt: AdapterMutationReceiptV1::from_operation_id(
+                            operation_id,
+                            &receipt,
+                        ),
+                    });
+                }
+                Ok(MemoryMutationExecution::Rejected { report }) => {
+                    return Ok(AdapterResponse::Rejected {
+                        request_id,
+                        audit_id,
+                        error_key: AdapterErrorKey::RuntimeRejected,
+                        reason: report.reason,
+                    });
+                }
+                Err(error)
+                    if error.class() == Some(ErrorClass::Conflict)
+                        && error.stage() == "memory_mutation_receipt_replay" =>
+                {
+                    return Ok(AdapterResponse::Rejected {
+                        request_id,
+                        audit_id,
+                        error_key: AdapterErrorKey::MutationOperationConflict,
+                        reason: "mutation_operation_id is already committed for a different intent"
+                            .to_string(),
+                    });
+                }
+                Err(error) => return Err(error),
+            }
+        }
         AdapterCommand::TranscriptAttrWrite(request) => AdapterSdkReport::TranscriptAttrWrite(
             Box::new(runtime.record_transcript_attrs(request)?),
         ),

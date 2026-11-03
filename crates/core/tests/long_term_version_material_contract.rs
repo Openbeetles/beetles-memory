@@ -54,6 +54,8 @@ fn material(
         owner_ref: owner_ref(),
         owner_revision,
         governed_content: LongTermMemoryGovernedContent {
+            transcript_sources: Vec::new(),
+            control_barrier_scope_revision: None,
             kind: LongTermMemoryKind::Fact,
             topic: "deployment".into(),
             content: content.into(),
@@ -261,6 +263,13 @@ fn control_revision(
         memory_space_id: MEMORY_SPACE_ID.into(),
         factual_owner_id: FACTUAL_OWNER_ID.into(),
         operation,
+        basis: if operation == LongTermControlOperation::Refresh {
+            bm_core::memory::LongTermTransitionBasis::SourceGoverned {
+                authoritative_sources: Vec::new(),
+            }
+        } else {
+            bm_core::memory::LongTermTransitionBasis::ExplicitControl
+        },
         invalidation_reason_code: None,
         transition,
         predecessor_material_digest: predecessor.content_digest.clone(),
@@ -750,6 +759,7 @@ fn governed_current_authority_accepts_exact_cross_owner_supersede_dependency() {
         memory_space_id: MEMORY_SPACE_ID.into(),
         factual_owner_id: FACTUAL_OWNER_ID.into(),
         operation: LongTermControlOperation::Supersede,
+        basis: bm_core::memory::LongTermTransitionBasis::ExplicitControl,
         invalidation_reason_code: None,
         transition: transition.clone(),
         predecessor_material_digest: predecessor.content_digest.clone(),

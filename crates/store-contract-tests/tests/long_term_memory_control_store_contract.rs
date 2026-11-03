@@ -7,15 +7,17 @@ use bm_core::memory::{
 };
 use bm_sdk::nonproduction_replay_harness::{StoreBackendConfig, StoreEventScope};
 use bm_sdk::{
-    LongTermMemoryDraft, LongTermMemoryKind, LongTermMemoryProvenance, LongTermMemoryQuery,
-    LongTermMemorySourceScope, LongTermMemorySourceType, MemoryCapabilityPolicy, MemoryClock,
-    MemoryEvidenceAuthority, MemoryGovernancePolicyMutation, MemoryGovernanceSelector,
-    MemoryGovernanceSuppressionDuration, MemoryIdentity, MemoryLongTermControlView,
-    MemoryLongTermGovernancePolicy, MemoryLongTermListRequest, MemoryLongTermMutation,
-    MemoryLongTermMutationRequest, MemoryLongTermPolicyRequest, MemoryLongTermTarget,
-    MemoryPrivacyClass, MemoryPrivacyPolicy, MemoryRuntime, MemoryScope, MemoryStoreHandle,
-    MemorySubjectVisibilityPolicy, MemoryWriteRequest, NoopMemoryAuditSink,
-    ParsedLongTermMemoryExtraction, RuntimeLifecycleModeInput,
+    CanonicalTurnDelta, ConversationScope, IngressKind, LongTermMemoryDraft, LongTermMemoryKind,
+    LongTermMemoryProvenance, LongTermMemoryQuery, LongTermMemorySourceScope,
+    LongTermMemorySourceType, MemoryCapabilityPolicy, MemoryClock, MemoryEvidenceAuthority,
+    MemoryGovernancePolicyMutation, MemoryGovernanceSelector, MemoryGovernanceSuppressionDuration,
+    MemoryIdentity, MemoryLongTermControlView, MemoryLongTermGovernancePolicy,
+    MemoryLongTermListRequest, MemoryLongTermMutation, MemoryLongTermMutationRequest,
+    MemoryLongTermPolicyRequest, MemoryLongTermTarget, MemoryPrivacyClass, MemoryPrivacyPolicy,
+    MemoryRuntime, MemoryScope, MemoryStoreHandle, MemorySubjectVisibilityPolicy,
+    MemoryTranscriptCommitRequest, MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource,
+    MemoryWriteRequest, NoopMemoryAuditSink, ParsedLongTermMemoryExtraction,
+    RuntimeLifecycleModeInput, TranscriptEvidenceRef, TranscriptInputMessage,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -67,7 +69,16 @@ fn preferred_editor_draft(content: &str, source_revision: u64) -> LongTermMemory
         confidence: Some(LongTermMemoryConfidence::High),
         freshness: Some(LongTermMemoryFreshness::Dynamic),
         stale_hint: Some(LongTermMemoryStaleHint::ReviewBeforeUse),
-        supporting_citations: vec!["transcript:space-user:chat-a:turn-preferred-editor".to_string()],
+        supporting_citations: vec![TranscriptEvidenceRef {
+            memory_space_id: MEMORY_SPACE_ID.into(),
+            channel_id: "test".into(),
+            conversation_id: "chat-a".into(),
+            turn_id: "turn-preferred-editor".into(),
+            message_id: None,
+            subject_id: Some(MOUNTED_SUBJECT_ID.into()),
+            authority: None,
+        }
+        .display_citation()],
         canonical_entities: Vec::new(),
         evidence_count: Some(1),
         observed_at: Some(NOW_SECS - 60),
@@ -103,6 +114,40 @@ fn runtime_for(handle: &MemoryStoreHandle) -> MemoryRuntime {
 
 fn seed_control_store(handle: &MemoryStoreHandle) -> ControlFixture {
     let runtime = runtime_for(handle);
+    runtime
+        .commit_transcript(MemoryTranscriptCommitRequest {
+            turn: CanonicalTurnDelta {
+                turn_id: "turn-preferred-editor".into(),
+                conversation: ConversationScope {
+                    channel: "test".into(),
+                    chat_id: "chat-a".into(),
+                    conversation_id: Some("chat-a".into()),
+                },
+                subject: MOUNTED_SUBJECT_ID.into(),
+                delivery_status: MemoryTurnDeliveryStatus::Delivered,
+                source: MemoryTurnSource {
+                    ingress: IngressKind::User,
+                    channel: "test".into(),
+                    provider: None,
+                    protocol: MemoryTurnProtocol::OllamaChat,
+                    endpoint: None,
+                    model_alias: None,
+                    model_resolved: None,
+                    request_id: None,
+                    client_conversation_hint: None,
+                },
+                actor: None,
+                input_messages: vec![TranscriptInputMessage::user(
+                    "Use the integrated editor for this project.",
+                )],
+                assistant_message: Some(TranscriptInputMessage::assistant("Recorded.")),
+                tool_observations: Vec::new(),
+                external_content_used: false,
+                candidate_ids: Vec::new(),
+            },
+            host_refs: Vec::new(),
+        })
+        .expect("commit real synthetic source");
     let write = runtime
         .write(MemoryWriteRequest::LongTermExtraction {
             extraction: ParsedLongTermMemoryExtraction {
@@ -157,21 +202,31 @@ fn seed_control_store(handle: &MemoryStoreHandle) -> ControlFixture {
     assert_eq!(deletion.tombstones.len(), 1);
 
     let policy_report = runtime
-        .mutate_memory_governance_policy(MemoryLongTermPolicyRequest {
-            operation: MemoryGovernancePolicyMutation::Suppress {
-                selector: MemoryGovernanceSelector {
-                    memory_space_id: Some(MEMORY_SPACE_ID.to_string()),
-                    subject_id: Some(MEMORY_SPACE_ID.to_string()),
-                    kind: Some(LongTermMemoryKind::Preference),
-                    topic_pattern: Some("temporary-*".to_string()),
-                    source_chat_id: None,
-                    source_scope: Some(LongTermMemorySourceScope::User),
+        .mutate_memory_governance_policy(
+            "long_term_memory_control_store_contract-policy-1",
+            MemoryLongTermPolicyRequest {
+                operation: MemoryGovernancePolicyMutation::Suppress {
+                    selector: MemoryGovernanceSelector {
+                        memory_space_id: Some(MEMORY_SPACE_ID.to_string()),
+                        subject_id: Some(MOUNTED_SUBJECT_ID.to_string()),
+                        kind: Some(LongTermMemoryKind::Preference),
+                        topic_pattern: Some("temporary-*".to_string()),
+                        source_chat_id: None,
+                        source_scope: Some(LongTermMemorySourceScope::User),
+                    },
+                    duration: MemoryGovernanceSuppressionDuration::UntilManualResume,
                 },
-                duration: MemoryGovernanceSuppressionDuration::UntilManualResume,
+                reason: "user does not want temporary preferences remembered".to_string(),
+                dry_run: false,
+                mode_input: RuntimeLifecycleModeInput::default(),
             },
-            reason: "user does not want temporary preferences remembered".to_string(),
-            dry_run: false,
-            mode_input: RuntimeLifecycleModeInput::default(),
+        )
+        .map(|execution| match execution {
+            bm_sdk::MemoryMutationExecution::Committed { report, .. }
+            | bm_sdk::MemoryMutationExecution::Rejected { report } => report,
+            bm_sdk::MemoryMutationExecution::Replayed { .. } => {
+                panic!("fresh test operation unexpectedly replayed")
+            }
         })
         .expect("persist suppression policy");
     assert!(policy_report.accepted);

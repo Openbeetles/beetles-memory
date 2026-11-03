@@ -83,7 +83,7 @@ fn sqlite_store_persists_core_runtime_paths_across_reopen() {
                 confidence: Some(LongTermMemoryConfidence::High),
                 freshness: Some(LongTermMemoryFreshness::Stable),
                 stale_hint: Some(LongTermMemoryStaleHint::ReviewBeforeUse),
-                supporting_citations: vec!["transcript:space:test:chat-a:turn-archive".to_string()],
+                supporting_citations: vec!["operator:sqlite-archive".to_string()],
                 canonical_entities: vec![CanonicalEntityRef {
                     key: CanonicalEntityKey {
                         kind: CanonicalEntityKind::System,
@@ -92,7 +92,7 @@ fn sqlite_store_persists_core_runtime_paths_across_reopen() {
                     display_label: Some("SQLite memory archive".to_string()),
                     aliases: vec!["archive store".to_string(), "sqlite archive".to_string()],
                     evidence_refs: vec![canonical_evidence_ref_from_source(
-                        "transcript:space:test:chat-a:turn-archive",
+                        "operator:sqlite-archive",
                     )
                     .expect("canonical archive evidence")],
                 }],

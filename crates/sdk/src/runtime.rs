@@ -1,3 +1,7 @@
+pub(crate) mod governed_indexes;
+mod long_term_sources;
+pub(crate) use long_term_sources::LongTermControlAuthorization;
+use long_term_sources::LongTermSourceContext;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write as _;
@@ -160,8 +164,8 @@ use bm_core::memory::{
     SelfContinuityStore, SelfModel, SelfModelStore, SelfRuntimeContext,
     SelfRuntimeInitialPlanningStateV1, SelfRuntimeJobPayload, SelfRuntimePlannedEffectV1,
     SelfRuntimeTrigger, SessionMessage, SessionMessageRecord, SessionStore, SessionSummaryStore,
-    SharedFactWriteGovernanceContext, SharedMemoryWriteAction, SharedMemoryWriteOutcome,
-    SharedMemoryWriteReason, SharedMemoryWriteSource, SubjectKind, SubjectLifecycleState,
+    SharedFactWriteGovernanceContext, SharedMemoryWriteOutcome, SharedMemoryWriteReason,
+    SharedMemoryWriteSource, SubjectKind, SubjectLifecycleState,
     SubjectProjectionBoundaryProtocolReport, SubjectProjectionMountReport, SubjectProjectionReport,
     SubjectProjectionWorkIntegrityReport, SubjectRegistry, SubjectRelationshipGraph,
     SubjectRelationshipKind, SubjectScopedRuntime, SubjectSoulAutonomousCycleIntentV1,
@@ -183,10 +187,10 @@ use bm_core::memory::{
     TranscriptCursorDisclosurePolicyV1, TranscriptCursorOperationKind, TranscriptEvidenceRef,
     TranscriptInputMessage, TranscriptLifecycleReport as CoreTranscriptLifecycleReport,
     TranscriptLifecycleRequest as CoreTranscriptLifecycleRequest, TranscriptLifecycleState,
-    TranscriptLifecycleTransition, TranscriptRedactionReason, TranscriptRedactionReportItem,
-    TranscriptRedactionState, TranscriptRepairReport as CoreTranscriptRepairReport,
-    TranscriptReplayView, TranscriptSearchNormalizerV1, TranscriptSearchQuery,
-    TranscriptSearchScope, TranscriptTimelineAnchor, TranscriptTurnCursor, TranscriptTurnRecord,
+    TranscriptRedactionReason, TranscriptRedactionReportItem, TranscriptRedactionState,
+    TranscriptRepairReport as CoreTranscriptRepairReport, TranscriptReplayView,
+    TranscriptSearchNormalizerV1, TranscriptSearchQuery, TranscriptSearchScope,
+    TranscriptTimelineAnchor, TranscriptTurnCursor, TranscriptTurnRecord,
     WorkingRecallInspectionInput, LONG_TERM_CONTROL_AUDIT_NAMESPACE,
     LONG_TERM_CONTROL_REVISION_NAMESPACE, LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
     LONG_TERM_GOVERNANCE_POLICY_NAMESPACE, MAX_LONG_TERM_MEMORY_ITEMS,
@@ -1112,10 +1116,10 @@ struct LongTermMutationExecution {
 }
 
 #[derive(Clone, Default)]
-struct MemoryStoreMutationPlan {
-    mutations: Vec<StoreMutation>,
-    preconditions: Vec<StoreJsonPrecondition>,
-    blob_preconditions: Vec<StoreBlobPrecondition>,
+pub(crate) struct MemoryStoreMutationPlan {
+    pub(crate) mutations: Vec<StoreMutation>,
+    pub(crate) preconditions: Vec<StoreJsonPrecondition>,
+    pub(crate) blob_preconditions: Vec<StoreBlobPrecondition>,
 }
 
 struct ProceduralFeedbackApplicationPlan {
@@ -1245,14 +1249,6 @@ fn continuity_snapshot_restored_layers(plans: &[ContinuitySnapshotImportPlan]) -
 }
 
 impl MemoryStoreMutationPlan {
-    fn from_mutations(mutations: Vec<StoreMutation>) -> Self {
-        Self {
-            mutations,
-            preconditions: Vec::new(),
-            blob_preconditions: Vec::new(),
-        }
-    }
-
     fn merge(&mut self, other: Self) -> Result<()> {
         self.mutations.extend(other.mutations);
         merge_json_preconditions(&mut self.preconditions, other.preconditions)?;
@@ -1584,6 +1580,14 @@ impl LongTermMemoryReadStore for GovernedLongTermMemoryReadView<'_> {
             self.facet_store,
         )?;
         Ok(query.filter_sort_entries(visible, self.runtime.config.clock.now_secs()))
+    }
+
+    fn query_all(&self, query: &LongTermMemoryQuery) -> Result<Vec<LongTermMemoryEntry>> {
+        let visible = self.runtime.filter_projection_visible_long_term_entries(
+            self.inner.list(usize::MAX)?,
+            self.facet_store,
+        )?;
+        Ok(query.filter_sort_all_entries(visible, self.runtime.config.clock.now_secs()))
     }
 
     fn list(&self, limit: usize) -> Result<Vec<LongTermMemoryEntry>> {
@@ -3208,6 +3212,15 @@ impl LongTermMemoryReadStore for MaterializedGovernedLongTermMemoryReadView<'_> 
             self.temporal_operation,
         )?;
         Ok(query.filter_sort_entries(visible, self.operation_time))
+    }
+
+    fn query_all(&self, query: &LongTermMemoryQuery) -> Result<Vec<LongTermMemoryEntry>> {
+        let visible = self.runtime.materialized_visible_long_term_entries(
+            self.inner,
+            self.owner_states,
+            self.temporal_operation,
+        )?;
+        Ok(query.filter_sort_all_entries(visible, self.operation_time))
     }
 
     fn list(&self, limit: usize) -> Result<Vec<LongTermMemoryEntry>> {
@@ -7240,6 +7253,74 @@ impl MemoryRuntime {
             .clone()
     }
 
+    fn long_term_inspection_snapshot(
+        &self,
+    ) -> Result<long_term_sources::LongTermInspectionSnapshot> {
+        if RuntimeBudgetLease::active_report(&self.config.runtime_budget_authority).is_none() {
+            let lease = self.acquire_runtime_budget_lease()?;
+            return self.execute_with_runtime_budget_lease(&lease, || {
+                self.long_term_inspection_snapshot()
+            });
+        }
+        let platform = self.store_platform_for_memory_space("long_term_control.inspect")?;
+        let budget = self.runtime_budget();
+        let limits = &budget.governed_state_budget;
+        let space = &self.config.memory_space_id;
+        let snapshot = platform.with_recall_immutable_read_session(&budget, |context| {
+            context.materialize_long_term_historical_scope(
+                space,
+                space,
+                limits.max_retained_long_term_revisions_per_owner,
+                limits.max_validity_joins,
+                limits.max_as_of_candidates,
+            )?;
+            let root_key = long_term_version_scope_manifest_key(space, space)?;
+            if let Some(root) = context.read_json::<LongTermMemoryVersionScopeManifest>(
+                crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
+                &root_key,
+            )? {
+                for head in root.head_bindings {
+                    let key = scoped_memory_facet_owner_storage_key(space, space, &head.owner_ref)
+                        .map_err(|error| {
+                            Error::config("long_term_control.inspect", error.to_string())
+                        })?;
+                    context.read_json_value(MEMORY_FACET_INDEX_NAMESPACE, &key)?;
+                }
+            }
+            let view = context.take_materialized_view();
+            let mut entries = Vec::new();
+            for entry in LongTermMemoryReadStore::list(&view, usize::MAX)? {
+                if !entry.privacy.projection_content_allowed()
+                    || self.subject_visibility_decision_for_subject(
+                        &entry.subject_visibility,
+                        &self.config.scoped_runtime.mounted_subject_id,
+                    )? != MemorySubjectVisibilityDecision::Allowed
+                {
+                    continue;
+                }
+                let owner = GovernedMemoryOwnerRef::new(
+                    GovernedMemoryOwnerPlane::LongTerm,
+                    entry.id.clone(),
+                );
+                let key = scoped_memory_facet_owner_storage_key(space, space, &owner).map_err(
+                    |error| Error::config("long_term_control.inspect", error.to_string()),
+                )?;
+                if view
+                    .json::<MemoryFacetIndexDoc>(MEMORY_FACET_INDEX_NAMESPACE, &key)?
+                    .as_ref()
+                    .is_some_and(|facet| self.long_term_entry_matches_governed_facet(&entry, facet))
+                {
+                    entries.push(entry);
+                }
+            }
+            Ok(long_term_sources::LongTermInspectionSnapshot {
+                entries,
+                operation_time: self.config.clock.now_secs(),
+            })
+        })?;
+        Ok(snapshot.output)
+    }
+
     pub fn list_long_term_memory(
         &self,
         request: MemoryLongTermListRequest,
@@ -7248,12 +7329,7 @@ impl MemoryRuntime {
             "long_term_control.inspect",
             self.capabilities.long_term_control_inspect,
         )?;
-        let store = self.config.long_term_memory_read_store.clone();
-        let governed_store = GovernedLongTermMemoryReadView {
-            runtime: self,
-            inner: store.as_ref(),
-            facet_store: self.config.store_platform.as_ref(),
-        };
+        let governed_store = self.long_term_inspection_snapshot()?;
         let control_store = self.config.long_term_memory_control_store.clone();
         bm_core::memory::list_long_term_memory_control_page(
             &governed_store,
@@ -7275,12 +7351,7 @@ impl MemoryRuntime {
             "long_term_control.inspect",
             self.capabilities.long_term_control_inspect,
         )?;
-        let store = self.config.long_term_memory_read_store.clone();
-        let governed_store = GovernedLongTermMemoryReadView {
-            runtime: self,
-            inner: store.as_ref(),
-            facet_store: self.config.store_platform.as_ref(),
-        };
+        let governed_store = self.long_term_inspection_snapshot()?;
         let control_store = self.config.long_term_memory_control_store.clone();
         let mut report = bm_core::memory::get_long_term_memory_control_detail(
             &governed_store,
@@ -7629,8 +7700,13 @@ impl MemoryRuntime {
                     None,
                 )
             } else {
+                let control_authority = LongTermControlAuthorization::issue(
+                    &self.config.memory_space_id,
+                    &self.config.scoped_runtime.actor_subject_id,
+                    &mutation_plan.mutations,
+                )?;
                 let (lifecycle_report, transaction) = self
-                    .commit_memory_write_transaction_with_operation(
+                    .commit_memory_write_transaction_with_graph_repair_authority_and_scope(
                         MemoryWriteTransactionCommit {
                             lifecycle,
                             operation: "long_term_control.mutation",
@@ -7642,7 +7718,10 @@ impl MemoryRuntime {
                             plan: mutation_plan,
                             changed_count: core_report.affected_records.len(),
                         },
+                        None,
+                        None,
                         mutation_operation,
+                        Some(control_authority),
                     )?;
                 (lifecycle_report, Some(transaction))
             };
@@ -7737,32 +7816,197 @@ impl MemoryRuntime {
         )
     }
 
+    fn validate_policy_authority(&self) -> Result<()> {
+        let scoped = &self.config.scoped_runtime;
+        let registry = &self.config.subject_registry;
+        if !scoped.validate_against_registry(registry).accepted
+            || scoped.memory_space_id != self.config.memory_space_id
+            || [&scoped.mounted_subject_id, &scoped.actor_subject_id]
+                .into_iter()
+                .any(|id| {
+                    registry.subject(id).is_none_or(|subject| {
+                        subject.lifecycle_state != bm_core::memory::SubjectLifecycleState::Active
+                    })
+                })
+        {
+            return Err(Error::invalid_input(
+                "long_term_policy_authority",
+                "active scoped registry authority required",
+            ));
+        }
+        Ok(())
+    }
+
+    fn readable_governance_policies(
+        &self,
+    ) -> Result<Vec<bm_core::memory::MemoryLongTermGovernancePolicy>> {
+        self.validate_policy_authority()?;
+        let mut policies = self
+            .config
+            .long_term_memory_control_store
+            .list_long_term_governance_policies(usize::MAX)?;
+        policies.retain(|policy| {
+            policy.memory_space_id == self.config.memory_space_id
+                && policy.selector.memory_space_id.as_deref()
+                    == Some(self.config.memory_space_id.as_str())
+                && policy.selector.subject_id.as_deref()
+                    == Some(self.config.scoped_runtime.mounted_subject_id.as_str())
+        });
+        policies.sort_by(|a, b| a.policy_id.cmp(&b.policy_id));
+        Ok(policies)
+    }
+
+    pub fn list_memory_governance_policies(
+        &self,
+        request: crate::MemoryLongTermPolicyListRequest,
+    ) -> Result<crate::MemoryLongTermPolicyListReport> {
+        self.ensure_visible(
+            "long_term_control.policy.list",
+            self.capabilities.long_term_control_inspect,
+        )?;
+        let policies = self.readable_governance_policies()?;
+        let total_visible = policies.len();
+        let snapshot = sha256_field_digest(&[
+            b"long_term_policy_catalog_v1",
+            self.config.memory_space_id.as_bytes(),
+            self.config.scoped_runtime.mounted_subject_id.as_bytes(),
+            &serde_json::to_vec(&policies)
+                .map_err(|error| Error::config("long_term_policy_cursor", error.to_string()))?,
+        ]);
+        let start = if let Some(cursor) = request.cursor.as_deref() {
+            let (digest, id): (String, String) = serde_json::from_str(cursor).map_err(|_| {
+                Error::invalid_input("long_term_policy_cursor", "invalid policy cursor")
+            })?;
+            if digest != snapshot {
+                return Err(Error::conflict(
+                    "long_term_policy_cursor",
+                    "policy catalog changed",
+                ));
+            }
+            policies
+                .iter()
+                .position(|policy| policy.policy_id == id)
+                .map(|n| n + 1)
+                .ok_or_else(|| {
+                    Error::invalid_input("long_term_policy_cursor", "unknown policy anchor")
+                })?
+        } else {
+            0
+        };
+        let end = start
+            .saturating_add(request.limit.clamp(1, MAX_LONG_TERM_MEMORY_ITEMS))
+            .min(total_visible);
+        let next_cursor = if end < total_visible {
+            Some(
+                serde_json::to_string(&(snapshot, &policies[end - 1].policy_id))
+                    .map_err(|error| Error::config("long_term_policy_cursor", error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let now = self.config.clock.now_secs();
+        Ok(crate::MemoryLongTermPolicyListReport {
+            policies: policies
+                .into_iter()
+                .skip(start)
+                .take(end - start)
+                .map(|policy| crate::MemoryLongTermPolicyView {
+                    effective: policy.effective_at(now),
+                    policy,
+                })
+                .collect(),
+            next_cursor,
+            total_visible,
+        })
+    }
+
+    pub fn get_memory_governance_policy(
+        &self,
+        request: crate::MemoryLongTermPolicyDetailRequest,
+    ) -> Result<crate::MemoryLongTermPolicyDetailReport> {
+        self.ensure_visible(
+            "long_term_control.policy.detail",
+            self.capabilities.long_term_control_inspect,
+        )?;
+        let now = self.config.clock.now_secs();
+        Ok(crate::MemoryLongTermPolicyDetailReport {
+            policy: self
+                .readable_governance_policies()?
+                .into_iter()
+                .find(|policy| policy.policy_id == request.policy_id)
+                .map(|policy| crate::MemoryLongTermPolicyView {
+                    effective: policy.effective_at(now),
+                    policy,
+                }),
+        })
+    }
+
     pub fn mutate_memory_governance_policy(
         &self,
-        request: MemoryLongTermPolicyRequest,
-    ) -> Result<MemoryGovernancePolicyMutationReport> {
+        operation_id: impl Into<String>,
+        mut request: MemoryLongTermPolicyRequest,
+    ) -> Result<MemoryMutationExecution<MemoryGovernancePolicyMutationReport>> {
+        self.validate_policy_authority()?;
         self.ensure_visible(
             "long_term_control.policy",
             self.capabilities.long_term_control_policy,
+        )?;
+        if RuntimeBudgetLease::active_report(&self.config.runtime_budget_authority).is_none() {
+            let lease = self.acquire_runtime_budget_lease()?;
+            return self.execute_with_runtime_budget_lease(&lease, || {
+                self.mutate_memory_governance_policy(operation_id, request)
+            });
+        }
+        if let bm_core::memory::MemoryGovernancePolicyMutation::Pause { selector, .. }
+        | bm_core::memory::MemoryGovernancePolicyMutation::Suppress { selector, .. } =
+            &mut request.operation
+        {
+            selector
+                .memory_space_id
+                .get_or_insert_with(|| self.config.memory_space_id.clone());
+            selector
+                .subject_id
+                .get_or_insert_with(|| self.config.scoped_runtime.mounted_subject_id.clone());
+            if selector.memory_space_id.as_deref() != Some(self.config.memory_space_id.as_str())
+                || selector.subject_id.as_deref()
+                    != Some(self.config.scoped_runtime.mounted_subject_id.as_str())
+            {
+                return Err(Error::invalid_input(
+                    "long_term_policy_authority",
+                    "policy selector is outside the mounted scope",
+                ));
+            }
+        }
+        let context = self.memory_mutation_execution_context(
+            operation_id.into(),
+            MemoryMutationOperationKind::LongTermControl {
+                operation: request.operation.control_operation(),
+            },
+            &request,
+        )?;
+        if let Some(receipt) = self.preflight_memory_mutation_operation(&context)? {
+            return Ok(MemoryMutationExecution::Replayed { receipt });
+        }
+        let (core_report, mutation_plan) = self.plan_memory_governance_policy_mutation(
+            request.operation,
+            &context.identity,
+            request.reason,
+            request.dry_run,
+            self.config.clock.now_secs(),
         )?;
         let lifecycle = self.start_lifecycle(
             RuntimeLifecycleOperation::OperatorAction,
             RuntimeLifecycleTrigger::OperatorRequested,
             request.mode_input,
         );
-        let (core_report, mutation_plan) = self.plan_memory_governance_policy_mutation(
-            request.operation,
-            request.reason,
-            request.dry_run,
-            self.config.clock.now_secs(),
-        )?;
         let changed = !core_report.dry_run && core_report.accepted;
-        let lifecycle_summary = format!(
-            "{} accepted={} policy={}",
-            core_report.operation,
-            core_report.accepted,
-            core_report.policy_id.as_deref().unwrap_or("")
-        );
+        if !changed {
+            let report =
+                lifecycle.finish_success(self.config.clock.now_secs(), false, "policy dry run");
+            return Ok(MemoryMutationExecution::Rejected {
+                report: memory_governance_policy_report_from_core(core_report, report),
+            });
+        }
         let lifecycle_payload = [
             (
                 "action",
@@ -7771,39 +8015,36 @@ impl MemoryRuntime {
                     .to_string(),
             ),
             ("control_operation", core_report.operation.to_string()),
-            ("accepted", core_report.accepted.to_string()),
+            ("accepted", "true".to_string()),
             (
                 "policy_id",
                 core_report.policy_id.clone().unwrap_or_default(),
             ),
         ];
-        let lifecycle_report = if mutation_plan.mutations.is_empty() {
-            self.finish_lifecycle_success_with_payload(
-                lifecycle,
-                RuntimeLifecycleEventKind::OperatorAction,
-                RuntimeLifecycleEffect::RecordOperatorAction,
-                changed,
-                lifecycle_summary,
-                &lifecycle_payload,
-            )?
-        } else {
-            self.commit_memory_write_transaction(MemoryWriteTransactionCommit {
+        let (lifecycle_report, transaction) = self.commit_memory_write_transaction_with_operation(
+            MemoryWriteTransactionCommit {
                 lifecycle,
                 operation: "long_term_control.policy",
                 lifecycle_kind: RuntimeLifecycleEventKind::OperatorAction,
                 lifecycle_effect: RuntimeLifecycleEffect::RecordOperatorAction,
                 changed,
-                summary: lifecycle_summary,
+                summary: format!("{} accepted=true", core_report.operation),
                 extra_payload: &lifecycle_payload,
                 plan: mutation_plan,
-                changed_count: usize::from(changed),
-            })?
-            .0
-        };
-        Ok(memory_governance_policy_report_from_core(
-            core_report,
-            lifecycle_report,
-        ))
+                changed_count: 1,
+            },
+            Some(context),
+        )?;
+        let receipt = transaction
+            .mutation_receipt
+            .ok_or_else(|| Error::config("long_term_policy_commit", "missing durable receipt"))?;
+        if transaction.mutation_replayed {
+            return Ok(MemoryMutationExecution::Replayed { receipt });
+        }
+        Ok(MemoryMutationExecution::Committed {
+            report: memory_governance_policy_report_from_core(core_report, lifecycle_report),
+            receipt,
+        })
     }
 
     pub fn upsert_agent_tool_registry(
@@ -9120,6 +9361,12 @@ impl MemoryRuntime {
             let planning_store = PlanningLongTermMemoryStore::new(
                 store.as_ref(),
                 &self.config.scoped_runtime.actor_subject_id,
+                LongTermSourceContext {
+                    platform: self.config.store_platform.as_ref(),
+                    memory_space_id: &self.config.memory_space_id,
+                    mounted_subject_id: &self.config.scoped_runtime.mounted_subject_id,
+                    admitted_turn: None,
+                },
             )?;
             let mut context = SharedFactWriteGovernanceContext::new(
                 self.config.memory_space_id.clone(),
@@ -9151,8 +9398,8 @@ impl MemoryRuntime {
                     .governed_state_budget
                     .max_retained_long_term_revisions_per_owner,
             )?;
-            let facet_plan =
-                self.plan_long_term_facet_index_upsert_mutations(&plan.accepted_entries)?;
+            let facet_plan = self
+                .plan_long_term_facet_index_mutations_for_store_mutations(&owner_plan.mutations)?;
             mutations.extend(owner_plan.mutations);
             merge_json_preconditions(&mut preconditions, owner_plan.preconditions)?;
             mutations.extend(facet_plan.mutations);
@@ -9163,25 +9410,6 @@ impl MemoryRuntime {
             .as_ref()
             .map(|outcome| outcome.changed)
             .unwrap_or(0);
-        let governed_draft_pairs = shared_fact_governance
-            .as_ref()
-            .map(|outcome| {
-                accepted_draft_pairs
-                    .iter()
-                    .zip(outcome.reports.iter())
-                    .filter(|&((_candidate, _draft), report)| {
-                        matches!(report.action, SharedMemoryWriteAction::Accepted)
-                    })
-                    .map(|((candidate, draft), _report)| (*candidate, draft.clone()))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-
-        mutations.extend(plan_candidate_derived_memory_ref_mutations(
-            &self.config.subject_id,
-            &governed_draft_pairs,
-            now_secs,
-        )?);
         mutations.extend(plan_soul_handoff_derived_memory_ref_mutations(
             &self.config.subject_id,
             &candidates,
@@ -9398,7 +9626,11 @@ impl MemoryRuntime {
             {
                 continue;
             }
-            let entry = state.projection.material.to_current_projection()?;
+            let entry = governed_indexes::project_long_term_evidence(
+                read_view,
+                &state.projection.material.to_current_projection()?,
+                &[],
+            )?;
             if matches!(
                 temporal_operation,
                 crate::MemoryRecallTemporalOperation::HistoricalAsOf { .. }
@@ -9756,8 +9988,13 @@ impl MemoryRuntime {
         &self,
         entry: &LongTermMemoryEntry,
     ) -> Result<MemoryFacetIndexDoc> {
+        let projected = if let Some(store) = self.config.store_platform.as_ref() {
+            governed_indexes::project_long_term_evidence(store, entry, &[])?
+        } else {
+            entry.project_transcript_evidence(|_| false)
+        };
         build_long_term_memory_facet_index_doc(
-            entry,
+            &projected,
             self.config.memory_space_id.clone(),
             self.governed_long_term_facet_index_subject_ids(),
             1,
@@ -9767,479 +10004,21 @@ impl MemoryRuntime {
 
     fn plan_governed_owner_facet_index_changes(
         &self,
-        mut changes: BTreeMap<GovernedMemoryOwnerRef, Option<MemoryFacetIndexDoc>>,
+        changes: BTreeMap<GovernedMemoryOwnerRef, Option<MemoryFacetIndexDoc>>,
         facet_scope_id: &str,
     ) -> Result<MemoryStoreMutationPlan> {
-        if changes.is_empty() {
-            return Ok(MemoryStoreMutationPlan::default());
-        }
-        let mut mutations = Vec::new();
-        let mut preconditions = Vec::new();
-        for (owner_ref, doc) in &changes {
-            let key = scoped_memory_facet_owner_storage_key(
-                &self.config.memory_space_id,
-                facet_scope_id,
-                owner_ref,
+        let platform = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "memory_facet_index_plan",
+                "facet transactions require StorePlatform",
             )
-            .map_err(|error| Error::config("memory_facet_index_plan", error.to_string()))?;
-            match doc {
-                Some(doc) => mutations.push(StoreMutation::PutJson {
-                    namespace: MEMORY_FACET_INDEX_NAMESPACE.to_string(),
-                    key: key.clone(),
-                    value: serde_json::to_value(doc).map_err(|error| {
-                        Error::config("memory_facet_index_plan", error.to_string())
-                    })?,
-                    event_kind: MemoryStoreEventKind::MemoryWrite,
-                    plane: MEMORY_FACET_INDEX_NAMESPACE.to_string(),
-                    record_key: key,
-                }),
-                None => mutations.push(StoreMutation::DeleteJson {
-                    namespace: MEMORY_FACET_INDEX_NAMESPACE.to_string(),
-                    key: key.clone(),
-                    event_kind: MemoryStoreEventKind::MemoryDelete,
-                    plane: MEMORY_FACET_INDEX_NAMESPACE.to_string(),
-                    record_key: key,
-                }),
-            }
-        }
-
-        let Some(store_platform) = self.config.store_platform.as_ref() else {
-            return Ok(MemoryStoreMutationPlan::from_mutations(mutations));
-        };
-        let facet_keys = changes
-            .keys()
-            .map(|owner_ref| {
-                scoped_memory_facet_owner_storage_key(
-                    &self.config.memory_space_id,
-                    facet_scope_id,
-                    owner_ref,
-                )
-                .map_err(|error| Error::config("memory_facet_index_plan", error.to_string()))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let previous_raw_docs =
-            store_platform.read_json_docs_by_keys(MEMORY_FACET_INDEX_NAMESPACE, &facet_keys)?;
-        let previous_raw_by_key = previous_raw_docs
-            .iter()
-            .map(|doc| (doc.key.clone(), doc.value.clone()))
-            .collect::<BTreeMap<_, _>>();
-        for key in &facet_keys {
-            preconditions.push(json_precondition(
-                MEMORY_FACET_INDEX_NAMESPACE,
-                key,
-                previous_raw_by_key.get(key).cloned(),
-            ));
-        }
-        for owner_ref in changes
-            .keys()
-            .filter(|owner_ref| owner_ref.owner_plane == GovernedMemoryOwnerPlane::LongTerm)
-        {
-            let head_key = long_term_version_head_key(
-                &self.config.memory_space_id,
-                &self.config.memory_space_id,
-                owner_ref,
-            )?;
-            let head_value = store_platform
-                .read_json_docs_by_keys(
-                    crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
-                    std::slice::from_ref(&head_key),
-                )?
-                .into_iter()
-                .next()
-                .map(|doc| doc.value);
-            preconditions.push(json_precondition(
-                crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
-                &head_key,
-                head_value.clone(),
-            ));
-            let Some(head_value) = head_value else {
-                continue;
-            };
-            let head = serde_json::from_value::<LongTermMemoryHeadManifest>(head_value)
-                .map_err(|error| Error::config("memory_facet_index_plan", error.to_string()))?;
-            let material_key = long_term_version_material_key(
-                &self.config.memory_space_id,
-                &self.config.memory_space_id,
-                owner_ref,
-                head.current_revision,
-            )?;
-            let material_value = store_platform
-                .read_json_docs_by_keys(
-                    crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
-                    std::slice::from_ref(&material_key),
-                )?
-                .into_iter()
-                .next()
-                .map(|doc| doc.value);
-            preconditions.push(json_precondition(
-                crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
-                &material_key,
-                material_value,
-            ));
-        }
-        let previous_docs = previous_raw_docs
-            .into_iter()
-            .map(|doc| {
-                serde_json::from_value::<MemoryFacetIndexDoc>(doc.value)
-                    .map(|facet| (facet.owner_ref.clone(), facet))
-                    .map_err(|error| Error::config("memory_facet_posting_plan", error.to_string()))
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?;
-        for (owner_ref, next) in &mut changes {
-            if let Some(next) = next {
-                next.facet_index_revision = previous_docs
-                    .get(owner_ref)
-                    .map(|previous| previous.facet_index_revision.saturating_add(1).max(1))
-                    .unwrap_or(1);
-            }
-        }
-        mutations.clear();
-        for (owner_ref, doc) in &changes {
-            let key = scoped_memory_facet_owner_storage_key(
-                &self.config.memory_space_id,
-                facet_scope_id,
-                owner_ref,
-            )
-            .map_err(|error| Error::config("memory_facet_index_plan", error.to_string()))?;
-            match doc {
-                Some(doc) => mutations.push(StoreMutation::PutJson {
-                    namespace: MEMORY_FACET_INDEX_NAMESPACE.to_string(),
-                    key: key.clone(),
-                    value: serde_json::to_value(doc).map_err(|error| {
-                        Error::config("memory_facet_index_plan", error.to_string())
-                    })?,
-                    event_kind: MemoryStoreEventKind::MemoryWrite,
-                    plane: MEMORY_FACET_INDEX_NAMESPACE.to_string(),
-                    record_key: key,
-                }),
-                None => mutations.push(StoreMutation::DeleteJson {
-                    namespace: MEMORY_FACET_INDEX_NAMESPACE.to_string(),
-                    key: key.clone(),
-                    event_kind: MemoryStoreEventKind::MemoryDelete,
-                    plane: MEMORY_FACET_INDEX_NAMESPACE.to_string(),
-                    record_key: key,
-                }),
-            }
-        }
-        let subject_id = facet_scope_id.trim();
-        let manifest_key = memory_facet_manifest_key(&self.config.memory_space_id, subject_id)
-            .map_err(|error| Error::config("memory_facet_manifest_plan", error.to_string()))?;
-        let manifest_raw = store_platform
-            .read_json_docs_by_keys(
-                MEMORY_FACET_POSTING_NAMESPACE,
-                std::slice::from_ref(&manifest_key),
-            )?
-            .into_iter()
-            .next();
-        preconditions.push(json_precondition(
-            MEMORY_FACET_POSTING_NAMESPACE,
-            &manifest_key,
-            manifest_raw.as_ref().map(|doc| doc.value.clone()),
-        ));
-        let mut manifest = manifest_raw
-            .map(|doc| {
-                serde_json::from_value::<MemoryFacetIndexManifest>(doc.value)
-                    .map_err(|error| Error::config("memory_facet_manifest_plan", error.to_string()))
-            })
-            .transpose()?
-            .unwrap_or(MemoryFacetIndexManifest {
-                schema_version: bm_core::memory::MEMORY_FACET_SCHEMA_VERSION,
-                memory_space_id: self.config.memory_space_id.clone(),
-                subject_id: subject_id.to_string(),
-                owner_doc_count: 0,
-                posting_doc_count: 0,
-                revision: 0,
-                owner_versions: Vec::new(),
-                posting_revisions: Vec::new(),
-            });
-        if manifest.schema_version != bm_core::memory::MEMORY_FACET_SCHEMA_VERSION
-            || manifest.memory_space_id != self.config.memory_space_id
-            || manifest.subject_id != subject_id
-        {
-            return Err(Error::config(
-                "memory_facet_manifest_plan",
-                "memory_facet_manifest_contract_mismatch",
-            ));
-        }
-        let previous_manifest_revision = manifest.revision;
-        let posting_keys_for = |doc: &MemoryFacetIndexDoc| -> Result<Vec<String>> {
-            if !doc.privacy.projection_content_allowed()
-                || doc.status != MemoryFacetStatus::Active
-                || !doc.subject_ids.iter().any(|subject| subject == subject_id)
-            {
-                return Ok(Vec::new());
-            }
-            doc.posting_keys_for_subject(subject_id)
-                .map_err(|error| Error::config("memory_facet_posting_plan", error.to_string()))
-        };
-        let mut affected_posting_keys = BTreeSet::new();
-        for (owner_ref, next) in &changes {
-            if let Some(previous) = previous_docs.get(owner_ref) {
-                affected_posting_keys.extend(posting_keys_for(previous)?);
-            }
-            if let Some(next) = next {
-                affected_posting_keys.extend(posting_keys_for(next)?);
-            }
-        }
-        let posting_keys = affected_posting_keys.into_iter().collect::<Vec<_>>();
-        let posting_raw_docs =
-            store_platform.read_json_docs_by_keys(MEMORY_FACET_POSTING_NAMESPACE, &posting_keys)?;
-        let posting_raw_by_key = posting_raw_docs
-            .iter()
-            .map(|doc| (doc.key.clone(), doc.value.clone()))
-            .collect::<BTreeMap<_, _>>();
-        for key in &posting_keys {
-            preconditions.push(json_precondition(
-                MEMORY_FACET_POSTING_NAMESPACE,
-                key,
-                posting_raw_by_key.get(key).cloned(),
-            ));
-        }
-        struct PlanningFacetPosting {
-            document: MemoryFacetPostingDoc,
-            owner_versions: BTreeMap<GovernedMemoryOwnerRef, MemoryFacetOwnerVersion>,
-        }
-        let mut postings = posting_raw_docs
-            .into_iter()
-            .map(|doc| {
-                serde_json::from_value::<MemoryFacetPostingDoc>(doc.value)
-                    .map_err(|error| Error::config("memory_facet_posting_plan", error.to_string()))
-                    .and_then(|posting| {
-                        let owner_versions = Self::memory_facet_owner_version_map(
-                            &posting.owner_versions,
-                            "memory_facet_posting_plan",
-                        )?;
-                        Ok((
-                            posting.posting_key.clone(),
-                            PlanningFacetPosting {
-                                document: posting,
-                                owner_versions,
-                            },
-                        ))
-                    })
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?;
-        for posting_key in &posting_keys {
-            postings
-                .entry(posting_key.clone())
-                .or_insert_with(|| PlanningFacetPosting {
-                    document: MemoryFacetPostingDoc {
-                        schema_version: bm_core::memory::MEMORY_FACET_SCHEMA_VERSION,
-                        memory_space_id: self.config.memory_space_id.clone(),
-                        subject_id: subject_id.to_string(),
-                        posting_key: posting_key.clone(),
-                        revision: 0,
-                        owner_versions: Vec::new(),
-                    },
-                    owner_versions: BTreeMap::new(),
-                });
-        }
-        for (owner_ref, next) in &changes {
-            if let Some(previous) = previous_docs.get(owner_ref) {
-                for posting_key in posting_keys_for(previous)? {
-                    if let Some(posting) = postings.get_mut(&posting_key) {
-                        posting.owner_versions.remove(owner_ref);
-                    }
-                }
-            }
-            if let Some(next) = next {
-                for posting_key in posting_keys_for(next)? {
-                    if let Some(posting) = postings.get_mut(&posting_key) {
-                        posting.owner_versions.insert(
-                            owner_ref.clone(),
-                            MemoryFacetOwnerVersion {
-                                owner_ref: owner_ref.clone(),
-                                owner_revision: next.owner_revision,
-                                facet_index_revision: next.facet_index_revision,
-                            },
-                        );
-                    }
-                }
-            }
-        }
-        let mut manifest_owner_versions = Self::memory_facet_owner_version_map(
-            &manifest.owner_versions,
-            "memory_facet_manifest_plan",
-        )?;
-        for (owner_ref, next) in &changes {
-            manifest_owner_versions.remove(owner_ref);
-            if let Some(next) = next.as_ref().filter(|doc| {
-                doc.privacy.projection_content_allowed()
-                    && doc.status == MemoryFacetStatus::Active
-                    && doc.subject_ids.iter().any(|subject| subject == subject_id)
-            }) {
-                manifest_owner_versions.insert(
-                    owner_ref.clone(),
-                    MemoryFacetOwnerVersion {
-                        owner_ref: owner_ref.clone(),
-                        owner_revision: next.owner_revision,
-                        facet_index_revision: next.facet_index_revision,
-                    },
-                );
-            }
-        }
-        manifest.owner_versions = manifest_owner_versions.into_values().collect();
-        manifest.revision = previous_manifest_revision.saturating_add(1).max(1);
-        let mut manifest_posting_revisions =
-            Self::memory_facet_posting_revision_map(&manifest.posting_revisions)?;
-        for planning in postings.into_values() {
-            let mut posting = planning.document;
-            posting.owner_versions = planning.owner_versions.into_values().collect();
-            let key = posting.posting_key.clone();
-            manifest_posting_revisions.remove(&key);
-            if posting.owner_versions.is_empty() {
-                mutations.push(StoreMutation::DeleteJson {
-                    namespace: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
-                    key: key.clone(),
-                    event_kind: MemoryStoreEventKind::MemoryDelete,
-                    plane: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
-                    record_key: key,
-                });
-            } else {
-                posting.revision = posting.revision.saturating_add(1).max(1);
-                manifest_posting_revisions.insert(
-                    key.clone(),
-                    MemoryFacetPostingRevision {
-                        posting_key: key.clone(),
-                        revision: posting.revision,
-                    },
-                );
-                mutations.push(StoreMutation::PutJson {
-                    namespace: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
-                    key: key.clone(),
-                    value: serde_json::to_value(&posting).map_err(|error| {
-                        Error::config("memory_facet_posting_plan", error.to_string())
-                    })?,
-                    event_kind: MemoryStoreEventKind::MemoryWrite,
-                    plane: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
-                    record_key: key,
-                });
-            }
-        }
-        manifest.posting_revisions = manifest_posting_revisions.into_values().collect();
-        manifest.owner_doc_count = manifest.owner_versions.len();
-        manifest.posting_doc_count = manifest.posting_revisions.len();
-        if manifest.owner_versions.is_empty() || manifest.posting_revisions.is_empty() {
-            mutations.push(StoreMutation::DeleteJson {
-                namespace: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
-                key: manifest_key.clone(),
-                event_kind: MemoryStoreEventKind::MemoryDelete,
-                plane: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
-                record_key: manifest_key,
-            });
-        } else {
-            validate_memory_facet_manifest(&self.config.memory_space_id, subject_id, &manifest)
-                .map_err(|error| Error::config("memory_facet_manifest_plan", error.to_string()))?;
-            mutations.push(StoreMutation::PutJson {
-                namespace: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
-                key: manifest_key.clone(),
-                value: serde_json::to_value(&manifest).map_err(|error| {
-                    Error::config("memory_facet_manifest_plan", error.to_string())
-                })?,
-                event_kind: MemoryStoreEventKind::MemoryWrite,
-                plane: MEMORY_FACET_POSTING_NAMESPACE.to_string(),
-                record_key: manifest_key,
-            });
-        }
-        for owner_ref in manifest
-            .owner_versions
-            .iter()
-            .map(|owner| &owner.owner_ref)
-            .filter(|owner_ref| !changes.contains_key(*owner_ref))
-        {
-            let facet_key = scoped_memory_facet_owner_storage_key(
-                &self.config.memory_space_id,
-                facet_scope_id,
-                owner_ref,
-            )
-            .map_err(|error| Error::config("memory_facet_index_plan", error.to_string()))?;
-            let facet_value = store_platform
-                .read_json_docs_by_keys(
-                    MEMORY_FACET_INDEX_NAMESPACE,
-                    std::slice::from_ref(&facet_key),
-                )?
-                .into_iter()
-                .next()
-                .map(|doc| doc.value);
-            preconditions.push(json_precondition(
-                MEMORY_FACET_INDEX_NAMESPACE,
-                &facet_key,
-                facet_value,
-            ));
-            if owner_ref.owner_plane != GovernedMemoryOwnerPlane::LongTerm {
-                continue;
-            }
-            let head_key = long_term_version_head_key(
-                &self.config.memory_space_id,
-                &self.config.memory_space_id,
-                owner_ref,
-            )?;
-            let head_value = store_platform
-                .read_json_docs_by_keys(
-                    crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
-                    std::slice::from_ref(&head_key),
-                )?
-                .into_iter()
-                .next()
-                .map(|doc| doc.value);
-            preconditions.push(json_precondition(
-                crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
-                &head_key,
-                head_value.clone(),
-            ));
-            let Some(head_value) = head_value else {
-                continue;
-            };
-            let head = serde_json::from_value::<LongTermMemoryHeadManifest>(head_value)
-                .map_err(|error| Error::config("memory_facet_index_plan", error.to_string()))?;
-            let material_key = long_term_version_material_key(
-                &self.config.memory_space_id,
-                &self.config.memory_space_id,
-                owner_ref,
-                head.current_revision,
-            )?;
-            let material_value = store_platform
-                .read_json_docs_by_keys(
-                    crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
-                    std::slice::from_ref(&material_key),
-                )?
-                .into_iter()
-                .next()
-                .map(|doc| doc.value);
-            preconditions.push(json_precondition(
-                crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
-                &material_key,
-                material_value,
-            ));
-        }
-        let mut normalized_preconditions = Vec::new();
-        merge_json_preconditions(&mut normalized_preconditions, preconditions)?;
-        Ok(MemoryStoreMutationPlan {
-            mutations,
-            preconditions: normalized_preconditions,
-            blob_preconditions: Vec::new(),
-        })
-    }
-
-    fn plan_long_term_facet_index_upsert_mutations(
-        &self,
-        entries: &[LongTermMemoryEntry],
-    ) -> Result<MemoryStoreMutationPlan> {
-        let mut changes = BTreeMap::new();
-        for entry in entries {
-            let owner_ref =
-                GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, entry.id.clone());
-            if changes
-                .insert(owner_ref, Some(self.long_term_facet_index_doc(entry)?))
-                .is_some()
-            {
-                return Err(Error::config(
-                    "memory_facet_index_plan",
-                    "memory_facet_owner_change_duplicate",
-                ));
-            }
-        }
-        self.plan_governed_owner_facet_index_changes(changes, self.config.memory_space_id.as_str())
+        })?;
+        governed_indexes::plan_governed_owner_facet_index_changes(
+            platform,
+            &self.config.memory_space_id,
+            changes,
+            facet_scope_id,
+        )
     }
 
     fn plan_long_term_facet_index_mutations_for_store_mutations(
@@ -10321,34 +10100,6 @@ impl MemoryRuntime {
             }
         }
         self.plan_governed_owner_facet_index_changes(changes, self.config.memory_space_id.as_str())
-    }
-
-    fn ensure_transcript_lifecycle_has_facet_impact_or_fails_closed(
-        &self,
-        key: &ConversationKey,
-        turn_id: Option<&str>,
-        transition: TranscriptLifecycleTransition,
-    ) -> Result<()> {
-        if !matches!(
-            transition,
-            TranscriptLifecycleTransition::Mask | TranscriptLifecycleTransition::DeleteRaw
-        ) {
-            return Ok(());
-        }
-        let Some(store_platform) = self.config.store_platform.as_ref() else {
-            return Ok(());
-        };
-        let facet_docs = store_platform.read_json_namespace(MEMORY_FACET_INDEX_NAMESPACE)?;
-        if !facet_docs
-            .iter()
-            .any(|doc| facet_doc_references_transcript_source(&doc.value, key, turn_id))
-        {
-            return Ok(());
-        }
-        Err(Error::config(
-            "transcript_lifecycle_facet_preflight",
-            "transcript_source_ref_redacted_facet_update_not_supported",
-        ))
     }
 
     fn build_facet_recall_report(
@@ -11079,7 +10830,13 @@ impl MemoryRuntime {
             let owner = match owner_ref.owner_plane {
                 GovernedMemoryOwnerPlane::LongTerm => long_term_owner_states
                     .get(owner_ref)
-                    .map(|state| state.projection.material.to_current_projection())
+                    .map(|state| {
+                        governed_indexes::project_long_term_evidence(
+                            read_view,
+                            &state.projection.material.to_current_projection()?,
+                            &[],
+                        )
+                    })
                     .transpose()
                     .map(|owner| owner.map(GovernedRecallOwnerMaterial::LongTerm)),
                 GovernedMemoryOwnerPlane::EvidenceDocument => self
@@ -11207,6 +10964,13 @@ impl MemoryRuntime {
                                     .projection
                                     .material
                                     .to_current_projection()
+                                    .and_then(|raw| {
+                                        governed_indexes::project_long_term_evidence(
+                                            read_view,
+                                            &raw,
+                                            &[],
+                                        )
+                                    })
                                     .is_ok_and(|projection| projection == *entry)
                         })
                     })
@@ -11715,7 +11479,13 @@ impl MemoryRuntime {
             let owner = match owner_ref.owner_plane {
                 GovernedMemoryOwnerPlane::LongTerm => long_term_owner_states
                     .get(owner_ref)
-                    .map(|state| state.projection.material.to_current_projection())
+                    .map(|state| {
+                        governed_indexes::project_long_term_evidence(
+                            read_view,
+                            &state.projection.material.to_current_projection()?,
+                            &[],
+                        )
+                    })
                     .transpose()
                     .map(|owner| owner.map(GovernedRecallOwnerMaterial::LongTerm)),
                 GovernedMemoryOwnerPlane::EvidenceDocument => self
@@ -11785,7 +11555,7 @@ impl MemoryRuntime {
         commit: MemoryWriteTransactionCommit<'_>,
     ) -> Result<(RuntimeLifecycleReport, MemoryWriteTransactionReport)> {
         self.commit_memory_write_transaction_with_graph_repair_authority_and_scope(
-            commit, None, None, None,
+            commit, None, None, None, None,
         )
     }
 
@@ -11799,6 +11569,7 @@ impl MemoryRuntime {
             None,
             None,
             mutation_operation,
+            None,
         )
     }
 
@@ -11815,6 +11586,7 @@ impl MemoryRuntime {
             None,
             Some(scope),
             mutation_operation,
+            None,
         )
     }
 
@@ -11827,6 +11599,7 @@ impl MemoryRuntime {
             Some(GraphRepairAuthority::issue_for_integrity_maintenance()),
             None,
             None,
+            None,
         )
     }
 
@@ -11836,6 +11609,7 @@ impl MemoryRuntime {
         graph_repair_authority: Option<GraphRepairAuthority>,
         transaction_scope: Option<StoreEventScope>,
         mutation_operation: Option<MemoryMutationExecutionContext>,
+        long_term_control_authority: Option<LongTermControlAuthorization>,
     ) -> Result<(RuntimeLifecycleReport, MemoryWriteTransactionReport)> {
         let MemoryWriteTransactionCommit {
             lifecycle,
@@ -11869,6 +11643,9 @@ impl MemoryRuntime {
                     self.config.scoped_runtime.actor_subject_id.clone(),
                     transaction_timestamp,
                 )
+                .map(|plan| {
+                    plan.with_long_term_control_authority(long_term_control_authority.clone())
+                })
             })
             .transpose()?;
         let transaction_id = mutation_operation_plan
@@ -11948,6 +11725,19 @@ impl MemoryRuntime {
                     (report, Some(receipt), true)
                 }
             },
+            (None, None) if long_term_control_authority.is_some() => (
+                store_platform.commit_authorized_long_term_control_transaction(
+                    batch,
+                    &plan.preconditions,
+                    &plan.blob_preconditions,
+                    long_term_control_authority
+                        .as_ref()
+                        .expect("matched control authority"),
+                    &runtime_budget,
+                )?,
+                None,
+                false,
+            ),
             (None, None) => (
                 store_platform
                     .commit_governed_memory_transaction_with_blob_preconditions_and_runtime_budget(
@@ -12339,16 +12129,23 @@ impl MemoryRuntime {
         let planning_long_term = PlanningLongTermMemoryStore::new(
             ctx.long_term_memory_store,
             &self.config.scoped_runtime.actor_subject_id,
+            LongTermSourceContext {
+                platform: self.config.store_platform.as_ref(),
+                memory_space_id: &self.config.memory_space_id,
+                mounted_subject_id: &self.config.scoped_runtime.mounted_subject_id,
+                admitted_turn: ctx.admitted_turn,
+            },
         )?;
         let refresh_context = LongTermMemoryRefreshContext {
             memory_store: ctx.memory_store,
             session_store: ctx.session_store,
             session_summary_store: ctx.session_summary_store,
-            long_term_memory_store: ctx.long_term_memory_store,
+            long_term_memory_store: &planning_long_term,
             extraction_state_store: ctx.extraction_state_store,
             turn_ledger_store: ctx.turn_ledger_store,
             skill_storage: ctx.skill_storage,
             draft_admission_policy: ctx.draft_admission_policy,
+            canonical_turn_only: ctx.admitted_turn.is_some(),
             subject_visibility: MemorySubjectVisibilityPolicy::AllSubjects,
         };
         let outcome = if ctx.strict_model_contract {
@@ -12435,11 +12232,6 @@ impl MemoryRuntime {
                 merge_json_preconditions(&mut preconditions, long_term_plan.preconditions)?;
                 mutations.extend(facet_index_mutations.mutations);
                 merge_json_preconditions(&mut preconditions, facet_index_mutations.preconditions)?;
-                mutations.extend(plan_long_term_extraction_derived_memory_ref_mutations(
-                    &self.config.subject_id,
-                    &apply_report.accepted_upserts,
-                    self.config.clock.now_secs(),
-                )?);
                 if let Some(mutation) = long_term_extraction_state_mutation(
                     ctx.chat_id,
                     previous_state.as_ref(),
@@ -12472,6 +12264,12 @@ impl MemoryRuntime {
         let planning_store = PlanningLongTermMemoryStore::new(
             store.as_ref(),
             &self.config.scoped_runtime.actor_subject_id,
+            LongTermSourceContext {
+                platform: self.config.store_platform.as_ref(),
+                memory_space_id: &self.config.memory_space_id,
+                mounted_subject_id: &self.config.scoped_runtime.mounted_subject_id,
+                admitted_turn: None,
+            },
         )?;
         let mut changed = 0usize;
         for slot in &extraction.deletes {
@@ -12483,7 +12281,6 @@ impl MemoryRuntime {
             }
         }
 
-        let mut accepted_upserts = Vec::new();
         let shared_fact_governance = if extraction.upserts.is_empty() {
             None
         } else {
@@ -12508,7 +12305,6 @@ impl MemoryRuntime {
             self.reject_reported_subject_visibility_transition(&plan.outcome)?;
             planning_store.stage_entries(&plan.accepted_entries)?;
             changed = changed.saturating_add(plan.outcome.changed);
-            accepted_upserts = plan.accepted_drafts;
             Some(plan.outcome)
         };
         let owner_plan = planning_store.into_plan(
@@ -12526,16 +12322,10 @@ impl MemoryRuntime {
         let mut mutation_plan = owner_plan;
         mutation_plan.merge(facet_plan)?;
         let MemoryStoreMutationPlan {
-            mut mutations,
+            mutations,
             preconditions,
             blob_preconditions: _,
         } = mutation_plan;
-
-        mutations.extend(plan_long_term_extraction_derived_memory_ref_mutations(
-            &self.config.subject_id,
-            &accepted_upserts,
-            now_secs,
-        )?);
 
         Ok(MemoryLongTermExtractionTransactionPlan {
             changed,
@@ -12591,6 +12381,7 @@ impl MemoryRuntime {
                     memory_space_id: &self.config.memory_space_id,
                     factual_owner_id: &self.config.memory_space_id,
                     expected_actor_subject_id: &self.config.scoped_runtime.actor_subject_id,
+                    mounted_subject_id: &self.config.scoped_runtime.mounted_subject_id,
                     human_confirmation_authority: human_confirmation_authority.as_ref(),
                     store_platform: self.config.store_platform.as_ref().ok_or_else(|| {
                         Error::config("long_term_version_plan", "store platform is required")
@@ -12776,6 +12567,7 @@ impl MemoryRuntime {
     fn plan_memory_governance_policy_mutation(
         &self,
         operation: bm_core::memory::MemoryGovernancePolicyMutation,
+        identity: &MemoryMutationOperationIdentity,
         reason: String,
         dry_run: bool,
         now_secs: u64,
@@ -12787,6 +12579,7 @@ impl MemoryRuntime {
         let core_plan = plan_long_term_memory_governance_policy_mutation(
             control_store.as_ref(),
             operation,
+            identity,
             reason,
             dry_run,
             now_secs,
@@ -17567,6 +17360,12 @@ impl MemoryRuntime {
         let planning_long_term = PlanningLongTermMemoryStore::new(
             long_term_memory_store.as_ref(),
             &self.config.scoped_runtime.actor_subject_id,
+            LongTermSourceContext {
+                platform: self.config.store_platform.as_ref(),
+                memory_space_id: &self.config.memory_space_id,
+                mounted_subject_id: &self.config.scoped_runtime.mounted_subject_id,
+                admitted_turn: None,
+            },
         )?;
         let continuity_capsule_store = platform.continuity_capsule_store();
         let extraction_state_store = platform.long_term_memory_extraction_state_store();
@@ -18677,6 +18476,7 @@ impl MemoryRuntime {
                 http,
                 governance_llm,
                 LongTermMemoryRefreshTransactionContext {
+                    admitted_turn: None,
                     chat_id: &self.config.scope.chat_id,
                     pressure,
                     profile: self.memory_profile(),
@@ -20238,10 +20038,15 @@ impl MemoryRuntime {
             mode_input: RuntimeLifecycleModeInput::default(),
         };
         let platform = self.config.platform.as_ref();
-        let session_store = self.transcript_backed_session_store(
-            platform.session_store(),
-            TranscriptReplayView::RawOwnerOnly,
-        );
+        let mut source_turns =
+            store_platform.list_turns(&transcript.key, &transcript.subject, usize::MAX)?;
+        source_turns.retain(|record| record.sequence <= transcript.sequence);
+        let session_store: Arc<dyn SessionStore> =
+            Arc::new(long_term_sources::GovernanceTurnSession::new(
+                &self.config.scope.chat_id,
+                &transcript,
+                &source_turns,
+            ));
         let session_summary_store = platform.session_summary_store();
         let mut disclosure_http = GovernanceDisclosureHttpClient {
             runtime: self,
@@ -20334,6 +20139,7 @@ impl MemoryRuntime {
                 &mut disclosure_http,
                 governance_llm,
                 LongTermMemoryRefreshTransactionContext {
+                    admitted_turn: Some(&transcript),
                     chat_id: &self.config.scope.chat_id,
                     pressure: finalize_request.pressure,
                     profile: self.memory_profile(),
@@ -20785,6 +20591,12 @@ impl MemoryRuntime {
         let planning_long_term = PlanningLongTermMemoryStore::new(
             long_term_memory_store.as_ref(),
             &self.config.scoped_runtime.actor_subject_id,
+            LongTermSourceContext {
+                platform: self.config.store_platform.as_ref(),
+                memory_space_id: &self.config.memory_space_id,
+                mounted_subject_id: &self.config.scoped_runtime.mounted_subject_id,
+                admitted_turn: None,
+            },
         )?;
         let hygiene = run_memory_retention_compaction(
             MemoryHygieneContext {
@@ -20931,6 +20743,12 @@ impl MemoryRuntime {
         let hygiene_long_term = PlanningLongTermMemoryStore::new(
             long_term_memory_store.as_ref(),
             &self.config.scoped_runtime.actor_subject_id,
+            LongTermSourceContext {
+                platform: self.config.store_platform.as_ref(),
+                memory_space_id: &self.config.memory_space_id,
+                mounted_subject_id: &self.config.scoped_runtime.mounted_subject_id,
+                admitted_turn: None,
+            },
         )?;
         let hygiene = inspect_memory_hygiene(
             MemoryHygieneContext {
@@ -21768,11 +21586,7 @@ impl MemoryRuntime {
             request.channel_id,
             request.conversation_id,
         )?;
-        self.ensure_transcript_lifecycle_has_facet_impact_or_fails_closed(
-            &key,
-            request.turn_id.as_deref(),
-            request.transition,
-        )?;
+
         let transcript_store = self.config.platform.conversation_transcript_store();
         let mut transcript = transcript_store.apply_lifecycle_request(
             &self.config.scoped_runtime.mounted_subject_id,
@@ -21927,6 +21741,12 @@ impl MemoryRuntime {
         let planning_long_term = PlanningLongTermMemoryStore::new(
             self.config.long_term_memory_read_store.as_ref(),
             &self.config.scoped_runtime.actor_subject_id,
+            LongTermSourceContext {
+                platform: self.config.store_platform.as_ref(),
+                memory_space_id: &self.config.memory_space_id,
+                mounted_subject_id: &self.config.scoped_runtime.mounted_subject_id,
+                admitted_turn: None,
+            },
         )?;
         let session_summary_store = platform.session_summary_store();
         let execution_state_store = platform.execution_state_store();
@@ -22509,11 +22329,7 @@ impl MemoryRuntime {
     ) -> Option<&'a MemoryLongTermGovernancePolicy> {
         let normalized = draft.normalized()?;
         let source_scope = runtime_inferred_long_term_source_scope(&normalized);
-        let subject_ids = [
-            self.config.subject_id.as_str(),
-            self.config.scoped_runtime.mounted_subject_id.as_str(),
-            self.config.scoped_runtime.actor_subject_id.as_str(),
-        ];
+        let subject_ids = [self.config.scoped_runtime.mounted_subject_id.as_str()];
         policies.iter().find(|policy| {
             long_term_governance_policy_blocks_future_write(policy, now_secs)
                 && subject_ids.iter().any(|subject_id| {
@@ -22541,13 +22357,7 @@ impl MemoryRuntime {
         {
             return Ok(None);
         }
-        let mut subject_ids = vec![
-            self.config.subject_id.clone(),
-            self.config.scoped_runtime.mounted_subject_id.clone(),
-            self.config.scoped_runtime.actor_subject_id.clone(),
-        ];
-        subject_ids.sort();
-        subject_ids.dedup();
+        let subject_ids = vec![self.config.scoped_runtime.mounted_subject_id.clone()];
         Ok(Some(RuntimeLongTermDraftAdmissionPolicy {
             memory_space_id: self.config.memory_space_id.clone(),
             subject_ids,
@@ -22783,7 +22593,7 @@ fn semantic_report_from_atomic_refresh(
     } else {
         usize::from(decision != GovernedWriteDecision::NotApplicable)
     };
-    PostTurnSemanticGovernanceReport {
+    let mut report = PostTurnSemanticGovernanceReport {
         attempted: true,
         executed: true,
         skipped_reason: None,
@@ -22803,7 +22613,29 @@ fn semantic_report_from_atomic_refresh(
             profile_decision: "profile_capability_checked".to_string(),
         }],
         soul_candidate_handoffs: Vec::new(),
+    };
+    if let Some(LongTermMemoryRefreshOutcome::Processed { apply_report, .. }) = refresh {
+        let reasons = apply_report.rejected_causal_upserts.iter().map(|reason| reason.label())
+            .chain(apply_report.rejected_deletions.iter().map(|(_, reason)| match reason {
+                bm_core::memory::LongTermMemoryEntryRejection::SourcePredatesExplicitControl => "source_predates_explicit_control",
+                _ => "factual_source_authority_required",
+            })).collect::<Vec<_>>();
+        report.rejected_count += reasons.len();
+        report.proposal_count += reasons.len();
+        for reason in reasons {
+            report.plane_reports.push(MemoryPlaneGovernanceReport {
+                domain: MemoryWriteDomain::Program,
+                plane: "long_term_memory".into(),
+                authority: MemoryWriteAuthority::RuntimeDeterministic,
+                decision: GovernedWriteDecision::Rejected,
+                reason: reason.into(),
+                evidence_refs: Vec::new(),
+                privacy_decision: "runtime_policy".into(),
+                profile_decision: "profile_capability_checked".into(),
+            });
+        }
     }
+    report
 }
 
 fn bind_control_audit_transaction_id(
@@ -25066,12 +24898,12 @@ struct GraphClosureLoadLimits {
     max_backlinks: usize,
 }
 
-struct RuntimeKnownJsonDoc {
+pub(crate) struct RuntimeKnownJsonDoc {
     key: String,
     value: serde_json::Value,
 }
 
-trait RuntimeKnownJsonRead {
+pub(crate) trait RuntimeKnownJsonRead {
     fn read_known_json_docs(
         &self,
         namespace: &str,
@@ -29306,34 +29138,6 @@ fn sanitize_transcript_lifecycle_report_for_view(
     report.host_ref_redactions.append(&mut redactions);
 }
 
-fn facet_doc_references_transcript_source(
-    facet_doc: &serde_json::Value,
-    key: &ConversationKey,
-    turn_id: Option<&str>,
-) -> bool {
-    let conversation_ref = format!(
-        "transcript:{}/{}/{}",
-        key.memory_space_id, key.channel_id, key.conversation_id
-    );
-    facet_doc
-        .get("canonical_evidence_refs")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|evidence| evidence.get("source_ref"))
-        .filter_map(serde_json::Value::as_str)
-        .any(|source_ref| {
-            let source_ref = source_ref.trim();
-            if !source_ref.starts_with(&conversation_ref) {
-                return false;
-            }
-            match turn_id {
-                Some(turn_id) => source_ref.contains(&format!("#turn={}", turn_id.trim())),
-                None => true,
-            }
-        })
-}
-
 fn apply_transcript_repair_budget(
     report: &mut CoreTranscriptRepairReport,
     budget: TranscriptGovernanceBudget,
@@ -29584,16 +29388,6 @@ fn session_record_from_transcript_message(
     record
 }
 
-fn long_term_extraction_derived_plane(draft: &LongTermMemoryDraft) -> DerivedMemoryPlane {
-    if draft.kind == LongTermMemoryKind::Fact
-        || matches!(draft.source_scope, Some(LongTermMemorySourceScope::World))
-    {
-        DerivedMemoryPlane::SharedFact
-    } else {
-        DerivedMemoryPlane::LongTerm
-    }
-}
-
 fn plan_private_garden_derived_memory_ref_mutations(
     memory_space_id: &str,
     subject_id: &str,
@@ -29630,63 +29424,6 @@ fn plan_private_garden_derived_memory_ref_mutations(
             )
         })
         .collect()
-}
-
-fn plan_long_term_extraction_derived_memory_ref_mutations(
-    subject_id: &str,
-    accepted_upserts: &[LongTermMemoryDraft],
-    now_secs: u64,
-) -> Result<Vec<StoreMutation>> {
-    let mut mutations = Vec::new();
-    for draft in accepted_upserts {
-        let Some(stable_id) = draft.stable_id() else {
-            continue;
-        };
-        let plane = long_term_extraction_derived_plane(draft);
-        let store_key = match plane {
-            DerivedMemoryPlane::SharedFact => format!("shared_fact:{stable_id}"),
-            _ => format!("long_term:{stable_id}"),
-        };
-        for source in transcript_evidence_refs_from_display_citations(
-            &draft.supporting_citations,
-            subject_id,
-            None,
-        ) {
-            mutations.push(candidate_derived_memory_ref_mutation(
-                plane, &store_key, subject_id, source, now_secs,
-            )?);
-        }
-    }
-    Ok(mutations)
-}
-
-fn plan_candidate_derived_memory_ref_mutations(
-    subject_id: &str,
-    accepted_draft_pairs: &[(&MemoryWriteCandidate, LongTermMemoryDraft)],
-    now_secs: u64,
-) -> Result<Vec<StoreMutation>> {
-    let mut mutations = Vec::new();
-    for (candidate, draft) in accepted_draft_pairs {
-        let Some(stable_id) = draft.stable_id() else {
-            continue;
-        };
-        let target = candidate.governed_target().unwrap_or(&candidate.target);
-        let plane = if target.domain() == MemoryWriteDomain::Program {
-            DerivedMemoryPlane::SharedFact
-        } else {
-            DerivedMemoryPlane::LongTerm
-        };
-        let store_key = match plane {
-            DerivedMemoryPlane::SharedFact => format!("shared_fact:{stable_id}"),
-            _ => format!("long_term:{stable_id}"),
-        };
-        for source in candidate_transcript_evidence_refs(candidate, subject_id) {
-            mutations.push(candidate_derived_memory_ref_mutation(
-                plane, &store_key, subject_id, source, now_secs,
-            )?);
-        }
-    }
-    Ok(mutations)
 }
 
 fn plan_soul_handoff_derived_memory_ref_mutations(
@@ -29822,6 +29559,7 @@ struct MemoryLongTermExtractionTransactionPlan {
 }
 
 struct LongTermMemoryRefreshTransactionContext<'a> {
+    admitted_turn: Option<&'a TranscriptTurnRecord>,
     chat_id: &'a str,
     pressure: PressureLevel,
     profile: MemoryProfile,
@@ -29856,6 +29594,7 @@ enum PlanningLongTermVersionIntent {
 struct PlanningLongTermTransitionIntent {
     revision_id: String,
     operation: bm_core::memory::LongTermControlOperation,
+    basis: bm_core::memory::LongTermTransitionBasis,
     invalidation_reason_code: Option<bm_core::memory::LongTermInvalidationReasonCode>,
     reason: String,
     actor_subject_id: Option<String>,
@@ -29913,6 +29652,9 @@ impl PlanningLongTermTransitionIntent {
                     .max(before.owner_revision.saturating_add(1))
             ),
             operation: bm_core::memory::LongTermControlOperation::Refresh,
+            basis: bm_core::memory::LongTermTransitionBasis::SourceGoverned {
+                authoritative_sources: Vec::new(),
+            },
             invalidation_reason_code: None,
             reason: reason.to_string(),
             actor_subject_id: Some(actor_subject_id.to_string()),
@@ -29926,6 +29668,9 @@ impl PlanningLongTermTransitionIntent {
         Self {
             revision_id: format!("delete:{}:{}", before.id, before.owner_revision),
             operation: bm_core::memory::LongTermControlOperation::Delete,
+            basis: bm_core::memory::LongTermTransitionBasis::SourceGoverned {
+                authoritative_sources: Vec::new(),
+            },
             invalidation_reason_code: None,
             reason: reason.to_string(),
             actor_subject_id: Some(actor_subject_id.to_string()),
@@ -29962,7 +29707,7 @@ impl PlanningLongTermTransitionIntent {
                 self.governed_evidence_refs.clone(),
             );
         }
-        bm_core::memory::LongTermMemoryControlRevisionIntent::for_owner_change(
+        let mut intent = bm_core::memory::LongTermMemoryControlRevisionIntent::for_owner_change(
             self.revision_id.clone(),
             self.operation,
             before,
@@ -29973,7 +29718,10 @@ impl PlanningLongTermTransitionIntent {
             memory_space_id,
             self.created_at,
             self.governed_evidence_refs.clone(),
-        )
+        )?;
+        intent.basis = self.basis.clone();
+        intent.validate_contract()?;
+        Ok(intent)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -30047,6 +29795,7 @@ impl PlanningLongTermTransitionIntent {
         Ok(Self {
             revision_id: intent.revision_id.clone(),
             operation: intent.operation,
+            basis: intent.basis.clone(),
             invalidation_reason_code: intent.invalidation_reason_code,
             reason: intent.reason.clone(),
             actor_subject_id: Some(actor_subject_id),
@@ -30129,17 +29878,27 @@ mod persisted_revision_tests {
 struct PlanningLongTermMemoryStore<'a> {
     base: &'a dyn LongTermMemoryReadStore,
     actor_subject_id: Option<String>,
+    sources: LongTermSourceContext<'a>,
+    source_preconditions: Mutex<Vec<StoreJsonPrecondition>>,
+    factual_authorities: Mutex<BTreeMap<String, Vec<TranscriptEvidenceRef>>>,
     changes: Mutex<BTreeMap<String, PlanningLongTermVersionIntent>>,
     read_set: Mutex<BTreeMap<String, Option<LongTermMemoryEntry>>>,
     complete_snapshot_read: Mutex<bool>,
 }
 
 impl<'a> PlanningLongTermMemoryStore<'a> {
-    fn new(base: &'a dyn LongTermMemoryReadStore, actor_subject_id: &str) -> Result<Self> {
+    fn new(
+        base: &'a dyn LongTermMemoryReadStore,
+        actor_subject_id: &str,
+        sources: LongTermSourceContext<'a>,
+    ) -> Result<Self> {
         let actor_subject_id = validated_planning_actor_subject_id(actor_subject_id)?;
         Ok(Self {
             base,
             actor_subject_id: Some(actor_subject_id),
+            sources,
+            source_preconditions: Mutex::new(Vec::new()),
+            factual_authorities: Mutex::new(BTreeMap::new()),
             changes: Mutex::new(BTreeMap::new()),
             read_set: Mutex::new(BTreeMap::new()),
             complete_snapshot_read: Mutex::new(false),
@@ -30156,6 +29915,15 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
     }
 
     fn stage_entries(&self, entries: &[LongTermMemoryEntry]) -> Result<()> {
+        let mut owner_ids = BTreeSet::new();
+        for entry in entries {
+            if !owner_ids.insert(entry.id.as_str()) {
+                return Err(Error::config(
+                    "long_term_version_plan",
+                    "duplicate long-term owner in staged entry batch",
+                ));
+            }
+        }
         let actor_subject_id = self.actor_subject_id()?.to_string();
         for entry in entries {
             let id = entry.id.clone();
@@ -30428,7 +30196,19 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
             ));
         }
 
-        let mut plan = MemoryStoreMutationPlan::default();
+        let next_scope_revision = previous_scope
+            .as_ref()
+            .map(|scope| {
+                checked_next_persisted_revision(scope.manifest_revision, "long_term_scope_manifest")
+            })
+            .transpose()?
+            .unwrap_or(1);
+        let mut plan = MemoryStoreMutationPlan {
+            preconditions: self.source_preconditions.into_inner().map_err(|_| {
+                Error::config("long_term_source_authority", "source read set poisoned")
+            })?,
+            ..Default::default()
+        };
         for (key, value) in &head_values {
             plan.preconditions.push(json_precondition(
                 crate::store_internal::LONG_TERM_HEAD_MANIFEST_NAMESPACE,
@@ -30450,7 +30230,79 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
                 Some(value.clone()),
             ));
         }
-        for (id, value) in changes {
+        let authorities = self
+            .factual_authorities
+            .into_inner()
+            .map_err(|_| Error::config("long_term_source_authority", "authority set poisoned"))?;
+        for (id, mut value) in changes {
+            let transition = match &mut value {
+                PlanningLongTermVersionIntent::Advance { transition, .. }
+                | PlanningLongTermVersionIntent::Terminal { transition, .. } => Some(transition),
+                PlanningLongTermVersionIntent::Create { .. } => None,
+            };
+            if let Some(transition) = transition {
+                if let bm_core::memory::LongTermTransitionBasis::SourceGoverned {
+                    authoritative_sources,
+                } = &mut transition.basis
+                {
+                    *authoritative_sources = match authorities.get(&id) {
+                        Some(sources) => sources.clone(),
+                        None => self.sources.authority(&[], &mut plan.preconditions)?.0,
+                    };
+                }
+            }
+            match &mut value {
+                PlanningLongTermVersionIntent::Create { after } => {
+                    self.sources.bind(after, None, &mut plan.preconditions)?
+                }
+                PlanningLongTermVersionIntent::Advance { before, after, .. } => {
+                    self.sources
+                        .bind(after, Some(before), &mut plan.preconditions)?
+                }
+                PlanningLongTermVersionIntent::Terminal { .. } => {}
+            }
+            if let Some(entry) = value.current_projection() {
+                for source in &entry.transcript_sources {
+                    let subject = source.subject_id.as_deref().ok_or_else(|| {
+                        Error::config("long_term_source_authority", "bound source has no subject")
+                    })?;
+                    let plane = if entry.kind == LongTermMemoryKind::Fact
+                        || entry.source_scope == LongTermMemorySourceScope::World
+                    {
+                        DerivedMemoryPlane::SharedFact
+                    } else {
+                        DerivedMemoryPlane::LongTerm
+                    };
+                    let key_prefix = if plane == DerivedMemoryPlane::SharedFact {
+                        "shared_fact"
+                    } else {
+                        "long_term"
+                    };
+                    plan.mutations.push(candidate_derived_memory_ref_mutation(
+                        plane,
+                        &format!("{key_prefix}:{}", entry.id),
+                        subject,
+                        source.clone(),
+                        entry.updated_at,
+                    )?);
+                }
+            }
+            if let PlanningLongTermVersionIntent::Advance {
+                before,
+                after,
+                transition,
+            } = &mut value
+            {
+                after.control_barrier_scope_revision = if matches!(
+                    transition.operation,
+                    bm_core::memory::LongTermControlOperation::Correct
+                        | bm_core::memory::LongTermControlOperation::Supersede
+                ) {
+                    Some(next_scope_revision)
+                } else {
+                    before.control_barrier_scope_revision
+                };
+            }
             let prior = if let Some(prior) = read_set.get(&id) {
                 prior.clone()
             } else if complete_snapshot_read {
@@ -31161,16 +31013,7 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
         let next_scope = LongTermMemoryVersionScopeManifest::build(
             memory_space_id,
             factual_owner_id,
-            previous_scope
-                .as_ref()
-                .map(|scope| {
-                    checked_next_persisted_revision(
-                        scope.manifest_revision,
-                        "long_term_scope_manifest",
-                    )
-                })
-                .transpose()?
-                .unwrap_or(1),
+            next_scope_revision,
             &heads,
             &materials,
             &transitions,
@@ -31197,6 +31040,50 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
 }
 
 impl LongTermMemoryStore for PlanningLongTermMemoryStore<'_> {
+    fn factual_admission_revision(&self, draft: &LongTermMemoryDraft) -> Result<Option<u64>> {
+        let citations = draft
+            .supporting_citations
+            .iter()
+            .cloned()
+            .chain(draft.canonical_entities.iter().flat_map(|entity| {
+                entity
+                    .evidence_refs
+                    .iter()
+                    .map(|reference| reference.source_ref.clone())
+            }))
+            .collect::<Vec<_>>();
+        let (sources, revision) = self.sources.authority(
+            &citations,
+            &mut *self.source_preconditions.lock().map_err(|_| {
+                Error::config("long_term_source_authority", "source read set poisoned")
+            })?,
+        )?;
+        if let Some(id) = draft.stable_id() {
+            self.factual_authorities
+                .lock()
+                .map_err(|_| Error::config("long_term_source_authority", "authority set poisoned"))?
+                .insert(id, sources);
+        }
+        Ok(revision)
+    }
+
+    fn factual_deletion_admission_revision(
+        &self,
+        entry: &LongTermMemoryEntry,
+    ) -> Result<Option<u64>> {
+        let (sources, revision) = self.sources.authority(
+            &[],
+            &mut *self.source_preconditions.lock().map_err(|_| {
+                Error::config("long_term_source_authority", "source read set poisoned")
+            })?,
+        )?;
+        self.factual_authorities
+            .lock()
+            .map_err(|_| Error::config("long_term_source_authority", "authority set poisoned"))?
+            .insert(entry.id.clone(), sources);
+        Ok(revision)
+    }
+
     fn upsert_many(&self, drafts: &[LongTermMemoryDraft], now_secs: u64) -> Result<usize> {
         let mut changed = 0usize;
         for draft in drafts {
@@ -31207,7 +31094,12 @@ impl LongTermMemoryStore for PlanningLongTermMemoryStore<'_> {
                 ));
             };
             let prior = LongTermMemoryStore::get(self, &id)?;
-            match plan_long_term_memory_upsert(prior.as_ref(), draft, now_secs) {
+            match plan_long_term_memory_upsert(
+                prior.as_ref(),
+                draft,
+                now_secs,
+                LongTermMemoryStore::factual_admission_revision(self, draft)?,
+            ) {
                 LongTermMemoryEntryPlan::Created(entry)
                 | LongTermMemoryEntryPlan::Updated(entry) => {
                     self.stage_entries(std::slice::from_ref(&entry))?;
@@ -31350,6 +31242,15 @@ impl LongTermMemoryStore for PlanningLongTermMemoryStore<'_> {
         let Some(current) = current else {
             return Ok(false);
         };
+        let admission = LongTermMemoryStore::factual_deletion_admission_revision(self, &current)?;
+        if bm_core::memory::validate_long_term_factual_admission(
+            current.control_barrier_scope_revision,
+            admission,
+        )
+        .is_err()
+        {
+            return Ok(false);
+        }
         let existing_change = self
             .changes
             .lock()
@@ -31413,6 +31314,7 @@ struct LongTermOwnerPlanningContext<'a> {
     memory_space_id: &'a str,
     factual_owner_id: &'a str,
     expected_actor_subject_id: &'a str,
+    mounted_subject_id: &'a str,
     human_confirmation_authority:
         Option<&'a bm_core::memory::LongTermMemoryHumanConfirmationAuthority>,
     store_platform: &'a StorePlatform,
@@ -31430,6 +31332,7 @@ fn plan_owner_writes(
         memory_space_id,
         factual_owner_id,
         expected_actor_subject_id,
+        mounted_subject_id,
         human_confirmation_authority,
         store_platform,
         max_retained_revisions_per_owner,
@@ -31557,6 +31460,14 @@ fn plan_owner_writes(
     let planning_store = PlanningLongTermMemoryStore {
         base,
         actor_subject_id: Some(expected_actor_subject_id),
+        sources: LongTermSourceContext {
+            platform: Some(store_platform),
+            memory_space_id,
+            mounted_subject_id,
+            admitted_turn: None,
+        },
+        source_preconditions: Mutex::new(Vec::new()),
+        factual_authorities: Mutex::new(BTreeMap::new()),
         changes: Mutex::new(changes),
         read_set: Mutex::new(read_set),
         complete_snapshot_read: Mutex::new(false),
@@ -35585,6 +35496,44 @@ mod projection_budget_truncation_tests {
             .build()
             .expect("runtime");
         runtime
+            .commit_transcript(crate::MemoryTranscriptCommitRequest {
+                turn: CanonicalTurnDelta {
+                    turn_id: "facet-rebuild".into(),
+                    conversation: bm_core::memory::ConversationScope {
+                        channel: "local".into(),
+                        chat_id: "chat-a".into(),
+                        conversation_id: Some("chat-a".into()),
+                    },
+                    subject: runtime.subject_id().into(),
+                    delivery_status: bm_core::memory::MemoryTurnDeliveryStatus::Delivered,
+                    source: bm_core::memory::MemoryTurnSource {
+                        ingress: IngressKind::User,
+                        channel: "local".into(),
+                        provider: None,
+                        protocol: bm_core::memory::MemoryTurnProtocol::Native,
+                        endpoint: None,
+                        model_alias: None,
+                        model_resolved: None,
+                        request_id: None,
+                        client_conversation_hint: None,
+                    },
+                    actor: None,
+                    input_messages: vec![TranscriptInputMessage::user(
+                        "synthetic rebuild evidence",
+                    )],
+                    assistant_message: None,
+                    tool_observations: Vec::new(),
+                    external_content_used: false,
+                    candidate_ids: Vec::new(),
+                },
+                host_refs: Vec::new(),
+            })
+            .unwrap();
+        let source_citation = format!(
+            "transcript:{}/local/chat-a#turn=facet-rebuild",
+            runtime.memory_space_id()
+        );
+        runtime
             .write(MemoryWriteRequest::LongTermExtraction {
                 extraction: ParsedLongTermMemoryExtraction {
                     upserts: vec![LongTermMemoryDraft {
@@ -35604,7 +35553,7 @@ mod projection_budget_truncation_tests {
                         confidence: None,
                         freshness: None,
                         stale_hint: None,
-                        supporting_citations: vec!["turn:facet-rebuild".to_string()],
+                        supporting_citations: vec![source_citation.clone()],
                         canonical_entities: Vec::new(),
                         evidence_count: Some(1),
                         observed_at: Some(1_800_000_000),
@@ -35644,15 +35593,37 @@ mod projection_budget_truncation_tests {
                 })
                 .expect("facet index")
         };
+        assert!(!read_facet().canonical_evidence_refs.is_empty());
+        runtime
+            .request_transcript_lifecycle(crate::MemoryTranscriptLifecycleRequest {
+                memory_space_id: runtime.memory_space_id().into(),
+                channel_id: "local".into(),
+                conversation_id: "chat-a".into(),
+                turn_id: Some("facet-rebuild".into()),
+                transition: crate::TranscriptLifecycleTransition::Mask,
+                reason: "synthetic reindex after withdrawal".into(),
+            })
+            .unwrap();
+        assert!(read_facet().canonical_evidence_refs.is_empty());
         let before = read_facet();
         let mutations = runtime
-            .plan_long_term_facet_index_upsert_mutations(std::slice::from_ref(&owner))
+            .plan_governed_owner_facet_index_changes(
+                BTreeMap::from([(
+                    GovernedMemoryOwnerRef::new(
+                        GovernedMemoryOwnerPlane::LongTerm,
+                        owner.id.clone(),
+                    ),
+                    Some(runtime.long_term_facet_index_doc(&owner).unwrap()),
+                )]),
+                runtime.memory_space_id(),
+            )
             .expect("facet rebuild plan");
         runtime
             .commit_memory_mutation_batch("test.pure_facet_rebuild", mutations)
             .expect("facet rebuild commit");
         let after = read_facet();
 
+        assert!(after.canonical_evidence_refs.is_empty());
         assert_eq!(after.owner_revision, before.owner_revision);
         assert_eq!(after.owner_revision, owner.owner_revision);
         assert_eq!(after.facet_index_revision, before.facet_index_revision + 1);
@@ -35764,12 +35735,39 @@ mod concurrent_memory_plan_tests {
             .plan_long_term_control_mutation(request("stale loser"))
             .expect("stale plan");
 
-        first
-            .commit_memory_mutation_batch("test.concurrent.first", first_plan)
-            .expect("first commit");
+        let commit_control =
+            |runtime: &MemoryRuntime, operation: &'static str, plan: MemoryStoreMutationPlan| {
+                let authority = LongTermControlAuthorization::issue(
+                    runtime.memory_space_id(),
+                    &runtime.config.scoped_runtime.actor_subject_id,
+                    &plan.mutations,
+                )?;
+                let lifecycle = runtime.start_lifecycle(
+                    RuntimeLifecycleOperation::Maintain,
+                    RuntimeLifecycleTrigger::SdkCall,
+                    RuntimeLifecycleModeInput::default(),
+                );
+                runtime.commit_memory_write_transaction_with_graph_repair_authority_and_scope(
+                    MemoryWriteTransactionCommit {
+                        lifecycle,
+                        operation,
+                        lifecycle_kind: RuntimeLifecycleEventKind::OperatorAction,
+                        lifecycle_effect: RuntimeLifecycleEffect::RecordOperatorAction,
+                        changed: true,
+                        summary: "synthetic concurrent correction".into(),
+                        extra_payload: &[],
+                        plan,
+                        changed_count: 1,
+                    },
+                    None,
+                    None,
+                    None,
+                    Some(authority),
+                )
+            };
+        commit_control(&first, "test.concurrent.first", first_plan).expect("first commit");
         let event_count = platform.read_events().expect("events").len();
-        let error = second
-            .commit_memory_mutation_batch("test.concurrent.stale", stale_plan)
+        let error = commit_control(&second, "test.concurrent.stale", stale_plan)
             .expect_err("stale plan must fail closed");
 
         assert_eq!(
@@ -35877,7 +35875,7 @@ mod concurrent_memory_plan_tests {
         let operation = || MemoryGovernancePolicyMutation::Suppress {
             selector: MemoryGovernanceSelector {
                 memory_space_id: Some(first.config.memory_space_id.clone()),
-                subject_id: Some(first.config.memory_space_id.clone()),
+                subject_id: Some(first.config.scoped_runtime.mounted_subject_id.clone()),
                 kind: Some(LongTermMemoryKind::Preference),
                 topic_pattern: Some("concurrent-policy-*".to_string()),
                 source_chat_id: None,
@@ -35888,6 +35886,16 @@ mod concurrent_memory_plan_tests {
         let (first_report, first_plan) = first
             .plan_memory_governance_policy_mutation(
                 operation(),
+                &first
+                    .memory_mutation_execution_context(
+                        "first-policy".into(),
+                        MemoryMutationOperationKind::LongTermControl {
+                            operation: LongTermControlOperation::PolicySuppress,
+                        },
+                        &operation(),
+                    )
+                    .unwrap()
+                    .identity,
                 "first policy".to_string(),
                 false,
                 1_900_000_001,
@@ -35896,6 +35904,16 @@ mod concurrent_memory_plan_tests {
         let (_, stale_plan) = second
             .plan_memory_governance_policy_mutation(
                 operation(),
+                &second
+                    .memory_mutation_execution_context(
+                        "second-policy".into(),
+                        MemoryMutationOperationKind::LongTermControl {
+                            operation: LongTermControlOperation::PolicySuppress,
+                        },
+                        &operation(),
+                    )
+                    .unwrap()
+                    .identity,
                 "stale policy".to_string(),
                 false,
                 1_900_000_001,
@@ -35910,9 +35928,23 @@ mod concurrent_memory_plan_tests {
             .commit_memory_mutation_batch("test.concurrent.policy.stale", stale_plan)
             .expect_err("stale policy plan must fail closed");
 
-        assert_eq!(
-            error.stage(),
-            "memory_write_transaction_precondition_failed"
+        let Error::Storage {
+            source: Some(source),
+            stage: "memory_write_transaction_commit_failed",
+        } = &error
+        else {
+            panic!("unexpected duplicate policy rejection: {error:?}");
+        };
+        let cause = source.downcast_ref::<Error>().expect("typed Store cause");
+        assert!(
+            matches!(
+                cause,
+                Error::Conflict {
+                    stage: "long_term_policy_duplicate",
+                    ..
+                }
+            ),
+            "{error:?}"
         );
         assert_eq!(
             platform.read_events().expect("events").len(),
@@ -35929,6 +35961,71 @@ mod concurrent_memory_plan_tests {
             first_report.policy_id.expect("policy id")
         );
         assert_eq!(policies[0].reason, "first policy");
+        let removal = MemoryGovernancePolicyMutation::RemoveSuppression {
+            target: bm_core::memory::MemoryGovernancePolicyRef {
+                policy_id: policies[0].policy_id.clone(),
+                policy_revision: policies[0].policy_revision,
+            },
+        };
+        let identity = second
+            .memory_mutation_execution_context(
+                "stale-exact-removal".into(),
+                MemoryMutationOperationKind::LongTermControl {
+                    operation: LongTermControlOperation::PolicyRemoveSuppression,
+                },
+                &removal,
+            )
+            .unwrap()
+            .identity;
+        let (_, stale_removal) = second
+            .plan_memory_governance_policy_mutation(
+                removal,
+                &identity,
+                "remove old revision".into(),
+                false,
+                1_900_000_002,
+            )
+            .unwrap();
+        first
+            .mutate_memory_governance_policy(
+                "update-existing-policy",
+                MemoryLongTermPolicyRequest {
+                    operation: operation(),
+                    reason: "updated policy".into(),
+                    dry_run: false,
+                    mode_input: Default::default(),
+                },
+            )
+            .unwrap();
+        let updated = first
+            .config
+            .long_term_memory_control_store
+            .list_long_term_governance_policies(8)
+            .unwrap();
+        assert_eq!(updated[0].policy_id, policies[0].policy_id);
+        assert_eq!(updated[0].policy_revision, policies[0].policy_revision + 1);
+        let image = || {
+            (
+                crate::store_internal::schema::store_json_namespaces()
+                    .map(|namespace| (namespace, platform.read_json_namespace(namespace).unwrap()))
+                    .collect::<Vec<_>>(),
+                platform.read_events().unwrap(),
+            )
+        };
+        let snapshot = image();
+        let error = second
+            .commit_memory_mutation_batch("test.concurrent.policy.exact-removal", stale_removal)
+            .expect_err("stale exact-revision removal must fail CAS");
+        assert_eq!(
+            error.stage(),
+            "memory_write_transaction_precondition_failed",
+            "{error:?}"
+        );
+        assert_eq!(
+            image(),
+            snapshot,
+            "stale removal must leave policy, audit, receipt and events unchanged"
+        );
     }
 }
 mod persona_learning;

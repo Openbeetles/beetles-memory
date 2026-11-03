@@ -51,6 +51,8 @@ Commands:
 | `long-term-list` | List accepted long-term memory or filter by topic. |
 | `long-term-detail` | Inspect one long-term memory record by `--record-id`. |
 | `long-term-delete` | Delete one long-term memory record by `--record-id` and emit tombstone/audit reports. |
+| `long-term-policy-list` / `long-term-policy-detail` | Read mounted-subject rules or an exact ID using `--input <request.json>`. |
+| `long-term-policy` | Submit a typed policy request using `--input <request.json>` and a required `--idempotency-key`; resume/removal uses the exact inspected ID/revision. |
 | `long-term-policy-suppress` | Add a suppression policy for future preference memory updates with `--topic <pattern>`. |
 | `transcript-attr-write` | Write governed transcript turn/message attrs from a JSON request file; requires `--reason`. |
 | `skill-list` | List runtime Skill Memory records. |
@@ -111,9 +113,10 @@ bm \
 ```bash
 bm \
   memory long-term-policy-suppress \
+  --idempotency-key suppress-temporary-preferences-1 \
   --profile "$BM_HOST_PROFILE" \
   --store-file /tmp/beetle-memory-store \
-  --topic temporary-* \
+  --topic 'temporary-*' \
   --reason "user does not want temporary preferences remembered"
 ```
 

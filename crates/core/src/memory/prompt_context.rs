@@ -2683,6 +2683,9 @@ mod tests {
         };
         let long_term_memory_store = StubLongTermMemoryStore {
             entries: Mutex::new(vec![LongTermMemoryEntry {
+                transcript_sources: Vec::new(),
+                control_barrier_scope_revision: None,
+
                 id: "pref:coffee".to_string(),
                 kind: LongTermMemoryKind::Preference,
                 privacy: MemoryPrivacyClass::SharedWithSubject,
@@ -5083,6 +5086,9 @@ mod tests {
         };
         let memory_store = StubLongTermMemoryStore {
             entries: Mutex::new(vec![LongTermMemoryEntry {
+                transcript_sources: Vec::new(),
+                control_barrier_scope_revision: None,
+
                 id: "pref-coffee".to_string(),
                 kind: LongTermMemoryKind::Preference,
                 privacy: MemoryPrivacyClass::SharedWithSubject,
@@ -5587,6 +5593,9 @@ mod tests {
         };
         let memory_store = StubLongTermMemoryStore {
             entries: Mutex::new(vec![LongTermMemoryEntry {
+                transcript_sources: Vec::new(),
+                control_barrier_scope_revision: None,
+
                 id: "pref-coffee".to_string(),
                 kind: LongTermMemoryKind::Preference,
                 privacy: MemoryPrivacyClass::SharedWithSubject,
@@ -6236,6 +6245,9 @@ mod tests {
         };
         let memory_store = StubLongTermMemoryStore {
             entries: Mutex::new(vec![LongTermMemoryEntry {
+                transcript_sources: Vec::new(),
+                control_barrier_scope_revision: None,
+
                 id: "memory-router".to_string(),
                 kind: LongTermMemoryKind::Project,
                 privacy: MemoryPrivacyClass::SharedWithSubject,
@@ -6551,6 +6563,9 @@ mod tests {
         };
         let memory_store = StubLongTermMemoryStore {
             entries: Mutex::new(vec![LongTermMemoryEntry {
+                transcript_sources: Vec::new(),
+                control_barrier_scope_revision: None,
+
                 id: "project-release".to_string(),
                 kind: LongTermMemoryKind::Project,
                 privacy: MemoryPrivacyClass::SharedWithSubject,
@@ -6681,6 +6696,9 @@ mod tests {
         let summary_store = StubSessionSummaryStore::default();
         let memory_store = StubLongTermMemoryStore {
             entries: Mutex::new(vec![LongTermMemoryEntry {
+                transcript_sources: Vec::new(),
+                control_barrier_scope_revision: None,
+
                 id: "network-outage-summary".to_string(),
                 kind: LongTermMemoryKind::Fact,
                 privacy: MemoryPrivacyClass::SharedWithSubject,
@@ -6934,6 +6952,9 @@ mod tests {
         };
         let memory_store = StubLongTermMemoryStore {
             entries: Mutex::new(vec![LongTermMemoryEntry {
+                transcript_sources: Vec::new(),
+                control_barrier_scope_revision: None,
+
                 id: "memory-router".to_string(),
                 kind: LongTermMemoryKind::Project,
                 privacy: MemoryPrivacyClass::SharedWithSubject,
@@ -7061,6 +7082,9 @@ mod tests {
         };
         let memory_store = StubLongTermMemoryStore {
             entries: Mutex::new(vec![LongTermMemoryEntry {
+                transcript_sources: Vec::new(),
+                control_barrier_scope_revision: None,
+
                 id: "project-release".to_string(),
                 kind: LongTermMemoryKind::Project,
                 privacy: MemoryPrivacyClass::SharedWithSubject,
@@ -7181,6 +7205,9 @@ mod tests {
         let summary_store = StubSessionSummaryStore::default();
         let memory_store = StubLongTermMemoryStore {
             entries: Mutex::new(vec![LongTermMemoryEntry {
+                transcript_sources: Vec::new(),
+                control_barrier_scope_revision: None,
+
                 id: "network-outage-summary".to_string(),
                 kind: LongTermMemoryKind::Fact,
                 privacy: MemoryPrivacyClass::SharedWithSubject,
@@ -7287,6 +7314,9 @@ mod tests {
         let summary_store = StubSessionSummaryStore::default();
         let memory_store = StubLongTermMemoryStore {
             entries: Mutex::new(vec![LongTermMemoryEntry {
+                transcript_sources: Vec::new(),
+                control_barrier_scope_revision: None,
+
                 id: "profile-owner-timezone".to_string(),
                 kind: LongTermMemoryKind::Profile,
                 privacy: MemoryPrivacyClass::SharedWithSubject,

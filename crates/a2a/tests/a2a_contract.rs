@@ -35,6 +35,8 @@ fn bridge_messages_are_memory_report_or_request_only() {
             "memory_long_term_list_request",
             "memory_long_term_detail_request",
             "memory_long_term_mutation_request",
+            "memory_long_term_policy_list_request",
+            "memory_long_term_policy_detail_request",
             "memory_long_term_policy_request",
             "memory_transcript_attr_write_request",
             "memory_report",
@@ -53,6 +55,8 @@ fn bridge_messages_are_memory_report_or_request_only() {
     assert!(operations.contains(&AdapterOperation::LongTermDetail));
     assert!(operations.contains(&AdapterOperation::LongTermMutate));
     assert!(operations.contains(&AdapterOperation::LongTermPolicy));
+    assert!(operations.contains(&AdapterOperation::LongTermPolicyList));
+    assert!(operations.contains(&AdapterOperation::LongTermPolicyDetail));
     assert!(operations.contains(&AdapterOperation::TranscriptAttrWrite));
 }
 

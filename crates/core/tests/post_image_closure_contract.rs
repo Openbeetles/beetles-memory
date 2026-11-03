@@ -43,6 +43,9 @@ fn build_long_term_memory_facet_index_doc(
 
 fn owner_entry(id: &str, owner_revision: u64) -> LongTermMemoryEntry {
     LongTermMemoryEntry {
+        transcript_sources: Vec::new(),
+        control_barrier_scope_revision: None,
+
         id: id.to_string(),
         kind: LongTermMemoryKind::Project,
         topic: "agent-memory/p7/post-image".to_string(),

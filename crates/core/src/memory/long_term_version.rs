@@ -19,15 +19,15 @@ use super::{
     MemorySubjectVisibilityPolicy, MemoryUpdateLineageReport, LONG_TERM_CONTROL_REVISION_NAMESPACE,
 };
 
-pub const LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION: u32 = 5;
-const LONG_TERM_VERSION_MATERIAL_KEY_DOMAIN: &str = "long_term_version_material_key_v5";
-const LONG_TERM_VERSION_HEAD_KEY_DOMAIN: &str = "long_term_version_head_key_v5";
-const LONG_TERM_VERSION_SCOPE_MANIFEST_KEY_DOMAIN: &str = "long_term_version_scope_manifest_key_v5";
-const LONG_TERM_VERSION_CONTENT_DIGEST_DOMAIN: &str = "long_term_version_content_digest_v5";
+pub const LONG_TERM_MEMORY_VERSION_SCHEMA_VERSION: u32 = 6;
+const LONG_TERM_VERSION_MATERIAL_KEY_DOMAIN: &str = "long_term_version_material_key_v6";
+const LONG_TERM_VERSION_HEAD_KEY_DOMAIN: &str = "long_term_version_head_key_v6";
+const LONG_TERM_VERSION_SCOPE_MANIFEST_KEY_DOMAIN: &str = "long_term_version_scope_manifest_key_v6";
+const LONG_TERM_VERSION_CONTENT_DIGEST_DOMAIN: &str = "long_term_version_content_digest_v6";
 const LONG_TERM_VERSION_HEAD_CONTENT_DIGEST_DOMAIN: &str =
-    "long_term_version_head_content_digest_v5";
+    "long_term_version_head_content_digest_v6";
 const LONG_TERM_VERSION_SCOPE_CLOSURE_DIGEST_DOMAIN: &str =
-    "long_term_version_scope_closure_digest_v5";
+    "long_term_version_scope_closure_digest_v6";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -157,6 +157,8 @@ impl LongTermVersionRetentionLease {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LongTermMemoryGovernedContent {
+    pub transcript_sources: Vec<super::TranscriptEvidenceRef>,
+    pub control_barrier_scope_revision: Option<u64>,
     pub kind: LongTermMemoryKind,
     pub topic: String,
     pub content: String,
@@ -262,6 +264,8 @@ impl LongTermMemoryVersionMaterial {
             owner_ref,
             owner_revision: entry.owner_revision,
             governed_content: LongTermMemoryGovernedContent {
+                transcript_sources: entry.transcript_sources.clone(),
+                control_barrier_scope_revision: entry.control_barrier_scope_revision,
                 kind: entry.kind.clone(),
                 topic: entry.topic.clone(),
                 content: entry.content.clone(),
@@ -313,6 +317,9 @@ impl LongTermMemoryVersionMaterial {
             ));
         }
         Ok(LongTermMemoryEntry {
+            transcript_sources: self.governed_content.transcript_sources.clone(),
+            control_barrier_scope_revision: self.governed_content.control_barrier_scope_revision,
+
             id: self.owner_ref.owner_id.clone(),
             kind: self.governed_content.kind.clone(),
             topic: self.governed_content.topic.clone(),
@@ -401,6 +408,49 @@ impl LongTermMemoryVersionMaterial {
         }
         failures.extend(self.origin.validate_for(&revision_ref).failures);
         if self.subject_visibility.validate_canonical().is_err() {
+            failures.push(GovernedContractFailure::ContentDigestMismatch);
+        }
+        let sources = &self.governed_content.transcript_sources;
+        let citations = self
+            .governed_content
+            .supporting_citations
+            .iter()
+            .map(String::as_str)
+            .chain(
+                self.governed_content
+                    .canonical_entities
+                    .iter()
+                    .flat_map(|entity| {
+                        entity
+                            .evidence_refs
+                            .iter()
+                            .map(|evidence| evidence.source_ref.as_str())
+                    }),
+            )
+            .filter(|citation| citation.starts_with("transcript:"))
+            .collect::<BTreeSet<_>>();
+        if self.governed_content.control_barrier_scope_revision == Some(0)
+            || sources.iter().any(|source| {
+                source.memory_space_id != self.memory_space_id
+                    || source
+                        .subject_id
+                        .as_deref()
+                        .is_none_or(|id| id.is_empty() || id.trim() != id)
+                    || !citations.contains(source.display_citation().as_str())
+                    || super::TranscriptEvidenceRef::parse_display_citation(
+                        &source.display_citation(),
+                    )
+                    .is_none()
+            })
+            || citations.iter().any(|citation| {
+                !sources
+                    .iter()
+                    .any(|source| source.display_citation() == *citation)
+            })
+            || sources
+                .windows(2)
+                .any(|pair| pair[0].display_citation() >= pair[1].display_citation())
+        {
             failures.push(GovernedContractFailure::ContentDigestMismatch);
         }
         let evidence_refs = self
