@@ -7253,66 +7253,89 @@ impl MemoryRuntime {
             .clone()
     }
 
-    fn long_term_inspection_snapshot(
+    fn long_term_inspection_owner(
         &self,
+        context: &mut crate::store_internal::recall_read::RecallImmutableReadContext<'_>,
+        owner: &GovernedMemoryOwnerRef,
+        max_retained_revisions_per_owner: usize,
+    ) -> Result<Option<LongTermMemoryEntry>> {
+        let space = &self.config.memory_space_id;
+        if context
+            .materialize_long_term_owner_closure(
+                space,
+                space,
+                owner,
+                max_retained_revisions_per_owner,
+                1,
+            )?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let key = scoped_memory_facet_owner_storage_key(space, space, owner)
+            .map_err(|error| Error::config("long_term_control.inspect", error.to_string()))?;
+        context.read_json_value(MEMORY_FACET_INDEX_NAMESPACE, &key)?;
+        let view = context.take_materialized_view();
+        let entries = LongTermMemoryReadStore::list(&view, usize::MAX)?;
+        if entries.len() > 1 {
+            return Err(Error::config(
+                "long_term_control.inspect",
+                "exact owner inspection produced multiple records",
+            ));
+        }
+        let Some(entry) = entries.into_iter().next() else {
+            return Ok(None);
+        };
+        if !entry.privacy.projection_content_allowed()
+            || self.subject_visibility_decision_for_subject(
+                &entry.subject_visibility,
+                &self.config.scoped_runtime.mounted_subject_id,
+            )? != MemorySubjectVisibilityDecision::Allowed
+        {
+            return Ok(None);
+        }
+        if view
+            .json::<MemoryFacetIndexDoc>(MEMORY_FACET_INDEX_NAMESPACE, &key)?
+            .as_ref()
+            .is_some_and(|facet| self.long_term_entry_matches_governed_facet(&entry, facet))
+        {
+            Ok(Some(entry))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn long_term_inspection_detail(
+        &self,
+        record_id: Option<&str>,
     ) -> Result<long_term_sources::LongTermInspectionSnapshot> {
         if RuntimeBudgetLease::active_report(&self.config.runtime_budget_authority).is_none() {
             let lease = self.acquire_runtime_budget_lease()?;
             return self.execute_with_runtime_budget_lease(&lease, || {
-                self.long_term_inspection_snapshot()
+                self.long_term_inspection_detail(record_id)
             });
         }
         let platform = self.store_platform_for_memory_space("long_term_control.inspect")?;
         let budget = self.runtime_budget();
-        let limits = &budget.governed_state_budget;
-        let space = &self.config.memory_space_id;
         let snapshot = platform.with_recall_immutable_read_session(&budget, |context| {
-            context.materialize_long_term_historical_scope(
-                space,
-                space,
-                limits.max_retained_long_term_revisions_per_owner,
-                limits.max_validity_joins,
-                limits.max_as_of_candidates,
-            )?;
-            let root_key = long_term_version_scope_manifest_key(space, space)?;
-            if let Some(root) = context.read_json::<LongTermMemoryVersionScopeManifest>(
-                crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
-                &root_key,
-            )? {
-                for head in root.head_bindings {
-                    let key = scoped_memory_facet_owner_storage_key(space, space, &head.owner_ref)
-                        .map_err(|error| {
-                            Error::config("long_term_control.inspect", error.to_string())
-                        })?;
-                    context.read_json_value(MEMORY_FACET_INDEX_NAMESPACE, &key)?;
-                }
-            }
-            let view = context.take_materialized_view();
-            let mut entries = Vec::new();
-            for entry in LongTermMemoryReadStore::list(&view, usize::MAX)? {
-                if !entry.privacy.projection_content_allowed()
-                    || self.subject_visibility_decision_for_subject(
-                        &entry.subject_visibility,
-                        &self.config.scoped_runtime.mounted_subject_id,
-                    )? != MemorySubjectVisibilityDecision::Allowed
-                {
-                    continue;
-                }
-                let owner = GovernedMemoryOwnerRef::new(
-                    GovernedMemoryOwnerPlane::LongTerm,
-                    entry.id.clone(),
-                );
-                let key = scoped_memory_facet_owner_storage_key(space, space, &owner).map_err(
-                    |error| Error::config("long_term_control.inspect", error.to_string()),
-                )?;
-                if view
-                    .json::<MemoryFacetIndexDoc>(MEMORY_FACET_INDEX_NAMESPACE, &key)?
-                    .as_ref()
-                    .is_some_and(|facet| self.long_term_entry_matches_governed_facet(&entry, facet))
-                {
-                    entries.push(entry);
-                }
-            }
+            let entries = record_id
+                .map(|id| {
+                    let owner = GovernedMemoryOwnerRef::new(
+                        GovernedMemoryOwnerPlane::LongTerm,
+                        id.to_string(),
+                    );
+                    self.long_term_inspection_owner(
+                        context,
+                        &owner,
+                        budget
+                            .governed_state_budget
+                            .max_retained_long_term_revisions_per_owner,
+                    )
+                })
+                .transpose()?
+                .flatten()
+                .into_iter()
+                .collect();
             Ok(long_term_sources::LongTermInspectionSnapshot {
                 entries,
                 operation_time: self.config.clock.now_secs(),
@@ -7329,17 +7352,104 @@ impl MemoryRuntime {
             "long_term_control.inspect",
             self.capabilities.long_term_control_inspect,
         )?;
-        let governed_store = self.long_term_inspection_snapshot()?;
-        let control_store = self.config.long_term_memory_control_store.clone();
-        bm_core::memory::list_long_term_memory_control_page(
-            &governed_store,
-            control_store.as_ref(),
-            CoreLongTermMemoryControlListRequest {
-                query: request.query,
-                cursor: request.cursor,
-                limit: request.limit,
-                view: request.view,
-            },
+        if RuntimeBudgetLease::active_report(&self.config.runtime_budget_authority).is_none() {
+            let lease = self.acquire_runtime_budget_lease()?;
+            return self
+                .execute_with_runtime_budget_lease(&lease, || self.list_long_term_memory(request));
+        }
+        let platform = self.store_platform_for_memory_space("long_term_control.inspect")?;
+        let budget = self.runtime_budget();
+        let space = &self.config.memory_space_id;
+        let retention = budget
+            .governed_state_budget
+            .max_retained_long_term_revisions_per_owner;
+        let core_request = CoreLongTermMemoryControlListRequest {
+            query: request.query,
+            cursor: request.cursor,
+            limit: request.limit,
+            view: request.view,
+        };
+        let operation_time = self.config.clock.now_secs();
+        let catalog =
+            platform.with_long_term_catalog_immutable_read_session(&budget, |context| {
+                let Some(root) = context.pin_long_term_catalog_scope_root(space)? else {
+                    return Ok((
+                        bm_core::memory::plan_long_term_memory_control_page(
+                            Vec::new(),
+                            &core_request,
+                        )?,
+                        Vec::new(),
+                    ));
+                };
+                context.checkpoint_catalog_batch()?;
+                let mut rows = Vec::new();
+                for binding in &root.head_bindings {
+                    if let Some(entry) =
+                        self.long_term_inspection_owner(context, &binding.owner_ref, retention)?
+                    {
+                        let tombstone_key = scoped_long_term_control_storage_key(
+                            space,
+                            LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE,
+                            &entry.id,
+                        )?;
+                        if context
+                            .read_json_value(LONG_TERM_CONTROL_TOMBSTONE_NAMESPACE, &tombstone_key)?
+                            .is_none()
+                        {
+                            if let Some(row) =
+                                bm_core::memory::LongTermControlCatalogRow::from_entry(
+                                    &entry,
+                                    &core_request.query,
+                                    operation_time,
+                                )?
+                            {
+                                rows.push(row);
+                            }
+                        }
+                    }
+                    context.checkpoint_catalog_batch()?;
+                }
+                let exact_rows = rows
+                    .iter()
+                    .cloned()
+                    .map(|row| (row.id.clone(), row))
+                    .collect::<BTreeMap<_, _>>();
+                let plan =
+                    bm_core::memory::plan_long_term_memory_control_page(rows, &core_request)?;
+                let mut page = Vec::with_capacity(plan.record_ids.len());
+                for id in &plan.record_ids {
+                    let owner =
+                        GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, id.clone());
+                    let entry = self
+                        .long_term_inspection_owner(context, &owner, retention)?
+                        .ok_or_else(|| {
+                            Error::config(
+                                "long_term_control.inspect",
+                                "planned catalog owner vanished inside pinned read session",
+                            )
+                        })?;
+                    if bm_core::memory::LongTermControlCatalogRow::from_entry(
+                        &entry,
+                        &core_request.query,
+                        operation_time,
+                    )?
+                    .as_ref()
+                        != exact_rows.get(id)
+                    {
+                        return Err(Error::config(
+                            "long_term_control.inspect",
+                            "planned catalog owner differs within pinned read session",
+                        ));
+                    }
+                    page.push(entry);
+                    context.checkpoint_catalog_batch()?;
+                }
+                Ok((plan, page))
+            })?;
+        bm_core::memory::finish_long_term_memory_control_page(
+            core_request.view,
+            catalog.output.0,
+            catalog.output.1,
         )
     }
 
@@ -7351,7 +7461,8 @@ impl MemoryRuntime {
             "long_term_control.inspect",
             self.capabilities.long_term_control_inspect,
         )?;
-        let governed_store = self.long_term_inspection_snapshot()?;
+        let governed_store =
+            self.long_term_inspection_detail(request.target.exact_record_id().as_deref())?;
         let control_store = self.config.long_term_memory_control_store.clone();
         let mut report = bm_core::memory::get_long_term_memory_control_detail(
             &governed_store,

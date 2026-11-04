@@ -1980,7 +1980,7 @@ fn render_age_hint(entry: &LongTermMemoryEntry, now_secs: u64) -> Option<String>
     Some(value)
 }
 
-fn entry_observed_at(entry: &LongTermMemoryEntry) -> u64 {
+pub(crate) fn entry_observed_at(entry: &LongTermMemoryEntry) -> u64 {
     entry
         .last_confirmed_at
         .unwrap_or(0)
@@ -2080,7 +2080,7 @@ pub fn long_term_memory_evidence_summary(
     }
 }
 
-fn confidence_rank(confidence: LongTermMemoryConfidence) -> u8 {
+pub(crate) fn confidence_rank(confidence: LongTermMemoryConfidence) -> u8 {
     match confidence {
         LongTermMemoryConfidence::Low => 0,
         LongTermMemoryConfidence::Medium => 1,
@@ -2143,7 +2143,10 @@ pub(crate) fn compare_long_term_memory_query_results(
         .then_with(|| left.id.cmp(&right.id))
 }
 
-fn query_exactness_priority(entry: &LongTermMemoryEntry, query: &LongTermMemoryQuery) -> u8 {
+pub(crate) fn query_exactness_priority(
+    entry: &LongTermMemoryEntry,
+    query: &LongTermMemoryQuery,
+) -> u8 {
     let mut score = 0u8;
     if query
         .topic

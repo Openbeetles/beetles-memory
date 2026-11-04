@@ -2,9 +2,9 @@
 
 SDK API 是主要入口。宿主项目应通过 `bm-sdk` 进入，或通过 `bm-entry` 加协议 adapter 进入；不应自行实现记忆 schema、store envelope、replay 格式或 adapter dispatch 规则。
 
-## 0.11.0：长期记忆控制完整性
+## 0.11.1：长期记忆控制完整性
 
-0.11.0 使用 Store v16；0.10.0 使用 Store v15，0.9.0 使用 Store v14。没有兼容读取或自动迁移，所有 Beetle crate 必须来自同一源码 tag。
+0.11.1 使用 Store v16；0.10.0 使用 Store v15，0.9.0 使用 Store v14。没有兼容读取或自动迁移，所有 Beetle crate 必须来自同一源码 tag。
 
 长期记忆分页、持久规则查询/解除、事实撤源和纠正屏障见 [Runtime 操作](#runtime-操作)。0.10.0 引入的生产学习与时间合同继续可用：
 
@@ -20,7 +20,7 @@ SDK API 是主要入口。宿主项目应通过 `bm-sdk` 进入，或通过 `bm-
 `LLMRuntimeProjectionEnvelope.expression_guidance` 承载仅供模型运行时消费的 `SubjectExpressionDiscipline`。
 `runtime_constraints` 现为 `Vec<RuntimeProjectionSourceBlock>`，保留内容来源和保护标记。
 显式构造 envelope、Core `InhabitedSubjectProjection` 或 `SubjectSoulRelationshipRuntimeViewV1` 的调用方
-必须补齐新字段；后者运行时 view 的序列化形状也改变。0.9.0 当时保留 Store v14；0.11.0 要求 Store v16。
+必须补齐新字段；后者运行时 view 的序列化形状也改变。0.9.0 当时保留 Store v14；0.11.1 要求 Store v16。
 模型使用 `projection.provider_payload().system_memory_block()`；UI/operator/Gateway 展示与诊断使用
 `projection.report()` 的对应安全方法，不记录 raw envelope、不重建第二份 renderer。
 见 [0.9.0 API 变更与 Store 边界](release-notes-0.9.0.md)。
@@ -42,7 +42,7 @@ SDK API 是主要入口。宿主项目应通过 `bm-sdk` 进入，或通过 `bm-
 
 ## Runtime 操作
 
-0.11.0 长期记忆控制合同使用 Store v16、long-term material v6 和 control revision v4；历史 v0.10.0 的 Store v15 合同不变。旧 Store 必须显式处置，本轮没有提供隐式迁移或缺字段宽松读取。
+0.11.1 长期记忆控制合同使用 Store v16、long-term material v6 和 control revision v4；历史 v0.10.0 的 Store v15 合同不变。旧 Store 必须显式处置，本轮没有提供隐式迁移或缺字段宽松读取。
 
 长期记忆列表在主体可见性过滤后分页。续页 cursor 绑定查询、主体和快照，失效时需重新查询；它不是授权凭据。禁记规则通过 `list_memory_governance_policies(MemoryLongTermPolicyListRequest)` 和 `get_memory_governance_policy(MemoryLongTermPolicyDetailRequest)` 查询，原事实删除不影响规则管理。规则只约束同一 MemorySpace 中当前 mounted subject 的未来长期事实写入；共同 HumanUser actor 不会把某个 Agent 的规则扩散给其他 Agent，也不会让已有事实隐身。
 
@@ -95,7 +95,7 @@ Status read 与 recovery control 必须携带 SDK 铸造的 opaque capability。
 
 ## 程序性证据声明权
 
-0.11.0 源码使用 `PostTurnLearningInputV3`；已发布 0.9.0 的 `PostTurnLearningInputV2` 是历史合同，不保留别名或兼容路径。普通回合使用 `PostTurnLearningInputV3::empty()` 或 `with_tool_call_count(n)`，通过 `finalize_turn` 提交；不要求注册 producer，空反馈不创建 procedural job。Selection receipt 证明的是精确投影，不是执行事实声明权。
+0.11.1 源码使用 `PostTurnLearningInputV3`；已发布 0.9.0 的 `PostTurnLearningInputV2` 是历史合同，不保留别名或兼容路径。普通回合使用 `PostTurnLearningInputV3::empty()` 或 `with_tool_call_count(n)`，通过 `finalize_turn` 提交；不要求注册 producer，空反馈不创建 procedural job。Selection receipt 证明的是精确投影，不是执行事实声明权。
 
 有反馈时，受信初始化代码使用同 Store、SubjectRegistry、MemorySpace 和 mounted scope 的 active governing `SystemGovernor` runtime：
 
@@ -119,7 +119,7 @@ Producer 收窄／撤权及受治理来源撤回，会立即阻断受影响的 c
 
 ## Subject Soul Provisioning
 
-`bm-sdk` 0.11.0 提供宿主无关的 Subject Soul 建档与生命周期公共合同。宿主只能提交 typed intent；Soul revision、generation、material、manifest、ledger、审计、事件和 durable operation receipt 由 Core、SDK 与 Store 在同一事务中拥有。Adapter、HTTP、MCP、Console 或宿主数据库不得维护第二套 Soul 状态，也不得先写默认人格再覆盖。
+`bm-sdk` 0.11.1 提供宿主无关的 Subject Soul 建档与生命周期公共合同。宿主只能提交 typed intent；Soul revision、generation、material、manifest、ledger、审计、事件和 durable operation receipt 由 Core、SDK 与 Store 在同一事务中拥有。Adapter、HTTP、MCP、Console 或宿主数据库不得维护第二套 Soul 状态，也不得先写默认人格再覆盖。
 
 | 操作 | SDK surface | 合同 |
 | --- | --- | --- |
@@ -168,11 +168,11 @@ CTQ1 query surface 统一使用 Store-owned `TranscriptQueryCursor`。调用方�
 
 `HostUi` 只是 **host-presentable redacted disclosure view**。它不是聊天窗口 API、分页方向、宿主产品名、transcript index owner 或 authorization token。Catalog、timeline、search、activity 只返回 Runtime hydration 后仍能通过请求 view 脱敏规则的结果。Search hit 携带受治理的 Unicode-safe excerpt 和 durable `TranscriptAnchor`；宿主应把 anchor 交给 `TranscriptTimelineAnchor::Around`，不得在 UI 内扫描或二次匹配 transcript 正文。
 
-0.11.0 只接受 Store v16；0.9.0 使用 Store v14，0.7.0 使用 Store v13。不提供 public Store migration API、compatibility reader、双写或 automatic migration。旧代、partial 与 foreign schema payload 都会 fail closed。旧代开发数据只能由其 owner 明确删除并重建；archive export/import 不是 schema migration。
+0.11.1 只接受 Store v16；0.9.0 使用 Store v14，0.7.0 使用 Store v13。不提供 public Store migration API、compatibility reader、双写或 automatic migration。旧代、partial 与 foreign schema payload 都会 fail closed。旧代开发数据只能由其 owner 明确删除并重建；archive export/import 不是 schema migration。
 
 Timeline 支持 latest、before、after、around-anchor、around-sequence、around-time 与 first-visible-in-range；页内 turn 始终按 sequence 正序，report 可返回 opaque older/newer cursor。日历换算归宿主：按用户 IANA timezone 把本地日期转换为 canonical UTC `[start_inclusive, end_exclusive)` 后再调用 Memory。不得假设每天都是 86400 秒，DST 当天可以是 23 或 25 小时；Transcript 查询消费显式 UTC 区间，不持久保存日历时区；模型上下文的本地时间 provider 是独立展示输入。
 
-0.11.0 源码保留 CTQ1 public query shape 与 capability snapshot v5。Store v16 增加事实来源入场／屏障及原子撤源闭包，并保留方法／任务 provenance 与 Soul 来源复审保证，不新增第二套 Transcript 查询模型。本地自动化合同不能充当真实数据、Provider、GUI/UAT、crates.io 或托管 Release 证据。
+0.11.1 源码保留 CTQ1 public query shape 与 capability snapshot v5。Store v16 增加事实来源入场／屏障及原子撤源闭包，并保留方法／任务 provenance 与 Soul 来源复审保证，不新增第二套 Transcript 查询模型。本地自动化合同不能充当真实数据、Provider、GUI/UAT、crates.io 或托管 Release 证据。
 
 Transcript attrs 是 Memory-owned transcript metadata，不是宿主业务对象库。每条 attr 都必须有 `TranscriptAttrTarget`、命名空间化 key、`TranscriptAttrValueKind`、JSON value、`HostRefVisibility`、`TranscriptAttrSource`、`TranscriptAttrGovernance` 和可选 `TranscriptAttrLink`。`HostUi` replay 只返回 HostUi-visible attrs，`ModelContext` 只返回 model-context attrs，`OperatorAudit` 返回审计可见 attrs，`Export` 只返回 export-visible 且 `export_allowed=true` 的 attrs；`RawOwnerOnly` 仍是内部视图。Repair report 会把 target turn/message 缺失、attr source key 不匹配、非法 key、超限 value、corrupt attr record 作为 fail-closed issue。`DeleteRaw` 默认隐藏 attrs；`OperatorAuditOnlyAfterMask` 最多保留脱敏后的审计 metadata，raw deletion 后绝不返回原始 attr value。
 

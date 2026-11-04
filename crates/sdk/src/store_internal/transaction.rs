@@ -694,6 +694,20 @@ pub trait StoreImmutableReadSession {
         addresses: &[(String, String)],
     ) -> Result<Vec<StoreBoundedKnownBlobRead>>;
     fn receipt(&self) -> Result<StoreReadReceipt>;
+
+    fn begin_catalog_scan(&mut self) -> Result<()> {
+        Err(Error::config(
+            "store_catalog_read_session",
+            "backend does not support a pinned catalog scan",
+        ))
+    }
+
+    fn checkpoint_catalog_batch(&mut self) -> Result<StoreReadReceipt> {
+        Err(Error::config(
+            "store_catalog_read_session",
+            "backend does not support catalog batch checkpoints",
+        ))
+    }
 }
 
 pub(crate) struct StoreReadSessionState {
@@ -705,6 +719,9 @@ pub(crate) struct StoreReadSessionState {
     seen_blobs: BTreeSet<(String, String)>,
     json_bytes: usize,
     blob_bytes: usize,
+    catalog_digest: Option<Sha256>,
+    catalog_receipt: StoreReadReceipt,
+    catalog_checkpoints: usize,
 }
 
 impl StoreReadSessionState {
@@ -718,7 +735,111 @@ impl StoreReadSessionState {
             seen_blobs: BTreeSet::new(),
             json_bytes: 0,
             blob_bytes: 0,
+            catalog_digest: None,
+            catalog_receipt: StoreReadReceipt::default(),
+            catalog_checkpoints: 0,
         }
+    }
+
+    pub(crate) fn begin_catalog_scan(&mut self) -> Result<()> {
+        if self.poisoned
+            || self.catalog_digest.is_some()
+            || !self.json_reads.is_empty()
+            || !self.blob_reads.is_empty()
+        {
+            return Err(Error::config(
+                "store_catalog_read_session",
+                "catalog mode must begin before the first read",
+            ));
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(b"beetle_memory_immutable_catalog_read_session_v1");
+        self.catalog_digest = Some(hasher);
+        Ok(())
+    }
+
+    pub(crate) fn checkpoint_catalog_batch(&mut self) -> Result<StoreReadReceipt> {
+        if self.poisoned || self.catalog_digest.is_none() {
+            return Err(Error::config(
+                "store_catalog_read_session",
+                "catalog checkpoint requires an active healthy catalog session",
+            ));
+        }
+        let batch = match immutable_read_session_receipt(
+            &self.json_reads,
+            &self.blob_reads,
+            self.json_bytes,
+            self.blob_bytes,
+        ) {
+            Ok(batch) => batch,
+            Err(error) => return self.fail(error),
+        };
+        if batch.entry_count == 0 {
+            return Ok(batch);
+        }
+        if self.catalog_checkpoints >= self.capacity.kv_max_entries {
+            return self.fail(Error::config(
+                "store_consistent_read_budget_exceeded",
+                "catalog batch count exceeds the Store entry ceiling",
+            ));
+        }
+        let next = (|| -> Result<(StoreReadReceipt, usize)> {
+            let add = |left: usize, right: usize, field: &'static str| {
+                left.checked_add(right)
+                    .ok_or_else(|| Error::config("store_catalog_read_session", field))
+            };
+            Ok((
+                StoreReadReceipt {
+                    state_digest: String::new(),
+                    json_doc_count: add(
+                        self.catalog_receipt.json_doc_count,
+                        batch.json_doc_count,
+                        "JSON count overflow",
+                    )?,
+                    blob_count: add(
+                        self.catalog_receipt.blob_count,
+                        batch.blob_count,
+                        "blob count overflow",
+                    )?,
+                    event_count: 0,
+                    entry_count: add(
+                        self.catalog_receipt.entry_count,
+                        batch.entry_count,
+                        "entry count overflow",
+                    )?,
+                    json_bytes: add(
+                        self.catalog_receipt.json_bytes,
+                        batch.json_bytes,
+                        "JSON byte count overflow",
+                    )?,
+                    blob_bytes: add(
+                        self.catalog_receipt.blob_bytes,
+                        batch.blob_bytes,
+                        "blob byte count overflow",
+                    )?,
+                },
+                add(
+                    self.catalog_checkpoints,
+                    1,
+                    "catalog checkpoint count overflow",
+                )?,
+            ))
+        })();
+        let (next_receipt, next_checkpoints) = match next {
+            Ok(next) => next,
+            Err(error) => return self.fail(error),
+        };
+        let digest = self.catalog_digest.as_mut().expect("catalog mode checked");
+        update_read_digest(digest, batch.state_digest.as_bytes());
+        self.catalog_receipt = next_receipt;
+        self.catalog_checkpoints = next_checkpoints;
+        self.json_reads.clear();
+        self.blob_reads.clear();
+        self.seen_json.clear();
+        self.seen_blobs.clear();
+        self.json_bytes = 0;
+        self.blob_bytes = 0;
+        Ok(batch)
     }
 
     pub(crate) fn record_json(
@@ -831,6 +952,57 @@ impl StoreReadSessionState {
         if self.poisoned {
             return Err(immutable_read_session_poisoned_error());
         }
+        if let Some(digest) = &self.catalog_digest {
+            let current = immutable_read_session_receipt(
+                &self.json_reads,
+                &self.blob_reads,
+                self.json_bytes,
+                self.blob_bytes,
+            )?;
+            let mut digest = digest.clone();
+            if current.entry_count != 0 {
+                update_read_digest(&mut digest, current.state_digest.as_bytes());
+            }
+            return Ok(StoreReadReceipt {
+                state_digest: format!("{:x}", digest.finalize()),
+                json_doc_count: self
+                    .catalog_receipt
+                    .json_doc_count
+                    .checked_add(current.json_doc_count)
+                    .ok_or_else(|| {
+                        Error::config("store_catalog_read_session", "JSON count overflow")
+                    })?,
+                blob_count: self
+                    .catalog_receipt
+                    .blob_count
+                    .checked_add(current.blob_count)
+                    .ok_or_else(|| {
+                        Error::config("store_catalog_read_session", "blob count overflow")
+                    })?,
+                event_count: 0,
+                entry_count: self
+                    .catalog_receipt
+                    .entry_count
+                    .checked_add(current.entry_count)
+                    .ok_or_else(|| {
+                        Error::config("store_catalog_read_session", "entry count overflow")
+                    })?,
+                json_bytes: self
+                    .catalog_receipt
+                    .json_bytes
+                    .checked_add(current.json_bytes)
+                    .ok_or_else(|| {
+                        Error::config("store_catalog_read_session", "JSON byte count overflow")
+                    })?,
+                blob_bytes: self
+                    .catalog_receipt
+                    .blob_bytes
+                    .checked_add(current.blob_bytes)
+                    .ok_or_else(|| {
+                        Error::config("store_catalog_read_session", "blob byte count overflow")
+                    })?,
+            });
+        }
         immutable_read_session_receipt(
             &self.json_reads,
             &self.blob_reads,
@@ -865,8 +1037,14 @@ impl StoreReadSessionState {
         let entries = self
             .seen_json
             .len()
-            .saturating_add(self.seen_blobs.len())
-            .saturating_add(1);
+            .checked_add(self.seen_blobs.len())
+            .and_then(|count| count.checked_add(1))
+            .ok_or_else(|| {
+                Error::config(
+                    "store_consistent_read_budget_exceeded",
+                    "immutable read entry count overflow",
+                )
+            })?;
         if entries > self.capacity.kv_max_entries {
             return Err(Error::config(
                 "store_consistent_read_budget_exceeded",
@@ -4550,19 +4728,33 @@ fn known_key_read_receipt(
         json_doc_count: json.iter().filter(|read| read.value.is_some()).count(),
         blob_count: blobs.iter().filter(|read| read.value.is_some()).count(),
         event_count: events.len(),
-        entry_count: json.len().saturating_add(blobs.len()),
+        entry_count: json.len().checked_add(blobs.len()).ok_or_else(|| {
+            Error::config("store_consistent_read", "read receipt entry count overflow")
+        })?,
         json_bytes: json
             .iter()
             .filter_map(|read| read.value.as_ref())
-            .map(serialized_json_len)
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .sum(),
+            .try_fold(0usize, |total, value| {
+                total
+                    .checked_add(serialized_json_len(value)?)
+                    .ok_or_else(|| {
+                        Error::config(
+                            "store_consistent_read",
+                            "read receipt JSON byte count overflow",
+                        )
+                    })
+            })?,
         blob_bytes: blobs
             .iter()
             .filter_map(|read| read.value.as_ref())
-            .map(Vec::len)
-            .sum(),
+            .try_fold(0usize, |total, value| {
+                total.checked_add(value.len()).ok_or_else(|| {
+                    Error::config(
+                        "store_consistent_read",
+                        "read receipt blob byte count overflow",
+                    )
+                })
+            })?,
     })
 }
 
@@ -4577,7 +4769,12 @@ fn immutable_read_session_receipt(
     hasher.update(b"beetle_memory_immutable_read_session_v1");
     update_read_digest(&mut hasher, receipt.state_digest.as_bytes());
     receipt.state_digest = format!("{:x}", hasher.finalize());
-    receipt.entry_count = json.len().saturating_add(blobs.len());
+    receipt.entry_count = json.len().checked_add(blobs.len()).ok_or_else(|| {
+        Error::config(
+            "store_immutable_read_session",
+            "read receipt entry count overflow",
+        )
+    })?;
     receipt.json_bytes = json_bytes;
     receipt.blob_bytes = blob_bytes;
     Ok(receipt)
@@ -4982,6 +5179,80 @@ mod tests {
             .expect_err("a failed immutable session cannot attest a partial transcript");
         assert_eq!(
             receipt_error.stage(),
+            "store_immutable_read_session_poisoned"
+        );
+    }
+
+    #[test]
+    fn catalog_checkpoints_keep_one_compact_receipt_across_batches() {
+        let mut read = StoreReadSessionState::new(StoreCapacityBudget::full());
+        read.begin_catalog_scan().unwrap();
+        let first = serde_json::json!({"generation": 1});
+        let second = serde_json::json!({"generation": 2});
+        read.record_json("catalog", "first", Some(first.clone()))
+            .unwrap();
+        let first_batch = read.checkpoint_catalog_batch().unwrap();
+        assert_eq!(first_batch.entry_count, 1);
+        assert!(read.json_reads.is_empty());
+        assert_eq!(read.json_bytes, 0);
+        read.record_json("catalog", "second", Some(second.clone()))
+            .unwrap();
+        let second_batch = read.checkpoint_catalog_batch().unwrap();
+        let receipt = read.receipt().unwrap();
+        assert_eq!(receipt.entry_count, 2);
+        assert_eq!(receipt.json_doc_count, 2);
+        assert_eq!(
+            receipt.json_bytes,
+            first_batch.json_bytes + second_batch.json_bytes
+        );
+        assert_eq!(receipt.blob_count, 0);
+        assert_eq!(read.catalog_checkpoints, 2);
+
+        let mut reversed = StoreReadSessionState::new(StoreCapacityBudget::full());
+        reversed.begin_catalog_scan().unwrap();
+        reversed
+            .record_json("catalog", "second", Some(second))
+            .unwrap();
+        reversed.checkpoint_catalog_batch().unwrap();
+        reversed
+            .record_json("catalog", "first", Some(first))
+            .unwrap();
+        reversed.checkpoint_catalog_batch().unwrap();
+        assert_ne!(
+            receipt.state_digest,
+            reversed.receipt().unwrap().state_digest
+        );
+    }
+
+    #[test]
+    fn catalog_checkpoint_cap_poison_blocks_partial_receipt() {
+        let mut capacity = StoreCapacityBudget::full();
+        capacity.kv_max_entries = 1;
+        let mut read = StoreReadSessionState::new(capacity);
+        read.begin_catalog_scan().unwrap();
+        read.record_json("catalog", "first", None).unwrap();
+        read.checkpoint_catalog_batch().unwrap();
+        read.record_json("catalog", "second", None).unwrap();
+        let error = read.checkpoint_catalog_batch().unwrap_err();
+        assert_eq!(error.stage(), "store_consistent_read_budget_exceeded");
+        assert_eq!(
+            read.receipt().unwrap_err().stage(),
+            "store_immutable_read_session_poisoned"
+        );
+    }
+
+    #[test]
+    fn catalog_checkpoint_overflow_never_commits_partial_counters() {
+        let mut read = StoreReadSessionState::new(StoreCapacityBudget::full());
+        read.begin_catalog_scan().unwrap();
+        read.catalog_receipt.blob_bytes = usize::MAX;
+        let before = read.catalog_receipt.clone();
+        read.record_blob("catalog", "blob", Some(vec![1])).unwrap();
+        let error = read.checkpoint_catalog_batch().unwrap_err();
+        assert_eq!(error.stage(), "store_catalog_read_session");
+        assert_eq!(read.catalog_receipt, before);
+        assert_eq!(
+            read.receipt().unwrap_err().stage(),
             "store_immutable_read_session_poisoned"
         );
     }

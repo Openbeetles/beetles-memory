@@ -112,6 +112,10 @@ bm-a2a
 - Adapter crates 保持 memory write、recall、projection 和 store 语义由 `MemoryRuntime` 承担。
 - Standalone deployment 覆盖 memory runtime 入口。产品专属表面和部署基础设施由宿主部署提供。
 
-## 0.11.0 候选范围
+## 0.11.1 候选范围
+
+0.11.1 仅修复长期记忆目录/详情在较大记录数下的读取容量与分页问题，不改变 Store v16、material v6、control revision v4、Adapter V2 或公共 API。按生产 macOS profile 的 43 条记录分页、三种 Store 的相关定向合同、格式、静态和文档/版本一致性验收；源码 tag 不以 Windows/Linux/ESP 全量矩阵或 13 包 publish dry-run 为前置条件。
+
+## 0.11.0 候选范围（历史）
 
 验收主体过滤后的长期记忆分页、持久规则查询与精确解除/幂等、Transcript 事实证据原子撤回，以及对旧排队/执行中学习任务的来源入场屏障。要求 Store v16 / material v6 / control revision v4。复用 LCI1 的 InMemory/File/SQLite 重开、current/as-of/delivery 隐私、CAS/budget/closure 证据，并重跑本轮受影响合同；核对 macOS 桌面合同、版本、公开文档与源码清单。Windows/Linux/ESP 对接与 13 包 dry-run 留到对应平台或 crates.io 发布进入范围时。第三方 lock records 与旧 tag 不变，不提供兼容 reader 或 automatic migration。完整多方法对照实验、真实 Provider 质量和 GUI/UAT 属于独立证据平面。

@@ -1003,6 +1003,23 @@ impl StorePlatform {
         runtime_budget: &RuntimeBudgetReport,
         read: impl FnOnce(&mut RecallImmutableReadContext<'_>) -> Result<T>,
     ) -> Result<RecallImmutableReadSessionOutcome<T>> {
+        self.with_immutable_read_session(runtime_budget, false, read)
+    }
+
+    pub(crate) fn with_long_term_catalog_immutable_read_session<T>(
+        &self,
+        runtime_budget: &RuntimeBudgetReport,
+        read: impl FnOnce(&mut RecallImmutableReadContext<'_>) -> Result<T>,
+    ) -> Result<RecallImmutableReadSessionOutcome<T>> {
+        self.with_immutable_read_session(runtime_budget, true, read)
+    }
+
+    fn with_immutable_read_session<T>(
+        &self,
+        runtime_budget: &RuntimeBudgetReport,
+        catalog_mode: bool,
+        read: impl FnOnce(&mut RecallImmutableReadContext<'_>) -> Result<T>,
+    ) -> Result<RecallImmutableReadSessionOutcome<T>> {
         let now_secs = current_unix_secs();
         runtime_budget.validate_for_admission(now_secs)?;
         let active_report = crate::RuntimeBudgetLease::active_report(
@@ -1029,10 +1046,14 @@ impl StorePlatform {
                 "immutable session-open count overflow",
             )
         })?;
-        let mut context = RecallImmutableReadContext::new(session)
-            .with_subject_soul_open_closure_certificate(
-                self.subject_soul_open_closure_certificate().clone(),
-            );
+        let context = if catalog_mode {
+            RecallImmutableReadContext::new_catalog(session)?
+        } else {
+            RecallImmutableReadContext::new(session)
+        };
+        let mut context = context.with_subject_soul_open_closure_certificate(
+            self.subject_soul_open_closure_certificate().clone(),
+        );
         let output = read(&mut context)?;
         let mut receipt_count = 0u64;
         let (receipt, read_set) = context.finish()?;

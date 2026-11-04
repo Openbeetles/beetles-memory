@@ -113,6 +113,10 @@ Before uploading crates to crates.io, run staged `cargo publish --dry-run -p <cr
 - Adapter crates keep memory write, recall, projection, and store semantics inside `MemoryRuntime`.
 - Standalone deployment covers memory runtime entry points. Product-specific surfaces and deployment infrastructure are supplied by the host deployment.
 
-## 0.11.0 candidate scope
+## 0.11.1 candidate scope
+
+0.11.1 only fixes long-term catalog/detail read capacity and pagination at larger record counts. Store v16, material v6, control revision v4, Adapter V2, and the public API are unchanged. Validate production macOS pagination with 43 records, related targeted contracts on the three Stores, formatting, static checks, and documentation/version consistency. The source tag does not require the Windows/Linux/ESP full matrix or the 13 crate publish dry-runs.
+
+## 0.11.0 candidate scope (historical)
 
 Verify subject-filtered long-term pagination, durable policy list/detail/exact removal and replay, atomic Transcript evidence withdrawal, and factual admission barriers against stale queued/in-flight learning. Require Store v16 / material v6 / control revision v4. Use the LCI1 InMemory/File/SQLite reopen, current/as-of/delivery privacy, CAS/budget/closure evidence and affected contract reruns; check the macOS desktop contract, versions, public docs and source inventory. Windows/Linux/ESP integration and 13 crate dry-runs are deferred until those surfaces or crates.io publication are in scope. Keep all third-party lock records and old tags unchanged. There is no compatibility reader or automatic migration. Full comparative-learning experiments, real Provider quality and GUI/UAT are separate evidence planes.

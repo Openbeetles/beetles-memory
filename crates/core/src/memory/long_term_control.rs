@@ -179,6 +179,24 @@ pub enum MemoryLongTermTarget {
     Query(MemoryLongTermSelector),
 }
 
+impl MemoryLongTermTarget {
+    pub fn exact_record_id(&self) -> Option<String> {
+        match self {
+            Self::RecordId(id) => Some(id.clone()),
+            Self::Slot(slot) => slot.stable_id(),
+            Self::TranscriptDerivedRef(reference)
+                if matches!(
+                    reference.plane,
+                    DerivedMemoryPlane::LongTerm | DerivedMemoryPlane::SharedFact
+                ) =>
+            {
+                Some(long_term_record_id_from_derived_ref(reference))
+            }
+            Self::TranscriptDerivedRef(_) | Self::Query(_) => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryLongTermMutation {
@@ -318,6 +336,57 @@ pub struct MemoryLongTermListReport {
     pub next_cursor: Option<String>,
     pub total_visible: usize,
     pub view: MemoryLongTermControlView,
+}
+
+/// A compact, query-specific catalog row. Inspection may release the full
+/// governed owner projection after constructing this row.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct LongTermControlCatalogRow {
+    pub id: String,
+    exactness_priority: u8,
+    confidence_rank: u8,
+    observed_at: u64,
+    updated_at: u64,
+    created_at: u64,
+    record_digest: String,
+}
+
+impl LongTermControlCatalogRow {
+    pub fn from_entry(
+        entry: &LongTermMemoryEntry,
+        query: &LongTermMemoryQuery,
+        now_secs: u64,
+    ) -> Result<Option<Self>> {
+        let query = query.normalized();
+        if !super::long_term::long_term_memory_matches_query(entry, &query, now_secs) {
+            return Ok(None);
+        }
+        Self::from_matching_entry(entry, &query).map(Some)
+    }
+
+    fn from_matching_entry(
+        entry: &LongTermMemoryEntry,
+        query: &LongTermMemoryQuery,
+    ) -> Result<Self> {
+        let bytes = serde_json::to_vec(entry)
+            .map_err(|error| Error::config("long_term_control_cursor", error.to_string()))?;
+        Ok(Self {
+            id: entry.id.clone(),
+            exactness_priority: super::long_term::query_exactness_priority(entry, query),
+            confidence_rank: super::long_term::confidence_rank(entry.confidence),
+            observed_at: super::long_term::entry_observed_at(entry),
+            updated_at: entry.updated_at,
+            created_at: entry.created_at,
+            record_digest: format!("{:x}", Sha256::digest(bytes)),
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LongTermControlPagePlan {
+    pub record_ids: Vec<String>,
+    pub next_cursor: Option<String>,
+    pub total_visible: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2393,14 +2462,65 @@ pub fn list_long_term_memory_control_page(
 ) -> Result<MemoryLongTermListReport> {
     let mut records = store.query_all(&request.query)?;
     records.retain(|entry| !is_tombstoned(control_store, &entry.id));
-    let total_visible = records.len();
+    let normalized_query = request.query.normalized();
+    let rows = records
+        .iter()
+        .map(|entry| LongTermControlCatalogRow::from_matching_entry(entry, &normalized_query))
+        .collect::<Result<Vec<_>>>()?;
+    let plan = plan_long_term_memory_control_page(rows, &request)?;
+    let mut by_id = records
+        .into_iter()
+        .map(|record| (record.id.clone(), record))
+        .collect::<BTreeMap<_, _>>();
+    let page = plan
+        .record_ids
+        .iter()
+        .map(|id| {
+            by_id.remove(id).ok_or_else(|| {
+                Error::config(
+                    "long_term_control_cursor",
+                    "planned catalog record is missing",
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    finish_long_term_memory_control_page(request.view, plan, page)
+}
+
+pub fn plan_long_term_memory_control_page(
+    mut rows: Vec<LongTermControlCatalogRow>,
+    request: &LongTermMemoryControlListRequest,
+) -> Result<LongTermControlPagePlan> {
+    rows.sort_by(|left, right| {
+        right
+            .exactness_priority
+            .cmp(&left.exactness_priority)
+            .then_with(|| right.confidence_rank.cmp(&left.confidence_rank))
+            .then_with(|| right.observed_at.cmp(&left.observed_at))
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+            .then_with(|| right.created_at.cmp(&left.created_at))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    if rows
+        .iter()
+        .map(|row| &row.id)
+        .collect::<BTreeSet<_>>()
+        .len()
+        != rows.len()
+    {
+        return Err(Error::config(
+            "long_term_control_cursor",
+            "catalog contains duplicate record ids",
+        ));
+    }
+    let total_visible = rows.len();
     let mut query_identity = request.query.normalized();
     query_identity.limit = 0;
     let snapshot_bytes = serde_json::to_vec(&(
-        "long_term_control_page_v1",
+        "long_term_control_page_v2",
         query_identity,
         request.view,
-        &records,
+        &rows,
     ))
     .map_err(|error| Error::config("long_term_control_cursor", error.to_string()))?;
     let snapshot = format!("{:x}", Sha256::digest(snapshot_bytes));
@@ -2414,8 +2534,7 @@ pub fn list_long_term_memory_control_page(
                 "catalog changed; restart pagination",
             ));
         }
-        records
-            .iter()
+        rows.iter()
             .position(|entry| entry.id == anchor)
             .map(|index| index + 1)
             .ok_or_else(|| {
@@ -2428,23 +2547,50 @@ pub fn list_long_term_memory_control_page(
     let end = start.saturating_add(limit).min(total_visible);
     let next_cursor = if end < total_visible {
         Some(
-            serde_json::to_string(&(snapshot, &records[end - 1].id))
+            serde_json::to_string(&(snapshot, &rows[end - 1].id))
                 .map_err(|error| Error::config("long_term_control_cursor", error.to_string()))?,
         )
     } else {
         None
     };
-    let records = records
+    let record_ids = rows
         .into_iter()
         .skip(start)
         .take(limit)
-        .map(|record| record_report(control_store, record, request.view))
+        .map(|row| row.id)
+        .collect();
+    Ok(LongTermControlPagePlan {
+        record_ids,
+        next_cursor,
+        total_visible,
+    })
+}
+
+pub fn finish_long_term_memory_control_page(
+    view: MemoryLongTermControlView,
+    plan: LongTermControlPagePlan,
+    page: Vec<LongTermMemoryEntry>,
+) -> Result<MemoryLongTermListReport> {
+    if page.len() != plan.record_ids.len()
+        || page
+            .iter()
+            .zip(&plan.record_ids)
+            .any(|(record, id)| record.id != *id)
+    {
+        return Err(Error::config(
+            "long_term_control_cursor",
+            "materialized page differs from the planned catalog",
+        ));
+    }
+    let records = page
+        .into_iter()
+        .map(|record| record_report(record, view))
         .collect::<Result<Vec<_>>>()?;
     Ok(MemoryLongTermListReport {
         records,
-        next_cursor,
-        total_visible,
-        view: request.view,
+        next_cursor: plan.next_cursor,
+        total_visible: plan.total_visible,
+        view,
     })
 }
 
@@ -3687,14 +3833,10 @@ fn long_term_record_id_from_derived_ref(reference: &DerivedMemoryRef) -> String 
 }
 
 fn record_report(
-    control_store: &dyn LongTermMemoryControlReadStore,
     record: LongTermMemoryEntry,
     view: MemoryLongTermControlView,
 ) -> Result<MemoryLongTermRecordReport> {
     let evidence = long_term_memory_evidence_summary(&record, crate::util::current_unix_secs());
-    let tombstoned = control_store
-        .get_long_term_control_tombstone(&record.id)?
-        .is_some();
     let transcript_refs = extract_transcript_refs(&record);
     let mut evidence_summary = evidence.summary;
     if !transcript_refs.is_empty() {
@@ -3719,7 +3861,7 @@ fn record_report(
         transcript_refs,
         record,
         evidence_summary,
-        tombstoned,
+        tombstoned: false,
     })
 }
 

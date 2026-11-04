@@ -92,6 +92,14 @@ impl StoreImmutableReadSession for EmbeddedImmutableReadSession<'_> {
     fn receipt(&self) -> Result<StoreReadReceipt> {
         self.read.receipt()
     }
+
+    fn begin_catalog_scan(&mut self) -> Result<()> {
+        self.read.begin_catalog_scan()
+    }
+
+    fn checkpoint_catalog_batch(&mut self) -> Result<StoreReadReceipt> {
+        self.read.checkpoint_catalog_batch()
+    }
 }
 
 impl EmbeddedStoreEngine {

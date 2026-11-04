@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use bm_core::agent::{ActiveWorkRecord, ActiveWorkStore};
 use bm_core::budget::RuntimeBudgetReport;
@@ -101,7 +102,7 @@ impl MaterializedProceduralReadAuthority {
 
 #[derive(Clone, Debug)]
 pub(crate) struct MaterializedLongTermOwnerClosure {
-    scope_manifest: LongTermMemoryVersionScopeManifest,
+    scope_manifest: Arc<LongTermMemoryVersionScopeManifest>,
     head: LongTermMemoryHeadManifest,
     owner_materials: Vec<LongTermMemoryVersionMaterial>,
     dependency_heads: Vec<LongTermMemoryHeadManifest>,
@@ -150,6 +151,13 @@ impl MaterializedRuntimeSkillScopeClosure {
 pub(crate) struct RecallImmutableReadContext<'a> {
     session: Box<dyn StoreImmutableReadSession + 'a>,
     final_receipt: RefCell<Option<StoreReadReceipt>>,
+    catalog_mode: bool,
+    catalog_scope_root: Option<(
+        String,
+        String,
+        Option<Arc<LongTermMemoryVersionScopeManifest>>,
+    )>,
+    catalog_completed: StoreReadReceipt,
     subject_soul_open_closure_certificate: Option<StoreOpenClosureCertificate>,
     json_cache: BTreeMap<(String, String), Option<serde_json::Value>>,
     blob_cache: BTreeMap<(String, String), Option<Vec<u8>>>,
@@ -234,6 +242,9 @@ impl<'a> RecallImmutableReadContext<'a> {
         Self {
             session,
             final_receipt: RefCell::new(None),
+            catalog_mode: false,
+            catalog_scope_root: None,
+            catalog_completed: StoreReadReceipt::default(),
             subject_soul_open_closure_certificate: None,
             json_cache: BTreeMap::new(),
             blob_cache: BTreeMap::new(),
@@ -245,6 +256,146 @@ impl<'a> RecallImmutableReadContext<'a> {
             runtime_skill_premise_evidence: BTreeMap::new(),
             runtime_skill_task_evidence: BTreeMap::new(),
         }
+    }
+
+    pub(crate) fn new_catalog(
+        mut session: Box<dyn StoreImmutableReadSession + 'a>,
+    ) -> Result<Self> {
+        session.begin_catalog_scan()?;
+        let mut context = Self::new(session);
+        context.catalog_mode = true;
+        Ok(context)
+    }
+
+    pub(crate) fn pin_long_term_catalog_scope_root(
+        &mut self,
+        memory_space_id: &str,
+    ) -> Result<Option<LongTermMemoryVersionScopeManifest>> {
+        if !self.catalog_mode || self.catalog_scope_root.is_some() {
+            return Err(Error::config(
+                "long_term_catalog_read",
+                "catalog scope root must be pinned exactly once in catalog mode",
+            ));
+        }
+        let key = long_term_version_scope_manifest_key(memory_space_id, memory_space_id)?;
+        let root = self.read_json::<LongTermMemoryVersionScopeManifest>(
+            crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
+            &key,
+        )?;
+        if let Some(root) = root.as_ref() {
+            validate_long_term_scope_root_shape(root, &key, memory_space_id, memory_space_id)?;
+        }
+        self.catalog_scope_root = Some((
+            memory_space_id.to_string(),
+            memory_space_id.to_string(),
+            root.clone().map(Arc::new),
+        ));
+        Ok(root)
+    }
+
+    /// Finish one bounded Store batch while keeping its underlying immutable
+    /// snapshot open. Only the typed scope root survives for subsequent owners.
+    pub(crate) fn checkpoint_catalog_batch(&mut self) -> Result<()> {
+        if !self.catalog_mode {
+            return Err(Error::config(
+                "long_term_catalog_read",
+                "catalog checkpoint requires catalog mode",
+            ));
+        }
+        self.ensure_receipt_not_finalized()?;
+        let batch = self.session.checkpoint_catalog_batch()?;
+        let (json_doc_count, blob_count, entry_count, json_bytes, blob_bytes) =
+            self.observed_read_metrics()?;
+        if batch.json_doc_count != json_doc_count
+            || batch.blob_count != blob_count
+            || batch.entry_count != entry_count
+            || batch.json_bytes != json_bytes
+            || batch.blob_bytes != blob_bytes
+        {
+            return Err(Error::config(
+                "long_term_catalog_read",
+                "catalog batch receipt differs from the exact observed batch",
+            ));
+        }
+        self.catalog_completed.json_doc_count = self
+            .catalog_completed
+            .json_doc_count
+            .checked_add(json_doc_count)
+            .ok_or_else(|| Error::config("long_term_catalog_read", "JSON count overflow"))?;
+        self.catalog_completed.blob_count = self
+            .catalog_completed
+            .blob_count
+            .checked_add(blob_count)
+            .ok_or_else(|| Error::config("long_term_catalog_read", "blob count overflow"))?;
+        self.catalog_completed.entry_count = self
+            .catalog_completed
+            .entry_count
+            .checked_add(entry_count)
+            .ok_or_else(|| Error::config("long_term_catalog_read", "entry count overflow"))?;
+        self.catalog_completed.json_bytes = self
+            .catalog_completed
+            .json_bytes
+            .checked_add(json_bytes)
+            .ok_or_else(|| Error::config("long_term_catalog_read", "JSON byte count overflow"))?;
+        self.catalog_completed.blob_bytes = self
+            .catalog_completed
+            .blob_bytes
+            .checked_add(blob_bytes)
+            .ok_or_else(|| Error::config("long_term_catalog_read", "blob byte count overflow"))?;
+        self.json_cache.clear();
+        self.blob_cache.clear();
+        self.json_observations.clear();
+        self.blob_observations.clear();
+        self.long_term_owner_closures.clear();
+        Ok(())
+    }
+
+    fn observed_read_metrics(&self) -> Result<(usize, usize, usize, usize, usize)> {
+        let json_doc_count = self
+            .json_observations
+            .values()
+            .filter(|value| value.is_some())
+            .count();
+        let blob_count = self
+            .blob_observations
+            .values()
+            .filter(|value| value.is_some())
+            .count();
+        let entry_count = self
+            .json_observations
+            .len()
+            .checked_add(self.blob_observations.len())
+            .ok_or_else(|| {
+                Error::config("recall_immutable_read_session", "read-set count overflow")
+            })?;
+        let json_bytes = self
+            .json_observations
+            .values()
+            .filter_map(Option::as_ref)
+            .try_fold(0usize, |total, value| {
+                let bytes = serde_json::to_vec(value).map_err(|error| {
+                    Error::config("recall_immutable_read_session", error.to_string())
+                })?;
+                total.checked_add(bytes.len()).ok_or_else(|| {
+                    Error::config("recall_immutable_read_session", "JSON byte count overflow")
+                })
+            })?;
+        let blob_bytes = self
+            .blob_observations
+            .values()
+            .filter_map(Option::as_ref)
+            .try_fold(0usize, |total, value| {
+                total.checked_add(value.len()).ok_or_else(|| {
+                    Error::config("recall_immutable_read_session", "blob byte count overflow")
+                })
+            })?;
+        Ok((
+            json_doc_count,
+            blob_count,
+            entry_count,
+            json_bytes,
+            blob_bytes,
+        ))
     }
 
     fn ensure_receipt_not_finalized(&self) -> Result<()> {
@@ -571,18 +722,40 @@ impl<'a> RecallImmutableReadContext<'a> {
             return Ok(Some(closure.clone()));
         }
         let root_key = long_term_version_scope_manifest_key(memory_space_id, factual_owner_id)?;
-        let Some(root) = self.read_json::<LongTermMemoryVersionScopeManifest>(
-            crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
-            &root_key,
-        )?
-        else {
+        let catalog_root_pinned = self.catalog_scope_root.is_some();
+        let root = if let Some((pinned_space, pinned_owner, pinned_root)) =
+            self.catalog_scope_root.as_ref()
+        {
+            if pinned_space != memory_space_id || pinned_owner != factual_owner_id {
+                return Err(Error::config(
+                    "long_term_catalog_read",
+                    "owner closure differs from the pinned catalog scope",
+                ));
+            }
+            pinned_root.clone()
+        } else {
+            self.read_json::<LongTermMemoryVersionScopeManifest>(
+                crate::store_internal::LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE,
+                &root_key,
+            )?
+            .map(Arc::new)
+        };
+        let Some(root) = root else {
             return Ok(None);
         };
-        validate_long_term_scope_root_shape(&root, &root_key, memory_space_id, factual_owner_id)?;
+        if !catalog_root_pinned {
+            validate_long_term_scope_root_shape(
+                &root,
+                &root_key,
+                memory_space_id,
+                factual_owner_id,
+            )?;
+        }
         let Some(head_binding) = root
             .head_bindings
-            .iter()
-            .find(|binding| &binding.owner_ref == owner_ref)
+            .binary_search_by(|binding| binding.owner_ref.cmp(owner_ref))
+            .ok()
+            .map(|index| &root.head_bindings[index])
         else {
             return Ok(None);
         };
@@ -992,7 +1165,7 @@ impl<'a> RecallImmutableReadContext<'a> {
                 .long_term_owner_closures
                 .iter()
                 .any(|(owner_ref, closure)| {
-                    !root_owner_refs.contains(owner_ref) || closure.scope_manifest != root
+                    !root_owner_refs.contains(owner_ref) || closure.scope_manifest.as_ref() != &root
                 })
             || self
                 .long_term_owner_closures
@@ -2179,52 +2352,38 @@ impl<'a> RecallImmutableReadContext<'a> {
         } else {
             self.session.receipt()?
         };
+        let (json_doc_count, blob_count, entry_count, json_bytes, blob_bytes) =
+            self.observed_read_metrics()?;
         let json_doc_count = self
-            .json_observations
-            .values()
-            .filter(|value| value.is_some())
-            .count();
+            .catalog_completed
+            .json_doc_count
+            .checked_add(json_doc_count)
+            .ok_or_else(|| Error::config("recall_immutable_read_session", "JSON count overflow"))?;
         let blob_count = self
-            .blob_observations
-            .values()
-            .filter(|value| value.is_some())
-            .count();
+            .catalog_completed
+            .blob_count
+            .checked_add(blob_count)
+            .ok_or_else(|| Error::config("recall_immutable_read_session", "blob count overflow"))?;
         let entry_count = self
-            .json_observations
-            .len()
-            .checked_add(self.blob_observations.len())
+            .catalog_completed
+            .entry_count
+            .checked_add(entry_count)
             .ok_or_else(|| {
-                Error::config(
-                    "recall_immutable_read_session",
-                    "materialized read-set count overflow",
-                )
+                Error::config("recall_immutable_read_session", "entry count overflow")
             })?;
         let json_bytes = self
-            .json_observations
-            .values()
-            .filter_map(Option::as_ref)
-            .try_fold(0usize, |total, value| {
-                let bytes = serde_json::to_vec(value).map_err(|error| {
-                    Error::config("recall_immutable_read_session", error.to_string())
-                })?;
-                total.checked_add(bytes.len()).ok_or_else(|| {
-                    Error::config(
-                        "recall_immutable_read_session",
-                        "materialized JSON byte count overflow",
-                    )
-                })
+            .catalog_completed
+            .json_bytes
+            .checked_add(json_bytes)
+            .ok_or_else(|| {
+                Error::config("recall_immutable_read_session", "JSON byte count overflow")
             })?;
         let blob_bytes = self
-            .blob_observations
-            .values()
-            .filter_map(Option::as_ref)
-            .try_fold(0usize, |total, value| {
-                total.checked_add(value.len()).ok_or_else(|| {
-                    Error::config(
-                        "recall_immutable_read_session",
-                        "materialized blob byte count overflow",
-                    )
-                })
+            .catalog_completed
+            .blob_bytes
+            .checked_add(blob_bytes)
+            .ok_or_else(|| {
+                Error::config("recall_immutable_read_session", "blob byte count overflow")
             })?;
         let read_set_exact = receipt.json_doc_count == json_doc_count
             && receipt.blob_count == blob_count
