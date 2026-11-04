@@ -38,9 +38,9 @@ let config = StoreBackendConfig::file("/var/lib/beetle-memory", profile)?
     .with_fsync(true);
 ```
 
-## 0.11.1 Schema 准入：Store v16
+## 0.11.2 Schema 准入：Store v16
 
-0.11.1 只接受 Store v16，长期记忆 immutable material v6、control revision v4。Canonical turn 持久保存事实来源入场顺序，长期记忆 owner 保存控制屏障和 transition basis。禁记规则通过精确 identity/revision 与 operation receipt 原子绑定；Transcript 撤源在同一事务更新事实证据及受治理索引。Adapter V2 仍为 envelope 版本，但 policy 请求与响应合同已变化，所有 Beetle crate 必须使用同一源码 tag。
+0.11.2 只接受 Store v16，长期记忆 immutable material v6、control revision v4。Canonical turn 持久保存事实来源入场顺序，长期记忆 owner 保存控制屏障和 transition basis。禁记规则通过精确 identity/revision 与 operation receipt 原子绑定；Transcript 撤源在同一事务更新事实证据及受治理索引。Adapter V2 仍为 envelope 版本，但 policy 请求与响应合同已变化，所有 Beetle crate 必须使用同一源码 tag。
 
 Store v15 及更早格式只读拒绝，不提供 automatic migration、不偷偷创建空库。本发布不迁移或删除真实数据；开发使用新的合成 Store。回退需要旧源码 tag 和匹配的完整旧 Store，archive import 不是 schema migration。
 

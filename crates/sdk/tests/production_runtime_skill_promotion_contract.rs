@@ -475,6 +475,45 @@ fn test_directory(label: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn completed_method_turn_replays_after_its_method_revision_advances() {
+    let config = StoreBackendConfig::in_memory(support::host_test_profile()).unwrap();
+    let store = support::open_memory_store(config).unwrap();
+    let clock = Arc::new(Clock(AtomicU64::new(1_800_000_000)));
+    let memory = runtime(store.clone(), clock);
+    seed_method_candidate(&memory);
+    let first_request = task_request(&memory, "replay-method-first");
+    let (first_job, _) = complete_request(&memory, first_request.clone(), 1);
+    let second_request = task_request(&memory, "replay-method-second");
+    let (second_job, _) = complete_request(&memory, second_request.clone(), 1);
+    assert!(project(&memory, "replay-method-active")
+        .report()
+        .selection_receipt()
+        .is_some());
+    let current_request = task_request(&memory, "replay-method-current");
+    assert_ne!(
+        first_request.learning.method_adoptions[0].method,
+        current_request.learning.method_adoptions[0].method,
+        "the replay must cross a real method revision"
+    );
+    #[cfg(feature = "nonproduction-replay-harness")]
+    let before_replay = store.export_replay_snapshot().unwrap();
+    for (input, job_id) in [(first_request, first_job), (second_request, second_job)] {
+        let replay = memory.submit(input).unwrap();
+        assert!(!replay.transcript_commit.unwrap().committed);
+        assert_eq!(
+            replay.procedural_learning.job_id.as_deref(),
+            Some(job_id.as_str())
+        );
+        assert_eq!(
+            replay.procedural_learning.reason,
+            "procedural_intent_already_present"
+        );
+    }
+    #[cfg(feature = "nonproduction-replay-harness")]
+    assert_eq!(store.export_replay_snapshot().unwrap(), before_replay);
+}
+
+#[test]
 fn two_accepted_production_turns_create_one_runtime_skill_and_project_it_after_reopen() {
     let eligibility = bm_core::skills::govern_runtime_skill_write_shapes(
         &[RuntimeSkillWrite {

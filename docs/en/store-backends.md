@@ -38,9 +38,9 @@ let config = StoreBackendConfig::file("/var/lib/beetle-memory", profile)?
     .with_fsync(true);
 ```
 
-## 0.11.1 Schema Admission: Store v16
+## 0.11.2 Schema Admission: Store v16
 
-The 0.11.1 source accepts only Store v16, with immutable long-term material v6 and control revision v4. Canonical turns persist factual admission order; long-term owners retain the control barrier and transition basis. Governance policies bind exact identity/revision to atomic operation receipts. Transcript source withdrawal updates factual evidence and governed indexes in the same transaction. Adapter V2 remains the envelope version, but policy requests and responses have changed; all Beetle crates must come from the same source tag.
+The 0.11.2 source accepts only Store v16, with immutable long-term material v6 and control revision v4. Canonical turns persist factual admission order; long-term owners retain the control barrier and transition basis. Governance policies bind exact identity/revision to atomic operation receipts. Transcript source withdrawal updates factual evidence and governed indexes in the same transaction. Adapter V2 remains the envelope version, but policy requests and responses have changed; all Beetle crates must come from the same source tag.
 
 Store v15 and earlier are rejected without writing, automatic migration, or creating an empty replacement. Real data is not migrated or deleted by this release. Use a new synthetic Store for development; rollback requires the old source tag and its matching complete Store. Archive import is not a schema migration.
 

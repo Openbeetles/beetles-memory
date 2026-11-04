@@ -64,6 +64,7 @@ fn ensure_governance_intent(
         job,
         None,
         now_secs,
+        &[],
     )?;
     Ok(outcome)
 }

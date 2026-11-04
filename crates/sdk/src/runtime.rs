@@ -18739,6 +18739,7 @@ impl MemoryRuntime {
             &semantic_job,
             procedural_job.as_ref(),
             now_secs,
+            &[],
         )?;
         self.notify_learning_wake_sinks();
         let semantic_report = MemoryConsolidationReport {

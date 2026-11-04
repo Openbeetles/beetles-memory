@@ -264,6 +264,57 @@ fn pl3_public_intake_material_requires_own_claim_and_exact_source_fragment() {
     assert!(evidence.has_authorized_content());
     assert!(!evidence.has_procedural_work());
     assert!(evidence.submitted_input_commitment.is_some());
+    let missing_job = pl3_material_request(&memory, "pl3-gap-revoked");
+    let context = memory.procedural_submission_context(&capability).unwrap();
+    let missing_evidence = memory
+        .build_post_turn_learning_evidence(&missing_job, Some(&context))
+        .unwrap();
+    let proof = crate::learning::ProceduralIntakeAuthorization {
+        store_authority_digest: platform.learning_store_authority_digest(),
+        current_head: context.head,
+        evidence: missing_evidence.clone(),
+        store_incarnation: platform
+            .procedural_store_incarnation(memory.memory_space_id())
+            .unwrap(),
+        source_preconditions: context.source_preconditions,
+    };
+    plan_canonical_turn_delta_with_transcript(
+        platform.session_store().as_ref(),
+        &platform,
+        memory.memory_space_id(),
+        &missing_job.turn,
+        CanonicalTurnTranscriptCommitOptions {
+            host_refs: vec![],
+            learning_evidence: Some(missing_evidence),
+            conversation_alias: None,
+            now_secs: 1_800_000_000,
+        },
+    )
+    .unwrap()
+    .commit_with(|intent| platform.append_authorized_canonical_turn(intent, &proof))
+    .unwrap();
+    governor
+        .control_procedural_producer(crate::MemoryProceduralProducerControlRequest {
+            operation_id: "revoke-pl3-materials".into(),
+            expected_revision: Some(capability.binding.revision_ref().unwrap()),
+            state: ProceduralProducerStateV1::Revoked,
+            spec: capability.binding.spec.clone(),
+        })
+        .unwrap();
+    let before_replay = image(&platform);
+    assert!(memory
+        .finalize_turn_with_procedural_evidence(&capability, missing_job)
+        .is_err());
+    assert_eq!(image(&platform), before_replay);
+    let replay = memory
+        .finalize_turn_with_procedural_evidence(&capability, input)
+        .unwrap();
+    assert!(!replay.transcript_commit.unwrap().committed);
+    assert_eq!(
+        replay.procedural_learning.state,
+        MemoryConsolidationState::NotScheduled
+    );
+    assert_eq!(image(&platform), before_replay);
 }
 
 #[test]
@@ -686,7 +737,7 @@ fn pfi2_intake_proof_is_exact_and_fenced_across_retry_and_revocation() {
         .finalize_turn_with_procedural_evidence(&capability, request(&foreign, "foreign"))
         .is_err());
     assert_eq!(image(&foreign_platform), foreign_before);
-    memory
+    let first = memory
         .finalize_turn_with_procedural_evidence(&capability, request(&memory, "retry"))
         .unwrap();
     let committed = image(&platform);
@@ -699,6 +750,70 @@ fn pfi2_intake_proof_is_exact_and_fenced_across_retry_and_revocation() {
         committed,
         "transport retry cannot append another turn/job/event"
     );
+    let (gap_plan, gap_proof) = make_plan("gap-active");
+    gap_plan
+        .commit_with(|intent| platform.append_authorized_canonical_turn(intent, &gap_proof))
+        .unwrap();
+    let recovered = memory
+        .finalize_turn_with_procedural_evidence(&capability, request(&memory, "gap-active"))
+        .unwrap();
+    assert!(!recovered.transcript_commit.unwrap().committed);
+    assert_eq!(
+        recovered.memory_consolidation.reason,
+        "governance_intent_created"
+    );
+    assert_eq!(
+        recovered.procedural_learning.reason,
+        "procedural_intent_created"
+    );
+    let recovered_image = image(&platform);
+    let recovered_retry = memory
+        .finalize_turn_with_procedural_evidence(&capability, request(&memory, "gap-active"))
+        .unwrap();
+    assert_eq!(
+        recovered_retry.procedural_learning.reason,
+        "procedural_intent_already_present"
+    );
+    assert_eq!(image(&platform), recovered_image);
+    for (id, transition) in [
+        ("replay-masked", TranscriptLifecycleTransition::Mask),
+        ("replay-deleted", TranscriptLifecycleTransition::DeleteRaw),
+    ] {
+        let input = request(&memory, id);
+        memory
+            .finalize_turn_with_procedural_evidence(&capability, input.clone())
+            .unwrap();
+        memory
+            .request_transcript_lifecycle(MemoryTranscriptLifecycleRequest {
+                memory_space_id: memory.memory_space_id().into(),
+                channel_id: "sdk.direct".into(),
+                conversation_id: "pfi2-chat".into(),
+                turn_id: Some(id.into()),
+                transition,
+                reason: "replay source withdrawn".into(),
+            })
+            .unwrap();
+        let withdrawn = image(&platform);
+        let error = memory
+            .finalize_turn_with_procedural_evidence(&capability, input)
+            .err()
+            .expect("withdrawn raw input must reject replay");
+        let Error::Other { source, .. } = error else {
+            panic!("withdrawn raw input must return a typed procedural error");
+        };
+        let typed = source
+            .downcast_ref::<crate::ProceduralLearningSdkError>()
+            .unwrap();
+        assert_eq!(
+            typed.key,
+            crate::ProceduralLearningErrorKeyV1::EvidenceConflict
+        );
+        assert_eq!(image(&platform), withdrawn);
+    }
+    let (revoked_gap_plan, revoked_gap_proof) = make_plan("gap-revoked");
+    revoked_gap_plan
+        .commit_with(|intent| platform.append_authorized_canonical_turn(intent, &revoked_gap_proof))
+        .unwrap();
     let (stale_plan, stale_proof) = make_plan("revoke-race");
     governor
         .control_procedural_producer(crate::MemoryProceduralProducerControlRequest {
@@ -709,16 +824,38 @@ fn pfi2_intake_proof_is_exact_and_fenced_across_retry_and_revocation() {
         })
         .unwrap();
     let revoked = image(&platform);
+    assert!(memory
+        .finalize_turn_with_procedural_evidence(&capability, request(&memory, "gap-revoked"))
+        .is_err());
+    assert_eq!(image(&platform), revoked);
     assert!(stale_plan
         .commit_with(|intent| platform.append_authorized_canonical_turn(intent, &stale_proof))
         .is_err());
     assert!(memory
         .finalize_turn_with_procedural_evidence(&capability, request(&memory, "after-revoke"))
         .is_err());
+    let historical = memory
+        .finalize_turn_with_procedural_evidence(&capability, request(&memory, "retry"))
+        .unwrap();
+    assert!(!historical.transcript_commit.unwrap().committed);
+    assert_eq!(
+        historical.memory_consolidation.job_id,
+        first.memory_consolidation.job_id
+    );
+    assert_eq!(
+        historical.procedural_learning.job_id,
+        first.procedural_learning.job_id
+    );
+    let mut changed_input = request(&memory, "retry");
+    changed_input.learning.agent_tool_feedback[0].execution_facts[0].outcome =
+        ToolExecutionOutcome::Succeeded;
+    assert!(memory
+        .finalize_turn_with_procedural_evidence(&capability, changed_input)
+        .is_err());
     assert_eq!(
         image(&platform),
         revoked,
-        "revocation must fence Session, Transcript, jobs and events together"
+        "revocation must fence new intake while historical replay stays read-only"
     );
 }
 

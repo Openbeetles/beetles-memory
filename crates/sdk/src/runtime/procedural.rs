@@ -637,13 +637,21 @@ impl MemoryRuntime {
         request: MemoryTurnFinalizeRequest,
     ) -> Result<MemoryTurnFinalizeReport> {
         (|| {
+            self.ensure_visible("write.turn", self.capabilities.write)
+                .map_err(|_| {
+                    feedback_error(crate::ProceduralLearningErrorKeyV1::CapabilityUnavailable)
+                })?;
             validate_turn_scope(
                 &self.config.scope,
                 &self.config.scoped_runtime,
                 &request.turn,
             )
             .map_err(|_| feedback_error(crate::ProceduralLearningErrorKeyV1::ScopeMismatch))?;
-            let context = self.procedural_submission_context(capability)?;
+            let verified = self.verified_procedural_submission_capability(capability)?;
+            if let Some(report) = self.exact_procedural_finalization_replay(&request, &verified)? {
+                return Ok(report);
+            }
+            let context = self.procedural_submission_context_from_verified(&verified)?;
             self.finalize_turn_internal(None, None, request, Some(&context))
         })()
         .map_err(|error| {
@@ -664,10 +672,19 @@ impl MemoryRuntime {
         }
     }
 
+    #[cfg(test)]
     fn procedural_submission_context(
         &self,
         capability: &crate::MemoryProceduralSubmissionCapability,
     ) -> Result<ProceduralSubmissionContext> {
+        let verified = self.verified_procedural_submission_capability(capability)?;
+        self.procedural_submission_context_from_verified(&verified)
+    }
+
+    fn verified_procedural_submission_capability(
+        &self,
+        capability: &crate::MemoryProceduralSubmissionCapability,
+    ) -> Result<crate::store_internal::procedural_feedback::VerifiedProceduralProducer> {
         use crate::ProceduralLearningErrorKeyV1 as Key;
         if capability.identity != self.governance_attachment_identity()?
             || !self.procedural_subject_active()
@@ -696,7 +713,6 @@ impl MemoryRuntime {
         )?;
         if verified.historical != capability.binding
             || verified.head.scope != self.procedural_producer_scope()
-            || verified.current.state != bm_core::memory::ProceduralProducerStateV1::Active
         {
             return Err(feedback_error(Key::ProducerAuthorityDenied));
         }
@@ -714,17 +730,262 @@ impl MemoryRuntime {
                 return Err(feedback_error(Key::ProducerAuthorityDenied));
             }
         }
+        Ok(verified)
+    }
+
+    fn procedural_submission_context_from_verified(
+        &self,
+        verified: &crate::store_internal::procedural_feedback::VerifiedProceduralProducer,
+    ) -> Result<ProceduralSubmissionContext> {
+        if verified.current.state != bm_core::memory::ProceduralProducerStateV1::Active {
+            return Err(feedback_error(
+                crate::ProceduralLearningErrorKeyV1::ProducerAuthorityDenied,
+            ));
+        }
         let source_preconditions = self.resolve_procedural_source_authority(
             &verified.historical.spec.source_authority,
             crate::ProceduralLearningSdkOperation::FinalizeTurn,
         )?;
         Ok(ProceduralSubmissionContext {
             principal: verified.historical.spec.principal.clone(),
-            binding: verified.historical,
-            current: verified.current,
-            head: verified.head,
+            binding: verified.historical.clone(),
+            current: verified.current.clone(),
+            head: verified.head.clone(),
             source_preconditions,
         })
+    }
+
+    /// A committed turn acknowledges historical intake. Its receipt must not
+    /// reacquire a method, producer, or source that changed after that intake.
+    fn exact_procedural_finalization_replay(
+        &self,
+        request: &MemoryTurnFinalizeRequest,
+        producer: &crate::store_internal::procedural_feedback::VerifiedProceduralProducer,
+    ) -> Result<Option<MemoryTurnFinalizeReport>> {
+        use crate::ProceduralLearningErrorKeyV1 as Key;
+        if !request.learning.has_authorized_content() {
+            return Ok(None);
+        }
+        let transcript_store = self.config.platform.conversation_transcript_store();
+        let key = ConversationKey::from_delta(&self.config.memory_space_id, &request.turn)?;
+        let Some(record) =
+            transcript_store.get_turn(&key, &self.config.subject_id, &request.turn.turn_id)?
+        else {
+            return Ok(None);
+        };
+        if !record.permits_post_turn_learning() {
+            return Err(feedback_error(Key::EvidenceConflict));
+        }
+        record.validate_canonical_intake()?;
+        let evidence = record
+            .learning_evidence
+            .as_ref()
+            .ok_or_else(|| feedback_error(Key::EvidenceConflict))?;
+        let submitted = self
+            .config
+            .store_platform
+            .as_ref()
+            .ok_or_else(|| feedback_error(Key::RepairRequired))?
+            .post_turn_learning_input_commitment(
+                &self.config.memory_space_id,
+                &request.turn,
+                &request.learning,
+            )?;
+        if record.canonical_turn_digest != canonical_turn_learning_digest(&request.turn)?
+            || !record.host_refs.is_empty()
+            || evidence.submitted_input_commitment.as_deref() != Some(submitted.as_str())
+            || evidence.authority.producer_revision() != Some(&producer.historical.revision_ref()?)
+        {
+            return Err(feedback_error(Key::EvidenceConflict));
+        }
+
+        let semantic_identity = PostTurnGovernanceIdentityV2::new(
+            &record.key.memory_space_id,
+            &record.subject,
+            &record.key.channel_id,
+            &request.turn.conversation.chat_id,
+            &record.key.conversation_id,
+            &record.turn_id,
+        )?;
+        let store = self
+            .config
+            .store_platform
+            .as_ref()
+            .ok_or_else(|| feedback_error(Key::RepairRequired))?;
+        let mut semantic_job = read_governance_job(store, &semantic_identity.job_id())?;
+        let transcript_digest = post_turn_governance_transcript_digest(&record)?;
+        if semantic_job.as_ref().is_some_and(|job| {
+            job.identity != semantic_identity
+                || job.transcript_sequence != record.sequence
+                || job.transcript_digest != transcript_digest
+        }) {
+            return Err(feedback_error(Key::RepairRequired));
+        }
+        let procedural_identity = ProceduralFeedbackIdentityV1::new(
+            &record.key.memory_space_id,
+            &record.subject,
+            &record.key.channel_id,
+            &request.turn.conversation.chat_id,
+            &record.key.conversation_id,
+            &record.turn_id,
+        )?;
+        let procedural_id = evidence
+            .has_procedural_work()
+            .then(|| procedural_identity.job_id(&evidence.learning_evidence_digest))
+            .transpose()?;
+        let mut procedural_job = procedural_id
+            .as_ref()
+            .map(|id| crate::store_internal::procedural_feedback::read_job(store, id))
+            .transpose()?
+            .flatten();
+        if let Some(job) = procedural_job.as_ref() {
+            let source = job.feedback_source()?;
+            if source.identity != procedural_identity
+                || source.transcript_sequence != record.sequence
+                || source.transcript_digest != transcript_digest
+                || source.learning_evidence_digest != evidence.learning_evidence_digest
+            {
+                return Err(feedback_error(Key::RepairRequired));
+            }
+        }
+        let plan = bm_core::memory::plan_canonical_turn_delta_with_transcript(
+            self.config.platform.session_store().as_ref(),
+            transcript_store.as_ref(),
+            &self.config.memory_space_id,
+            &request.turn,
+            CanonicalTurnTranscriptCommitOptions {
+                host_refs: Vec::new(),
+                learning_evidence: Some(evidence.clone()),
+                conversation_alias: self.conversation_alias_from_delta(&request.turn)?,
+                now_secs: self.config.clock.now_secs(),
+            },
+        )?;
+        let committed = plan.commit_with(|_| Err(feedback_error(Key::RepairRequired)))?;
+        if committed.session_commit.committed
+            || committed
+                .transcript_commit
+                .as_ref()
+                .is_none_or(|report| report.committed)
+        {
+            return Err(feedback_error(Key::RepairRequired));
+        }
+        let mut semantic_created = false;
+        let mut procedural_created = false;
+        let recovering_semantic = semantic_job.is_none();
+        let recovering_procedural = procedural_id.is_some() && procedural_job.is_none();
+        if recovering_semantic || recovering_procedural {
+            let mut fences = Vec::new();
+            let current = self.procedural_submission_context_from_verified(producer)?;
+            merge_json_preconditions(&mut fences, current.source_preconditions)?;
+            merge_json_preconditions(
+                &mut fences,
+                self.resolve_production_learning_input_sources(request)?,
+            )?;
+            merge_json_preconditions(
+                &mut fences,
+                vec![StoreJsonPrecondition::Exact {
+                    namespace: crate::store_internal::schema::PROCEDURAL_PRODUCER_HEAD_NAMESPACE
+                        .into(),
+                    key: current.head.binding_key.clone(),
+                    value: serde_json::to_value(&current.head)
+                        .map_err(|_| feedback_error(Key::RepairRequired))?,
+                }],
+            )?;
+            let now = self.config.clock.now_secs();
+            let expected_semantic = self.build_governance_job_from_transcript(
+                &record,
+                &request.turn.conversation.chat_id,
+                request.learning.tool_call_count,
+                "conversation_transcript_turn_already_committed",
+                now,
+            )?;
+            let expected_procedural = if recovering_procedural {
+                Some(
+                    self.build_procedural_job_from_transcript(
+                        &record,
+                        &request.turn.conversation.chat_id,
+                        now,
+                    )?
+                    .ok_or_else(|| feedback_error(Key::RepairRequired))?,
+                )
+            } else {
+                procedural_job.clone()
+            };
+            let scope = self
+                .memory_write_transaction_scope()
+                .with_conversation(key.conversation_id.clone());
+            let (semantic_outcome, procedural_outcome) =
+                crate::store_internal::procedural_feedback::ensure_post_turn_learning_intents(
+                    store,
+                    scope,
+                    &self.runtime_budget(),
+                    &expected_semantic,
+                    expected_procedural.as_ref(),
+                    now,
+                    &fences,
+                )?;
+            semantic_created = semantic_outcome == GovernanceIntentEnsureOutcome::Created;
+            procedural_created = procedural_outcome == Some(ProceduralIntentEnsureOutcome::Created);
+            semantic_job = read_governance_job(store, &semantic_identity.job_id())?;
+            procedural_job = procedural_id
+                .as_ref()
+                .map(|id| crate::store_internal::procedural_feedback::read_job(store, id))
+                .transpose()?
+                .flatten();
+            if semantic_created || procedural_created {
+                self.notify_learning_wake_sinks();
+            }
+        }
+        let semantic_job = semantic_job.ok_or_else(|| feedback_error(Key::RepairRequired))?;
+        if procedural_id.is_some() && procedural_job.is_none() {
+            return Err(feedback_error(Key::RepairRequired));
+        }
+        let lifecycle = self.start_lifecycle(
+            RuntimeLifecycleOperation::Maintain,
+            RuntimeLifecycleTrigger::PostReply,
+            self.mode_input_for_request(request.mode_input, request.pressure),
+        );
+        let lifecycle_report = lifecycle.finish_success(
+            self.config.clock.now_secs(),
+            false,
+            "conversation_transcript_turn_already_committed",
+        );
+        Ok(Some(MemoryTurnFinalizeReport {
+            session_commit: committed.session_commit,
+            transcript_commit: committed.transcript_commit,
+            maintenance: None,
+            private_garden_self_work: PostTurnPrivateGardenReport::skipped("turn_not_committed"),
+            semantic_governance: PostTurnSemanticGovernanceReport::skipped("turn_not_committed"),
+            memory_consolidation: MemoryConsolidationReport {
+                state: MemoryConsolidationState::Queued,
+                job_id: Some(semantic_job.job_id),
+                reason: if semantic_created {
+                    "governance_intent_created"
+                } else {
+                    "governance_intent_already_present"
+                }
+                .into(),
+            },
+            procedural_learning: if let Some(job) = procedural_job {
+                MemoryProceduralLearningIntentReport {
+                    state: MemoryConsolidationState::Queued,
+                    job_id: Some(job.job_id),
+                    reason: if procedural_created {
+                        "procedural_intent_created"
+                    } else {
+                        "procedural_intent_already_present"
+                    }
+                    .into(),
+                }
+            } else {
+                MemoryProceduralLearningIntentReport {
+                    state: MemoryConsolidationState::NotScheduled,
+                    job_id: None,
+                    reason: "no_actionable_procedural_feedback".into(),
+                }
+            },
+            lifecycle_report,
+        }))
     }
 
     pub fn control_procedural_producer(

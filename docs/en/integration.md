@@ -1,8 +1,8 @@
 # Integration Guide
 
-This guide describes how to embed Beetle Memory 0.11.1 source into a Rust project through `bm-sdk`: post-turn input V3, semantic Job V4 and Store v16. These contracts are not available in the published 0.9.0 source, which uses input V2 and Store v14. No compatibility reader or automatic migration is provided; the Git tag identifies the released source.
+This guide describes how to embed Beetle Memory 0.11.2 source into a Rust project through `bm-sdk`: post-turn input V3, semantic Job V4 and Store v16. These contracts are not available in the published 0.9.0 source, which uses input V2 and Store v14. No compatibility reader or automatic migration is provided; the Git tag identifies the released source.
 
-The 0.11.1 contract described in [API changes](api.md#runtime-operations) requires Store v16 / material v6 / control revision v4. The historical v0.10.0 tag remains unchanged.
+The 0.11.2 contract described in [API changes](api.md#runtime-operations) requires Store v16 / material v6 / control revision v4. The historical v0.10.0 tag remains unchanged.
 
 ## 1. Choose A Profile
 
@@ -32,7 +32,7 @@ Use the same source tag for every Beetle crate. Source release does not mean cra
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.11.1", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.11.1", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.11.2", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.11.2", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 Use exactly one profile feature for a build. Linux desktop, Linux device, and Linux server are distinct deployment targets; do not substitute one for another.
@@ -186,7 +186,7 @@ Its `expected_revision: None` is only for this fresh ephemeral Store. Persistent
 existing binding references and manage revisions explicitly, never automatically regrant on each
 startup or turn. Adapt `GovernanceBindingSource` and `GovernanceCredentialResolver` to the product's
 one configuration owner for real model execution; they are deliberately unconfigured here.
-See [0.11.1 source release notes](release-notes-0.11.1.md) for the current API and Store boundary.
+See [0.11.2 source release notes](release-notes-0.11.2.md) for the current API and Store boundary.
 
 The host remains responsible for final ordering of system, developer, user, and
 tool messages.
@@ -255,6 +255,8 @@ bm-entry = { path = "crates/entry", default-features = false, features = ["profi
 
 `bm_entry::entry_governance_model_client_compiled()` reports the compiled capability. Configuring an endpoint/model/key cannot supply a missing compiled executor: the official service reports capability unavailable, retains the job, and sends no Provider request. The offline example above deliberately does not enable or call a model and does not prove semantic learning completion. Production still uses the host's single `GovernanceBindingSource` / `GovernanceCredentialResolver`; do not create a second model configuration.
 
+For a committed authorized turn, retry the exact same request and sealed capability. The SDK verifies the Store-private raw input commitment and returns existing intent identities without creating work. A missing intent is recovered only under current producer/source authority with exact Store preconditions. A revoked producer may receive the minimal historical receipt when all intents exist, but cannot authorize new intake or missing-intent recovery. Masked or deleted raw content rejects replay.
+
 Production hosts attach the official `bm-entry::MemoryLearningService` to the
 existing `Arc<MemoryRuntime>`. The service consumes the SDK-owned
 `MemoryLearningEngine`, which alone performs bounded discovery, reconciliation,
@@ -269,7 +271,7 @@ Hosts must not claim jobs, run governance transitions, assemble memory
 mutations, or implement a second queue/worker/retry policy. Operator and
 attachment status reads must use the SDK-minted typed inspection authority;
 unauthorized or cross-subject requests fail before job identity or reason detail
-is returned. The 0.11.1 source accepts only Store v16 and rejects v15 and earlier without writing. Owners may explicitly
+is returned. The 0.11.2 source accepts only Store v16 and rejects v15 and earlier without writing. Owners may explicitly
 recreate disposable development stores; the runtime neither deletes real data nor
 provides automatic migration or a compatibility reader.
 
@@ -348,7 +350,7 @@ silently.
 
 Bulk `forget_by_query` must run a dry-run preview before execution and then pass the confirmation token. Use `MemoryLongTermPolicyRequest` for "do not remember this kind of thing again" or pausing future long-term memory updates for a scope; policies do not retroactively delete accepted records.
 
-In 0.11.1, Transcript raw delete/mask atomically withdraws derived factual evidence and facet/graph associations. Accepted facts and independent evidence remain; deleting the fact still goes through `mutate_long_term_memory`. Inspect suppression rules through `list_memory_governance_policies` / `get_memory_governance_policy`, then resume using the exact policy ID/revision and a stable operation ID. Rules apply to the mounted subject, even when multiple Agents share one HumanUser actor. Runtime Skill edit/retire only manages procedural runtime skill memory and is not the control surface for ordinary long-term memory; retire appends a terminal revision and preserves owner lineage.
+In 0.11.2, Transcript raw delete/mask atomically withdraws derived factual evidence and facet/graph associations. Accepted facts and independent evidence remain; deleting the fact still goes through `mutate_long_term_memory`. Inspect suppression rules through `list_memory_governance_policies` / `get_memory_governance_policy`, then resume using the exact policy ID/revision and a stable operation ID. Rules apply to the mounted subject, even when multiple Agents share one HumanUser actor. Runtime Skill edit/retire only manages procedural runtime skill memory and is not the control surface for ordinary long-term memory; retire appends a terminal revision and preserves owner lineage.
 
 ## 10. Host Turn Lifecycle
 
@@ -456,4 +458,4 @@ Add a smoke test in the integrating project that:
 8. Exports an opaque archive, imports it into a runtime with the same exact typed scope and policy, and checks the governed archive root.
 9. Runs operator inspect and replay against the replaced scope.
 
-The historical [0.9.0 source notes](release-notes-0.9.0.md) describe projection changes that retained Store v14. The 0.11.1 source instead requires Store v16; never apply the historical no-rebuild statement to this clean break.
+The historical [0.9.0 source notes](release-notes-0.9.0.md) describe projection changes that retained Store v14. The 0.11.2 source instead requires Store v16; never apply the historical no-rebuild statement to this clean break.

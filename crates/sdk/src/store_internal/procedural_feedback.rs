@@ -2094,6 +2094,7 @@ pub(crate) fn ensure_post_turn_learning_intents(
     semantic_job: &PostTurnGovernanceJobV4,
     procedural_job: Option<&ProceduralFeedbackJobV2>,
     now_secs: u64,
+    additional_preconditions: &[StoreJsonPrecondition],
 ) -> Result<(
     GovernanceIntentEnsureOutcome,
     Option<ProceduralIntentEnsureOutcome>,
@@ -2162,6 +2163,7 @@ pub(crate) fn ensure_post_turn_learning_intents(
     let mut mutations = Vec::new();
     let mut preconditions =
         vec![TranscriptLearningSource::semantic(semantic_job)?.read_precondition(platform)?];
+    preconditions.extend_from_slice(additional_preconditions);
     if let Some(job) = procedural_job {
         TranscriptLearningSource::procedural(job)?.require_precondition(&preconditions)?;
     }
