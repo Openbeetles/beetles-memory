@@ -51,11 +51,11 @@ fn delivered_delta(turn_id: &str) -> CanonicalTurnDelta {
         input_messages: vec![TranscriptInputMessage::user("请把这个事项挂到宿主任务上")
             .with_observed_at(1_800_000_001)
             .with_speaker("owner-human", "human")],
-        assistant_message: Some(
+        assistant_messages: vec![bm_core::memory::TranscriptAssistantMessage::complete(
             TranscriptInputMessage::assistant("已记录证据，但不会解释宿主任务状态。")
                 .with_observed_at(1_800_000_002)
                 .with_speaker("assistant-main", "llm_agent"),
-        ),
+        )],
         tool_observations: vec![ToolObservationDigest {
             observation_id: "tool-1".to_string(),
             call_id: "call-1".to_string(),
@@ -92,7 +92,7 @@ fn transcript_query_index_eligibility_is_canonical_and_excludes_private_authorit
     assert!(record
         .input_messages
         .iter()
-        .chain(record.assistant_message.iter())
+        .chain(record.assistant_messages.iter().map(|item| &item.message))
         .all(transcript_message_is_query_index_eligible));
     for authority in [
         MemoryEvidenceAuthority::PrivateGardenInternal,
@@ -398,7 +398,8 @@ fn transcript_document_indexing_allows_valid_content_without_searchable_terms() 
         let key = ConversationKey::new("space-a", "llm.gateway", "conversation-a").unwrap();
         let mut delta = delivered_delta("turn-unindexable-content");
         delta.input_messages = vec![TranscriptInputMessage::user(content)];
-        delta.assistant_message = None;
+        delta.assistant_messages = vec![];
+        delta.delivery_status = MemoryTurnDeliveryStatus::UserOnly;
         let record = TranscriptTurnRecord::from_delta(&key, 1, &delta, Vec::new(), 10).unwrap();
         TranscriptAppendIntent {
             record,
@@ -602,7 +603,7 @@ fn transcript_turn_record_keeps_actor_attribution_and_host_refs_opaque() {
     assert_eq!(record.input_messages[0].actor.speaker_id, "owner-human");
     assert_eq!(record.input_messages[0].actor.speaker_kind, "human");
     assert_eq!(
-        record.assistant_message.as_ref().unwrap().actor.speaker_id,
+        record.assistant_messages[0].message.actor.speaker_id,
         "assistant-main"
     );
     assert_eq!(record.host_refs.len(), 1);
@@ -651,10 +652,8 @@ fn transcript_turn_record_uses_host_provided_actor_attribution() {
         Some("subject-agent-mounted")
     );
     assert_eq!(
-        record
-            .assistant_message
-            .as_ref()
-            .unwrap()
+        record.assistant_messages[0]
+            .message
             .actor
             .agent_id
             .as_deref(),
@@ -682,10 +681,11 @@ fn transcript_turn_record_serialization_roundtrips_contract_fields() {
 }
 
 #[test]
-fn transcript_turn_record_from_delta_does_not_record_non_delivered_assistant_message() {
+fn incomplete_stream_without_settlement_has_no_assistant_message() {
     let key = ConversationKey::new("space-a", "llm.gateway", "conversation-a").unwrap();
     let mut delta = delivered_delta("turn-incomplete");
     delta.delivery_status = MemoryTurnDeliveryStatus::IncompleteStream;
+    delta.assistant_messages.clear();
 
     let record = TranscriptTurnRecord::from_delta(&key, 3, &delta, Vec::new(), 10).unwrap();
 
@@ -694,7 +694,7 @@ fn transcript_turn_record_from_delta_does_not_record_non_delivered_assistant_mes
         MemoryTurnDeliveryStatus::IncompleteStream
     );
     assert_eq!(record.input_messages.len(), 1);
-    assert!(record.assistant_message.is_none());
+    assert!(record.assistant_messages.is_empty());
 }
 
 #[test]
@@ -737,7 +737,8 @@ fn non_owner_replay_views_redact_private_internal_authority() {
         "private scratch",
         MemoryEvidenceAuthority::PrivateGardenInternal,
     )];
-    delta.assistant_message = None;
+    delta.assistant_messages = vec![];
+    delta.delivery_status = MemoryTurnDeliveryStatus::UserOnly;
     let record = TranscriptTurnRecord::from_delta(&key, 1, &delta, Vec::new(), 10).unwrap();
 
     let replay =
@@ -875,12 +876,7 @@ fn transcript_attrs_are_filtered_per_replay_view_and_attached_to_message() {
         10,
     )
     .unwrap();
-    let assistant_message_id = record
-        .assistant_message
-        .as_ref()
-        .unwrap()
-        .message_id
-        .clone();
+    let assistant_message_id = record.assistant_messages[0].message.message_id.clone();
     let host_ui_attr = message_usage_attr(
         &key,
         "turn-attr-visibility",
@@ -905,7 +901,7 @@ fn transcript_attrs_are_filtered_per_replay_view_and_attached_to_message() {
         &[host_ui_attr.clone(), model_attr.clone()],
     );
 
-    let assistant = host_ui.turns[0].assistant_message.as_ref().unwrap();
+    let assistant = &host_ui.turns[0].assistant_messages[0].message;
     assert_eq!(assistant.attrs, vec![host_ui_attr]);
     assert!(host_ui.redactions.iter().any(|item| {
         item.reason == TranscriptRedactionReason::AttrVisibility
@@ -919,7 +915,7 @@ fn transcript_attrs_are_filtered_per_replay_view_and_attached_to_message() {
         &[model_attr],
     );
     assert_eq!(
-        model.turns[0].assistant_message.as_ref().unwrap().attrs[0].visibility,
+        model.turns[0].assistant_messages[0].message.attrs[0].visibility,
         HostRefVisibility::ModelContext
     );
 }
@@ -935,12 +931,7 @@ fn transcript_attrs_obey_mask_and_delete_raw_lifecycle_policies() {
         10,
     )
     .unwrap();
-    let assistant_message_id = record
-        .assistant_message
-        .as_ref()
-        .unwrap()
-        .message_id
-        .clone();
+    let assistant_message_id = record.assistant_messages[0].message.message_id.clone();
     let metadata_attr = message_usage_attr(
         &key,
         "turn-attr-lifecycle",
@@ -958,7 +949,7 @@ fn transcript_attrs_obey_mask_and_delete_raw_lifecycle_policies() {
         std::slice::from_ref(&metadata_attr),
     );
     assert_eq!(
-        masked.turns[0].assistant_message.as_ref().unwrap().attrs,
+        masked.turns[0].assistant_messages[0].message.attrs,
         vec![metadata_attr.clone()]
     );
 
@@ -971,10 +962,8 @@ fn transcript_attrs_obey_mask_and_delete_raw_lifecycle_policies() {
         std::slice::from_ref(&raw_deleted_record),
         std::slice::from_ref(&metadata_attr),
     );
-    assert!(raw_deleted.turns[0]
-        .assistant_message
-        .as_ref()
-        .unwrap()
+    assert!(raw_deleted.turns[0].assistant_messages[0]
+        .message
         .attrs
         .is_empty());
     assert!(raw_deleted.redactions.iter().any(|item| {
@@ -998,13 +987,17 @@ fn transcript_attrs_obey_mask_and_delete_raw_lifecycle_policies() {
         std::slice::from_ref(&raw_deleted_record),
         std::slice::from_ref(&audit_attr),
     );
-    let visible_attr = &operator.turns[0].assistant_message.as_ref().unwrap().attrs[0];
-    assert_ne!(visible_attr.value, audit_attr.value);
-    assert_eq!(visible_attr.value["redacted"], json!(true));
-    assert_eq!(
-        visible_attr.schema_ref.as_deref(),
-        Some("memory.transcript.attr.redacted.v1")
-    );
+    assert!(operator.turns[0].assistant_messages[0]
+        .message
+        .attrs
+        .is_empty());
+    assert!(operator
+        .redactions
+        .iter()
+        .any(
+            |item| item.attr_id.as_deref() == Some(audit_attr.attr_id.as_str())
+                && item.reason == TranscriptRedactionReason::AttrLifecyclePolicy
+        ));
 }
 
 #[test]
@@ -1018,12 +1011,7 @@ fn transcript_attr_validation_rejects_unscoped_keys_and_bad_message_targets() {
         10,
     )
     .unwrap();
-    let assistant_message_id = record
-        .assistant_message
-        .as_ref()
-        .unwrap()
-        .message_id
-        .clone();
+    let assistant_message_id = record.assistant_messages[0].message.message_id.clone();
     let mut invalid_key = message_usage_attr(
         &key,
         "turn-attr-validation",
@@ -1061,7 +1049,8 @@ fn redaction_report_records_message_reasons() {
         "private scratch",
         MemoryEvidenceAuthority::PrivateGardenInternal,
     )];
-    delta.assistant_message = None;
+    delta.assistant_messages = vec![];
+    delta.delivery_status = MemoryTurnDeliveryStatus::UserOnly;
     let record = TranscriptTurnRecord::from_delta(&key, 1, &delta, Vec::new(), 10).unwrap();
 
     let replay =
@@ -1364,7 +1353,7 @@ fn canonical_turn_does_not_adopt_same_text_from_session_shadow() {
         .append(
             "legacy-chat-a",
             "assistant",
-            &delta.assistant_message.as_ref().unwrap().content,
+            &delta.assistant_messages[0].message.content,
         )
         .unwrap();
     let alias = TranscriptConversationAlias::new(
@@ -1430,6 +1419,67 @@ fn transcript_canonical_intake_digest_is_required_and_survives_raw_deletion() {
 }
 
 #[test]
+fn raw_deleted_record_requires_erased_payload_and_exact_state_pair() {
+    let delta = delivered_delta("forged-raw-deletion");
+    let key = ConversationKey::from_delta("space-a", &delta).unwrap();
+    let mut record = TranscriptTurnRecord::from_delta(
+        &key,
+        1,
+        &delta,
+        vec![host_ref("sensitive", HostRefVisibility::HostUi)],
+        10,
+    )
+    .unwrap();
+    record.lifecycle_state = TranscriptLifecycleState::RawDeleted;
+    record.redaction_state = TranscriptRedactionState::RawDeleted;
+    assert!(
+        record.validate_canonical_intake().is_err(),
+        "forged deletion retains raw content"
+    );
+
+    let mut deleted = TranscriptTurnRecord::from_delta(
+        &key,
+        1,
+        &delta,
+        vec![host_ref("sensitive", HostRefVisibility::HostUi)],
+        10,
+    )
+    .unwrap();
+    deleted.apply_lifecycle_transition(
+        bm_core::memory::TranscriptLifecycleTransition::DeleteRaw,
+        11,
+    );
+    deleted.validate_canonical_intake().unwrap();
+    let mut leaked_content = deleted.clone();
+    leaked_content.assistant_messages[0].message.content = "leaked".into();
+    assert!(leaked_content.validate_canonical_intake().is_err());
+    let mut leaked_ref = deleted.clone();
+    leaked_ref.host_refs[0].label = Some("leaked".into());
+    assert!(leaked_ref.validate_canonical_intake().is_err());
+    let mut leaked_tool = deleted.clone();
+    leaked_tool.tool_observations = delta.tool_observations.clone();
+    assert!(leaked_tool.validate_canonical_intake().is_err());
+    let mut mismatched = deleted.clone();
+    mismatched.redaction_state = TranscriptRedactionState::RawAvailable;
+    assert!(mismatched.validate_canonical_intake().is_err());
+    mismatched = deleted;
+    mismatched.lifecycle_state = TranscriptLifecycleState::Active;
+    assert!(mismatched.validate_canonical_intake().is_err());
+}
+
+#[test]
+fn masked_turn_can_be_archived_without_restoring_raw_visibility() {
+    let delta = delivered_delta("masked-archived");
+    let key = ConversationKey::from_delta("space-a", &delta).unwrap();
+    let mut record = TranscriptTurnRecord::from_delta(&key, 1, &delta, Vec::new(), 10).unwrap();
+    record.apply_lifecycle_transition(bm_core::memory::TranscriptLifecycleTransition::Mask, 11);
+    record.apply_lifecycle_transition(bm_core::memory::TranscriptLifecycleTransition::Archive, 12);
+    assert_eq!(record.lifecycle_state, TranscriptLifecycleState::Archived);
+    assert_eq!(record.redaction_state, TranscriptRedactionState::Masked);
+    record.validate_canonical_intake().unwrap();
+}
+
+#[test]
 fn pfi2_transcript_raw_deletion_is_a_permanent_lifecycle_terminal() {
     use bm_core::memory::TranscriptLifecycleTransition as Transition;
     let delta = delivered_delta("permanent-deletion");
@@ -1468,9 +1518,9 @@ fn distinct_turns_preserve_repeated_user_text_and_message_identity() {
         second.turn_id = "repeat-second".into();
         second.source.request_id = Some("request-second".into());
         second.input_messages[0].observed_at += 10;
-        second.assistant_message.as_mut().unwrap().observed_at += 10;
+        second.assistant_messages[0].message.observed_at += 10;
         if !same_reply {
-            second.assistant_message.as_mut().unwrap().content = "another answer".into();
+            second.assistant_messages[0].message.content = "another answer".into();
         }
         for turn in [&first, &second] {
             let result = commit_canonical_turn_delta_with_transcript(
@@ -1514,6 +1564,9 @@ fn repeated_turn_delivery_status_preserves_only_the_admitted_evidence() {
         for index in 0..2 {
             let mut turn = delivered_delta(&format!("status-repeat-{index}"));
             turn.delivery_status = status;
+            if status != MemoryTurnDeliveryStatus::Delivered {
+                turn.assistant_messages.clear();
+            }
             let result = commit_canonical_turn_delta(&fixture, &turn).unwrap();
             assert_eq!(result.committed_messages.len(), expected);
             assert_eq!(result.committed, expected > 0);
@@ -1523,6 +1576,71 @@ fn repeated_turn_delivery_status_preserves_only_the_admitted_evidence() {
             expected * 2
         );
     }
+}
+
+#[test]
+fn cancelled_turn_preserves_ordered_settled_assistant_messages() {
+    use bm_core::memory::TranscriptAssistantMessage;
+
+    let fixture = AtomicTurnFixture::default();
+    let mut turn = delivered_delta("cancelled-after-speech");
+    turn.delivery_status = MemoryTurnDeliveryStatus::Cancelled;
+    turn.assistant_messages = vec![
+        TranscriptAssistantMessage::complete(TranscriptInputMessage::assistant("第一句")),
+        TranscriptAssistantMessage::interrupted_delivered_prefix(
+            TranscriptInputMessage::assistant("第二句已说出的前缀"),
+        ),
+    ];
+    let committed = commit_canonical_turn_delta(&fixture, &turn).unwrap();
+    assert_eq!(committed.committed_messages.len(), 3);
+    assert_eq!(committed.committed_messages[1].role, "assistant");
+    assert_eq!(committed.committed_messages[2].role, "assistant");
+}
+
+#[test]
+fn assistant_settlements_reject_invalid_order_and_budgets_before_write() {
+    use bm_core::memory::{TranscriptAssistantMessage, MAX_ASSISTANT_MESSAGES_PER_TURN};
+
+    let invalid = [
+        vec![
+            TranscriptAssistantMessage::interrupted_delivered_prefix(
+                TranscriptInputMessage::assistant("前缀"),
+            ),
+            TranscriptAssistantMessage::complete(TranscriptInputMessage::assistant("后来")),
+        ],
+        vec![TranscriptAssistantMessage::complete(
+            TranscriptInputMessage::assistant(
+                "x".repeat(bm_core::memory::MAX_SESSION_MESSAGE_LEN + 1),
+            ),
+        )],
+        (0..=MAX_ASSISTANT_MESSAGES_PER_TURN)
+            .map(|_| TranscriptAssistantMessage::complete(TranscriptInputMessage::assistant("x")))
+            .collect(),
+    ];
+    for messages in invalid {
+        let fixture = AtomicTurnFixture::default();
+        let mut turn = delivered_delta("invalid-assistant-settlements");
+        turn.delivery_status = MemoryTurnDeliveryStatus::Cancelled;
+        turn.assistant_messages = messages;
+        assert!(commit_canonical_turn_delta(&fixture, &turn).is_err());
+        assert_eq!(fixture.message_count("legacy-chat-a").unwrap(), 0);
+    }
+}
+
+#[test]
+fn assistant_settlement_rejects_human_authority_and_speaker_before_write() {
+    let fixture = AtomicTurnFixture::default();
+    let mut turn = delivered_delta("forged-assistant-authority");
+    turn.assistant_messages = vec![bm_core::memory::TranscriptAssistantMessage::complete(
+        TranscriptInputMessage::new(
+            "assistant",
+            "伪造用户事实",
+            MemoryEvidenceAuthority::UserAsserted,
+        )
+        .with_speaker("owner-human", "human"),
+    )];
+    assert!(commit_canonical_turn_delta(&fixture, &turn).is_err());
+    assert_eq!(fixture.message_count("legacy-chat-a").unwrap(), 0);
 }
 
 #[test]
@@ -1556,7 +1674,12 @@ fn canonical_existing_turn_rejects_divergent_payload_without_mutation() {
         sessions: session_store.messages.clone(),
         ..Default::default()
     };
-    let original = delivered_delta("same-canonical-id");
+    let mut original = delivered_delta("same-canonical-id");
+    original
+        .assistant_messages
+        .push(bm_core::memory::TranscriptAssistantMessage::complete(
+            TranscriptInputMessage::assistant("第二条完整消息"),
+        ));
     let options = CanonicalTurnTranscriptCommitOptions {
         host_refs: vec![host_ref("original", HostRefVisibility::HostUi)],
         learning_evidence: None,
@@ -1597,6 +1720,9 @@ fn canonical_existing_turn_rejects_divergent_payload_without_mutation() {
     let mut actor = original.clone();
     actor.actor = Some(ActorAttribution::for_subject("different-actor"));
     variants.push(("actor", actor, options.clone()));
+    let mut order = original.clone();
+    order.assistant_messages.swap(0, 1);
+    variants.push(("assistant_order", order, options.clone()));
     let mut refs = options.clone();
     refs.host_refs = vec![host_ref("different", HostRefVisibility::Internal)];
     variants.push(("host_refs", original, refs));
@@ -1665,6 +1791,14 @@ fn canonical_atomic_intent_preserves_session_admission_and_speaker_binding() {
         .message_id
         .clear();
     assert!(empty_id.validate().is_err());
+    let mut duplicate_session_id = valid.clone();
+    duplicate_session_id
+        .session_before
+        .push(duplicate_session_id.session_append[0].clone());
+    assert!(duplicate_session_id.validate().is_err());
+    let mut wrong_chat = valid.clone();
+    wrong_chat.session_chat_id = "another-chat".into();
+    assert!(wrong_chat.validate().is_err());
     let mut empty_role = valid;
     empty_role.session_append[0].role = " ".into();
     empty_role.transcript.record.input_messages[0].role = " ".into();
@@ -1864,11 +1998,13 @@ fn canonical_turn_delta_is_idempotent_and_does_not_recommit_full_history() {
             TranscriptInputMessage::assistant("你好，我在。"),
             TranscriptInputMessage::user("叫我青川"),
         ]),
-        assistant_message: Some(TranscriptInputMessage::new(
-            "assistant",
-            "你好，青川。",
-            MemoryEvidenceAuthority::AssistantUtterance,
-        )),
+        assistant_messages: vec![bm_core::memory::TranscriptAssistantMessage::complete(
+            TranscriptInputMessage::new(
+                "assistant",
+                "你好，青川。",
+                MemoryEvidenceAuthority::AssistantUtterance,
+            ),
+        )],
         tool_observations: vec![ToolObservationDigest {
             observation_id: "tool-1".to_string(),
             call_id: "call-1".to_string(),
@@ -1918,11 +2054,11 @@ fn canonical_turn_delta_persists_message_identity_time_and_speaker_metadata() {
         input_messages: vec![TranscriptInputMessage::user("Human asks")
             .with_observed_at(1_800_000_001)
             .with_speaker("owner-human", "human")],
-        assistant_message: Some(
+        assistant_messages: vec![bm_core::memory::TranscriptAssistantMessage::complete(
             TranscriptInputMessage::assistant("Specialist answers")
                 .with_observed_at(1_800_000_002)
                 .with_speaker("planner-agent", "llm_agent"),
-        ),
+        )],
         tool_observations: vec![],
         external_content_used: false,
         candidate_ids: vec![],
@@ -1965,7 +2101,11 @@ fn turn_delta(
         source: turn_source(),
         actor: None,
         input_messages: bm_core::memory::protocol_window_user_delta(&input_messages),
-        assistant_message: assistant_message.map(TranscriptInputMessage::assistant),
+        assistant_messages: assistant_message
+            .map(TranscriptInputMessage::assistant)
+            .map(bm_core::memory::TranscriptAssistantMessage::complete)
+            .into_iter()
+            .collect(),
         tool_observations: Vec::new(),
         external_content_used: false,
         candidate_ids: Vec::new(),
@@ -2078,7 +2218,7 @@ fn assistant_self_description_is_committed_as_low_authority_evidence_not_identit
 }
 
 #[test]
-fn incomplete_stream_does_not_commit_partial_assistant() {
+fn incomplete_stream_without_settled_message_does_not_commit_partial_assistant() {
     let store = AtomicTurnFixture::default();
 
     let report = commit_canonical_turn_delta(
@@ -2087,7 +2227,7 @@ fn incomplete_stream_does_not_commit_partial_assistant() {
             "turn-1",
             MemoryTurnDeliveryStatus::IncompleteStream,
             vec![TranscriptInputMessage::user("叫我青川")],
-            Some("你好，青"),
+            None,
         ),
     )
     .expect("commit succeeds");

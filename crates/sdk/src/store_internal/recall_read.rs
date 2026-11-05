@@ -3775,9 +3775,11 @@ mod tests {
                         },
                         actor: None,
                         input_messages: vec![TranscriptInputMessage::user("Synthetic search")],
-                        assistant_message: Some(TranscriptInputMessage::assistant(
-                            "Synthetic result",
-                        )),
+                        assistant_messages: vec![
+                            bm_core::memory::TranscriptAssistantMessage::complete(
+                                TranscriptInputMessage::assistant("Synthetic result"),
+                            ),
+                        ],
                         tool_observations: vec![ToolObservationDigest {
                             observation_id: "read-observation".into(),
                             call_id: "read-call".into(),

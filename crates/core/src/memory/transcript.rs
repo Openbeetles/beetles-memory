@@ -12,8 +12,8 @@ pub use crate::budget::{
 use crate::error::{Error, Result};
 
 use super::{
-    synthesize_session_message_id, CanonicalTurnDelta, CommittedSessionMessage,
-    MemoryEvidenceAuthority, MemoryTurnDeliveryStatus, MemoryTurnSource,
+    synthesize_session_message_id, AssistantMessageSettlement, CanonicalTurnDelta,
+    CommittedSessionMessage, MemoryEvidenceAuthority, MemoryTurnDeliveryStatus, MemoryTurnSource,
     PostTurnLearningEvidenceV3, SessionMessage, SessionTurnCommitReport, SubjectId,
     ToolObservationDigest, TranscriptInputMessage, MAX_SESSION_MESSAGE_LEN,
 };
@@ -534,6 +534,12 @@ impl TranscriptAttrEnvelope {
 
     pub fn validate_for_record(&self, record: &TranscriptTurnRecord) -> Result<()> {
         self.validate()?;
+        if record.lifecycle_state == TranscriptLifecycleState::RawDeleted {
+            return Err(Error::config(
+                "transcript_attr",
+                "raw-deleted transcript cannot receive attrs",
+            ));
+        }
         if self.target.key != record.key {
             return Err(Error::config(
                 "transcript_attr",
@@ -690,6 +696,7 @@ pub struct TranscriptTurnRecord {
     pub factual_admission_revision: u64,
     pub key: ConversationKey,
     pub turn_id: String,
+    pub session_chat_id: String,
     /// Digest of the full original canonical intake, before Session deduplication.
     /// It survives raw deletion and is not inferred from retained message text.
     pub canonical_turn_digest: String,
@@ -699,8 +706,7 @@ pub struct TranscriptTurnRecord {
     pub subject: SubjectId,
     pub actor: ActorAttribution,
     pub input_messages: Vec<TranscriptMessageRecord>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assistant_message: Option<TranscriptMessageRecord>,
+    pub assistant_messages: Vec<TranscriptAssistantMessageRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_observations: Vec<ToolObservationDigest>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -713,6 +719,12 @@ pub struct TranscriptTurnRecord {
     pub redaction_state: TranscriptRedactionState,
     pub created_at: u64,
     pub updated_at: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptAssistantMessageRecord {
+    pub message: TranscriptMessageRecord,
+    pub settlement: AssistantMessageSettlement,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -741,6 +753,7 @@ impl TranscriptTurnRecord {
         now_secs: u64,
     ) -> Result<Self> {
         validate_key_matches_delta(key, delta)?;
+        super::turn_commit::validate_assistant_messages(delta)?;
         let actor = delta
             .actor
             .clone()
@@ -763,27 +776,31 @@ impl TranscriptTurnRecord {
                 })
             })
             .collect::<Vec<_>>();
-        let assistant_message = if delta.delivery_status == MemoryTurnDeliveryStatus::Delivered {
-            delta.assistant_message.as_ref().map(|message| {
-                TranscriptMessageRecord::from_input(TranscriptMessageInput {
+        let assistant_messages = delta
+            .assistant_messages
+            .iter()
+            .enumerate()
+            .map(|(index, item)| TranscriptAssistantMessageRecord {
+                message: TranscriptMessageRecord::from_input(TranscriptMessageInput {
                     key,
                     turn_id: &delta.turn_id,
                     sequence: u64::try_from(input_messages.len())
                         .unwrap_or(u64::MAX)
+                        .saturating_add(u64::try_from(index).unwrap_or(u64::MAX))
                         .saturating_add(1),
-                    message,
+                    message: &item.message,
                     fallback_observed_at: now_secs,
                     created_at: now_secs,
                     subject_id: &delta.subject,
                     turn_actor: Some(&actor),
-                })
+                }),
+                settlement: item.settlement,
             })
-        } else {
-            None
-        };
+            .collect();
         Ok(Self {
             key: key.clone(),
             turn_id: delta.turn_id.clone(),
+            session_chat_id: delta.conversation.chat_id.clone(),
             canonical_turn_digest: super::canonical_turn_learning_digest(delta)?,
             factual_admission_revision: 0,
             sequence,
@@ -792,7 +809,7 @@ impl TranscriptTurnRecord {
             subject: delta.subject.clone(),
             actor,
             input_messages,
-            assistant_message,
+            assistant_messages,
             tool_observations: delta.tool_observations.clone(),
             host_refs,
             learning_evidence,
@@ -815,13 +832,21 @@ impl TranscriptTurnRecord {
         now_secs: u64,
     ) -> Result<Self> {
         validate_key_matches_delta(key, delta)?;
+        super::turn_commit::validate_assistant_messages(delta)?;
+        if committed_inputs.len() != committed_messages.len() {
+            return Err(Error::config(
+                "conversation_transcript_intake",
+                "session/transcript message count mismatch",
+            ));
+        }
         let actor = delta
             .actor
             .clone()
             .unwrap_or_else(|| ActorAttribution::for_subject(&delta.subject))
             .normalized_for_subject(&delta.subject);
         let mut input_messages = Vec::new();
-        let mut assistant_message = None;
+        let mut assistant_messages = Vec::new();
+        let mut assistant_started = false;
         for (index, (message, committed)) in committed_inputs
             .iter()
             .zip(committed_messages.iter())
@@ -836,14 +861,41 @@ impl TranscriptTurnRecord {
                 Some(&actor),
             );
             if record.role.eq_ignore_ascii_case("assistant") {
-                assistant_message = Some(record);
+                assistant_started = true;
+                let settlement = delta
+                    .assistant_messages
+                    .get(assistant_messages.len())
+                    .ok_or_else(|| {
+                        Error::config(
+                            "conversation_transcript_intake",
+                            "assistant settlement missing",
+                        )
+                    })?
+                    .settlement;
+                assistant_messages.push(TranscriptAssistantMessageRecord {
+                    message: record,
+                    settlement,
+                });
             } else {
+                if assistant_started {
+                    return Err(Error::config(
+                        "conversation_transcript_intake",
+                        "input follows assistant settlement",
+                    ));
+                }
                 input_messages.push(record);
             }
+        }
+        if assistant_messages.len() != delta.assistant_messages.len() {
+            return Err(Error::config(
+                "conversation_transcript_intake",
+                "assistant settlement count mismatch",
+            ));
         }
         Ok(Self {
             key: key.clone(),
             turn_id: delta.turn_id.clone(),
+            session_chat_id: delta.conversation.chat_id.clone(),
             canonical_turn_digest: super::canonical_turn_learning_digest(delta)?,
             factual_admission_revision: 0,
             sequence,
@@ -852,7 +904,7 @@ impl TranscriptTurnRecord {
             subject: delta.subject.clone(),
             actor,
             input_messages,
-            assistant_message,
+            assistant_messages,
             tool_observations: delta.tool_observations.clone(),
             host_refs: attachments.host_refs,
             learning_evidence: attachments.learning_evidence,
@@ -867,6 +919,91 @@ impl TranscriptTurnRecord {
 
     pub fn validate_canonical_intake(&self) -> Result<()> {
         super::validate_tool_observation_identities(&self.tool_observations)?;
+        require_canonical_transcript_query_component(&self.session_chat_id, "session_chat_id")?;
+        let lifecycle_valid = matches!(
+            (self.lifecycle_state, self.redaction_state),
+            (
+                TranscriptLifecycleState::Active | TranscriptLifecycleState::Archived,
+                TranscriptRedactionState::RawAvailable
+            ) | (
+                TranscriptLifecycleState::Archived,
+                TranscriptRedactionState::Masked
+            ) | (
+                TranscriptLifecycleState::Masked,
+                TranscriptRedactionState::Masked
+            ) | (
+                TranscriptLifecycleState::RawDeleted,
+                TranscriptRedactionState::RawDeleted
+            )
+        );
+        if !lifecycle_valid
+            || (self.lifecycle_state == TranscriptLifecycleState::RawDeleted
+                && (!self.tool_observations.is_empty()
+                    || self.learning_evidence.is_some()
+                    || self
+                        .host_refs
+                        .iter()
+                        .any(|reference| reference.label.is_some())
+                    || self
+                        .input_messages
+                        .iter()
+                        .chain(self.assistant_messages.iter().map(|item| &item.message))
+                        .any(|message| !message.content.is_empty())))
+        {
+            return Err(Error::config(
+                "conversation_transcript_intake",
+                "transcript lifecycle and redaction payload differ",
+            ));
+        }
+        let settlements = self
+            .assistant_messages
+            .iter()
+            .map(|item| item.settlement)
+            .collect::<Vec<_>>();
+        if !super::turn_commit::assistant_settlements_valid(self.delivery_status, &settlements)
+            || self
+                .input_messages
+                .len()
+                .saturating_add(self.assistant_messages.len())
+                > super::MAX_SESSION_ENTRIES
+            || self.actor.subject_id.as_deref() != Some(self.subject.as_str())
+            || self.assistant_messages.iter().any(|item| {
+                !item.message.role.eq_ignore_ascii_case("assistant")
+                    || (self.redaction_state == TranscriptRedactionState::RawAvailable
+                        && item.message.content.trim().is_empty())
+                    || item.message.content.len() > MAX_SESSION_MESSAGE_LEN
+                    || item.message.actor.subject_id.as_deref() != Some(self.subject.as_str())
+                    || !super::turn_commit::assistant_attribution_valid(
+                        item.message.authority,
+                        &item.message.actor.speaker_kind,
+                        &item.message.actor.speaker_id,
+                    )
+            })
+        {
+            return Err(Error::config(
+                "conversation_transcript_intake",
+                "assistant settlement shape is invalid",
+            ));
+        }
+        let mut message_ids = HashSet::new();
+        for (index, message) in self
+            .input_messages
+            .iter()
+            .chain(self.assistant_messages.iter().map(|item| &item.message))
+            .enumerate()
+        {
+            if message.message_id.is_empty()
+                || !message_ids.insert(&message.message_id)
+                || message.turn_id != self.turn_id
+                || message.content.len() > MAX_SESSION_MESSAGE_LEN
+                || message.sequence != u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1)
+            {
+                return Err(Error::config(
+                    "conversation_transcript_intake",
+                    "message identities or order are invalid",
+                ));
+            }
+        }
         if !canonical_sha256_digest(&self.canonical_turn_digest)
             || self.learning_evidence.as_ref().is_some_and(|evidence| {
                 evidence.canonical_turn_digest != self.canonical_turn_digest
@@ -912,8 +1049,11 @@ impl TranscriptTurnRecord {
                 for message in &mut self.input_messages {
                     message.redact_raw();
                 }
-                if let Some(message) = &mut self.assistant_message {
-                    message.redact_raw();
+                for assistant in &mut self.assistant_messages {
+                    assistant.message.redact_raw();
+                }
+                for host_ref in &mut self.host_refs {
+                    host_ref.label = None;
                 }
             }
         }
@@ -1001,7 +1141,7 @@ impl TranscriptEvidenceRef {
                 Some(id) => record
                     .input_messages
                     .iter()
-                    .chain(record.assistant_message.iter())
+                    .chain(record.assistant_messages.iter().map(|item| &item.message))
                     .any(|message| {
                         message.message_id == id && self.authority == Some(message.authority)
                     }),
@@ -1153,6 +1293,12 @@ pub struct RedactedTranscriptMessage {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedactedTranscriptAssistantMessage {
+    pub message: RedactedTranscriptMessage,
+    pub settlement: AssistantMessageSettlement,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RedactedTranscriptTurn {
     pub turn_id: String,
     pub sequence: u64,
@@ -1162,8 +1308,7 @@ pub struct RedactedTranscriptTurn {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attrs: Vec<TranscriptAttrEnvelope>,
     pub input_messages: Vec<RedactedTranscriptMessage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assistant_message: Option<RedactedTranscriptMessage>,
+    pub assistant_messages: Vec<RedactedTranscriptAssistantMessage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub host_refs: Vec<HostOpaqueRef>,
     pub lifecycle_state: TranscriptLifecycleState,
@@ -1943,7 +2088,12 @@ impl TranscriptSearchCandidate {
             .record
             .input_messages
             .iter()
-            .chain(self.record.assistant_message.iter())
+            .chain(
+                self.record
+                    .assistant_messages
+                    .iter()
+                    .map(|item| &item.message),
+            )
             .any(|message| message.message_id == self.message_id);
         if !matches {
             return Err(Error::config(
@@ -2148,6 +2298,12 @@ impl CanonicalTurnAppendIntent {
     pub fn validate(&self) -> Result<()> {
         self.transcript.validate()?;
         require_canonical_transcript_query_component(&self.session_chat_id, "session_chat_id")?;
+        if self.transcript.record.session_chat_id != self.session_chat_id {
+            return Err(Error::config(
+                "canonical_turn_append",
+                "session_chat_owner_mismatch",
+            ));
+        }
         if self
             .transcript
             .conversation_alias
@@ -2164,7 +2320,13 @@ impl CanonicalTurnAppendIntent {
             .record
             .input_messages
             .iter()
-            .chain(self.transcript.record.assistant_message.iter())
+            .chain(
+                self.transcript
+                    .record
+                    .assistant_messages
+                    .iter()
+                    .map(|item| &item.message),
+            )
             .collect::<Vec<_>>();
         let matches = |session: &SessionMessage, transcript: &TranscriptMessageRecord| {
             session.message_id == transcript.message_id
@@ -2191,6 +2353,20 @@ impl CanonicalTurnAppendIntent {
         };
         if !valid
             || self.session_append.iter().any(|message| {
+                self.session_before
+                    .iter()
+                    .any(|prior| prior.message_id == message.message_id)
+            })
+            || self
+                .session_append
+                .iter()
+                .enumerate()
+                .any(|(index, message)| {
+                    self.session_append[..index]
+                        .iter()
+                        .any(|prior| prior.message_id == message.message_id)
+                })
+            || self.session_append.iter().any(|message| {
                 message.message_id.trim().is_empty()
                     || message.role.trim().is_empty()
                     || message.content.len() > MAX_SESSION_MESSAGE_LEN
@@ -2214,7 +2390,12 @@ impl TranscriptAppendIntent {
             .record
             .input_messages
             .iter()
-            .chain(self.record.assistant_message.iter())
+            .chain(
+                self.record
+                    .assistant_messages
+                    .iter()
+                    .map(|item| &item.message),
+            )
             .any(|message| message.content.len() > MAX_SESSION_MESSAGE_LEN)
         {
             return Err(Error::config(
@@ -2642,23 +2823,31 @@ impl RedactedTranscriptSlice {
                         )
                     })
                     .collect();
-                let assistant_message = record.assistant_message.as_ref().map(|message| {
-                    let attrs_for_message = filter_attrs_for_target(
-                        record,
-                        Some(&message.message_id),
-                        attrs,
-                        view,
-                        &mut redactions,
-                    );
-                    redact_message_for_view(
-                        record,
-                        message,
-                        view,
-                        attrs_for_message,
-                        &mut redacted_messages,
-                        &mut redactions,
-                    )
-                });
+                let assistant_messages = record
+                    .assistant_messages
+                    .iter()
+                    .map(|item| {
+                        let message = &item.message;
+                        let attrs_for_message = filter_attrs_for_target(
+                            record,
+                            Some(&message.message_id),
+                            attrs,
+                            view,
+                            &mut redactions,
+                        );
+                        RedactedTranscriptAssistantMessage {
+                            message: redact_message_for_view(
+                                record,
+                                message,
+                                view,
+                                attrs_for_message,
+                                &mut redacted_messages,
+                                &mut redactions,
+                            ),
+                            settlement: item.settlement,
+                        }
+                    })
+                    .collect();
                 let host_refs = filter_host_refs_for_view(
                     record,
                     view,
@@ -2673,7 +2862,7 @@ impl RedactedTranscriptSlice {
                     delivery_status: record.delivery_status,
                     attrs: attrs_for_turn,
                     input_messages,
-                    assistant_message,
+                    assistant_messages,
                     host_refs,
                     lifecycle_state: record.lifecycle_state,
                     redaction_state: record.redaction_state,
@@ -2930,8 +3119,8 @@ pub trait ConversationTranscriptStore: Send + Sync {
                 .iter()
                 .map(|message| message.message_id.clone())
                 .collect::<HashSet<_>>();
-            if let Some(message) = turn.assistant_message.as_ref() {
-                message_ids.insert(message.message_id.clone());
+            for assistant in &turn.assistant_messages {
+                message_ids.insert(assistant.message.message_id.clone());
             }
             turn_message_ids.insert(turn.turn_id.clone(), message_ids);
         }
@@ -3108,9 +3297,9 @@ fn record_has_message(record: &TranscriptTurnRecord, message_id: &str) -> bool {
         .iter()
         .any(|message| message.message_id == message_id)
         || record
-            .assistant_message
-            .as_ref()
-            .is_some_and(|message| message.message_id == message_id)
+            .assistant_messages
+            .iter()
+            .any(|item| item.message.message_id == message_id)
 }
 
 fn transcript_attr_validation_issue_kind(reason: &str) -> TranscriptRepairIssueKind {
@@ -3230,6 +3419,19 @@ fn filter_attrs_for_target(
             _ => false,
         };
         if !target_matches {
+            continue;
+        }
+        if record.lifecycle_state == TranscriptLifecycleState::RawDeleted {
+            redactions.push(TranscriptRedactionReportItem {
+                turn_id: record.turn_id.clone(),
+                message_id: message_id.map(str::to_string),
+                host_ref_index: None,
+                attr_id: Some(attr.attr_id.clone()),
+                attr_key: Some(attr.key.clone()),
+                reason: TranscriptRedactionReason::AttrLifecyclePolicy,
+                source_authority: None,
+                view,
+            });
             continue;
         }
         if attr.validate_for_record(record).is_err() {

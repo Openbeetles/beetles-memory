@@ -140,7 +140,9 @@ fn seed_control_store(handle: &MemoryStoreHandle) -> ControlFixture {
                 input_messages: vec![TranscriptInputMessage::user(
                     "Use the integrated editor for this project.",
                 )],
-                assistant_message: Some(TranscriptInputMessage::assistant("Recorded.")),
+                assistant_messages: vec![bm_core::memory::TranscriptAssistantMessage::complete(
+                    TranscriptInputMessage::assistant("Recorded."),
+                )],
                 tool_observations: Vec::new(),
                 external_content_used: false,
                 candidate_ids: Vec::new(),

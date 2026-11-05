@@ -96,7 +96,9 @@ fn finalize_request(conversation_id: &str, turn_id: &str) -> MemoryTurnFinalizeR
             },
             actor: None,
             input_messages: vec![TranscriptInputMessage::user("请记住我喜欢冷萃咖啡。")],
-            assistant_message: Some(TranscriptInputMessage::assistant("记下了。")),
+            assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                TranscriptInputMessage::assistant("记下了。"),
+            )],
             tool_observations: Vec::new(),
             external_content_used: false,
             candidate_ids: Vec::new(),
@@ -988,9 +990,11 @@ fn pl3_service_turn(
                     },
                     actor: None,
                     input_messages: observations,
-                    assistant_message: Some(TranscriptInputMessage::assistant(
-                        "I will distinguish uncertainty from evidence.",
-                    )),
+                    assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                        TranscriptInputMessage::assistant(
+                            "I will distinguish uncertainty from evidence.",
+                        ),
+                    )],
                     tool_observations: vec![],
                     external_content_used: false,
                     candidate_ids: vec![],

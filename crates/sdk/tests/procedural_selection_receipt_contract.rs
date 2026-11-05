@@ -170,9 +170,9 @@ fn request(
             },
             actor: None,
             input_messages: vec![TranscriptInputMessage::user("unpack archive")],
-            assistant_message: Some(TranscriptInputMessage::assistant(
-                "archive unpack completed successfully",
-            )),
+            assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                TranscriptInputMessage::assistant("archive unpack completed successfully"),
+            )],
             tool_observations: canonical,
             external_content_used: false,
             candidate_ids: vec![],

@@ -446,7 +446,12 @@ fn repeated_turn_window_preserves_new_user_even_after_empty_assistant_boundary()
                 assert!(ids.insert(message.message_id.clone()));
             }
             assert_eq!(
-                turn.assistant_message.as_ref().unwrap().content.as_deref(),
+                turn.assistant_messages
+                    .first()
+                    .unwrap()
+                    .message
+                    .content
+                    .as_deref(),
                 Some("ok")
             );
         }

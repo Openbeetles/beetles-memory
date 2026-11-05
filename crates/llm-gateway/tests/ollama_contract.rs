@@ -347,7 +347,7 @@ fn chat_non_streaming_finalizes_turn_into_session_store_after_done_true() {
         .slice
         .turns
         .iter()
-        .filter_map(|turn| turn.assistant_message.as_ref())
+        .flat_map(|turn| turn.assistant_messages.iter().map(|entry| &entry.message))
         .find(|message| message.content.as_deref() == Some("ok"))
         .expect("assistant message persisted");
     assert!(assistant_message.message_id.starts_with("msg_"));
@@ -417,7 +417,7 @@ fn chat_full_history_finalizes_only_new_user_delta_for_same_ollama_thread() {
         .flat_map(|turn| {
             turn.input_messages
                 .iter()
-                .chain(turn.assistant_message.iter())
+                .chain(turn.assistant_messages.iter().map(|entry| &entry.message))
         })
         .filter_map(|message| message.content.as_deref())
         .collect::<Vec<_>>();
@@ -820,7 +820,12 @@ fn repeated_turn_window_preserves_new_user_even_after_empty_assistant_boundary()
                 assert!(ids.insert(message.message_id.clone()));
             }
             assert_eq!(
-                turn.assistant_message.as_ref().unwrap().content.as_deref(),
+                turn.assistant_messages
+                    .first()
+                    .unwrap()
+                    .message
+                    .content
+                    .as_deref(),
                 Some("ok")
             );
         }

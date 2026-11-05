@@ -6,10 +6,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{
-    MemoryEvidenceAuthority, MemoryTurnDeliveryStatus, PostTurnGovernanceIdentityV2,
-    SubjectSoulExpectedStateV1, SubjectSoulLifecycleStateV1, SubjectSoulOwnerV1,
-    TranscriptTurnRecord, TurnContinuityEvidence, TurnLedgerStatus, TurnPersonaLedger,
-    TurnPersonaPriorityLedger,
+    AssistantMessageSettlement, MemoryEvidenceAuthority, MemoryTurnDeliveryStatus,
+    PostTurnGovernanceIdentityV2, SubjectSoulExpectedStateV1, SubjectSoulLifecycleStateV1,
+    SubjectSoulOwnerV1, TranscriptTurnRecord, TurnContinuityEvidence, TurnLedgerStatus,
+    TurnPersonaLedger, TurnPersonaPriorityLedger,
 };
 use crate::{Error, Result};
 
@@ -140,10 +140,11 @@ impl TurnPersonaInterpretationV1 {
         if !transcript.permits_post_turn_learning()
             || transcript.delivery_status != MemoryTurnDeliveryStatus::Delivered
             || transcript.external_content_used
-            || transcript
-                .assistant_message
-                .as_ref()
-                .is_none_or(|message| message.content.trim().is_empty())
+            || transcript.assistant_messages.is_empty()
+            || transcript.assistant_messages.iter().any(|entry| {
+                entry.settlement != AssistantMessageSettlement::Complete
+                    || entry.message.content.trim().is_empty()
+            })
             || priority_order.len() > 8
             || priority_order.iter().any(|value| {
                 super::persona_priority::canonical_priority_token(value).as_deref()
@@ -424,9 +425,10 @@ impl GovernedTurnPersonaEvidenceV1 {
             status: TurnLedgerStatus::Answered,
             final_reply_delivered: true,
             canonical_reply_source: transcript
-                .assistant_message
-                .as_ref()
+                .assistant_messages
+                .last()
                 .ok_or_else(invalid)?
+                .message
                 .message_id
                 .clone(),
             observed_at_ms: self.observed_at.checked_mul(1000).ok_or_else(invalid)?,

@@ -154,7 +154,9 @@ fn request(entry: &EntryRuntime, id: &str, feedback: bool) -> AdapterCommand {
             },
             actor: None,
             input_messages: vec![TranscriptInputMessage::user("synthetic entry request")],
-            assistant_message: Some(TranscriptInputMessage::assistant("finished safely")),
+            assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                TranscriptInputMessage::assistant("finished safely"),
+            )],
             tool_observations: vec![ToolObservationDigest {
                 observation_id: format!("obs-{id}"),
                 call_id: format!("call-{id}"),

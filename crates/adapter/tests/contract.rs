@@ -639,7 +639,9 @@ fn v1_rejects_every_mutation_reliability_class_but_keeps_reads() {
                 },
                 actor: None,
                 input_messages: vec![TranscriptInputMessage::user("v1 mutation")],
-                assistant_message: Some(TranscriptInputMessage::assistant("rejected")),
+                assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                    TranscriptInputMessage::assistant("rejected"),
+                )],
                 tool_observations: Vec::new(),
                 external_content_used: false,
                 candidate_ids: Vec::new(),
@@ -1252,7 +1254,9 @@ fn transcript_turn() -> CanonicalTurnDelta {
         },
         actor: None,
         input_messages: vec![TranscriptInputMessage::user("adapter user")],
-        assistant_message: Some(TranscriptInputMessage::assistant("adapter assistant")),
+        assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+            TranscriptInputMessage::assistant("adapter assistant"),
+        )],
         tool_observations: Vec::new(),
         external_content_used: false,
         candidate_ids: Vec::new(),
@@ -1411,9 +1415,10 @@ fn transcript_attr_write_command_dispatches_through_memory_runtime() {
         .expect("replay transcript");
     let turn = &replay.slice.turns[0];
     let message_id = turn
-        .assistant_message
-        .as_ref()
+        .assistant_messages
+        .first()
         .expect("assistant message")
+        .message
         .message_id
         .clone();
 

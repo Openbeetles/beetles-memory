@@ -61,8 +61,8 @@ use crate::store_internal::recall_index::{
     TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE,
 };
 
-pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema_v16";
-pub const STORE_SCHEMA_VERSION: u32 = 16;
+pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema_v17";
+pub const STORE_SCHEMA_VERSION: u32 = 17;
 pub(crate) const LONG_TERM_VERSION_MATERIAL_NAMESPACE: &str = "long_term_version_materials";
 pub(crate) const LONG_TERM_HEAD_MANIFEST_NAMESPACE: &str = "long_term_head_manifests";
 pub(crate) const LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE: &str =
@@ -3340,14 +3340,14 @@ mod tests {
     }
 
     #[test]
-    fn store_schema_identity_is_exactly_v16_and_rejects_v15() {
-        assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v16");
-        assert_eq!(STORE_SCHEMA_VERSION, 16);
+    fn store_schema_identity_is_exactly_v17_and_rejects_v16() {
+        assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v17");
+        assert_eq!(STORE_SCHEMA_VERSION, 17);
         assert!(
             validate_store_schema_identity(STORE_SCHEMA_ID, STORE_SCHEMA_VERSION, "test").is_ok()
         );
         assert!(
-            validate_store_schema_identity("beetle_memory_store_schema_v15", 15, "test").is_err()
+            validate_store_schema_identity("beetle_memory_store_schema_v16", 16, "test").is_err()
         );
         assert!(
             validate_store_schema_identity("beetle_memory_store_schema_v14", 14, "test").is_err()
@@ -3359,7 +3359,7 @@ mod tests {
     }
 
     #[test]
-    fn store_v16_rejects_v2_governance_job_and_scope_payloads() {
+    fn store_v17_rejects_v2_governance_job_and_scope_payloads() {
         let identity = PostTurnGovernanceIdentityV2::new(
             "space:v2-reject",
             "subject:v2-reject",

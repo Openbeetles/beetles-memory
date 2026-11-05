@@ -58,7 +58,9 @@ fn finalize_request(user: &str, assistant: &str) -> MemoryTurnFinalizeRequest {
             source: turn_source(),
             actor: None,
             input_messages: vec![TranscriptInputMessage::user(user)],
-            assistant_message: Some(TranscriptInputMessage::assistant(assistant)),
+            assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                TranscriptInputMessage::assistant(assistant),
+            )],
             tool_observations: Vec::new(),
             external_content_used: false,
             candidate_ids: Vec::new(),

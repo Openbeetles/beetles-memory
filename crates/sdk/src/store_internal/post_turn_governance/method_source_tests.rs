@@ -266,9 +266,11 @@ fn revoked_source_admission(config: StoreBackendConfig, reopen: bool, contract: 
                     input_messages: vec![TranscriptInputMessage::user(
                         "Learn from the admitted checksum instructions.",
                     )],
-                    assistant_message: Some(TranscriptInputMessage::assistant(
-                        "I will use checksum validation.",
-                    )),
+                    assistant_messages: vec![
+                        bm_core::memory::TranscriptAssistantMessage::complete(
+                            TranscriptInputMessage::assistant("I will use checksum validation."),
+                        ),
+                    ],
                     tool_observations: vec![],
                     external_content_used: false,
                     candidate_ids: vec![],

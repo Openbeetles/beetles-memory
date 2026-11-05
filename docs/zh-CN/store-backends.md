@@ -38,7 +38,11 @@ let config = StoreBackendConfig::file("/var/lib/beetle-memory", profile)?
     .with_fsync(true);
 ```
 
-## 0.11.2 Schema 准入：Store v16
+## 0.12.0 Schema 准入：Store v17
+
+0.12.0 源码只接受 Store v17。有序助手消息、逐条结算状态、精确 turn 身份、Session shadow、transcript attrs/aux、host ref label 与索引按同一受治理闭包校验。`DeleteRaw` 在该闭包中清除受影响原文及依赖的 session summary 文本。打开 Store v16 必须明确失败：不兼容读取、不自动迁移、不双写，也不静默建立替代 Store。完整旧 Store 只能由匹配的旧源码 tag 读取；数据过渡须由 owner 另行决定。Archive import 不承担 schema migration。详见 [0.12.0 源码发布说明](release-notes-0.12.0.md)。
+
+## 历史 0.11.2 Schema 准入：Store v16
 
 0.11.2 只接受 Store v16，长期记忆 immutable material v6、control revision v4。Canonical turn 持久保存事实来源入场顺序，长期记忆 owner 保存控制屏障和 transition basis。禁记规则通过精确 identity/revision 与 operation receipt 原子绑定；Transcript 撤源在同一事务更新事实证据及受治理索引。Adapter V2 仍为 envelope 版本，但 policy 请求与响应合同已变化，所有 Beetle crate 必须使用同一源码 tag。
 

@@ -42,7 +42,9 @@ fn finalize_request(turn_id: &str) -> MemoryTurnFinalizeRequest {
             input_messages: vec![TranscriptInputMessage::user(
                 "记住 runtime metrics 必须来自 SDK report",
             )],
-            assistant_message: Some(TranscriptInputMessage::assistant("已记录。")),
+            assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                TranscriptInputMessage::assistant("已记录。"),
+            )],
             tool_observations: Vec::new(),
             external_content_used: false,
             candidate_ids: Vec::new(),

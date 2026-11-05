@@ -219,7 +219,9 @@ fn submit_feedback_with_task(
                     },
                     actor: None,
                     input_messages: vec![TranscriptInputMessage::user("synthetic tool execution")],
-                    assistant_message: Some(TranscriptInputMessage::assistant("synthetic result")),
+                    assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                        TranscriptInputMessage::assistant("synthetic result"),
+                    )],
                     tool_observations,
                     external_content_used: false,
                     candidate_ids: Vec::new(),

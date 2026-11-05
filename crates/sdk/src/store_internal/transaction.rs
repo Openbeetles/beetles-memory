@@ -3090,7 +3090,7 @@ fn scoped_transcript_query_dependency_addresses(
                         .physical_key,
                     ));
                 }
-                for (locator, content) in message_locators(&record) {
+                for (locator, content, _) in message_locators(&record) {
                     if namespaces.contains(TRANSCRIPT_SEARCH_MESSAGE_MANIFEST_NAMESPACE) {
                         addresses.insert((
                             TRANSCRIPT_SEARCH_MESSAGE_MANIFEST_NAMESPACE.to_string(),
@@ -4922,6 +4922,7 @@ mod tests {
                 .unwrap(),
                 lifecycle_state: TranscriptLifecycleState::RawDeleted,
                 redaction_state: TranscriptRedactionState::RawDeleted,
+                message_sequence: 1,
             }],
         };
         let key = search_posting_key(

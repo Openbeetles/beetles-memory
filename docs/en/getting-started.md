@@ -1,6 +1,6 @@
 # Getting Started
 
-Use this guide when embedding Beetle Memory into a Rust host through the SDK. For protocol deployment, start here and then read [Adapters](adapters.md).
+Use this guide when embedding the 0.12.0 source version into a Rust host through the SDK. Its Store v17 and ordered `assistant_messages` contract is described in the [release notes](release-notes-0.12.0.md). For protocol deployment, start here and then read [Adapters](adapters.md).
 
 ## Dependency
 
@@ -11,14 +11,16 @@ From this repository:
 bm-sdk = { path = "crates/sdk", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
-From an external repository, use the source tag (this does not require a crates.io publication):
+After `v0.12.0` has been published and verified, an external repository can use the source tag (this does not require a crates.io publication):
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.11.2", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.11.2", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.12.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.12.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 Select exactly one desktop embedded feature for the host OS: `profile-desktop-macos-embedded-sdk`, `profile-desktop-windows-embedded-sdk`, or `profile-desktop-linux-embedded-sdk`. Linux desktop hosts must not use a server or dev-full profile.
+
+The published v0.11.2 tag remains a Store v16 release. Store v17 does not read v16; use a new Store for this version until the data owner has decided how to handle existing data.
 
 ## Build A Runtime
 

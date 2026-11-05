@@ -158,9 +158,9 @@ fn production_learning_with_active_receipt(
                     },
                     actor: None,
                     input_messages: vec![TranscriptInputMessage::user(MATERIAL)],
-                    assistant_message: Some(TranscriptInputMessage::assistant(
-                        "I verified the file.",
-                    )),
+                    assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                        TranscriptInputMessage::assistant("I verified the file."),
+                    )],
                     tool_observations: vec![],
                     external_content_used: false,
                     candidate_ids: vec![],
@@ -362,9 +362,11 @@ fn production_learning_with_active_receipt(
                         input_messages: vec![TranscriptInputMessage::user(
                             "Verify this file using the selected method.",
                         )],
-                        assistant_message: Some(TranscriptInputMessage::assistant(
-                            if failed_task && index == 2 { "The verifier rejected the result despite successful tool execution." } else { "The independent checksum verifier accepted the result." },
-                        )),
+                        assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                            TranscriptInputMessage::assistant(
+                                if failed_task && index == 2 { "The verifier rejected the result despite successful tool execution." } else { "The independent checksum verifier accepted the result." },
+                            ),
+                        )],
                         tool_observations: support::procedural::canonical_observations(
                             "verify_file",
                             &[fact],

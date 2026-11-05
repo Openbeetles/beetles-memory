@@ -13,7 +13,8 @@ use super::{
     TranscriptTurnRecord, MAX_SESSION_ENTRIES,
 };
 
-const CANONICAL_TURN_LEARNING_DIGEST_DOMAIN: &str = "canonical_turn_learning_digest_v1";
+const CANONICAL_TURN_LEARNING_DIGEST_DOMAIN: &str = "canonical_turn_learning_digest_v2";
+pub const MAX_ASSISTANT_MESSAGES_PER_TURN: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -168,6 +169,39 @@ impl TranscriptInputMessage {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantMessageSettlement {
+    /// The host settled a complete assistant message before this turn ended.
+    Complete,
+    /// The host settled the prefix already delivered before interruption.
+    /// Transient stream fragments without settlement are not transcript input.
+    InterruptedDeliveredPrefix,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptAssistantMessage {
+    pub message: TranscriptInputMessage,
+    pub settlement: AssistantMessageSettlement,
+}
+
+impl TranscriptAssistantMessage {
+    pub fn complete(message: TranscriptInputMessage) -> Self {
+        Self {
+            message,
+            settlement: AssistantMessageSettlement::Complete,
+        }
+    }
+
+    pub fn interrupted_delivered_prefix(message: TranscriptInputMessage) -> Self {
+        Self {
+            message,
+            settlement: AssistantMessageSettlement::InterruptedDeliveredPrefix,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryTurnSource {
     pub ingress: IngressKind,
@@ -229,6 +263,7 @@ pub fn validate_tool_observation_identities(observations: &[ToolObservationDiges
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CanonicalTurnDelta {
     pub turn_id: String,
     pub conversation: ConversationScope,
@@ -241,8 +276,7 @@ pub struct CanonicalTurnDelta {
     /// Normalize protocol history with `protocol_window_user_delta` before intake.
     #[serde(default)]
     pub input_messages: Vec<TranscriptInputMessage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assistant_message: Option<TranscriptInputMessage>,
+    pub assistant_messages: Vec<TranscriptAssistantMessage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_observations: Vec<ToolObservationDigest>,
     #[serde(default)]
@@ -292,6 +326,7 @@ pub struct CanonicalTurnTranscriptCommitOptions {
 
 pub fn canonical_turn_learning_digest(delta: &CanonicalTurnDelta) -> Result<String> {
     validate_tool_observation_identities(&delta.tool_observations)?;
+    validate_assistant_messages(delta)?;
     let encoded = serde_json::to_vec(delta).map_err(|error| {
         crate::error::Error::config("canonical_turn_learning_digest", error.to_string())
     })?;
@@ -301,6 +336,80 @@ pub fn canonical_turn_learning_digest(delta: &CanonicalTurnDelta) -> Result<Stri
     hasher.update((encoded.len() as u64).to_be_bytes());
     hasher.update(encoded);
     Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+pub(crate) fn validate_assistant_messages(delta: &CanonicalTurnDelta) -> Result<()> {
+    let messages = &delta.assistant_messages;
+    let settlements = messages
+        .iter()
+        .map(|item| item.settlement)
+        .collect::<Vec<_>>();
+    if !assistant_settlements_valid(delta.delivery_status, &settlements)
+        || delta.input_messages.len().saturating_add(messages.len()) > MAX_SESSION_ENTRIES
+        || delta
+            .actor
+            .as_ref()
+            .and_then(|actor| actor.subject_id.as_deref())
+            .is_some_and(|subject| subject != delta.subject)
+        || messages.iter().any(|item| {
+            !item.message.is_role("assistant")
+                || item.message.content.trim().is_empty()
+                || item.message.content.len() > super::MAX_SESSION_MESSAGE_LEN
+                || !assistant_attribution_valid(
+                    item.message.authority,
+                    &item.message.speaker_kind,
+                    &item.message.speaker_id,
+                )
+        })
+    {
+        return Err(crate::error::Error::config(
+            "canonical_turn_assistant_messages",
+            "assistant messages must be bounded, ordered, settled, and match turn delivery status",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn assistant_attribution_valid(
+    authority: MemoryEvidenceAuthority,
+    speaker_kind: &str,
+    speaker_id: &str,
+) -> bool {
+    matches!(
+        authority,
+        MemoryEvidenceAuthority::AssistantUtterance | MemoryEvidenceAuthority::AssistantSelfClaim
+    ) && speaker_kind == "llm_agent"
+        && !speaker_id.is_empty()
+        && speaker_id.len() <= 256
+        && speaker_id.trim() == speaker_id
+        && !speaker_id.chars().any(char::is_control)
+}
+
+pub(crate) fn assistant_settlements_valid(
+    status: MemoryTurnDeliveryStatus,
+    settlements: &[AssistantMessageSettlement],
+) -> bool {
+    if settlements.len() > MAX_ASSISTANT_MESSAGES_PER_TURN {
+        return false;
+    }
+    match status {
+        MemoryTurnDeliveryStatus::Delivered => {
+            !settlements.is_empty()
+                && settlements
+                    .iter()
+                    .all(|item| *item == AssistantMessageSettlement::Complete)
+        }
+        MemoryTurnDeliveryStatus::Cancelled
+        | MemoryTurnDeliveryStatus::UpstreamFailed
+        | MemoryTurnDeliveryStatus::IncompleteStream => settlements
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| **item == AssistantMessageSettlement::InterruptedDeliveredPrefix)
+            .all(|(index, _)| index + 1 == settlements.len()),
+        MemoryTurnDeliveryStatus::UserOnly | MemoryTurnDeliveryStatus::RejectedByPolicy => {
+            settlements.is_empty()
+        }
+    }
 }
 
 pub fn commit_canonical_turn_delta_with_transcript(
@@ -354,6 +463,7 @@ pub fn plan_canonical_turn_delta_with_transcript(
     delta: &CanonicalTurnDelta,
     options: CanonicalTurnTranscriptCommitOptions,
 ) -> Result<CanonicalTurnTranscriptCommitPlan> {
+    validate_assistant_messages(delta)?;
     let CanonicalTurnTranscriptCommitOptions {
         host_refs,
         learning_evidence,
@@ -496,26 +606,29 @@ fn prepare_canonical_turn_delta(
         .iter()
         .filter(|message| message.is_role("user") && !message.content.trim().is_empty())
         .cloned();
-    let assistant_message = delta
-        .assistant_message
-        .as_ref()
-        .filter(|message| message.is_role("assistant") && !message.content.trim().is_empty())
-        .cloned();
+    let assistant_messages = delta
+        .assistant_messages
+        .iter()
+        .map(|item| item.message.clone());
     let mut messages = Vec::new();
     match delta.delivery_status {
         MemoryTurnDeliveryStatus::Delivered => {
             messages.extend(user_delta);
-            if let Some(message) = assistant_message {
-                messages.push(message);
-            }
+            messages.extend(assistant_messages);
         }
         MemoryTurnDeliveryStatus::UserOnly
         | MemoryTurnDeliveryStatus::UpstreamFailed
         | MemoryTurnDeliveryStatus::Cancelled => {
             messages.extend(user_delta);
+            messages.extend(assistant_messages);
         }
-        MemoryTurnDeliveryStatus::IncompleteStream | MemoryTurnDeliveryStatus::RejectedByPolicy => {
+        MemoryTurnDeliveryStatus::IncompleteStream => {
+            if !delta.assistant_messages.is_empty() {
+                messages.extend(user_delta);
+                messages.extend(assistant_messages);
+            }
         }
+        MemoryTurnDeliveryStatus::RejectedByPolicy => {}
     }
     let skipped_reason = if messages.is_empty() {
         Some(skipped_reason(delta.delivery_status).to_string())

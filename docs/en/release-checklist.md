@@ -2,6 +2,13 @@
 
 Use this checklist for maintainer release candidates.
 
+## 0.12.0 Source Candidate
+
+- Confirm the `assistant_messages` SDK break and `InterruptedDeliveredPrefix` status rules against Core, SDK, Store, and the bilingual release notes. Verify exact retry, 16-message/4 KiB rejection, and `Cancelled` settled-prefix replay.
+- Confirm Store v17 opens only v17; an attempted Store v16 open fails without writes. Do not use archive import as migration or run destructive operations on the only real Store copy.
+- Verify `DeleteRaw` closes over Session shadow, transcript attrs/auxiliary material, host-reference labels, indexes, and dependent summary text. Record the targeted Core/SDK/Store evidence and explicitly list unrun Provider, GUI, real-data, and platform checks.
+- Only after source checks and documentation agree, record the source commit, immutable `v0.12.0` tag, and both remote readbacks. Do not count a local tag, crates.io package, hosted Release, binary, or deployment as evidence for another surface.
+
 ## Documentation
 
 - Root README links to the English and Chinese documentation.

@@ -1786,7 +1786,9 @@ mod transcript_commitment_tests {
             input_messages: vec![TranscriptInputMessage::user(
                 "Use a checksum before extraction",
             )],
-            assistant_message: Some(TranscriptInputMessage::assistant("Checksum verified")),
+            assistant_messages: vec![crate::memory::TranscriptAssistantMessage::complete(
+                TranscriptInputMessage::assistant("Checksum verified"),
+            )],
             tool_observations: Vec::new(),
             external_content_used: false,
             candidate_ids: Vec::new(),

@@ -599,7 +599,9 @@ fn transcript_source_identity_survives_archive_but_not_erasure_or_body_correctio
         },
         actor: None,
         input_messages: vec![TranscriptInputMessage::user("synthetic private source")],
-        assistant_message: Some(TranscriptInputMessage::assistant("synthetic reply")),
+        assistant_messages: vec![crate::memory::TranscriptAssistantMessage::complete(
+            TranscriptInputMessage::assistant("synthetic reply"),
+        )],
         tool_observations: Vec::new(),
         external_content_used: false,
         candidate_ids: Vec::new(),

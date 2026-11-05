@@ -334,7 +334,9 @@ fn commit_source(runtime: &MemoryRuntime, subject: &str, chat: &str) -> Transcri
         },
         actor: None,
         input_messages: vec![TranscriptInputMessage::user("独立的合成来源")],
-        assistant_message: Some(TranscriptInputMessage::assistant("收到。")),
+        assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+            TranscriptInputMessage::assistant("收到。"),
+        )],
         tool_observations: Vec::new(),
         external_content_used: false,
         candidate_ids: Vec::new(),

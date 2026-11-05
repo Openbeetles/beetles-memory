@@ -219,7 +219,7 @@ fn non_streaming_response_finalizes_turn_into_session_store() {
         .slice
         .turns
         .iter()
-        .filter_map(|turn| turn.assistant_message.as_ref())
+        .flat_map(|turn| turn.assistant_messages.iter().map(|entry| &entry.message))
         .any(|message| message.content.as_deref() == Some("I will verify artifacts first.")));
 }
 
@@ -315,7 +315,7 @@ fn canonical_gateway_finalize_reports_queued_without_request_time_maintenance_se
         .slice
         .turns
         .iter()
-        .filter_map(|turn| turn.assistant_message.as_ref())
+        .flat_map(|turn| turn.assistant_messages.iter().map(|entry| &entry.message))
         .any(|message| message.content.as_deref() == Some("I will verify artifacts first.")));
 }
 

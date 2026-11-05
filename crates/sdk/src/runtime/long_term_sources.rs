@@ -64,7 +64,7 @@ impl LongTermSourceContext<'_> {
             let message = record
                 .input_messages
                 .iter()
-                .chain(record.assistant_message.iter())
+                .chain(record.assistant_messages.iter().map(|entry| &entry.message))
                 .find(|message| &message.message_id == message_id)
                 .ok_or_else(|| {
                     Error::config(
@@ -200,9 +200,7 @@ impl GovernanceTurnSession {
         );
         let source_count = records
             .iter()
-            .map(|record| {
-                record.input_messages.len() + usize::from(record.assistant_message.is_some())
-            })
+            .map(|record| record.input_messages.len() + record.assistant_messages.len())
             .sum();
         Self {
             chat_id: chat_id.to_string(),

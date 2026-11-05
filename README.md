@@ -20,7 +20,7 @@ The project is not a vector database, a generic RAG framework, a chat-history du
 | Model gateway and transparent local-model control | `bm-llm-gateway`, `bm-ollama-transparent` |
 | Adapters | `bm-cli`, `bm-http`, `bm-wss`, `bm-mcp`, `bm-a2a` |
 
-This source tree is [0.11.2](docs/en/release-notes-0.11.2.md), with [Store v16](docs/en/store-backends.md) and [explicit procedural evidence authority](docs/en/api.md#procedural-evidence-authority). The 0.7.0 source uses Store v13. There is no compatibility reader or automatic migration between generations. Release identity is determined by the corresponding Git tag, not a working-tree version number; crates.io packages, binaries and deployment each require separate release evidence. The repository includes smoke-test examples under `examples/` and platform capability fixtures under `fixtures/platform/capabilities/`.
+The published [v0.11.2 Git tag](docs/en/release-notes-0.11.2.md) uses Store v16 and [explicit procedural evidence authority](docs/en/api.md#procedural-evidence-authority). The current [0.12.0 source version](docs/en/release-notes-0.12.0.md) uses Store v17 for ordered assistant messages and settled interrupted prefixes. Store v17 has no compatibility reader or automatic migration from v16; opening an older Store must fail without changing its data. Release identity is determined by the verified Git tag, not a working-tree version number; crates.io packages, binaries and deployment each require separate release evidence. The repository includes smoke-test examples under `examples/` and platform capability fixtures under `fixtures/platform/capabilities/`.
 
 ## Capabilities
 

@@ -2,6 +2,13 @@
 
 此清单面向 maintainer release candidate。
 
+## 0.12.0 源码候选
+
+- 对照 Core、SDK、Store 和双语发布说明核对 `assistant_messages` 破坏性变更及 `InterruptedDeliveredPrefix` 状态规则；验证精确重试、16 条/单条 4 KiB 拒绝，以及 `Cancelled` 已结算前缀回放。
+- 验证 Store v17 只打开 v17，打开 Store v16 必须无写入地失败。Archive import 不当作迁移，不对真实 Store 唯一副本执行破坏性操作。
+- 验证 `DeleteRaw` 覆盖 Session shadow、transcript attrs/aux、host ref label、索引和依赖摘要文本；记录定向 Core/SDK/Store 证据，并明确列出未执行的 Provider、GUI、真实数据和目标平台检查。
+- 源码检查和文档一致后，再记录源码 commit、不可移动的 `v0.12.0` tag 与双远端回读。不得以本地 tag、crates.io 包、托管 Release、二进制或部署替代另一发布面的证据。
+
 ## 文档
 
 - 根 README 链接英文和中文文档。

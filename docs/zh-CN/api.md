@@ -2,7 +2,11 @@
 
 SDK API 是主要入口。宿主项目应通过 `bm-sdk` 进入，或通过 `bm-entry` 加协议 adapter 进入；不应自行实现记忆 schema、store envelope、replay 格式或 adapter dispatch 规则。
 
-## 0.11.2：长期记忆控制完整性
+## 0.12.0：Transcript Commit
+
+`bm-sdk` 0.12.0 使用有序的 `CanonicalTurnDelta.assistant_messages: Vec<TranscriptAssistantMessage>`，每条带 `Complete` 或 `InterruptedDeliveredPrefix` 结算状态；`Cancelled` 回合可保留已结算的助手输出。下文 SDK Transcript 合同列出状态与容量规则；[发布说明](release-notes-0.12.0.md)说明 Store v17 clean break。Store v17 不读取 Store v16。发布身份以对应 Git tag 与远端回读为准。
+
+## 历史 0.11.2：长期记忆控制完整性
 
 0.11.2 使用 Store v16；0.10.0 使用 Store v15，0.9.0 使用 Store v14。没有兼容读取或自动迁移，所有 Beetle crate 必须来自同一源码 tag。
 
@@ -71,7 +75,7 @@ Transcript Mask/DeleteRaw 会在同一事务撤回派生事实的来源证据与
 
 ## Universal Long-Term Learning
 
-`finalize_turn` 会提交 delivered canonical turn 和唯一 durable governance intent。之后由 `bm-sdk::MemoryLearningEngine` 统一拥有完整 due-job cycle：exact scope discovery、lease/CAS、当前 transcript/subject/privacy 准入、最小 Provider 外发、候选严格验证、accepted long-term mutation、receipt/audit、retry、blocking、cancellation 与 terminal completion。生产宿主不得再把旧 low-level worker transition 拼成第二套 Worker。
+`finalize_turn` 会提交 canonical turn 及适用的 durable governance intent。之后由 `bm-sdk::MemoryLearningEngine` 统一拥有完整 due-job cycle：exact scope discovery、lease/CAS、当前 transcript/subject/privacy 准入、最小 Provider 外发、候选严格验证、accepted long-term mutation、receipt/audit、retry、blocking、cancellation 与 terminal completion。生产宿主不得再把旧 low-level worker transition 拼成第二套 Worker。
 
 `bm-entry::MemoryLearningService` 是官方异步执行的 process owner。它从已有 `Arc<MemoryRuntime>`、唯一 `GovernanceBindingSource` 和唯一 `GovernanceCredentialResolver` 启动；只有 Store authority、Subject Registry 与 MemorySpace 全部一致的其他 Runtime 才能 attach。已提交授权回合的精确重放同时校验 canonical turn、Store 私有原始输入承诺、历史封存 producer 绑定、主体和 Store 实例。任务已存在时只返回原任务标识，不写 Store、不唤醒 worker，producer 后续撤权也不改变历史回执。缺任务恢复须重新通过当前 producer／来源授权并带精确 Store 前置条件；输入变化和原文撤回均拒绝。
 
@@ -145,7 +149,7 @@ Generation-owned Soul layer envelope、自治 capability、Core revision plan �
 
 Conversation Transcript Substrate 发布面是当前已落地的基础证据合同，用于 governed transcript commit、redacted replay、lifecycle review 和 archive-ready evidence handling。它不是宿主任务系统，也不替代 Soul Governance、Subject Projection、Program Memory、procedural memory 或已接受的长期记忆平面。
 
-owner 仍然是 `MemoryRuntime`：宿主和 adapter 只提供 delivered turn delta、actor attribution 和 opaque host refs；Beetle Memory 负责提交 evidence、执行治理并返回 report。外部代码不能另写一套 transcript store，也不能从 raw conversation history 自行推断 memory facts。
+owner 仍然是 `MemoryRuntime`：宿主和 adapter 提供 canonical turn delta、actor attribution 和 opaque host refs；Beetle Memory 负责提交 evidence、执行治理并返回 report。外部代码不能另写一套 transcript store，也不能从 raw conversation history 自行推断 memory facts。
 
 `MemoryScope::new(channel, chat_id)` 仍是单 agent 默认接入形态。若宿主有区别于 legacy chat id 的稳定 conversation id，可使用 `MemoryScope::with_conversation_id(...)`；`finalize_turn` 和 `commit_transcript` 也会记住最近一次提交的 transcript conversation，供后续 recall、projection、maintenance 和 inspection 使用。
 
@@ -153,7 +157,7 @@ SDK transcript 操作：
 
 | 操作 | SDK surface | 用途 |
 | --- | --- | --- |
-| Transcript Commit | `MemoryRuntime::finalize_turn` + `CanonicalTurnDelta`；手动提交使用 `MemoryTranscriptCommitRequest` / `MemoryTranscriptCommitReport`，通过 `MemoryRuntime::commit_transcript` 调用 | 将 delivered turn 作为 governed evidence 提交到 `memory_space_id + channel_id + conversation_id`。 |
+| Transcript Commit | `MemoryRuntime::finalize_turn` + `CanonicalTurnDelta`；手动提交使用 `MemoryTranscriptCommitRequest` / `MemoryTranscriptCommitReport`，通过 `MemoryRuntime::commit_transcript` 调用 | 将 canonical turn 及其中已结算的助手消息作为 governed evidence 提交到 `memory_space_id + channel_id + conversation_id`。 |
 | Redacted Transcript Replay | `MemoryTranscriptReplayRequest` / `MemoryTranscriptReplayReport`，通过 `MemoryRuntime::replay_transcript` 调用 | 通过 model context、host UI、operator audit 或 export 等分层视图读取 transcript evidence。 |
 | Conversation Catalog | `MemoryConversationListRequest` / `MemoryConversationListReport`，通过 `MemoryRuntime::list_conversations` 调用 | 列出当前 mounted subject 可见且已有受治理 evidence 的 conversations，可按 channel 与 lifecycle 过滤。 |
 | Transcript Timeline | `MemoryTranscriptTimelineRequest` / `MemoryTranscriptTimelineReport`，通过 `MemoryRuntime::query_transcript_timeline` 调用 | 围绕 `Latest`、`Before`、`After`、durable anchor、sequence、UTC time 或 UTC range 内第一条可见消息读取同一 conversation。 |
@@ -164,17 +168,19 @@ SDK transcript 操作：
 | Transcript Attr Write | `MemoryTranscriptAttrWriteRequest` / `MemoryTranscriptAttrWriteReport`，通过 `MemoryRuntime::record_transcript_attrs` 调用 | 在 transcript target 已存在后写入 turn/message `TranscriptAttrEnvelope`。适用于每条消息的模型用量、运行延迟/状态、附件摘要、provenance 标签等轻量 metadata。 |
 | Transcript Export | `MemoryTranscriptExportRequest` / `MemoryTranscriptExportReport`，通过 `MemoryRuntime::export_transcript` 调用；`MemorySpaceExportRequest { private_material_policy: MemorySpacePrivateMaterialPolicy::ExcludePrivate, .. }` 会把 private transcript material 及其依赖的 export-visible index 作为一个受治理 closure 排除 | 导出 redacted transcript slice；除非调用方明确选择 `IncludePrivate`，否则 private transcript material 不进入公开 memory-space archive。 |
 
+`bm-sdk` 0.12.0 使用按顺序排列的 `CanonicalTurnDelta.assistant_messages: Vec<TranscriptAssistantMessage>`。每项包含 `message`，其结算状态为 `Complete` 或 `InterruptedDeliveredPrefix`。`Delivered` 回合至少有一条助手消息，且全部为 `Complete`。`Cancelled`、`UpstreamFailed` 或 `IncompleteStream` 回合可保留已结算的 `Complete` 消息，末尾最多再有一条 `InterruptedDeliveredPrefix`；未结算的流式片段不属于 transcript 输入。`UserOnly` 和 `RejectedByPolicy` 没有助手消息。若一回合助手消息超过 16 条，或任一助手消息正文超过 4 KiB，intake 拒绝整回合，不截断。同一 turn id 重试必须使用原 canonical payload，包含消息顺序与结算状态；修改 payload 会冲突。
+
 `MemoryTranscriptReplayRequest` 和 `MemoryTranscriptExportRequest` 接收 `limit` 与可选 `cursor`；对应 report 返回 `next_cursor` 和 `has_more`。SDK 调用方应通过 `MemoryRuntime` 分页 replay/export transcript，不应下沉到 core/store trait。Runtime profile budget 可以裁剪 page size、每 turn 可见 host refs、每 turn/message 可见 attrs、redaction items、lifecycle derived refs 和 repair issues 数量，但不能放宽 redaction、lifecycle 或 privacy policy。Lifecycle 和 repair report 的列表被裁剪时会设置 `profile_budget_applied=true`。
 
 CTQ1 query surface 统一使用 Store-owned `TranscriptQueryCursor`。调用方必须把它当 opaque value：不得解码、铸造、签名、持久化 claims 或注入 host cursor authority。Cursor validation 绑定 operation、exact MemorySpace、mounted subject、filters、view、query digest、方向/anchor、Store incarnation 与 owner/index generation；每一页都重新执行 capability、subject、lifecycle、privacy 和 disclosure。Catalog/timeline 继续受 `transcript_replay` 控制；indexed search/activity 还分别要求 `transcript_search` 和 `transcript_activity`。Platform capability snapshot 通过 `beetle-memory.platform.capability.v5` 暴露这些开关。
 
 `HostUi` 只是 **host-presentable redacted disclosure view**。它不是聊天窗口 API、分页方向、宿主产品名、transcript index owner 或 authorization token。Catalog、timeline、search、activity 只返回 Runtime hydration 后仍能通过请求 view 脱敏规则的结果。Search hit 携带受治理的 Unicode-safe excerpt 和 durable `TranscriptAnchor`；宿主应把 anchor 交给 `TranscriptTimelineAnchor::Around`，不得在 UI 内扫描或二次匹配 transcript 正文。
 
-0.11.2 只接受 Store v16；0.9.0 使用 Store v14，0.7.0 使用 Store v13。不提供 public Store migration API、compatibility reader、双写或 automatic migration。旧代、partial 与 foreign schema payload 都会 fail closed。旧代开发数据只能由其 owner 明确删除并重建；archive export/import 不是 schema migration。
+已发布的 v0.11.2 只接受 Store v16；`bm-sdk` 0.12.0 只接受 Store v17，不读取 v16。0.9.0 使用 Store v14，0.7.0 使用 Store v13。不提供 public Store migration API、compatibility reader、双写或 automatic migration。旧代、partial 与 foreign schema payload 都会 fail closed。旧代开发数据只能由其 owner 明确删除并重建；archive export/import 不是 schema migration。
 
 Timeline 支持 latest、before、after、around-anchor、around-sequence、around-time 与 first-visible-in-range；页内 turn 始终按 sequence 正序，report 可返回 opaque older/newer cursor。日历换算归宿主：按用户 IANA timezone 把本地日期转换为 canonical UTC `[start_inclusive, end_exclusive)` 后再调用 Memory。不得假设每天都是 86400 秒，DST 当天可以是 23 或 25 小时；Transcript 查询消费显式 UTC 区间，不持久保存日历时区；模型上下文的本地时间 provider 是独立展示输入。
 
-0.11.2 源码保留 CTQ1 public query shape 与 capability snapshot v5。Store v16 增加事实来源入场／屏障及原子撤源闭包，并保留方法／任务 provenance 与 Soul 来源复审保证，不新增第二套 Transcript 查询模型。本地自动化合同不能充当真实数据、Provider、GUI/UAT、crates.io 或托管 Release 证据。
+已发布的 v0.11.2 保留 CTQ1 public query shape 与 capability snapshot v5。其 Store v16 增加事实来源入场／屏障及原子撤源闭包，并保留方法／任务 provenance 与 Soul 来源复审保证，不新增第二套 Transcript 查询模型。Store v17 的本地自动化合同不能充当真实数据、Provider、GUI/UAT、crates.io 或托管 Release 证据。
 
 Transcript attrs 是 Memory-owned transcript metadata，不是宿主业务对象库。每条 attr 都必须有 `TranscriptAttrTarget`、命名空间化 key、`TranscriptAttrValueKind`、JSON value、`HostRefVisibility`、`TranscriptAttrSource`、`TranscriptAttrGovernance` 和可选 `TranscriptAttrLink`。`HostUi` replay 只返回 HostUi-visible attrs，`ModelContext` 只返回 model-context attrs，`OperatorAudit` 返回审计可见 attrs，`Export` 只返回 export-visible 且 `export_allowed=true` 的 attrs；`RawOwnerOnly` 仍是内部视图。Repair report 会把 target turn/message 缺失、attr source key 不匹配、非法 key、超限 value、corrupt attr record 作为 fail-closed issue。`DeleteRaw` 默认隐藏 attrs；`OperatorAuditOnlyAfterMask` 最多保留脱敏后的审计 metadata，raw deletion 后绝不返回原始 attr value。
 

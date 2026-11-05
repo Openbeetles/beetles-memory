@@ -8,7 +8,8 @@ use bm_entry::EntryRuntime;
 use bm_sdk::{
     CanonicalTurnDelta, ConversationScope, MaintenanceBudget, MemoryTurnDeliveryStatus,
     MemoryTurnFinalizeRequest, MemoryTurnProjectionReceiptV2, MemoryTurnProtocol, MemoryTurnSource,
-    PostTurnLearningInputV3, RuntimeLifecycleModeInput, TranscriptInputMessage,
+    PostTurnLearningInputV3, RuntimeLifecycleModeInput, TranscriptAssistantMessage,
+    TranscriptInputMessage,
 };
 #[cfg(test)]
 use serde_json::json;
@@ -96,10 +97,14 @@ impl GatewayMaintenancePlan {
                     source: self.turn_source.clone(),
                     actor: None,
                     input_messages: self.input_messages.clone(),
-                    assistant_message: if snapshot.reply_content.trim().is_empty() {
-                        None
+                    assistant_messages: if snapshot.reply_content.trim().is_empty()
+                        || snapshot.delivery_status != MemoryTurnDeliveryStatus::Delivered
+                    {
+                        Vec::new()
                     } else {
-                        Some(TranscriptInputMessage::assistant(snapshot.reply_content))
+                        vec![TranscriptAssistantMessage::complete(
+                            TranscriptInputMessage::assistant(snapshot.reply_content),
+                        )]
                     },
                     tool_observations: Vec::new(),
                     external_content_used: self.external_content_used,

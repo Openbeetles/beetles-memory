@@ -19,13 +19,13 @@ use bm_sdk::{
     MemoryTranscriptSearchScope, MemoryTranscriptTimelineRequest, MemoryTurnDeliveryStatus,
     MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, MemoryWriteCandidate,
     MemoryWriteRequest, ParsedLongTermMemoryExtraction, PressureLevel, ProfileId,
-    RuntimeLifecycleModeInput, TranscriptAttrEnvelope, TranscriptAttrGovernance,
-    TranscriptAttrLink, TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
-    TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind,
-    TranscriptCatalogLifecycle, TranscriptEvidenceRef, TranscriptInputMessage,
-    TranscriptLifecycleTransition, TranscriptQueryCursor, TranscriptRedactionReason,
-    TranscriptReplayView, TranscriptSearchLifecycle, TranscriptSearchSort,
-    TranscriptTimelineAnchor, TranscriptUtcRange,
+    RuntimeLifecycleModeInput, TranscriptAssistantMessage, TranscriptAttrEnvelope,
+    TranscriptAttrGovernance, TranscriptAttrLink, TranscriptAttrRedactionPolicy,
+    TranscriptAttrScope, TranscriptAttrSource, TranscriptAttrSourceKind, TranscriptAttrTarget,
+    TranscriptAttrValueKind, TranscriptCatalogLifecycle, TranscriptEvidenceRef,
+    TranscriptInputMessage, TranscriptLifecycleTransition, TranscriptQueryCursor,
+    TranscriptRedactionReason, TranscriptReplayView, TranscriptSearchLifecycle,
+    TranscriptSearchSort, TranscriptTimelineAnchor, TranscriptUtcRange,
 };
 use serde_json::json;
 
@@ -62,7 +62,9 @@ fn finalize_request(user: &str, assistant: &str) -> MemoryTurnFinalizeRequest {
             source: turn_source(),
             actor: None,
             input_messages: vec![TranscriptInputMessage::user(user)],
-            assistant_message: Some(TranscriptInputMessage::assistant(assistant)),
+            assistant_messages: vec![TranscriptAssistantMessage::complete(
+                TranscriptInputMessage::assistant(assistant),
+            )],
             tool_observations: Vec::new(),
             external_content_used: false,
             candidate_ids: Vec::new(),
@@ -80,6 +82,56 @@ fn indexed_transcript_turn(index: usize) -> CanonicalTurnDelta {
     );
     request.turn.turn_id = format!("history-turn-{index:03}");
     request.turn
+}
+
+#[test]
+fn cancelled_turn_replays_all_settled_assistant_messages_in_order() {
+    let profile = support::host_test_profile();
+    let platform = empty_store_platform(profile);
+    let runtime = test_runtime_with_scope_and_subject(
+        platform,
+        profile,
+        "llm.gateway",
+        "chat-a",
+        "subject-default",
+    );
+    let mut turn = finalize_request("请接着说", "第一段").turn;
+    turn.turn_id = "settled-interruption".into();
+    turn.delivery_status = MemoryTurnDeliveryStatus::Cancelled;
+    turn.assistant_messages = vec![
+        TranscriptAssistantMessage::complete(TranscriptInputMessage::assistant("第一段")),
+        TranscriptAssistantMessage::complete(TranscriptInputMessage::assistant("第二段")),
+        TranscriptAssistantMessage::interrupted_delivered_prefix(
+            TranscriptInputMessage::assistant("第三段已经说出"),
+        ),
+    ];
+    runtime
+        .commit_transcript(MemoryTranscriptCommitRequest {
+            turn,
+            host_refs: Vec::new(),
+        })
+        .unwrap();
+    let replay = runtime
+        .replay_transcript(MemoryTranscriptReplayRequest {
+            memory_space_id: runtime.memory_space_id().to_string(),
+            channel_id: "llm.gateway".into(),
+            conversation_id: "conversation-a".into(),
+            limit: 10,
+            cursor: None,
+            view: TranscriptReplayView::RawOwnerOnly,
+        })
+        .unwrap();
+    let stored = &replay.slice.turns[0];
+    assert_eq!(stored.delivery_status, MemoryTurnDeliveryStatus::Cancelled);
+    assert_eq!(stored.assistant_messages.len(), 3);
+    assert_eq!(
+        stored
+            .assistant_messages
+            .iter()
+            .map(|entry| entry.message.content.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        ["第一段", "第二段", "第三段已经说出"]
+    );
 }
 
 fn commit_repeated_turn_with_readmission(
@@ -125,7 +177,7 @@ fn repeated_turns_reopen_contract(mut open: impl FnMut() -> bm_sdk::MemoryStoreH
             request.turn.turn_id = format!("repeat-{index}");
             request.turn.source.request_id = Some(format!("request-{index}"));
             request.turn.input_messages[0].observed_at = 1_800_000_000 + index;
-            request.turn.assistant_message.as_mut().unwrap().observed_at = 1_800_000_000 + index;
+            request.turn.assistant_messages[0].message.observed_at = 1_800_000_000 + index;
             if index < 2 {
                 runtime.finalize_turn(request.clone()).unwrap();
                 let before = platform.export_replay_snapshot().unwrap();
@@ -153,7 +205,7 @@ fn repeated_turns_reopen_contract(mut open: impl FnMut() -> bm_sdk::MemoryStoreH
             assert_eq!(record.input_messages[0].content, "repeated-cobalt-user");
             assert_eq!(record.input_messages[0].observed_at, 1_800_000_000 + index);
             assert!(identities.insert(record.input_messages[0].message_id.clone()));
-            assert!(identities.insert(record.assistant_message.unwrap().message_id));
+            assert!(identities.insert(record.assistant_messages[0].message.message_id.clone()));
             if index == 69 {
                 let before = platform.export_replay_snapshot().unwrap();
                 request.turn.input_messages[0].content = "changed payload".into();
@@ -205,7 +257,7 @@ fn repeated_turns_reopen_contract(mut open: impl FnMut() -> bm_sdk::MemoryStoreH
                 for message in turn
                     .input_messages
                     .iter()
-                    .chain(turn.assistant_message.iter())
+                    .chain(turn.assistant_messages.iter().map(|entry| &entry.message))
                 {
                     assert!(
                         restored_ids.insert(message.message_id.clone()),
@@ -568,7 +620,7 @@ fn runtime_records_transcript_attrs_and_replays_host_ui_message_usage() {
         })
         .unwrap();
     let turn = &replay.slice.turns[0];
-    let message_id = turn.assistant_message.as_ref().unwrap().message_id.clone();
+    let message_id = turn.assistant_messages[0].message.message_id.clone();
     let attr = model_usage_attr(
         replay.slice.key.clone(),
         &turn.turn_id,
@@ -603,11 +655,7 @@ fn runtime_records_transcript_attrs_and_replays_host_ui_message_usage() {
         })
         .unwrap();
     assert_eq!(
-        host_ui.slice.turns[0]
-            .assistant_message
-            .as_ref()
-            .unwrap()
-            .attrs,
+        host_ui.slice.turns[0].assistant_messages[0].message.attrs,
         vec![attr]
     );
 }
@@ -666,10 +714,8 @@ fn runtime_transcript_attr_dry_run_reports_without_persisting() {
             view: TranscriptReplayView::HostUi,
         })
         .unwrap();
-    assert!(host_ui.slice.turns[0]
-        .assistant_message
-        .as_ref()
-        .unwrap()
+    assert!(host_ui.slice.turns[0].assistant_messages[0]
+        .message
         .attrs
         .is_empty());
 }
@@ -1837,10 +1883,8 @@ fn memory_space_export_redacts_raw_conversation_transcript_by_default() {
             view: TranscriptReplayView::RawOwnerOnly,
         })
         .unwrap();
-    let assistant_message_id = replay.slice.turns[0]
-        .assistant_message
-        .as_ref()
-        .unwrap()
+    let assistant_message_id = replay.slice.turns[0].assistant_messages[0]
+        .message
         .message_id
         .clone();
     runtime
@@ -2438,8 +2482,8 @@ fn transcript_search_cursor_pages_are_stable_without_overlap_or_omission() {
         let mut turn = indexed_transcript_turn(index);
         turn.input_messages[0].content = format!("cobalt searchable turn {index}");
         turn.input_messages[0].observed_at = 10_000 + index as u64;
-        turn.assistant_message.as_mut().unwrap().content = "ordinary answer".to_string();
-        turn.assistant_message.as_mut().unwrap().observed_at = 10_000 + index as u64;
+        turn.assistant_messages[0].message.content = "ordinary answer".to_string();
+        turn.assistant_messages[0].message.observed_at = 10_000 + index as u64;
         runtime
             .commit_transcript(MemoryTranscriptCommitRequest {
                 turn,
@@ -2561,7 +2605,7 @@ fn manual_transcript_commit_does_not_adopt_same_text_from_session_shadow() {
         .append(
             "chat-a",
             "assistant",
-            &turn.assistant_message.as_ref().unwrap().content,
+            &turn.assistant_messages[0].message.content,
         )
         .unwrap();
 
@@ -2624,7 +2668,7 @@ fn finalize_turn_preserves_new_evidence_despite_same_text_in_session_shadow() {
         .append(
             "chat-a",
             "assistant",
-            &turn.assistant_message.as_ref().unwrap().content,
+            &turn.assistant_messages[0].message.content,
         )
         .unwrap();
 
@@ -2687,7 +2731,7 @@ fn transcript_backfill_rejects_session_shadow_owned_by_another_subject_without_m
         .append(
             "chat-a",
             "assistant",
-            &owner_turn.assistant_message.as_ref().unwrap().content,
+            &owner_turn.assistant_messages[0].message.content,
         )
         .unwrap();
 
@@ -3059,11 +3103,11 @@ fn search_hit_and_utc_half_open_activity_jump_into_the_same_timeline() {
     let mut before = indexed_transcript_turn(1);
     before.input_messages[0].content = "before boundary".to_string();
     before.input_messages[0].observed_at = 86_399;
-    before.assistant_message.as_mut().unwrap().observed_at = 86_399;
+    before.assistant_messages[0].message.observed_at = 86_399;
     let mut at = indexed_transcript_turn(2);
     at.input_messages[0].content = "calendar cobalt jump".to_string();
     at.input_messages[0].observed_at = 86_400;
-    at.assistant_message.as_mut().unwrap().observed_at = 86_400;
+    at.assistant_messages[0].message.observed_at = 86_400;
     for turn in [before, at] {
         runtime
             .commit_transcript(MemoryTranscriptCommitRequest {

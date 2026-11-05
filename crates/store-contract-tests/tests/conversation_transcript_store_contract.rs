@@ -86,11 +86,12 @@ fn transcript_query_indexes_cover_catalog_timeline_search_activity_and_tamper() 
         record.sequence = sequence;
         record.created_at = 1_800_000_000 + sequence;
         record.updated_at = 1_800_000_000 + sequence;
-        for message in record
-            .input_messages
-            .iter_mut()
-            .chain(record.assistant_message.iter_mut())
-        {
+        for message in record.input_messages.iter_mut().chain(
+            record
+                .assistant_messages
+                .iter_mut()
+                .map(|item| &mut item.message),
+        ) {
             message.observed_at = 1_800_000_000 + sequence;
             message.created_at = 1_800_000_000 + sequence;
         }
@@ -276,14 +277,9 @@ fn transcript_query_indexes_exclude_private_authority_before_candidate_hydration
     let mut record = transcript_record(&key, "turn-private-authority", "private-cobalt-secret");
     record.input_messages[0].authority = MemoryEvidenceAuthority::PrivateGardenInternal;
     record.input_messages[0].observed_at = 1_800_000_001;
-    record.assistant_message.as_mut().unwrap().content = "public-amber-sentinel".to_string();
-    record.assistant_message.as_mut().unwrap().observed_at = 1_800_000_002;
-    let public_message_id = record
-        .assistant_message
-        .as_ref()
-        .unwrap()
-        .message_id
-        .clone();
+    record.assistant_messages[0].message.content = "public-amber-sentinel".to_string();
+    record.assistant_messages[0].message.observed_at = 1_800_000_002;
+    let public_message_id = record.assistant_messages[0].message.message_id.clone();
     record.created_at = 1_800_000_001;
     record.updated_at = 1_800_000_002;
     store.append_turn(&record).unwrap();
@@ -471,11 +467,12 @@ fn file_store_reopens_with_transcript_query_cursor_authority_and_indexes() {
             record.sequence = sequence;
             record.created_at = 1_800_100_000 + sequence;
             record.updated_at = 1_800_100_000 + sequence;
-            for message in record
-                .input_messages
-                .iter_mut()
-                .chain(record.assistant_message.iter_mut())
-            {
+            for message in record.input_messages.iter_mut().chain(
+                record
+                    .assistant_messages
+                    .iter_mut()
+                    .map(|item| &mut item.message),
+            ) {
                 message.observed_at = 1_800_100_000 + sequence;
                 message.created_at = 1_800_100_000 + sequence;
             }
@@ -638,11 +635,598 @@ fn delta(turn_id: &str, user: &str) -> CanonicalTurnDelta {
         source: turn_source(),
         actor: None,
         input_messages: vec![TranscriptInputMessage::user(user).with_speaker("owner", "human")],
-        assistant_message: Some(TranscriptInputMessage::assistant("noted")),
+        assistant_messages: vec![bm_core::memory::TranscriptAssistantMessage::complete(
+            TranscriptInputMessage::assistant("noted"),
+        )],
         tool_observations: Vec::new(),
         external_content_used: false,
         candidate_ids: Vec::new(),
     }
+}
+
+#[test]
+fn same_timestamp_assistant_messages_keep_turn_order_in_search_and_activity() {
+    let platform = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(ProfileId::native_dev_full().unwrap()).unwrap(),
+    )
+    .unwrap();
+    let store = platform.conversation_transcript_store();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    let mut turn = delta("ordered-assistants", "请回答");
+    turn.assistant_messages = vec![
+        bm_core::memory::TranscriptAssistantMessage::complete(TranscriptInputMessage::assistant(
+            "cobalt 第一条",
+        )),
+        bm_core::memory::TranscriptAssistantMessage::complete(TranscriptInputMessage::assistant(
+            "cobalt 第二条",
+        )),
+    ];
+    let record = (0..100)
+        .find_map(|suffix| {
+            turn.assistant_messages[1].message.content = format!("cobalt 第二条 {suffix}");
+            let record =
+                TranscriptTurnRecord::from_delta(&key, 1, &turn, Vec::new(), 1_800_500_000)
+                    .unwrap();
+            (record.assistant_messages[0].message.message_id
+                > record.assistant_messages[1].message.message_id)
+                .then_some(record)
+        })
+        .expect("find message IDs whose lexical order opposes turn order");
+    let expected = record
+        .assistant_messages
+        .iter()
+        .rev()
+        .map(|item| item.message.message_id.clone())
+        .collect::<Vec<_>>();
+    store.append_turn(&record).unwrap();
+    let search = store
+        .search_transcript(
+            "subject-store",
+            &TranscriptSearchQuery {
+                scope: TranscriptSearchScope::ExactConversation { key: key.clone() },
+                governance_context_digest: governance_context_digest("same-time-order"),
+                query: TranscriptSearchNormalizerV1::normalize("cobalt").unwrap(),
+                sort: TranscriptSearchSort::ObservedAtDescending,
+                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+                limit: 1,
+                cursor: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(search.candidates[0].message_id, expected[0]);
+    let next = store
+        .search_transcript(
+            "subject-store",
+            &TranscriptSearchQuery {
+                scope: TranscriptSearchScope::ExactConversation { key: key.clone() },
+                governance_context_digest: governance_context_digest("same-time-order"),
+                query: TranscriptSearchNormalizerV1::normalize("cobalt").unwrap(),
+                sort: TranscriptSearchSort::ObservedAtDescending,
+                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+                limit: 1,
+                cursor: search.next_cursor,
+            },
+        )
+        .unwrap();
+    assert_eq!(next.candidates[0].message_id, expected[1]);
+    let activity = store
+        .query_transcript_activity(
+            "subject-store",
+            &TranscriptActivityQuery {
+                key,
+                ranges: vec![TranscriptUtcRange::new(1_800_500_000, 1_800_500_001).unwrap()],
+                lifecycle: TranscriptSearchLifecycle::ActiveOnly,
+            },
+        )
+        .unwrap();
+    let observed = activity.buckets[0]
+        .candidates
+        .iter()
+        .map(|candidate| candidate.message_id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed,
+        record
+            .input_messages
+            .iter()
+            .chain(record.assistant_messages.iter().map(|item| &item.message))
+            .map(|message| message.message_id.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn store_rejects_mutated_assistant_content_and_authority_at_public_append_boundary() {
+    let platform = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(ProfileId::native_dev_full().unwrap()).unwrap(),
+    )
+    .unwrap();
+    let store = platform.conversation_transcript_store();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    let original = transcript_record(&key, "turn-invalid", "prompt");
+    let mut blank = original.clone();
+    blank.assistant_messages[0].message.content.clear();
+    assert!(store.append_turn(&blank).is_err());
+    let mut forged = original.clone();
+    forged.assistant_messages[0].message.authority = MemoryEvidenceAuthority::UserAsserted;
+    forged.assistant_messages[0].message.actor.speaker_kind = "human".into();
+    assert!(store.append_turn(&forged).is_err());
+    assert!(store
+        .get_turn(&key, "subject-store", "turn-invalid")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn public_append_rejects_forged_raw_deleted_record_with_retained_text() {
+    let platform = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(ProfileId::native_dev_full().unwrap()).unwrap(),
+    )
+    .unwrap();
+    let store = platform.conversation_transcript_store();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    let mut forged = transcript_record(&key, "forged-deleted", "secret raw text");
+    forged.lifecycle_state = TranscriptLifecycleState::RawDeleted;
+    forged.redaction_state = bm_core::memory::TranscriptRedactionState::RawDeleted;
+    assert!(store.append_turn(&forged).is_err());
+    assert!(store
+        .get_turn(&key, "subject-store", "forged-deleted")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn delete_raw_fails_closed_when_session_shadow_id_has_divergent_content() {
+    let scope = StoreEventScope::new("agent-a", "owner-a", "llm.gateway", "legacy-chat-a")
+        .with_memory_space("space-store")
+        .with_subject("subject-store")
+        .with_conversation("conversation-store");
+    let platform = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(ProfileId::native_dev_full().unwrap())
+            .unwrap()
+            .with_event_scope(scope),
+    )
+    .unwrap();
+    let store = platform.conversation_transcript_store();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    let record = transcript_record(&key, "divergent-shadow", "original secret");
+    let message = &record.input_messages[0];
+    platform
+        .session_store()
+        .append_batch(
+            "legacy-chat-a",
+            &[bm_core::memory::SessionMessage::new(
+                &message.message_id,
+                &message.role,
+                "drifted original secret",
+                message.observed_at,
+                message.created_at,
+                &message.actor.speaker_id,
+                &message.actor.speaker_kind,
+            )],
+        )
+        .unwrap();
+    store.append_turn(&record).unwrap();
+    let error = store
+        .apply_lifecycle_request(
+            "subject-store",
+            &TranscriptLifecycleRequest {
+                key: key.clone(),
+                turn_id: Some(record.turn_id.clone()),
+                transition: TranscriptLifecycleTransition::DeleteRaw,
+                reason: "privacy".into(),
+                requested_by: "owner".into(),
+                requested_at: 20,
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.stage(), "transcript_lifecycle_plan");
+    assert_eq!(
+        store
+            .get_turn(&key, "subject-store", &record.turn_id)
+            .unwrap()
+            .unwrap()
+            .lifecycle_state,
+        TranscriptLifecycleState::Active
+    );
+}
+
+#[test]
+fn delete_raw_clears_session_shadow_attrs_and_host_labels_without_touching_next_turn() {
+    let scope = StoreEventScope::new("agent-a", "owner-a", "llm.gateway", "legacy-chat-a")
+        .with_memory_space("space-store")
+        .with_subject("subject-store")
+        .with_conversation("conversation-store");
+    let platform = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(ProfileId::native_dev_full().unwrap())
+            .unwrap()
+            .with_event_scope(scope),
+    )
+    .unwrap();
+    let store = platform.conversation_transcript_store();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    let secret = "private verbatim assistant text";
+    let mut first = delta("turn-private", "first user text");
+    first.assistant_messages[0].message.content = secret.into();
+    let refs = vec![HostOpaqueRef {
+        host_kind: "ui".into(),
+        business_ref_type: "card".into(),
+        business_ref_id: "ref-1".into(),
+        relation: HostRefRelation::Origin,
+        visibility: HostRefVisibility::HostUi,
+        label: Some(secret.into()),
+    }];
+    let record = TranscriptTurnRecord::from_delta(&key, 1, &first, refs, 1_800_600_000).unwrap();
+    let next = TranscriptTurnRecord::from_delta(
+        &key,
+        2,
+        &delta("turn-next", "keep this turn"),
+        Vec::new(),
+        1_800_600_001,
+    )
+    .unwrap();
+    let session_messages = [&record, &next]
+        .into_iter()
+        .flat_map(|turn| {
+            turn.input_messages
+                .iter()
+                .chain(turn.assistant_messages.iter().map(|item| &item.message))
+        })
+        .map(|message| {
+            bm_core::memory::SessionMessage::new(
+                &message.message_id,
+                &message.role,
+                &message.content,
+                message.observed_at,
+                message.created_at,
+                &message.actor.speaker_id,
+                &message.actor.speaker_kind,
+            )
+        })
+        .collect::<Vec<_>>();
+    platform
+        .session_store()
+        .append_batch("legacy-chat-a", &session_messages)
+        .unwrap();
+    platform
+        .session_summary_store()
+        .set("legacy-chat-a", secret)
+        .unwrap();
+    store.append_turn(&record).unwrap();
+    store.append_turn(&next).unwrap();
+    let mut attr = model_usage_attr(
+        &key,
+        "turn-private",
+        &record.assistant_messages[0].message.message_id,
+    );
+    attr.value = json!({"source_excerpt": secret});
+    store
+        .upsert_transcript_attrs(&key, "subject-store", &[attr.clone()])
+        .unwrap();
+    store
+        .apply_lifecycle_request(
+            "subject-store",
+            &TranscriptLifecycleRequest {
+                key: key.clone(),
+                turn_id: Some("turn-private".into()),
+                transition: TranscriptLifecycleTransition::DeleteRaw,
+                reason: "privacy".into(),
+                requested_by: "owner".into(),
+                requested_at: 1_800_600_010,
+            },
+        )
+        .unwrap();
+    let recent = platform
+        .session_store()
+        .load_recent("legacy-chat-a", 10)
+        .unwrap();
+    assert_eq!(recent.len(), session_messages.len());
+    assert!(recent[..2].iter().all(|message| message.content.is_empty()));
+    assert_eq!(recent[2..], session_messages[2..]);
+    assert!(platform
+        .session_summary_store()
+        .get("legacy-chat-a")
+        .unwrap()
+        .is_none());
+    let deleted = store
+        .get_turn(&key, "subject-store", "turn-private")
+        .unwrap()
+        .unwrap();
+    assert!(deleted
+        .host_refs
+        .iter()
+        .all(|reference| reference.label.is_none()));
+    assert!(attr.validate_for_record(&deleted).is_err());
+    assert!(store
+        .list_transcript_attrs(&key, "subject-store", Some("turn-private"))
+        .unwrap()
+        .is_empty());
+    let report = store
+        .upsert_transcript_attrs(&key, "subject-store", &[attr])
+        .unwrap();
+    assert!(report.accepted_attrs.is_empty());
+    assert_eq!(report.rejected_attrs.len(), 1);
+    // A later explicit summary write is a separate owner action; DeleteRaw
+    // clears the summary that existed when the lifecycle transaction ran.
+    platform
+        .session_summary_store()
+        .set("legacy-chat-a", "fresh independent summary")
+        .unwrap();
+    assert_eq!(
+        platform
+            .session_summary_store()
+            .get("legacy-chat-a")
+            .unwrap()
+            .as_deref(),
+        Some("fresh independent summary")
+    );
+}
+
+#[test]
+fn file_reopen_preserves_delete_raw_session_shadow_erasure() {
+    let root = temp_root("delete-raw-session-file");
+    let scope = StoreEventScope::new("agent-a", "owner-a", "llm.gateway", "legacy-chat-a")
+        .with_memory_space("space-store")
+        .with_subject("subject-store")
+        .with_conversation("conversation-store");
+    let config = StoreBackendConfig::file(&root, support::native_persistent_profile())
+        .unwrap()
+        .with_event_scope(scope);
+    assert_delete_raw_session_shadow_reopen(config);
+}
+
+#[cfg(feature = "sqlite-store")]
+#[test]
+fn sqlite_reopen_preserves_delete_raw_session_shadow_erasure() {
+    let root = temp_root("delete-raw-session-sqlite");
+    let scope = StoreEventScope::new("agent-a", "owner-a", "llm.gateway", "legacy-chat-a")
+        .with_memory_space("space-store")
+        .with_subject("subject-store")
+        .with_conversation("conversation-store");
+    let config = StoreBackendConfig::sqlite(
+        root.join("memory.sqlite3"),
+        support::native_persistent_profile(),
+    )
+    .unwrap()
+    .with_event_scope(scope);
+    assert_delete_raw_session_shadow_reopen(config);
+}
+
+fn assert_delete_raw_session_shadow_reopen(config: StoreBackendConfig) {
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    let secret = "persistent private assistant text";
+    {
+        let platform = support::open_store(config.clone()).unwrap();
+        let store = platform.conversation_transcript_store();
+        let mut turn = delta("turn-private", "persistent private user text");
+        turn.assistant_messages[0].message.content = secret.into();
+        let record =
+            TranscriptTurnRecord::from_delta(&key, 1, &turn, Vec::new(), 1_800_600_000).unwrap();
+        let session_messages = record
+            .input_messages
+            .iter()
+            .chain(record.assistant_messages.iter().map(|item| &item.message))
+            .map(|message| {
+                bm_core::memory::SessionMessage::new(
+                    &message.message_id,
+                    &message.role,
+                    &message.content,
+                    message.observed_at,
+                    message.created_at,
+                    &message.actor.speaker_id,
+                    &message.actor.speaker_kind,
+                )
+            })
+            .collect::<Vec<_>>();
+        platform
+            .session_store()
+            .append_batch("legacy-chat-a", &session_messages)
+            .unwrap();
+        platform
+            .session_summary_store()
+            .set("legacy-chat-a", secret)
+            .unwrap();
+        store.append_turn(&record).unwrap();
+        store
+            .apply_lifecycle_request(
+                "subject-store",
+                &TranscriptLifecycleRequest {
+                    key: key.clone(),
+                    turn_id: Some("turn-private".into()),
+                    transition: TranscriptLifecycleTransition::DeleteRaw,
+                    reason: "privacy".into(),
+                    requested_by: "owner".into(),
+                    requested_at: 1_800_600_010,
+                },
+            )
+            .unwrap();
+    }
+    let reopened = support::open_store(config).unwrap();
+    assert!(reopened
+        .session_store()
+        .load_recent("legacy-chat-a", 10)
+        .unwrap()
+        .iter()
+        .all(|message| message.content.is_empty()));
+    assert!(reopened
+        .session_summary_store()
+        .get("legacy-chat-a")
+        .unwrap()
+        .is_none());
+    let record = reopened
+        .conversation_transcript_store()
+        .get_turn(&key, "subject-store", "turn-private")
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.lifecycle_state, TranscriptLifecycleState::RawDeleted);
+}
+
+#[test]
+fn cancelled_multi_message_turn_indexes_and_erases_every_settlement() {
+    let platform = support::open_store_in_memory(
+        StoreBackendConfig::in_memory(ProfileId::native_dev_full().unwrap()).unwrap(),
+    )
+    .unwrap();
+    let store = platform.conversation_transcript_store();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    let mut turn = delta("cancelled-with-speech", "请继续");
+    turn.delivery_status = MemoryTurnDeliveryStatus::Cancelled;
+    turn.assistant_messages = vec![
+        bm_core::memory::TranscriptAssistantMessage::complete(TranscriptInputMessage::assistant(
+            "第一条已完成",
+        )),
+        bm_core::memory::TranscriptAssistantMessage::interrupted_delivered_prefix(
+            TranscriptInputMessage::assistant("第二条已交付前缀"),
+        ),
+    ];
+    let record = TranscriptTurnRecord::from_delta(&key, 1, &turn, Vec::new(), 10).unwrap();
+    let expected_ids = record
+        .assistant_messages
+        .iter()
+        .map(|item| item.message.message_id.clone())
+        .collect::<Vec<_>>();
+    let mut corrupt = record.clone();
+    corrupt.assistant_messages[1].message.message_id = expected_ids[0].clone();
+    assert!(store.append_turn(&corrupt).is_err());
+    assert!(store
+        .get_turn(&key, "subject-store", &turn.turn_id)
+        .unwrap()
+        .is_none());
+    store.append_turn(&record).unwrap();
+    let loaded = store
+        .get_turn(&key, "subject-store", &turn.turn_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.assistant_messages.len(), 2);
+    assert_eq!(
+        loaded.assistant_messages[0].message.message_id,
+        expected_ids[0]
+    );
+    assert_eq!(
+        loaded.assistant_messages[1].settlement,
+        bm_core::memory::AssistantMessageSettlement::InterruptedDeliveredPrefix
+    );
+
+    let catalog = store
+        .list_conversation_catalog(
+            "subject-store",
+            &TranscriptCatalogQuery {
+                memory_space_id: "space-store".into(),
+                governance_context_digest: governance_context_digest("cancelled-multi-message"),
+                channel_id: Some("llm.gateway".into()),
+                lifecycle: TranscriptCatalogLifecycle::ActiveOnly,
+                limit: 8,
+                cursor: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(catalog.heads[0].message_count, 3);
+
+    let report = store
+        .apply_lifecycle_request(
+            "subject-store",
+            &TranscriptLifecycleRequest {
+                key: key.clone(),
+                turn_id: Some(turn.turn_id.clone()),
+                transition: TranscriptLifecycleTransition::DeleteRaw,
+                reason: "user_redaction_request".into(),
+                requested_by: "owner".into(),
+                requested_at: 20,
+            },
+        )
+        .unwrap();
+    assert_eq!(report.affected_message_ids.len(), 3);
+    assert!(expected_ids
+        .iter()
+        .all(|id| report.affected_message_ids.contains(id)));
+    let deleted = store
+        .get_turn(&key, "subject-store", &turn.turn_id)
+        .unwrap()
+        .unwrap();
+    assert!(deleted
+        .assistant_messages
+        .iter()
+        .all(|item| item.message.content.is_empty()));
+}
+
+#[test]
+fn file_store_reopens_cancelled_multi_message_turn_without_losing_order() {
+    let root = temp_root("cancelled-multi-message-reopen");
+    let config = StoreBackendConfig::file(&root, support::native_persistent_profile()).unwrap();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    let mut turn = delta("cancelled-reopen", "你说到哪里了");
+    turn.delivery_status = MemoryTurnDeliveryStatus::Cancelled;
+    turn.assistant_messages = vec![
+        bm_core::memory::TranscriptAssistantMessage::complete(TranscriptInputMessage::assistant(
+            "第一条完整发言",
+        )),
+        bm_core::memory::TranscriptAssistantMessage::interrupted_delivered_prefix(
+            TranscriptInputMessage::assistant("第二条已交付前缀"),
+        ),
+    ];
+    let record = TranscriptTurnRecord::from_delta(&key, 1, &turn, Vec::new(), 10).unwrap();
+    {
+        let platform = support::open_store(config.clone()).unwrap();
+        platform
+            .conversation_transcript_store()
+            .append_turn(&record)
+            .unwrap();
+    }
+    let reopened = support::open_store(config).unwrap();
+    let loaded = reopened
+        .conversation_transcript_store()
+        .get_turn(&key, "subject-store", &turn.turn_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.assistant_messages, record.assistant_messages);
+    let replay = reopened
+        .conversation_transcript_store()
+        .redacted_replay(&key, "subject-store", 8, TranscriptReplayView::HostUi)
+        .unwrap();
+    assert_eq!(replay.turns[0].assistant_messages.len(), 2);
+    assert_eq!(
+        replay.turns[0].assistant_messages[1].settlement,
+        bm_core::memory::AssistantMessageSettlement::InterruptedDeliveredPrefix
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(feature = "sqlite-store")]
+#[test]
+fn sqlite_store_reopens_cancelled_multi_message_turn_without_losing_order() {
+    let root = temp_root("cancelled-multi-message-sqlite");
+    let config = StoreBackendConfig::sqlite(
+        root.join("store.sqlite"),
+        support::native_persistent_profile(),
+    )
+    .unwrap();
+    let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
+    let mut turn = delta("cancelled-sqlite", "继续");
+    turn.delivery_status = MemoryTurnDeliveryStatus::Cancelled;
+    turn.assistant_messages = vec![
+        bm_core::memory::TranscriptAssistantMessage::complete(TranscriptInputMessage::assistant(
+            "第一条完整发言",
+        )),
+        bm_core::memory::TranscriptAssistantMessage::interrupted_delivered_prefix(
+            TranscriptInputMessage::assistant("第二条已交付前缀"),
+        ),
+    ];
+    let record = TranscriptTurnRecord::from_delta(&key, 1, &turn, Vec::new(), 10).unwrap();
+    {
+        let platform = support::open_store(config.clone()).unwrap();
+        platform
+            .conversation_transcript_store()
+            .append_turn(&record)
+            .unwrap();
+    }
+    let reopened = support::open_store(config).unwrap();
+    let loaded = reopened
+        .conversation_transcript_store()
+        .get_turn(&key, "subject-store", &turn.turn_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.assistant_messages, record.assistant_messages);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 fn governance_context_digest(label: &str) -> String {
@@ -924,12 +1508,7 @@ fn transcript_per_turn_aux_scales_with_one_thousand_turns() {
         let turn_id = format!("turn-{sequence:04}");
         let mut record = transcript_record(&key, &turn_id, "bounded aux");
         record.sequence = sequence;
-        let message_id = record
-            .assistant_message
-            .as_ref()
-            .expect("assistant message")
-            .message_id
-            .clone();
+        let message_id = record.assistant_messages[0].message.message_id.clone();
         store.append_turn(&record).unwrap();
         store
             .upsert_transcript_attrs(
@@ -998,7 +1577,7 @@ fn transcript_per_turn_aux_scales_with_one_thousand_turns() {
         replay
             .turns
             .iter()
-            .filter_map(|turn| turn.assistant_message.as_ref())
+            .filter_map(|turn| turn.assistant_messages.first().map(|item| &item.message))
             .map(|message| message.attrs.len())
             .sum::<usize>(),
         10
@@ -1063,12 +1642,7 @@ fn store_persists_transcript_attrs_and_replays_visible_message_attrs() {
     let store = platform.conversation_transcript_store();
     let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
     let record = transcript_record(&key, "turn-attr", "count this model reply");
-    let message_id = record
-        .assistant_message
-        .as_ref()
-        .unwrap()
-        .message_id
-        .clone();
+    let message_id = record.assistant_messages[0].message.message_id.clone();
     store.append_turn(&record).unwrap();
 
     let attr = model_usage_attr(&key, "turn-attr", &message_id);
@@ -1082,7 +1656,7 @@ fn store_persists_transcript_attrs_and_replays_visible_message_attrs() {
         .redacted_replay(&key, "subject-store", 10, TranscriptReplayView::HostUi)
         .unwrap();
     assert_eq!(
-        replay.turns[0].assistant_message.as_ref().unwrap().attrs,
+        replay.turns[0].assistant_messages[0].message.attrs,
         vec![attr]
     );
 }
@@ -1099,12 +1673,7 @@ fn store_rejects_transcript_attrs_when_target_turn_or_message_is_missing() {
     let store = platform.conversation_transcript_store();
     let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
     let record = transcript_record(&key, "turn-attr-target", "target exists");
-    let message_id = record
-        .assistant_message
-        .as_ref()
-        .unwrap()
-        .message_id
-        .clone();
+    let message_id = record.assistant_messages[0].message.message_id.clone();
     store.append_turn(&record).unwrap();
 
     let missing_turn = model_usage_attr(&key, "missing-turn", &message_id);
@@ -1138,12 +1707,7 @@ fn store_replay_fails_closed_while_repair_reports_corrupt_transcript_attr_record
     let store = platform.conversation_transcript_store();
     let key = ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
     let record = transcript_record(&key, "turn-corrupt-attr", "target exists");
-    let message_id = record
-        .assistant_message
-        .as_ref()
-        .unwrap()
-        .message_id
-        .clone();
+    let message_id = record.assistant_messages[0].message.message_id.clone();
     store.append_turn(&record).unwrap();
     let valid_attr = model_usage_attr(&key, "turn-corrupt-attr", &message_id);
     store
@@ -1570,12 +2134,7 @@ fn file_store_persists_long_transcript_keys_and_attrs_across_reopen() {
     turn_delta.conversation.channel = key.channel_id.clone();
     turn_delta.conversation.conversation_id = Some(key.conversation_id.clone());
     let record = TranscriptTurnRecord::from_delta(&key, 1, &turn_delta, Vec::new(), 10).unwrap();
-    let message_id = record
-        .assistant_message
-        .as_ref()
-        .unwrap()
-        .message_id
-        .clone();
+    let message_id = record.assistant_messages[0].message.message_id.clone();
     let attr = model_usage_attr(&key, "turn-long-file-key", &message_id);
 
     {
@@ -1599,7 +2158,7 @@ fn file_store_persists_long_transcript_keys_and_attrs_across_reopen() {
         Some("persist long key")
     );
     assert_eq!(
-        replay.turns[0].assistant_message.as_ref().unwrap().attrs,
+        replay.turns[0].assistant_messages[0].message.attrs,
         vec![attr]
     );
 }
@@ -1696,12 +2255,7 @@ fn file_snapshot_export_import_preserves_long_transcript_keys_and_attrs() {
     turn_delta.conversation.channel = key.channel_id.clone();
     turn_delta.conversation.conversation_id = Some(key.conversation_id.clone());
     let record = TranscriptTurnRecord::from_delta(&key, 1, &turn_delta, Vec::new(), 10).unwrap();
-    let message_id = record
-        .assistant_message
-        .as_ref()
-        .unwrap()
-        .message_id
-        .clone();
+    let message_id = record.assistant_messages[0].message.message_id.clone();
     let attr = model_usage_attr(&key, "turn-long-file-snapshot", &message_id);
     let source_store = source.conversation_transcript_store();
     source_store.append_turn(&record).unwrap();
@@ -1738,7 +2292,7 @@ fn file_snapshot_export_import_preserves_long_transcript_keys_and_attrs() {
         Some("snapshot long key")
     );
     assert_eq!(
-        replay.turns[0].assistant_message.as_ref().unwrap().attrs,
+        replay.turns[0].assistant_messages[0].message.attrs,
         vec![attr]
     );
 }
@@ -1885,11 +2439,12 @@ fn sqlite_store_reopens_with_transcript_catalog_timeline_search_and_activity() {
             record.sequence = sequence;
             record.created_at = 1_800_200_000 + sequence;
             record.updated_at = 1_800_200_000 + sequence;
-            for message in record
-                .input_messages
-                .iter_mut()
-                .chain(record.assistant_message.iter_mut())
-            {
+            for message in record.input_messages.iter_mut().chain(
+                record
+                    .assistant_messages
+                    .iter_mut()
+                    .map(|item| &mut item.message),
+            ) {
                 message.observed_at = 1_800_200_000 + sequence;
                 message.created_at = 1_800_200_000 + sequence;
             }
@@ -1962,6 +2517,7 @@ fn sqlite_store_rejects_unsupported_schemas_without_mutation() {
     for (schema_id, version) in [
         ("beetle_memory_store_schema_v11", 11),
         ("beetle_memory_store_schema_v13", 13),
+        ("beetle_memory_store_schema_v16", 16),
         ("unknown_memory_store_schema_v999", 999),
     ] {
         let root = temp_root(&format!("query-sqlite-v{version}-clean-break"));
@@ -1974,7 +2530,7 @@ fn sqlite_store_rejects_unsupported_schemas_without_mutation() {
                 ConversationKey::new("space-store", "llm.gateway", "conversation-store").unwrap();
             platform
                 .conversation_transcript_store()
-                .append_turn(&transcript_record(&key, "turn-v11", "preserved v11 state"))
+                .append_turn(&transcript_record(&key, "turn-old", "preserved state"))
                 .unwrap();
         }
         {
@@ -1999,7 +2555,7 @@ fn sqlite_store_rejects_unsupported_schemas_without_mutation() {
         }
         let before = file_tree_bytes(&root);
         let error = match support::open_store(config) {
-            Ok(_) => panic!("v14 clean break must reject SQLite schema {schema_id}"),
+            Ok(_) => panic!("v17 clean break must reject SQLite schema {schema_id}"),
             Err(error) => error,
         };
         assert_eq!(error.stage(), "store_rebuild_required", "{schema_id}");
@@ -2012,6 +2568,7 @@ fn file_store_rejects_unsupported_schemas_without_mutation() {
     for (schema_id, version) in [
         ("beetle_memory_store_schema_v11", 11),
         ("beetle_memory_store_schema_v13", 13),
+        ("beetle_memory_store_schema_v16", 16),
         ("unknown_memory_store_schema_v999", 999),
     ] {
         let root = temp_root(&format!("query-file-v{version}-clean-break"));
@@ -2028,7 +2585,7 @@ fn file_store_rejects_unsupported_schemas_without_mutation() {
         rewrite_file_manifest_schema(&root, schema_id, version);
         let before = file_tree_bytes(&root);
         let error = match support::open_store(config) {
-            Ok(_) => panic!("v14 clean break must reject File schema {schema_id}"),
+            Ok(_) => panic!("v17 clean break must reject File schema {schema_id}"),
             Err(error) => error,
         };
         assert_eq!(error.stage(), "store_rebuild_required", "{schema_id}");
@@ -2112,11 +2669,12 @@ fn transcript_lifecycle_exact_zeroes_catalog_timeline_search_and_activity_indexe
         let mut record = transcript_record(&key, "turn-private", "private cobalt 私密消息");
         record.created_at = 1_800_300_001;
         record.updated_at = 1_800_300_001;
-        for message in record
-            .input_messages
-            .iter_mut()
-            .chain(record.assistant_message.iter_mut())
-        {
+        for message in record.input_messages.iter_mut().chain(
+            record
+                .assistant_messages
+                .iter_mut()
+                .map(|item| &mut item.message),
+        ) {
             message.observed_at = 1_800_300_001;
             message.created_at = 1_800_300_001;
         }
@@ -2211,11 +2769,12 @@ fn transcript_query_continuation_pages_are_lossless_beyond_128_entries() {
         record.sequence = sequence;
         record.created_at = 1_800_400_000 + sequence;
         record.updated_at = 1_800_400_000 + sequence;
-        for message in record
-            .input_messages
-            .iter_mut()
-            .chain(record.assistant_message.iter_mut())
-        {
+        for message in record.input_messages.iter_mut().chain(
+            record
+                .assistant_messages
+                .iter_mut()
+                .map(|item| &mut item.message),
+        ) {
             message.observed_at = 1_800_400_000 + sequence;
             message.created_at = 1_800_400_000 + sequence;
         }

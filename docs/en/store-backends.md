@@ -38,7 +38,11 @@ let config = StoreBackendConfig::file("/var/lib/beetle-memory", profile)?
     .with_fsync(true);
 ```
 
-## 0.11.2 Schema Admission: Store v16
+## 0.12.0 Schema Admission: Store v17
+
+The 0.12.0 source accepts only Store v17. Ordered assistant messages, per-message settlement, exact turn identity, Session shadow, transcript attrs/auxiliary material, host-reference labels, and indexes are validated as one governed closure. `DeleteRaw` clears affected raw content and dependent session summary text in that closure. Store v16 fails closed on open: no compatibility read, automatic migration, dual write, or silent replacement. A complete old Store remains with its matching old source tag; any data transition requires a separate owner decision. Archive import does not migrate schema. See the [0.12.0 source release notes](release-notes-0.12.0.md).
+
+## Historical 0.11.2 Schema Admission: Store v16
 
 The 0.11.2 source accepts only Store v16, with immutable long-term material v6 and control revision v4. Canonical turns persist factual admission order; long-term owners retain the control barrier and transition basis. Governance policies bind exact identity/revision to atomic operation receipts. Transcript source withdrawal updates factual evidence and governed indexes in the same transaction. Adapter V2 remains the envelope version, but policy requests and responses have changed; all Beetle crates must come from the same source tag.
 

@@ -293,7 +293,7 @@ impl SessionStore for VerifiedSoulSession<'_> {
             for message in turn
                 .input_messages
                 .iter()
-                .chain(turn.assistant_message.iter())
+                .chain(turn.assistant_messages.iter().map(|entry| &entry.message))
             {
                 messages.push((
                     turn,

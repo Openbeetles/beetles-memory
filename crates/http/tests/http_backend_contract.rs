@@ -76,14 +76,17 @@ fn real_http_socket_finalize_queues_then_reports_durable_configuration_block() {
                 "speaker_id": "user",
                 "speaker_kind": "human"
             }],
-            "assistant_message": {
+            "assistant_messages": [{
+                "settlement": "complete",
+                "message": {
                 "role": "assistant",
                 "content": "已记录。",
                 "authority": "assistant_utterance",
                 "observed_at": 1,
                 "speaker_id": "assistant",
                 "speaker_kind": "assistant"
-            },
+                }
+            }],
             "external_content_used": false
         },
         "learning": bm_sdk::PostTurnLearningInputV3::empty()
@@ -238,9 +241,9 @@ fn pfi2_finalize_body(runtime: &EntryRuntime, id: &str, feedback: bool) -> serde
         input_messages: vec![TranscriptInputMessage::user(
             "Synthetic authorized HTTP turn",
         )],
-        assistant_message: Some(TranscriptInputMessage::assistant(
-            "Synthetic response delivered",
-        )),
+        assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+            TranscriptInputMessage::assistant("Synthetic response delivered"),
+        )],
         tool_observations: observations,
         external_content_used: false,
         candidate_ids: Vec::new(),

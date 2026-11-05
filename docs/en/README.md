@@ -1,6 +1,6 @@
 # Beetle Memory Developer Documentation
 
-Beetle Memory is integrated through `bm-sdk` or deployed through `bm-entry` plus protocol adapters. Start with architecture, then choose SDK integration, standalone deployment, or CLI operation.
+Beetle Memory is integrated through `bm-sdk` or deployed through `bm-entry` plus protocol adapters. For the 0.12.0 source version, start with [Getting Started](getting-started.md), [Integration](integration.md), and [release notes](release-notes-0.12.0.md); the published v0.11.2 tag remains available as a historical Store v16 contract.
 
 - [Architecture](architecture.md)
 - [Integration Guide](integration.md)
@@ -15,6 +15,7 @@ Beetle Memory is integrated through `bm-sdk` or deployed through `bm-entry` plus
 - [Replay and Archive](replay-and-archive.md)
 - [Operator Guide](operator-guide.md)
 - [Release Checklist](release-checklist.md)
+- [0.12.0 Source Release Notes](release-notes-0.12.0.md)
 - [0.11.2 Source Release Notes](release-notes-0.11.2.md)
 - [0.11.1 Source Release Notes](release-notes-0.11.1.md)
 - [0.11.0 Source Release Notes](release-notes-0.11.0.md)

@@ -1,8 +1,8 @@
 # Integration Guide
 
-This guide describes how to embed Beetle Memory 0.11.2 source into a Rust project through `bm-sdk`: post-turn input V3, semantic Job V4 and Store v16. These contracts are not available in the published 0.9.0 source, which uses input V2 and Store v14. No compatibility reader or automatic migration is provided; the Git tag identifies the released source.
+This guide describes how to embed the 0.12.0 source version into a Rust project through `bm-sdk`: ordered `assistant_messages`, settled interruption prefixes, post-turn input V3, semantic Job V4, and Store v17. The published v0.11.2 tag remains the Store v16 contract. No compatibility reader or automatic migration is provided; a verified Git tag identifies a released source.
 
-The 0.11.2 contract described in [API changes](api.md#runtime-operations) requires Store v16 / material v6 / control revision v4. The historical v0.10.0 tag remains unchanged.
+The historical 0.11.2 long-term control contract described in [API changes](api.md#runtime-operations) uses material v6 and control revision v4. The 0.12.0 source retains those contracts while changing transcript turn input and Store schema. The historical v0.10.0 tag remains unchanged.
 
 ## 1. Choose A Profile
 
@@ -28,11 +28,11 @@ From this repository:
 bm-sdk = { path = "crates/sdk", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
-Use the same source tag for every Beetle crate. Source release does not mean crates.io publication. For an external consumer:
+Use the same source tag for every Beetle crate. Source release does not mean crates.io publication. After the `v0.12.0` tag is published and verified, an external consumer can use:
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.11.2", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.11.2", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.12.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.12.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 Use exactly one profile feature for a build. Linux desktop, Linux device, and Linux server are distinct deployment targets; do not substitute one for another.
@@ -186,7 +186,7 @@ Its `expected_revision: None` is only for this fresh ephemeral Store. Persistent
 existing binding references and manage revisions explicitly, never automatically regrant on each
 startup or turn. Adapt `GovernanceBindingSource` and `GovernanceCredentialResolver` to the product's
 one configuration owner for real model execution; they are deliberately unconfigured here.
-See [0.11.2 source release notes](release-notes-0.11.2.md) for the current API and Store boundary.
+See the [0.12.0 source release notes](release-notes-0.12.0.md) for the current API and Store boundary; the [0.11.2 source release notes](release-notes-0.11.2.md) remain the published historical contract.
 
 The host remains responsible for final ordering of system, developer, user, and
 tool messages.
@@ -363,6 +363,21 @@ A complete SDK host turn uses one public path:
 5. Use `recall` and `project` to build model context; do not assemble memory planes in the host.
 6. Use `inspect` for operator visibility and safe recovery context.
 7. Use typed memory-space export, direct same-scope import, and replay for replacement or release gates.
+
+For 0.12.0, populate `CanonicalTurnDelta.assistant_messages` in delivery order. For example, a cancelled turn may include a complete message followed by its final settled interrupted prefix:
+
+```rust
+use bm_sdk::{TranscriptAssistantMessage, TranscriptInputMessage};
+
+let assistant_messages = vec![
+    TranscriptAssistantMessage::complete(TranscriptInputMessage::assistant("First reply.")),
+    TranscriptAssistantMessage::interrupted_delivered_prefix(
+        TranscriptInputMessage::assistant("The delivered part of the next reply."),
+    ),
+];
+```
+
+Set `delivery_status` to `Cancelled` for that turn and pass the messages to `finalize_turn` as part of its canonical delta. `Delivered` accepts only complete messages; `Cancelled`, `UpstreamFailed`, and `IncompleteStream` permit at most one interrupted delivered prefix at the end. The 16-message and 4 KiB-per-message limits reject the entire turn on overflow. Retry with the original turn id and complete canonical payload; do not reconstruct it from the remaining stream buffer.
 
 Generic host fixtures and Beetle-derived fixtures under `fixtures/sdk-host-readiness/` follow this same path. Beetle-derived data is current-contract host evidence only, not a special SDK or compatibility branch.
 

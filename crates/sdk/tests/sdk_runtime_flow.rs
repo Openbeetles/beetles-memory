@@ -122,9 +122,11 @@ fn seed_private_garden_with_production_owner(
             input_messages: vec![TranscriptInputMessage::user(
                 "Retain this protected inward note for governed self-work.",
             )],
-            assistant_message: Some(TranscriptInputMessage::assistant(
-                "I will keep it within the governed private owner.",
-            )),
+            assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                TranscriptInputMessage::assistant(
+                    "I will keep it within the governed private owner.",
+                ),
+            )],
             tool_observations: Vec::new(),
             external_content_used: false,
             candidate_ids: Vec::new(),

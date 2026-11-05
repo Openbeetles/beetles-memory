@@ -4224,6 +4224,7 @@ impl StorePlatform {
                 serde_json::from_value::<TranscriptTurnRecord>(value.clone()).map_err(|error| {
                     Error::config("conversation_transcript_page", error.to_string())
                 })?;
+            record.validate_canonical_intake()?;
             let expected_address = RecallIndexAddress::json(
                 "conversation_transcript",
                 &entry.key,
@@ -10859,7 +10860,7 @@ impl StorePlatform {
             ));
         }
         self.load_query_keyring(&record.key.memory_space_id)?;
-        for (locator, content) in message_locators(record) {
+        for (locator, content, message_sequence) in message_locators(record) {
             let manifest_key = search_message_manifest_key(&locator);
             let manifest_value = self
                 .engine
@@ -10932,7 +10933,9 @@ impl StorePlatform {
                             "time root references a missing page",
                         )
                     })?;
-                time_bound |= page.locators.iter().any(|entry| entry.locator == locator);
+                time_bound |= page.locators.iter().any(|entry| {
+                    entry.locator == locator && entry.message_sequence == message_sequence
+                });
             }
             if !time_bound {
                 return Err(Error::config(
@@ -10985,7 +10988,9 @@ impl StorePlatform {
                                 "search root references a missing page",
                             )
                         })?;
-                    search_bound |= page.locators.iter().any(|entry| entry.locator == locator);
+                    search_bound |= page.locators.iter().any(|entry| {
+                        entry.locator == locator && entry.message_sequence == message_sequence
+                    });
                 }
                 if !search_bound {
                     return Err(Error::config(
@@ -11025,7 +11030,7 @@ impl StorePlatform {
         let messages = record
             .input_messages
             .iter()
-            .chain(record.assistant_message.iter())
+            .chain(record.assistant_messages.iter().map(|item| &item.message))
             .collect::<Vec<_>>();
         stats.turn_count = stats.turn_count.saturating_add(1);
         stats.message_count = stats
@@ -11055,11 +11060,8 @@ impl StorePlatform {
                 .map(|head| head.message_count)
                 .unwrap_or(0)
                 .saturating_add(
-                    u64::try_from(
-                        record.input_messages.len()
-                            + usize::from(record.assistant_message.is_some()),
-                    )
-                    .unwrap_or(u64::MAX),
+                    u64::try_from(record.input_messages.len() + record.assistant_messages.len())
+                        .unwrap_or(u64::MAX),
                 ),
             lifecycle,
             first_sequence: previous
@@ -11090,10 +11092,9 @@ impl StorePlatform {
         let mut message_count = 0u64;
         let mut lifecycle = TranscriptLifecycleAggregate::default();
         for record in records {
-            let count = u64::try_from(
-                record.input_messages.len() + usize::from(record.assistant_message.is_some()),
-            )
-            .unwrap_or(u64::MAX);
+            let count =
+                u64::try_from(record.input_messages.len() + record.assistant_messages.len())
+                    .unwrap_or(u64::MAX);
             message_count = message_count.saturating_add(count);
             let stats = match record.lifecycle_state {
                 TranscriptLifecycleState::Active => &mut lifecycle.active,
@@ -11106,7 +11107,7 @@ impl StorePlatform {
             for message in record
                 .input_messages
                 .iter()
-                .chain(record.assistant_message.iter())
+                .chain(record.assistant_messages.iter().map(|item| &item.message))
             {
                 stats.first_observed_at = Some(
                     stats
@@ -11286,9 +11287,10 @@ impl StorePlatform {
         let mut by_day = BTreeMap::<u64, Vec<TranscriptPostingLocatorV1>>::new();
         let mut by_term = BTreeMap::<String, Vec<TranscriptPostingLocatorV1>>::new();
         let mut manifests = Vec::<(TranscriptLocator, Vec<String>)>::new();
-        for (locator, content) in message_locators(record) {
+        for (locator, content, message_sequence) in message_locators(record) {
             let posting_locator = TranscriptPostingLocatorV1 {
                 locator: locator.clone(),
+                message_sequence,
                 lifecycle_state: record.lifecycle_state,
                 redaction_state: record.redaction_state,
             };
@@ -11381,6 +11383,7 @@ impl StorePlatform {
                 (
                     entry.locator.observed_at,
                     entry.locator.turn_sequence,
+                    entry.message_sequence,
                     entry.locator.message_id.clone(),
                 )
             };
@@ -11477,6 +11480,7 @@ impl StorePlatform {
             (
                 candidate.locator.observed_at,
                 candidate.locator.turn_sequence,
+                candidate.message_sequence,
                 candidate.locator.message_id.clone(),
             )
         });
@@ -11575,6 +11579,7 @@ impl StorePlatform {
                 (
                     entry.locator.observed_at,
                     entry.locator.turn_sequence,
+                    entry.message_sequence,
                     entry.locator.message_id.clone(),
                 )
             };
@@ -11681,6 +11686,7 @@ impl StorePlatform {
             (
                 candidate.locator.observed_at,
                 candidate.locator.turn_sequence,
+                candidate.message_sequence,
                 candidate.locator.message_id.clone(),
             )
         });
@@ -11751,9 +11757,10 @@ impl StorePlatform {
         let mut owner = None::<TranscriptTurnRecord>;
         for (before_record, after_record) in changed {
             owner.get_or_insert_with(|| after_record.clone());
-            for (locator, content) in message_locators(before_record) {
+            for (locator, content, message_sequence) in message_locators(before_record) {
                 let replacement = TranscriptPostingLocatorV1 {
                     locator: locator.clone(),
+                    message_sequence,
                     lifecycle_state: after_record.lifecycle_state,
                     redaction_state: after_record.redaction_state,
                 };
@@ -13205,22 +13212,27 @@ impl ConversationTranscriptStore for StorePlatform {
                         head_digest: owner_head.head_digest,
                     },
                     observed_at,
+                    locator.message_sequence,
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        candidates.sort_by(|(left, left_observed_at), (right, right_observed_at)| {
-            match query.sort {
-                TranscriptSearchSort::RelevanceThenObservedAt => right
-                    .score
-                    .cmp(&left.score)
-                    .then_with(|| right_observed_at.cmp(left_observed_at)),
-                TranscriptSearchSort::ObservedAtDescending => {
-                    right_observed_at.cmp(left_observed_at)
+        candidates.sort_by(
+            |(left, left_observed_at, left_sequence),
+             (right, right_observed_at, right_sequence)| {
+                match query.sort {
+                    TranscriptSearchSort::RelevanceThenObservedAt => right
+                        .score
+                        .cmp(&left.score)
+                        .then_with(|| right_observed_at.cmp(left_observed_at)),
+                    TranscriptSearchSort::ObservedAtDescending => {
+                        right_observed_at.cmp(left_observed_at)
+                    }
                 }
-            }
-            .then_with(|| right.record.sequence.cmp(&left.record.sequence))
-            .then_with(|| right.message_id.cmp(&left.message_id))
-        });
+                .then_with(|| right.record.sequence.cmp(&left.record.sequence))
+                .then_with(|| right_sequence.cmp(left_sequence))
+                .then_with(|| right.message_id.cmp(&left.message_id))
+            },
+        );
         let snapshot_digest = format!("sha256:{:x}", snapshot_hasher.finalize());
         let start = if let Some(cursor) = query.cursor.as_ref() {
             let claims = decode_cursor(&keyring, cursor)?;
@@ -13291,7 +13303,7 @@ impl ConversationTranscriptStore for StorePlatform {
         Ok(TranscriptSearchCandidatePage {
             candidates: candidates
                 .into_iter()
-                .map(|(candidate, _)| candidate)
+                .map(|(candidate, _, _)| candidate)
                 .collect(),
             next_cursor,
             has_more,
@@ -14035,8 +14047,8 @@ impl ConversationTranscriptStore for StorePlatform {
                 for message in &record.input_messages {
                     affected_message_ids.push(message.message_id.clone());
                 }
-                if let Some(message) = &record.assistant_message {
-                    affected_message_ids.push(message.message_id.clone());
+                for assistant in &record.assistant_messages {
+                    affected_message_ids.push(assistant.message.message_id.clone());
                 }
                 affected_host_refs.extend(record.host_refs.clone());
                 changed_records.push((before_record, record.clone()));
@@ -14103,6 +14115,7 @@ impl ConversationTranscriptStore for StorePlatform {
         }
         if !mutations.is_empty() {
             let mut indexes = Vec::with_capacity(pages.len().saturating_add(8));
+            let mut lifecycle_preconditions = Vec::new();
             for (page_id, (page, before, entries)) in pages {
                 indexes.push(self.plan_conversation_transcript_page(
                     &request.key,
@@ -14112,6 +14125,300 @@ impl ConversationTranscriptStore for StorePlatform {
                     before,
                     entries,
                 )?);
+            }
+            if request.transition == TranscriptLifecycleTransition::DeleteRaw {
+                let mut session_targets = BTreeMap::<String, Vec<&TranscriptTurnRecord>>::new();
+                for (before, _) in &changed_records {
+                    session_targets
+                        .entry(before.session_chat_id.clone())
+                        .or_default()
+                        .push(before);
+                    let (_, aux, aux_before) = self.load_conversation_transcript_aux(
+                        &request.key,
+                        mounted_subject_id,
+                        &before.turn_id,
+                    )?;
+                    if let Some(aux) = aux {
+                        let mut remaining = aux.entries.clone();
+                        for entry in aux
+                            .entries
+                            .iter()
+                            .filter(|entry| entry.namespace == "conversation_transcript_attr")
+                        {
+                            let value = self
+                                .engine
+                                .get_json_value("conversation_transcript_attr", &entry.key)?
+                                .ok_or_else(|| {
+                                    Error::config(
+                                        "transcript_lifecycle_plan",
+                                        "attr index references missing owner",
+                                    )
+                                })?;
+                            lifecycle_preconditions.push(StoreJsonPrecondition::Exact {
+                                namespace: "conversation_transcript_attr".into(),
+                                key: entry.key.clone(),
+                                value,
+                            });
+                            mutations.push(StoreMutation::DeleteJson {
+                                namespace: "conversation_transcript_attr".into(),
+                                key: entry.key.clone(),
+                                event_kind: MemoryStoreEventKind::MemoryDelete,
+                                plane: "conversation_transcript_attr".into(),
+                                record_key: entry.key.clone(),
+                            });
+                            remaining = remove_recall_index_address(
+                                &remaining,
+                                RecallIndexAddressKind::Json,
+                                "conversation_transcript_attr",
+                                &entry.key,
+                            );
+                        }
+                        if remaining != aux.entries {
+                            indexes.push(self.plan_conversation_transcript_aux(
+                                &request.key,
+                                mounted_subject_id,
+                                &before.turn_id,
+                                Some(&aux),
+                                aux_before,
+                                remaining,
+                            )?);
+                        }
+                    }
+                }
+                let summary_chats = session_targets.keys().cloned().collect::<Vec<_>>();
+                let validate_archive_owner_binding = |namespace: &str,
+                                                      chat_id: &str,
+                                                      before_value: &serde_json::Value|
+                 -> Result<()> {
+                    let binding_key = recall_owner_scope_binding_key("json", namespace, chat_id)?;
+                    let binding_value = self
+                        .engine
+                        .get_json_value(RECALL_OWNER_SCOPE_BINDING_NAMESPACE, &binding_key)?
+                        .ok_or_else(|| {
+                            Error::config(
+                                "transcript_lifecycle_plan",
+                                "archive shadow lacks owner binding",
+                            )
+                        })?;
+                    let binding = serde_json::from_value::<RecallOwnerScopeBinding>(binding_value)
+                        .map_err(|error| {
+                            Error::config("transcript_lifecycle_plan", error.to_string())
+                        })?;
+                    let source_address = RecallIndexAddress::json(
+                        namespace,
+                        chat_id,
+                        1,
+                        request.requested_at,
+                        before_value,
+                    )?;
+                    let expected_binding = RecallOwnerScopeBinding::build(
+                        &request.key.memory_space_id,
+                        mounted_subject_id,
+                        "json",
+                        namespace,
+                        chat_id,
+                        &source_address.content_sha256,
+                    )?;
+                    if binding != expected_binding {
+                        return Err(Error::config(
+                            "transcript_lifecycle_plan",
+                            "archive shadow owner binding differs",
+                        ));
+                    }
+                    Ok(())
+                };
+                let mut session_addresses = Vec::new();
+                for (chat_id, turns) in session_targets {
+                    let Some(before_value) = self.engine.get_json_value("session", &chat_id)?
+                    else {
+                        continue;
+                    };
+                    let mut session =
+                        serde_json::from_value::<Vec<SessionMessage>>(before_value.clone())
+                            .map_err(|error| {
+                                Error::config("transcript_lifecycle_plan", error.to_string())
+                            })?;
+                    let mut changed = false;
+                    for turn in turns {
+                        for message in turn
+                            .input_messages
+                            .iter()
+                            .chain(turn.assistant_messages.iter().map(|item| &item.message))
+                        {
+                            let matches = session
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, item)| item.message_id == message.message_id)
+                                .map(|(index, _)| index)
+                                .collect::<Vec<_>>();
+                            if matches.len() > 1 {
+                                return Err(Error::config(
+                                    "transcript_lifecycle_plan",
+                                    "session shadow message is ambiguous",
+                                ));
+                            }
+                            if let Some(index) = matches.first() {
+                                let item = &session[*index];
+                                if item.role != message.role
+                                    || item.content != message.content
+                                    || item.observed_at != message.observed_at
+                                    || item.created_at != message.created_at
+                                    || item.speaker_id != message.actor.speaker_id
+                                    || item.speaker_kind != message.actor.speaker_kind
+                                {
+                                    return Err(Error::config(
+                                        "transcript_lifecycle_plan",
+                                        "session shadow message differs from transcript owner",
+                                    ));
+                                }
+                                session[*index].content.clear();
+                                changed = true;
+                            }
+                        }
+                    }
+                    if !changed {
+                        continue;
+                    }
+                    validate_archive_owner_binding("session", &chat_id, &before_value)?;
+                    let next_value = serde_json::to_value(&session).map_err(|error| {
+                        Error::config("transcript_lifecycle_plan", error.to_string())
+                    })?;
+                    lifecycle_preconditions.push(StoreJsonPrecondition::Exact {
+                        namespace: "session".into(),
+                        key: chat_id.clone(),
+                        value: before_value.clone(),
+                    });
+                    mutations.push(StoreMutation::PutJson {
+                        namespace: "session".into(),
+                        key: chat_id.clone(),
+                        value: next_value.clone(),
+                        event_kind: MemoryStoreEventKind::MemoryWrite,
+                        plane: "session".into(),
+                        record_key: chat_id.clone(),
+                    });
+                    session_addresses.push((chat_id, before_value, next_value));
+                }
+                let mut summary_deletions = Vec::new();
+                for chat_id in summary_chats {
+                    let Some(before_value) =
+                        self.engine.get_json_value("session_summary", &chat_id)?
+                    else {
+                        continue;
+                    };
+                    validate_archive_owner_binding("session_summary", &chat_id, &before_value)?;
+                    lifecycle_preconditions.push(StoreJsonPrecondition::Exact {
+                        namespace: "session_summary".into(),
+                        key: chat_id.clone(),
+                        value: before_value.clone(),
+                    });
+                    mutations.push(StoreMutation::DeleteJson {
+                        namespace: "session_summary".into(),
+                        key: chat_id.clone(),
+                        event_kind: MemoryStoreEventKind::MemoryDelete,
+                        plane: "session_summary".into(),
+                        record_key: chat_id.clone(),
+                    });
+                    summary_deletions.push((chat_id, before_value));
+                }
+                if !session_addresses.is_empty() || !summary_deletions.is_empty() {
+                    let manifest_key = ArchiveRecallManifest::build(
+                        1,
+                        &request.key.memory_space_id,
+                        mounted_subject_id,
+                        std::iter::empty(),
+                    )?
+                    .physical_key;
+                    let (previous, before) =
+                        self.load_typed_recall_index::<ArchiveRecallManifest>(&manifest_key)?;
+                    let previous = previous.ok_or_else(|| {
+                        Error::config(
+                            "transcript_lifecycle_plan",
+                            "session shadow lacks archive manifest",
+                        )
+                    })?;
+                    let mut entries = previous.entries.clone();
+                    for (chat_id, before_session, value) in &session_addresses {
+                        let previous_digest = RecallIndexAddress::json(
+                            "session",
+                            chat_id,
+                            1,
+                            request.requested_at,
+                            before_session,
+                        )?
+                        .content_sha256;
+                        let owners = entries
+                            .iter()
+                            .filter(|entry| {
+                                entry.kind == RecallIndexAddressKind::Json
+                                    && entry.namespace == "session"
+                                    && entry.key == *chat_id
+                            })
+                            .collect::<Vec<_>>();
+                        if owners.len() != 1 || owners[0].content_sha256 != previous_digest {
+                            return Err(Error::config(
+                                "transcript_lifecycle_plan",
+                                "session archive address differs from owner pre-image",
+                            ));
+                        }
+                        let address = RecallIndexAddress::json(
+                            "session",
+                            chat_id,
+                            next_entry_revision(
+                                &entries,
+                                RecallIndexAddressKind::Json,
+                                "session",
+                                chat_id,
+                            ),
+                            request.requested_at,
+                            value,
+                        )?;
+                        entries = replace_recall_index_address(&entries, address);
+                    }
+                    for (chat_id, before_summary) in &summary_deletions {
+                        let previous_digest = RecallIndexAddress::json(
+                            "session_summary",
+                            chat_id,
+                            1,
+                            request.requested_at,
+                            before_summary,
+                        )?
+                        .content_sha256;
+                        let owners = entries
+                            .iter()
+                            .filter(|entry| {
+                                entry.kind == RecallIndexAddressKind::Json
+                                    && entry.namespace == "session_summary"
+                                    && entry.key == *chat_id
+                            })
+                            .collect::<Vec<_>>();
+                        if owners.len() != 1 || owners[0].content_sha256 != previous_digest {
+                            return Err(Error::config(
+                                "transcript_lifecycle_plan",
+                                "session summary archive address differs from owner pre-image",
+                            ));
+                        }
+                        entries = remove_recall_index_address(
+                            &entries,
+                            RecallIndexAddressKind::Json,
+                            "session_summary",
+                            chat_id,
+                        );
+                    }
+                    let next = ArchiveRecallManifest::build(
+                        previous.revision.saturating_add(1),
+                        &request.key.memory_space_id,
+                        mounted_subject_id,
+                        entries,
+                    )?;
+                    indexes.push((
+                        ArchiveRecallManifest::NAMESPACE,
+                        manifest_key,
+                        serde_json::to_value(next).map_err(|error| {
+                            Error::config("transcript_lifecycle_plan", error.to_string())
+                        })?,
+                        before,
+                    ));
+                }
             }
             let head_plan = self.plan_conversation_head(
                 &request.key,
@@ -14150,6 +14457,7 @@ impl ConversationTranscriptStore for StorePlatform {
                 request.requested_at,
             )?;
             let mut preconditions = learning.preconditions;
+            preconditions.extend(lifecycle_preconditions);
             mutations.extend(learning.mutations);
             for (before, _) in &changed_records {
                 preconditions.push(StoreJsonPrecondition::Exact {
@@ -16334,11 +16642,187 @@ pub(crate) fn validate_transcript_query_snapshot_closure(
     validate_transcript_query_snapshot_closure_with_keyring(json, true)
 }
 
+fn validate_raw_deleted_snapshot_closure(
+    json: &BTreeMap<(String, String), serde_json::Value>,
+    record: &TranscriptTurnRecord,
+    attr_owners: &HashSet<(String, String)>,
+) -> Result<()> {
+    if record.lifecycle_state != TranscriptLifecycleState::RawDeleted {
+        return Ok(());
+    }
+    let message_ids = record
+        .input_messages
+        .iter()
+        .chain(record.assistant_messages.iter().map(|item| &item.message))
+        .map(|message| message.message_id.as_str())
+        .collect::<HashSet<_>>();
+    if let Some(value) = json.get(&("session".to_string(), record.session_chat_id.clone())) {
+        let session =
+            serde_json::from_value::<Vec<SessionMessage>>(value.clone()).map_err(|error| {
+                Error::config(
+                    "conversation_transcript_raw_deleted_closure",
+                    error.to_string(),
+                )
+            })?;
+        if session.iter().any(|message| {
+            message_ids.contains(message.message_id.as_str()) && !message.content.is_empty()
+        }) {
+            return Err(Error::config(
+                "conversation_transcript_raw_deleted_closure",
+                "raw-deleted transcript still has session text",
+            ));
+        }
+    }
+    let aux_key = ConversationTranscriptAuxManifest::build(
+        1,
+        &record.key.memory_space_id,
+        &record.subject,
+        &record.key.channel_id,
+        &record.key.conversation_id,
+        &record.turn_id,
+        std::iter::empty(),
+    )?
+    .physical_key;
+    if let Some(value) = json.get(&(
+        ConversationTranscriptAuxManifest::NAMESPACE.to_string(),
+        aux_key,
+    )) {
+        let aux = serde_json::from_value::<ConversationTranscriptAuxManifest>(value.clone())
+            .map_err(|error| {
+                Error::config(
+                    "conversation_transcript_raw_deleted_closure",
+                    error.to_string(),
+                )
+            })?;
+        if aux
+            .entries
+            .iter()
+            .any(|entry| entry.namespace == "conversation_transcript_attr")
+        {
+            return Err(Error::config(
+                "conversation_transcript_raw_deleted_closure",
+                "raw-deleted transcript still indexes attrs",
+            ));
+        }
+    }
+    let attr_prefix = transcript_attr_storage_key_prefix(&record.key, &record.subject);
+    if attr_owners.contains(&(attr_prefix, record.turn_id.clone())) {
+        return Err(Error::config(
+            "conversation_transcript_raw_deleted_closure",
+            "raw-deleted transcript still owns attr text",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_transcript_query_snapshot_closure_with_keyring(
     json: &BTreeMap<(String, String), serde_json::Value>,
     require_keyring: bool,
 ) -> Result<()> {
     let stage = "conversation_transcript_query_closure";
+    let mut transcript_subjects = BTreeMap::<(String, String, String, String), Vec<String>>::new();
+    for ((namespace, physical_key), value) in json {
+        if namespace != "conversation_transcript" {
+            continue;
+        }
+        let record = serde_json::from_value::<TranscriptTurnRecord>(value.clone())
+            .map_err(|error| Error::config(stage, error.to_string()))?;
+        if transcript_turn_storage_key(&record.key, &record.subject, &record.turn_id)
+            != *physical_key
+        {
+            return Err(Error::config(
+                stage,
+                "transcript owner has a non-canonical storage key",
+            ));
+        }
+        transcript_subjects
+            .entry((
+                record.key.memory_space_id,
+                record.key.channel_id,
+                record.key.conversation_id,
+                record.turn_id,
+            ))
+            .or_default()
+            .push(record.subject);
+    }
+    let mut attr_owners = HashSet::new();
+    for ((namespace, key), value) in json {
+        if namespace != "conversation_transcript_attr" {
+            continue;
+        }
+        let attr = serde_json::from_value::<TranscriptAttrEnvelope>(value.clone())
+            .map_err(|error| Error::config(stage, error.to_string()))?;
+        attr.validate()?;
+        let target = (&attr.target.key, &attr.target.turn_id);
+        let subjects = transcript_subjects.get(&(
+            target.0.memory_space_id.clone(),
+            target.0.channel_id.clone(),
+            target.0.conversation_id.clone(),
+            target.1.clone(),
+        ));
+        let owners = subjects
+            .into_iter()
+            .flatten()
+            .filter(|subject| transcript_attr_storage_key(target.0, subject, &attr) == *key)
+            .collect::<Vec<_>>();
+        if owners.len() != 1 {
+            return Err(Error::config(
+                stage,
+                "transcript attr storage key or aux membership is invalid",
+            ));
+        }
+        let subject = owners[0];
+        let aux_key = ConversationTranscriptAuxManifest::build(
+            1,
+            &target.0.memory_space_id,
+            subject,
+            &target.0.channel_id,
+            &target.0.conversation_id,
+            target.1,
+            std::iter::empty(),
+        )?
+        .physical_key;
+        let aux = json
+            .get(&(
+                ConversationTranscriptAuxManifest::NAMESPACE.to_string(),
+                aux_key,
+            ))
+            .ok_or_else(|| {
+                Error::config(
+                    stage,
+                    "transcript attr storage key or aux membership is invalid",
+                )
+            })?;
+        let aux = serde_json::from_value::<ConversationTranscriptAuxManifest>(aux.clone())
+            .map_err(|error| Error::config(stage, error.to_string()))?;
+        let digest = RecallIndexAddress::json(
+            "conversation_transcript_attr",
+            key,
+            1,
+            attr.updated_at,
+            value,
+        )?
+        .content_sha256;
+        let bindings = aux
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.kind == RecallIndexAddressKind::Json
+                    && entry.namespace == "conversation_transcript_attr"
+                    && entry.key == *key
+            })
+            .collect::<Vec<_>>();
+        if bindings.len() != 1 || bindings[0].content_sha256 != digest {
+            return Err(Error::config(
+                stage,
+                "transcript attr storage key or aux membership is invalid",
+            ));
+        }
+        attr_owners.insert((
+            transcript_attr_storage_key_prefix(target.0, subject),
+            target.1.clone(),
+        ));
+    }
     let mut expected_query_message_keys = HashSet::new();
     for ((namespace, _), value) in json {
         if namespace == TRANSCRIPT_QUERY_KEYRING_NAMESPACE {
@@ -16362,10 +16846,12 @@ fn validate_transcript_query_snapshot_closure_with_keyring(
         }
         let record = serde_json::from_value::<TranscriptTurnRecord>(value.clone())
             .map_err(|error| Error::config(stage, error.to_string()))?;
+        record.validate_canonical_intake()?;
+        validate_raw_deleted_snapshot_closure(json, &record, &attr_owners)?;
         expected_query_message_keys.extend(
             message_locators(&record)
                 .into_iter()
-                .map(|(locator, _)| search_message_manifest_key(&locator)),
+                .map(|(locator, _, _)| search_message_manifest_key(&locator)),
         );
     }
     let mut catalog_heads =
@@ -16392,7 +16878,8 @@ fn validate_transcript_query_snapshot_closure_with_keyring(
         if namespace == "conversation_transcript" {
             let record = serde_json::from_value::<TranscriptTurnRecord>(value.clone())
                 .map_err(|error| Error::config(stage, error.to_string()))?;
-            for (locator, content) in message_locators(&record) {
+            record.validate_canonical_intake()?;
+            for (locator, content, message_sequence) in message_locators(&record) {
                 let manifest_key = search_message_manifest_key(&locator);
                 let manifest_value = json
                     .get(&(
@@ -16453,6 +16940,7 @@ fn validate_transcript_query_snapshot_closure_with_keyring(
                             .map_err(|error| Error::config(stage, error.to_string()))?;
                     time_bound |= page.locators.iter().any(|entry| {
                         entry.locator == locator
+                            && entry.message_sequence == message_sequence
                             && entry.lifecycle_state == record.lifecycle_state
                             && entry.redaction_state == record.redaction_state
                     });
@@ -16502,6 +16990,7 @@ fn validate_transcript_query_snapshot_closure_with_keyring(
                             .map_err(|error| Error::config(stage, error.to_string()))?;
                             search_bound |= page.locators.iter().any(|entry| {
                                 entry.locator == locator
+                                    && entry.message_sequence == message_sequence
                                     && entry.lifecycle_state == record.lifecycle_state
                                     && entry.redaction_state == record.redaction_state
                             });
@@ -17459,6 +17948,231 @@ mod transaction_error_contract_tests {
         return ProfileId::DesktopLinuxEmbeddedSdk;
         #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         compile_error!("store preparation tests require a supported host target");
+    }
+
+    fn snapshot_deleted_record() -> TranscriptTurnRecord {
+        use bm_core::memory::*;
+        let delta = CanonicalTurnDelta {
+            turn_id: "forged-deleted".into(),
+            conversation: ConversationScope {
+                channel: "desktop".into(),
+                chat_id: "chat-a".into(),
+                conversation_id: Some("conversation-a".into()),
+            },
+            subject: "subject-a".into(),
+            delivery_status: MemoryTurnDeliveryStatus::Delivered,
+            source: MemoryTurnSource {
+                ingress: IngressKind::User,
+                channel: "desktop".into(),
+                provider: None,
+                protocol: MemoryTurnProtocol::Native,
+                endpoint: None,
+                model_alias: None,
+                model_resolved: None,
+                request_id: None,
+                client_conversation_hint: None,
+            },
+            actor: None,
+            input_messages: vec![TranscriptInputMessage::user("retained private text")],
+            assistant_messages: vec![TranscriptAssistantMessage::complete(
+                TranscriptInputMessage::assistant("retained private reply"),
+            )],
+            tool_observations: Vec::new(),
+            external_content_used: false,
+            candidate_ids: Vec::new(),
+        };
+        let key = ConversationKey::from_delta("space-a", &delta).unwrap();
+        let mut record = TranscriptTurnRecord::from_delta(&key, 1, &delta, Vec::new(), 10).unwrap();
+        record.apply_lifecycle_transition(TranscriptLifecycleTransition::DeleteRaw, 11);
+        record
+    }
+
+    fn snapshot_attr(record: &TranscriptTurnRecord) -> TranscriptAttrEnvelope {
+        use bm_core::memory::*;
+        TranscriptAttrEnvelope {
+            attr_id: "retained-attr".into(),
+            target: TranscriptAttrTarget {
+                key: record.key.clone(),
+                scope: TranscriptAttrScope::Turn,
+                turn_id: record.turn_id.clone(),
+                message_id: None,
+            },
+            key: "host.example.note".into(),
+            value_kind: TranscriptAttrValueKind::String,
+            schema_ref: None,
+            value: serde_json::json!("retained private text"),
+            visibility: HostRefVisibility::HostUi,
+            source: TranscriptAttrSource {
+                writer: "host".into(),
+                source_kind: TranscriptAttrSourceKind::HostReported,
+                written_at: 11,
+                audit_reason: "source".into(),
+            },
+            governance: TranscriptAttrGovernance {
+                max_value_bytes: 4096,
+                redaction_policy: TranscriptAttrRedactionPolicy::FollowTranscript,
+                export_allowed: false,
+            },
+            links: Vec::new(),
+            created_at: 11,
+            updated_at: 11,
+        }
+    }
+
+    #[test]
+    fn snapshot_post_image_rejects_raw_deleted_owner_with_retained_text() {
+        let mut record = snapshot_deleted_record();
+        let key = record.key.clone();
+        record.input_messages[0].content = "retained private text".into();
+        record.lifecycle_state = TranscriptLifecycleState::RawDeleted;
+        record.redaction_state = TranscriptRedactionState::RawDeleted;
+        let mut image = BTreeMap::new();
+        image.insert(
+            (
+                "conversation_transcript".to_string(),
+                transcript_turn_storage_key(&key, "subject-a", &record.turn_id),
+            ),
+            serde_json::to_value(record).unwrap(),
+        );
+        assert_eq!(
+            validate_transcript_query_snapshot_closure(&image)
+                .unwrap_err()
+                .stage(),
+            "conversation_transcript_intake"
+        );
+    }
+
+    #[test]
+    fn snapshot_post_image_rejects_raw_deleted_session_shadow_and_aux_attr() {
+        use bm_core::memory::*;
+        let record = snapshot_deleted_record();
+        let key = record.key.clone();
+        let mut image = BTreeMap::new();
+        image.insert(
+            (
+                "conversation_transcript".to_string(),
+                transcript_turn_storage_key(&key, "subject-a", &record.turn_id),
+            ),
+            serde_json::to_value(&record).unwrap(),
+        );
+        let message = &record.input_messages[0];
+        image.insert(
+            ("session".to_string(), record.session_chat_id.clone()),
+            serde_json::to_value(vec![SessionMessage::new(
+                &message.message_id,
+                &message.role,
+                "retained private text",
+                message.observed_at,
+                message.created_at,
+                &message.actor.speaker_id,
+                &message.actor.speaker_kind,
+            )])
+            .unwrap(),
+        );
+        assert_eq!(
+            validate_transcript_query_snapshot_closure(&image)
+                .unwrap_err()
+                .stage(),
+            "conversation_transcript_raw_deleted_closure"
+        );
+        image.remove(&("session".to_string(), record.session_chat_id.clone()));
+        let attr_key = format!(
+            "{}orphan",
+            transcript_attr_storage_key_prefix(&key, &record.subject)
+        );
+        let attr_value = serde_json::json!({"private": "retained private text"});
+        let attr_address = RecallIndexAddress::json(
+            "conversation_transcript_attr",
+            &attr_key,
+            1,
+            11,
+            &attr_value,
+        )
+        .unwrap();
+        let aux = ConversationTranscriptAuxManifest::build(
+            1,
+            &key.memory_space_id,
+            &record.subject,
+            &key.channel_id,
+            &key.conversation_id,
+            &record.turn_id,
+            vec![attr_address],
+        )
+        .unwrap();
+        image.insert(
+            (
+                ConversationTranscriptAuxManifest::NAMESPACE.to_string(),
+                aux.physical_key.clone(),
+            ),
+            serde_json::to_value(aux).unwrap(),
+        );
+        assert_eq!(
+            validate_transcript_query_snapshot_closure(&image)
+                .unwrap_err()
+                .stage(),
+            "conversation_transcript_raw_deleted_closure"
+        );
+        image.retain(|(namespace, _), _| namespace != ConversationTranscriptAuxManifest::NAMESPACE);
+        let attr = snapshot_attr(&record);
+        image.insert(
+            (
+                "conversation_transcript_attr".to_string(),
+                transcript_attr_storage_key(&key, &record.subject, &attr),
+            ),
+            serde_json::to_value(attr).unwrap(),
+        );
+        assert_eq!(
+            validate_transcript_query_snapshot_closure(&image)
+                .unwrap_err()
+                .stage(),
+            "conversation_transcript_raw_deleted_closure"
+        );
+    }
+
+    #[test]
+    fn snapshot_rejects_noncanonical_or_orphan_transcript_attr_owner() {
+        let record = snapshot_deleted_record();
+        let attr = snapshot_attr(&record);
+        let mut image = BTreeMap::new();
+        image.insert(
+            (
+                "conversation_transcript".to_string(),
+                transcript_turn_storage_key(&record.key, &record.subject, &record.turn_id),
+            ),
+            serde_json::to_value(&record).unwrap(),
+        );
+        image.insert(
+            (
+                "conversation_transcript_attr".to_string(),
+                "opaqueattr__orphan".to_string(),
+            ),
+            serde_json::to_value(&attr).unwrap(),
+        );
+        let error = validate_transcript_query_snapshot_closure(&image).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("transcript attr storage key or aux membership"),
+            "{error}"
+        );
+        image.remove(&(
+            "conversation_transcript_attr".to_string(),
+            "opaqueattr__orphan".to_string(),
+        ));
+        image.insert(
+            (
+                "conversation_transcript_attr".to_string(),
+                transcript_attr_storage_key(&record.key, &record.subject, &attr),
+            ),
+            serde_json::to_value(attr).unwrap(),
+        );
+        let error = validate_transcript_query_snapshot_closure(&image).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("transcript attr storage key or aux membership"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -18931,8 +19645,8 @@ mod transaction_error_contract_tests {
                     "model_alias":null, "model_resolved":null, "request_id":null, "client_conversation_hint":null},
                 "input_messages":[{"role":"user", "content":"same input text", "authority":"user_asserted", "observed_at":100,
                     "speaker_id":"private-human-a", "speaker_kind":"human"}],
-                "assistant_message":{"role":"assistant", "content":"same reply text", "authority":"assistant_utterance", "observed_at":100,
-                    "speaker_id":"private-agent-a", "speaker_kind":"llm_agent"}
+                "assistant_messages":[{"message":{"role":"assistant", "content":"same reply text", "authority":"assistant_utterance", "observed_at":100,
+                    "speaker_id":"private-agent-a", "speaker_kind":"llm_agent"}, "settlement":"complete"}]
             })).expect("canonical synthetic turn");
             let options = || CanonicalTurnTranscriptCommitOptions {
                 host_refs: Vec::new(),
@@ -19015,11 +19729,13 @@ mod transaction_error_contract_tests {
                     "rejected intake private body",
                     MemoryEvidenceAuthority::UserAsserted,
                 )],
-                assistant_message: Some(TranscriptInputMessage::new(
-                    "assistant",
-                    "rejected intake assistant body",
-                    MemoryEvidenceAuthority::AssistantUtterance,
-                )),
+                assistant_messages: vec![bm_core::memory::TranscriptAssistantMessage::complete(
+                    TranscriptInputMessage::new(
+                        "assistant",
+                        "rejected intake assistant body",
+                        MemoryEvidenceAuthority::AssistantUtterance,
+                    ),
+                )],
                 tool_observations: Vec::new(),
                 external_content_used: false,
                 candidate_ids: Vec::new(),
@@ -19148,7 +19864,12 @@ mod transaction_error_contract_tests {
                 session_append: racing_record
                     .input_messages
                     .iter()
-                    .chain(racing_record.assistant_message.iter())
+                    .chain(
+                        racing_record
+                            .assistant_messages
+                            .iter()
+                            .map(|item| &item.message),
+                    )
                     .map(|message| {
                         SessionMessage::new(
                             &message.message_id,

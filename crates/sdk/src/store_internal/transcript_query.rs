@@ -235,6 +235,7 @@ impl TranscriptCatalogPageV1 {
 #[serde(deny_unknown_fields)]
 pub(crate) struct TranscriptPostingLocatorV1 {
     pub locator: TranscriptLocator,
+    pub message_sequence: u64,
     pub lifecycle_state: TranscriptLifecycleState,
     pub redaction_state: TranscriptRedactionState,
 }
@@ -303,6 +304,7 @@ impl TranscriptTimePostingPageV1 {
             || self.locators.len() > TRANSCRIPT_QUERY_PAGE_CAPACITY
             || self.locators.iter().any(|entry| {
                 entry.locator.key != self.key
+                    || entry.message_sequence == 0
                     || entry.locator.mounted_subject_id != self.mounted_subject_id
                     || entry.locator.observed_at / 86_400 != self.utc_day
             })
@@ -371,7 +373,8 @@ impl TranscriptSearchPostingPageV1 {
             || self.locators.is_empty()
             || self.locators.len() > TRANSCRIPT_QUERY_PAGE_CAPACITY
             || self.locators.iter().any(|entry| {
-                entry.locator.key.memory_space_id != self.memory_space_id
+                entry.message_sequence == 0
+                    || entry.locator.key.memory_space_id != self.memory_space_id
                     || entry.locator.mounted_subject_id != self.mounted_subject_id
             })
         {
@@ -640,11 +643,13 @@ pub(crate) fn decode_cursor(
     Ok(claims)
 }
 
-pub(crate) fn message_locators(record: &TranscriptTurnRecord) -> Vec<(TranscriptLocator, &str)> {
+pub(crate) fn message_locators(
+    record: &TranscriptTurnRecord,
+) -> Vec<(TranscriptLocator, &str, u64)> {
     record
         .input_messages
         .iter()
-        .chain(record.assistant_message.iter())
+        .chain(record.assistant_messages.iter().map(|item| &item.message))
         .filter(|message| transcript_message_is_query_index_eligible(message))
         .map(|message| {
             (
@@ -657,6 +662,7 @@ pub(crate) fn message_locators(record: &TranscriptTurnRecord) -> Vec<(Transcript
                     observed_at: message.observed_at,
                 },
                 message.content.as_str(),
+                message.sequence,
             )
         })
         .collect()

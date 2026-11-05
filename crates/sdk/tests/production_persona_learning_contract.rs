@@ -270,9 +270,11 @@ fn signed_persona_request(runtime: &MemoryRuntime, turn_id: &str) -> MemoryTurnF
             },
             actor: None,
             input_messages: vec![TranscriptInputMessage::user(OBSERVATION)],
-            assistant_message: Some(TranscriptInputMessage::assistant(
-                "I will distinguish the evidence from uncertainty.",
-            )),
+            assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                TranscriptInputMessage::assistant(
+                    "I will distinguish the evidence from uncertainty.",
+                ),
+            )],
             tool_observations: vec![],
             external_content_used: false,
             candidate_ids: vec![],
@@ -316,6 +318,60 @@ fn public_engine_interprets_signed_canonical_turn_without_host_persona_ledger() 
     let runtime = runtime_for_store(store, "persona-agent");
     install(&runtime);
     run_turn(&runtime, "observation-turn", &LearningModel::new(false));
+}
+
+#[test]
+fn cancelled_interrupted_prefix_is_recalled_without_persona_growth() {
+    let store = support::open_memory_store(
+        StoreBackendConfig::in_memory(support::host_test_profile()).unwrap(),
+    )
+    .unwrap();
+    let runtime = runtime_for_store(store, "cancelled-persona-source");
+    install(&runtime);
+    let mut request = signed_persona_request(&runtime, "cancelled-after-visible-prefix");
+    request.turn.delivery_status = MemoryTurnDeliveryStatus::Cancelled;
+    request.turn.assistant_messages =
+        vec![TranscriptAssistantMessage::interrupted_delivered_prefix(
+            TranscriptInputMessage::assistant("I began to distinguish the evidence"),
+        )];
+    runtime.finalize_turn(request).unwrap();
+    let replay = runtime
+        .replay_transcript(MemoryTranscriptReplayRequest {
+            memory_space_id: runtime.memory_space_id().into(),
+            channel_id: "sdk.direct".into(),
+            conversation_id: runtime.scope().chat_id.clone(),
+            limit: 8,
+            cursor: None,
+            view: TranscriptReplayView::HostUi,
+        })
+        .unwrap();
+    assert_eq!(replay.slice.turns[0].assistant_messages.len(), 1);
+    assert_eq!(
+        replay.slice.turns[0].assistant_messages[0].settlement,
+        AssistantMessageSettlement::InterruptedDeliveredPrefix,
+    );
+    let model = LearningModel::new(true);
+    let engine = MemoryLearningEngine::attach(runtime.clone()).unwrap();
+    engine
+        .run_due_cycle(
+            MemoryLearningCycleRequest {
+                lease_owner: "cancelled-persona-source-test".into(),
+                lease_duration_secs: 60,
+            },
+            &mut Port(&model),
+        )
+        .unwrap();
+    assert_eq!(model.calls.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        runtime
+            .read_subject_soul(SubjectSoulReadRequestV1 {
+                target_subject_id: runtime.subject_id().into(),
+                selector: SubjectSoulReadSelectorV1::Current,
+                view: SubjectSoulReadViewV1::OperatorSafe,
+            })
+            .unwrap(),
+        SubjectSoulReadOutcomeV1::ImplicitUnseeded { .. }
+    ));
 }
 
 fn assert_metadata_private(runtime: &MemoryRuntime) {
@@ -568,9 +624,9 @@ fn source_review_recovery_proof(config: StoreBackendConfig, persistent: bool) {
                 },
                 actor: None,
                 input_messages: vec![TranscriptInputMessage::user(INDEPENDENT_FACT)],
-                assistant_message: Some(TranscriptInputMessage::assistant(
-                    "I will use that workspace name.",
-                )),
+                assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                    TranscriptInputMessage::assistant("I will use that workspace name."),
+                )],
                 tool_observations: vec![],
                 external_content_used: false,
                 candidate_ids: vec![],

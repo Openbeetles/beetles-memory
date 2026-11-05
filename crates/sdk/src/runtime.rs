@@ -137,35 +137,35 @@ use bm_core::memory::{
     MemoryLongTermGovernancePolicy, MemoryLongTermMutation, MemoryMutationEffect,
     MemoryMutationOperationIdentity, MemoryMutationOperationKind, MemoryMutationReceipt,
     MemoryPlaneGovernanceReport, MemoryPrivacyClass, MemorySubjectVisibilityDecision,
-    MemorySubjectVisibilityPolicy, MemoryUpdateLineageReport, MemoryWriteAuthority,
-    MemoryWriteCandidate, MemoryWriteDomain, MentalPrivacyState, MentalPrivacyStore, OuterVoice,
-    OuterVoiceStore, ParsedLongTermMemoryExtraction, PostReplyMemoryMaintenanceContext,
-    PostReplyMemoryMaintenanceInput, PostTurnGovernanceAttemptAuthorityV3,
-    PostTurnGovernanceBindingSnapshotV1, PostTurnGovernanceDecisionSummaryV1,
-    PostTurnGovernanceExecutionBindingV1, PostTurnGovernanceIdentityV2,
-    PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV4, PostTurnGovernancePrivacyAuthorityV1,
-    PostTurnLearningEvidenceV3, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
-    PremiseTypedSource, PrivateDocStore, PrivateDocWorkspace, PrivateGardenDoc,
-    PrivateGardenDocRecord, PrivateGardenGovernanceContext, PrivateGardenGovernanceInput,
-    PrivateGardenGovernanceManifestEntry, PrivateGardenGovernanceOutcome, PrivateGardenStore,
-    ProceduralFeedbackAuthorityV2, ProceduralFeedbackIdentityV1, ProceduralFeedbackJobV2,
-    ProceduralMemoryDeliveryReport, ProjectionBudgetDecision, ProjectionFaithfulnessCheck,
-    ProjectionPrivacyDecision, PromptMemoryContextParams, PromptParticipationPlan,
-    PromptProjectionSource, PromptProjectionSurfaceRole, PromptRecallIntent, QueryFacet,
-    QueryFacetInput, QueryFacetParser, RecallCandidate, RecallDeliveryCandidate,
-    RecallDeliveryOrderingPolicy, RecallDeliveryText, RecallSelectionReport,
-    RedactedTranscriptSlice, RelationshipConstitution, RelationshipConstitutionStore,
-    RelationshipPortfolio, RelationshipPortfolioStore, RelationshipSourceConstitutionV1,
-    RelationshipSourceControlAuthorityV1, RelationshipSourceControlErrorKeyV1,
-    RelationshipSourceControlIntentV1, RelationshipSourceControlReportV1,
-    RelationshipSourceExpectedStateV1, RelationshipSourceReadRequestV1,
-    RelationshipSourceReadSelectorV1, RelationshipTopology, RelationshipTopologyStore,
-    SelfAuthoredCore, SelfAuthoredCoreRefreshPlanV1, SelfAuthoredCoreStore, SelfContinuity,
-    SelfContinuityStore, SelfModel, SelfModelStore, SelfRuntimeContext,
-    SelfRuntimeInitialPlanningStateV1, SelfRuntimeJobPayload, SelfRuntimePlannedEffectV1,
-    SelfRuntimeTrigger, SessionMessage, SessionMessageRecord, SessionStore, SessionSummaryStore,
-    SharedFactWriteGovernanceContext, SharedMemoryWriteOutcome, SharedMemoryWriteReason,
-    SharedMemoryWriteSource, SubjectKind, SubjectLifecycleState,
+    MemorySubjectVisibilityPolicy, MemoryTurnDeliveryStatus, MemoryUpdateLineageReport,
+    MemoryWriteAuthority, MemoryWriteCandidate, MemoryWriteDomain, MentalPrivacyState,
+    MentalPrivacyStore, OuterVoice, OuterVoiceStore, ParsedLongTermMemoryExtraction,
+    PostReplyMemoryMaintenanceContext, PostReplyMemoryMaintenanceInput,
+    PostTurnGovernanceAttemptAuthorityV3, PostTurnGovernanceBindingSnapshotV1,
+    PostTurnGovernanceDecisionSummaryV1, PostTurnGovernanceExecutionBindingV1,
+    PostTurnGovernanceIdentityV2, PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV4,
+    PostTurnGovernancePrivacyAuthorityV1, PostTurnLearningEvidenceV3, PostTurnPrivateGardenReport,
+    PostTurnSemanticGovernanceReport, PremiseTypedSource, PrivateDocStore, PrivateDocWorkspace,
+    PrivateGardenDoc, PrivateGardenDocRecord, PrivateGardenGovernanceContext,
+    PrivateGardenGovernanceInput, PrivateGardenGovernanceManifestEntry,
+    PrivateGardenGovernanceOutcome, PrivateGardenStore, ProceduralFeedbackAuthorityV2,
+    ProceduralFeedbackIdentityV1, ProceduralFeedbackJobV2, ProceduralMemoryDeliveryReport,
+    ProjectionBudgetDecision, ProjectionFaithfulnessCheck, ProjectionPrivacyDecision,
+    PromptMemoryContextParams, PromptParticipationPlan, PromptProjectionSource,
+    PromptProjectionSurfaceRole, PromptRecallIntent, QueryFacet, QueryFacetInput, QueryFacetParser,
+    RecallCandidate, RecallDeliveryCandidate, RecallDeliveryOrderingPolicy, RecallDeliveryText,
+    RecallSelectionReport, RedactedTranscriptSlice, RelationshipConstitution,
+    RelationshipConstitutionStore, RelationshipPortfolio, RelationshipPortfolioStore,
+    RelationshipSourceConstitutionV1, RelationshipSourceControlAuthorityV1,
+    RelationshipSourceControlErrorKeyV1, RelationshipSourceControlIntentV1,
+    RelationshipSourceControlReportV1, RelationshipSourceExpectedStateV1,
+    RelationshipSourceReadRequestV1, RelationshipSourceReadSelectorV1, RelationshipTopology,
+    RelationshipTopologyStore, SelfAuthoredCore, SelfAuthoredCoreRefreshPlanV1,
+    SelfAuthoredCoreStore, SelfContinuity, SelfContinuityStore, SelfModel, SelfModelStore,
+    SelfRuntimeContext, SelfRuntimeInitialPlanningStateV1, SelfRuntimeJobPayload,
+    SelfRuntimePlannedEffectV1, SelfRuntimeTrigger, SessionMessage, SessionMessageRecord,
+    SessionStore, SessionSummaryStore, SharedFactWriteGovernanceContext, SharedMemoryWriteOutcome,
+    SharedMemoryWriteReason, SharedMemoryWriteSource, SubjectKind, SubjectLifecycleState,
     SubjectProjectionBoundaryProtocolReport, SubjectProjectionMountReport, SubjectProjectionReport,
     SubjectProjectionWorkIntegrityReport, SubjectRegistry, SubjectRelationshipGraph,
     SubjectRelationshipKind, SubjectScopedRuntime, SubjectSoulAutonomousCycleIntentV1,
@@ -17933,6 +17933,13 @@ impl MemoryRuntime {
                 "signed source scope differs from canonical turn",
             ));
         }
+        if request.turn.delivery_status != MemoryTurnDeliveryStatus::Delivered
+            || request.turn.assistant_messages.iter().any(|entry| {
+                entry.settlement != bm_core::memory::AssistantMessageSettlement::Complete
+            })
+        {
+            return Ok(false);
+        }
         let current = base
             .verified
             .turn_source_admission()
@@ -22654,7 +22661,14 @@ fn canonical_turn_delta_from_transcript(
         source: record.source.clone(),
         actor: Some(record.actor.clone()),
         input_messages: record.input_messages.iter().map(convert_message).collect(),
-        assistant_message: record.assistant_message.as_ref().map(convert_message),
+        assistant_messages: record
+            .assistant_messages
+            .iter()
+            .map(|entry| bm_core::memory::TranscriptAssistantMessage {
+                message: convert_message(&entry.message),
+                settlement: entry.settlement,
+            })
+            .collect(),
         tool_observations: record.tool_observations.clone(),
         external_content_used: record.external_content_used,
         candidate_ids: record.candidate_ids.clone(),
@@ -28595,11 +28609,81 @@ fn latest_user_content(turn: &CanonicalTurnDelta) -> String {
 }
 
 fn assistant_content(turn: &CanonicalTurnDelta) -> Option<String> {
-    turn.assistant_message
-        .as_ref()
-        .filter(|message| message.role.eq_ignore_ascii_case("assistant"))
-        .map(|message| message.content.trim().to_string())
+    if turn.delivery_status != MemoryTurnDeliveryStatus::Delivered {
+        return None;
+    }
+    // This is a derived text view for existing maintenance inputs. Message
+    // identity and settlement remain authoritative only in the Transcript.
+    let content = turn
+        .assistant_messages
+        .iter()
+        .filter(|entry| entry.settlement == bm_core::memory::AssistantMessageSettlement::Complete)
+        .map(|entry| entry.message.content.trim())
         .filter(|content| !content.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (!content.is_empty()).then_some(content)
+}
+
+#[cfg(test)]
+mod assistant_content_contract_tests {
+    use super::*;
+
+    fn turn(status: MemoryTurnDeliveryStatus) -> CanonicalTurnDelta {
+        CanonicalTurnDelta {
+            turn_id: "assistant-content-contract".into(),
+            conversation: bm_core::memory::ConversationScope {
+                channel: "test".into(),
+                chat_id: "chat".into(),
+                conversation_id: None,
+            },
+            subject: "agent".into(),
+            delivery_status: status,
+            source: bm_core::memory::MemoryTurnSource {
+                ingress: IngressKind::User,
+                channel: "test".into(),
+                provider: None,
+                protocol: bm_core::memory::MemoryTurnProtocol::Native,
+                endpoint: None,
+                model_alias: None,
+                model_resolved: None,
+                request_id: None,
+                client_conversation_hint: None,
+            },
+            actor: None,
+            input_messages: vec![TranscriptInputMessage::user("请继续")],
+            assistant_messages: vec![
+                bm_core::memory::TranscriptAssistantMessage::complete(
+                    TranscriptInputMessage::assistant("先说第一段。"),
+                ),
+                bm_core::memory::TranscriptAssistantMessage::complete(
+                    TranscriptInputMessage::assistant("再说第二段。"),
+                ),
+            ],
+            tool_observations: Vec::new(),
+            external_content_used: false,
+            candidate_ids: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn complete_turn_maintenance_view_keeps_all_messages_in_order() {
+        assert_eq!(
+            assistant_content(&turn(MemoryTurnDeliveryStatus::Delivered)).as_deref(),
+            Some("先说第一段。\n\n再说第二段。"),
+        );
+    }
+
+    #[test]
+    fn cancelled_turn_messages_are_not_a_completed_reply_for_learning() {
+        let mut cancelled = turn(MemoryTurnDeliveryStatus::Cancelled);
+        cancelled.assistant_messages.push(
+            bm_core::memory::TranscriptAssistantMessage::interrupted_delivered_prefix(
+                TranscriptInputMessage::assistant("第三段的前缀"),
+            ),
+        );
+        assert_eq!(assistant_content(&cancelled), None);
+    }
 }
 
 fn semantic_report_from_maintenance(
@@ -28928,7 +29012,7 @@ fn transcript_message_by_id<'a>(
     record
         .input_messages
         .iter()
-        .chain(record.assistant_message.iter())
+        .chain(record.assistant_messages.iter().map(|entry| &entry.message))
         .find(|message| message.message_id == message_id)
 }
 
@@ -28939,7 +29023,7 @@ fn redacted_transcript_message_by_id<'a>(
     slice.turns.iter().find_map(|turn| {
         turn.input_messages
             .iter()
-            .chain(turn.assistant_message.iter())
+            .chain(turn.assistant_messages.iter().map(|entry| &entry.message))
             .find(|message| message.message_id == message_id)
     })
 }
@@ -28975,7 +29059,7 @@ fn transcript_message_is_visible(
     Ok(slice.turns.first().is_some_and(|turn| {
         turn.input_messages
             .iter()
-            .chain(turn.assistant_message.iter())
+            .chain(turn.assistant_messages.iter().map(|entry| &entry.message))
             .any(|message| {
                 message.message_id == message_id && !message.redacted && message.content.is_some()
             })
@@ -29125,7 +29209,8 @@ fn apply_transcript_governance_budget_to_slice(
                 profile_budget_limited = true;
             }
         }
-        if let Some(message) = turn.assistant_message.as_mut() {
+        for entry in &mut turn.assistant_messages {
+            let message = &mut entry.message;
             if truncate_transcript_attrs_for_budget(
                 &turn.turn_id,
                 Some(&message.message_id),
@@ -29426,7 +29511,8 @@ fn redacted_transcript_slice_to_session_messages(
                 messages.push(session_message_from_transcript_message(message, content));
             }
         }
-        if let Some(message) = turn.assistant_message.as_ref() {
+        for entry in &turn.assistant_messages {
+            let message = &entry.message;
             if let Some(content) = message.content.as_deref() {
                 messages.push(session_message_from_transcript_message(message, content));
             }
@@ -29451,7 +29537,8 @@ fn redacted_transcript_slice_to_session_records(
                 ));
             }
         }
-        if let Some(message) = turn.assistant_message.as_ref() {
+        for entry in &turn.assistant_messages {
+            let message = &entry.message;
             if let Some(content) = message.content.as_deref() {
                 records.push(session_record_from_transcript_message(
                     key,
@@ -35617,7 +35704,7 @@ mod projection_budget_truncation_tests {
                         conversation_id: Some("chat-a".into()),
                     },
                     subject: runtime.subject_id().into(),
-                    delivery_status: bm_core::memory::MemoryTurnDeliveryStatus::Delivered,
+                    delivery_status: bm_core::memory::MemoryTurnDeliveryStatus::UserOnly,
                     source: bm_core::memory::MemoryTurnSource {
                         ingress: IngressKind::User,
                         channel: "local".into(),
@@ -35633,7 +35720,7 @@ mod projection_budget_truncation_tests {
                     input_messages: vec![TranscriptInputMessage::user(
                         "synthetic rebuild evidence",
                     )],
-                    assistant_message: None,
+                    assistant_messages: Vec::new(),
                     tool_observations: Vec::new(),
                     external_content_used: false,
                     candidate_ids: Vec::new(),

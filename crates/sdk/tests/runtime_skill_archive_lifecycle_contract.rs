@@ -340,9 +340,9 @@ fn old_public_archive_cannot_reactivate_a_withdrawn_runtime_skill() {
                     },
                     actor: None,
                     input_messages: vec![TranscriptInputMessage::user("unpack archive")],
-                    assistant_message: Some(TranscriptInputMessage::assistant(
-                        "archive unpack completed",
-                    )),
+                    assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                        TranscriptInputMessage::assistant("archive unpack completed"),
+                    )],
                     tool_observations: Vec::new(),
                     external_content_used: false,
                     candidate_ids: Vec::new(),

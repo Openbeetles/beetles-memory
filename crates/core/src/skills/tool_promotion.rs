@@ -629,7 +629,9 @@ mod tests {
                     },
                     actor: None,
                     input_messages: vec![TranscriptInputMessage::user("Extract the archive")],
-                    assistant_message: Some(TranscriptInputMessage::assistant("Done")),
+                    assistant_messages: vec![crate::memory::TranscriptAssistantMessage::complete(
+                        TranscriptInputMessage::assistant("Done"),
+                    )],
                     tool_observations: vec![ToolObservationDigest {
                         observation_id: observation_id.clone(),
                         call_id: format!("call-{index}"),
@@ -836,9 +838,9 @@ mod tests {
                     input_messages: vec![TranscriptInputMessage::user(
                         "Apply the method and verify extraction",
                     )],
-                    assistant_message: Some(TranscriptInputMessage::assistant(
-                        "Verification passed",
-                    )),
+                    assistant_messages: vec![crate::memory::TranscriptAssistantMessage::complete(
+                        TranscriptInputMessage::assistant("Verification passed"),
+                    )],
                     tool_observations: observations.clone(),
                     external_content_used: false,
                     candidate_ids: vec![],
@@ -1190,6 +1192,10 @@ mod tests {
                 4 => fixture.turns[2].tool_observations[0].call_id = "other-call".into(),
                 5 => fixture.turns[2].tool_observations[0].external_content = true,
                 _ => fixture.turns[2].subject = "agent-b".into(),
+            }
+            if mutation == 6 {
+                assert!(fixture.turns[2].validate_canonical_intake().is_err());
+                continue;
             }
             fixture.refresh(2);
             assert!(

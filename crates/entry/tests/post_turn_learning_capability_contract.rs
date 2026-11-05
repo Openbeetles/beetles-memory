@@ -83,7 +83,9 @@ fn finalize_request() -> MemoryTurnFinalizeRequest {
             },
             actor: None,
             input_messages: vec![TranscriptInputMessage::user("请记住这条能力阻断测试。")],
-            assistant_message: Some(TranscriptInputMessage::assistant("已收到。")),
+            assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                TranscriptInputMessage::assistant("已收到。"),
+            )],
             tool_observations: Vec::new(),
             external_content_used: false,
             candidate_ids: Vec::new(),

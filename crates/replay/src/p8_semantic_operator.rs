@@ -919,9 +919,9 @@ pub(crate) fn run_p8_gate_contract() -> Result<(), String> {
                     input_messages: vec![TranscriptInputMessage::user(
                         "Keep one governed private P8 gate note.",
                     )],
-                    assistant_message: Some(TranscriptInputMessage::assistant(
-                        "The governed private note is retained.",
-                    )),
+                    assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                        TranscriptInputMessage::assistant("The governed private note is retained."),
+                    )],
                     tool_observations: Vec::new(),
                     external_content_used: false,
                     candidate_ids: Vec::new(),

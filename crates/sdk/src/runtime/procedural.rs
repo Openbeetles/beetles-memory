@@ -106,16 +106,24 @@ impl MemoryRuntime {
                         }
                         Self::tighten_method_material_authority(material, source.authority);
                     }
-                    Source::CanonicalAssistantMessage => {
-                        let source = request
-                            .turn
-                            .assistant_message
-                            .as_ref()
-                            .ok_or_else(|| feedback_error(Key::EvidenceConflict))?;
-                        if !source.content.contains(&material.text) {
+                    Source::CanonicalAssistantMessage { assistant_index } => {
+                        if request.turn.delivery_status
+                            != bm_core::memory::MemoryTurnDeliveryStatus::Delivered
+                        {
                             return Err(feedback_error(Key::EvidenceConflict));
                         }
-                        Self::tighten_method_material_authority(material, source.authority);
+                        let source = request
+                            .turn
+                            .assistant_messages
+                            .get(*assistant_index as usize)
+                            .ok_or_else(|| feedback_error(Key::EvidenceConflict))?;
+                        if source.settlement
+                            != bm_core::memory::AssistantMessageSettlement::Complete
+                            || !source.message.content.contains(&material.text)
+                        {
+                            return Err(feedback_error(Key::EvidenceConflict));
+                        }
+                        Self::tighten_method_material_authority(material, source.message.authority);
                     }
                     Source::ToolObservation { observation_id } => {
                         let observation = request
@@ -672,7 +680,7 @@ impl MemoryRuntime {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "sqlite-store"))]
     fn procedural_submission_context(
         &self,
         capability: &crate::MemoryProceduralSubmissionCapability,

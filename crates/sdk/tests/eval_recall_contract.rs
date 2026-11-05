@@ -582,7 +582,9 @@ fn delivery_and_loss_reports_never_expose_archive_or_transcript_locators() {
                 },
                 actor: None,
                 input_messages: vec![bm_sdk::TranscriptInputMessage::user("Synthetic source.")],
-                assistant_message: Some(bm_sdk::TranscriptInputMessage::assistant("Recorded.")),
+                assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                    bm_sdk::TranscriptInputMessage::assistant("Recorded."),
+                )],
                 tool_observations: Vec::new(),
                 external_content_used: false,
                 candidate_ids: Vec::new(),

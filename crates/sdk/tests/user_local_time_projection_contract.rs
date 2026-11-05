@@ -292,9 +292,11 @@ fn official_background_job_uses_exact_local_clock_and_drops_it_when_unavailable(
                     input_messages: vec![TranscriptInputMessage::user(
                         "Please reflect on this exchange.",
                     )],
-                    assistant_message: Some(TranscriptInputMessage::assistant(
-                        "I will reflect without inventing a time or location.",
-                    )),
+                    assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                        TranscriptInputMessage::assistant(
+                            "I will reflect without inventing a time or location.",
+                        ),
+                    )],
                     tool_observations: vec![],
                     external_content_used: false,
                     candidate_ids: vec![],

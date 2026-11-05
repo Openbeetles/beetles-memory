@@ -511,9 +511,9 @@ fn learn_runtime_skill(path: std::path::PathBuf) -> Arc<MemoryRuntime> {
                         input_messages: vec![TranscriptInputMessage::user(
                             "Inspect desktop console",
                         )],
-                        assistant_message: Some(TranscriptInputMessage::assistant(
-                            "Desktop console verified",
-                        )),
+                        assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                            TranscriptInputMessage::assistant("Desktop console verified"),
+                        )],
                         tool_observations: procedural::canonical_observations(
                             "desktop.inspect",
                             &facts,

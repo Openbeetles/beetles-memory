@@ -783,9 +783,9 @@ fn assert_backend_archive_restore(
                     input_messages: vec![TranscriptInputMessage::user(format!(
                         "{case_name} archive cobalt transcript"
                     ))],
-                    assistant_message: Some(TranscriptInputMessage::assistant(
-                        "archive transcript response",
-                    )),
+                    assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                        TranscriptInputMessage::assistant("archive transcript response"),
+                    )],
                     tool_observations: Vec::new(),
                     external_content_used: false,
                     candidate_ids: Vec::new(),

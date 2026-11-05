@@ -6052,7 +6052,9 @@ mod tests {
             },
             actor: None,
             input_messages: vec![TranscriptInputMessage::user("synthetic source")],
-            assistant_message: Some(TranscriptInputMessage::assistant("synthetic result")),
+            assistant_messages: vec![bm_core::memory::TranscriptAssistantMessage::complete(
+                TranscriptInputMessage::assistant("synthetic result"),
+            )],
             tool_observations: vec![ToolObservationDigest {
                 observation_id: "observation:test".into(),
                 call_id: "call:test".into(),

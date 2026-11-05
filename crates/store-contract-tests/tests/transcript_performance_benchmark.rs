@@ -44,9 +44,9 @@ fn benchmark_turn(key: &ConversationKey, sequence: usize) -> TranscriptTurnRecor
         input_messages: vec![TranscriptInputMessage::user(format!(
             "fixed benchmark input {sequence}"
         ))],
-        assistant_message: Some(TranscriptInputMessage::assistant(
-            "fixed benchmark response",
-        )),
+        assistant_messages: vec![bm_core::memory::TranscriptAssistantMessage::complete(
+            TranscriptInputMessage::assistant("fixed benchmark response"),
+        )],
         tool_observations: Vec::new(),
         external_content_used: false,
         candidate_ids: Vec::new(),

@@ -259,7 +259,9 @@ fn request(agent: &MemoryRuntime, id: &str, input: &str, reply: &str) -> MemoryT
             },
             actor: None,
             input_messages: vec![TranscriptInputMessage::user(input)],
-            assistant_message: Some(TranscriptInputMessage::assistant(reply)),
+            assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                TranscriptInputMessage::assistant(reply),
+            )],
             tool_observations: Vec::new(),
             external_content_used: false,
             candidate_ids: Vec::new(),

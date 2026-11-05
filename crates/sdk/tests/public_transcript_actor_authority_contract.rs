@@ -34,7 +34,9 @@ fn turn(runtime: &MemoryRuntime, id: &str) -> CanonicalTurnDelta {
             triggered_by: None,
         }),
         input_messages: vec![TranscriptInputMessage::user(format!("input-{id}"))],
-        assistant_message: Some(TranscriptInputMessage::assistant(format!("reply-{id}"))),
+        assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+            TranscriptInputMessage::assistant(format!("reply-{id}")),
+        )],
         tool_observations: vec![],
         external_content_used: false,
         candidate_ids: vec![],

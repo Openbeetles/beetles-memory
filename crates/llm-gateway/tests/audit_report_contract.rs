@@ -461,9 +461,9 @@ fn seed_governed_private_context(runtime: &MemoryRuntime) {
                     input_messages: vec![TranscriptInputMessage::user(
                         "Keep inward reflections within their governed private owner.",
                     )],
-                    assistant_message: Some(TranscriptInputMessage::assistant(
-                        "I will preserve the private boundary.",
-                    )),
+                    assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                        TranscriptInputMessage::assistant("I will preserve the private boundary."),
+                    )],
                     tool_observations: vec![],
                     external_content_used: false,
                     candidate_ids: vec![],

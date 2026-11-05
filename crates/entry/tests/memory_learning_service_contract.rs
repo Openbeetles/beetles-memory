@@ -225,7 +225,9 @@ fn finalize_request() -> MemoryTurnFinalizeRequest {
             },
             actor: None,
             input_messages: vec![TranscriptInputMessage::user("合成的多主体记忆输入")],
-            assistant_message: Some(TranscriptInputMessage::assistant("合成回复")),
+            assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                TranscriptInputMessage::assistant("合成回复"),
+            )],
             tool_observations: Vec::new(),
             external_content_used: false,
             candidate_ids: Vec::new(),

@@ -1,8 +1,8 @@
 # 集成文档
 
-本文描述如何通过 `bm-sdk` 接入0.11.2 源码：post-turn input V3、semantic Job V4、Store v16。已发布 0.9.0 源码使用 input V2 与 Store v14，不提供本文的新合同。当前没有兼容读取或自动迁移；发布源码身份由对应 Git tag 确定。
+本文描述如何通过 `bm-sdk` 接入 0.12.0 源码版本：有序 `assistant_messages`、中断已结算前缀、post-turn input V3、semantic Job V4 和 Store v17。已发布的 v0.11.2 tag 仍对应 Store v16。当前没有兼容读取或自动迁移；已验证的 Git tag 才能确定源码发布身份。
 
-[API 变更](api.md#runtime-操作)所述 0.11.2 合同使用 Store v16 / material v6 / control revision v4，不改变历史 v0.10.0 tag。
+[API 变更](api.md#runtime-操作)所述历史 0.11.2 长期记忆控制合同使用 material v6 / control revision v4；0.12.0 源码保留这些合同，同时改变 transcript 回合输入和 Store schema。历史 v0.10.0 tag 不变。
 
 ## 1. 选择 Profile
 
@@ -28,11 +28,11 @@
 bm-sdk = { path = "crates/sdk", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
-所有 Beetle crate 必须来自同一源码 tag。源码发布不代表 crates.io 上传；外部项目可以这样接入：
+所有 Beetle crate 必须来自同一源码 tag。源码发布不代表 crates.io 上传；`v0.12.0` tag 发布并完成回读后，外部项目可以这样接入：
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.11.2", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.11.2", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.12.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.12.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 每次构建只使用一个 profile feature。Linux desktop、Linux device 与 Linux server 是三个不同部署目标，禁止相互替代。
@@ -176,7 +176,7 @@ Linux/Windows 配置分别增加 `--no-default-features --features desktop-linux
 示例的 `expected_revision: None` 只用于本次新建的易失 Store。持久宿主应保存/查询既有 binding 引用并显式管理其 revision，
 不能在每次启动或每个回合自动重授权限。真实模型配置与凭证分别通过既有 `GovernanceBindingSource`、
 `GovernanceCredentialResolver` 接入产品的同一配置真源；本示例刻意不配置它们。
-当前 API 与 Store 边界见 [0.11.2 源码发布说明](release-notes-0.11.2.md)。
+当前 API 与 Store 边界见 [0.12.0 源码发布说明](release-notes-0.12.0.md)；[0.11.2 源码发布说明](release-notes-0.11.2.md)保留已发布历史合同。
 
 system、developer、user、tool message 的最终排序仍归宿主 prompt assembly。
 
@@ -338,6 +338,21 @@ closed，绝不静默驱逐旧 receipt。
 5. 用 `recall` 和 `project` 生成模型上下文；宿主不自己拼 memory plane。
 6. 用 `inspect` 提供运维可见性和安全恢复上下文。
 7. 替换或发布闸口走 typed memory-space export、直接同 scope import 和 replay。
+
+0.12.0 须按交付顺序填入 `CanonicalTurnDelta.assistant_messages`。例如，取消的回合可包含一条完整消息，以及末尾已结算的中断已交付前缀：
+
+```rust
+use bm_sdk::{TranscriptAssistantMessage, TranscriptInputMessage};
+
+let assistant_messages = vec![
+    TranscriptAssistantMessage::complete(TranscriptInputMessage::assistant("第一段回复。")),
+    TranscriptAssistantMessage::interrupted_delivered_prefix(
+        TranscriptInputMessage::assistant("第二段回复已交付的部分。"),
+    ),
+];
+```
+
+此回合将 `delivery_status` 设为 `Cancelled`，并把这些消息作为 canonical delta 的一部分交给 `finalize_turn`。`Delivered` 只接收完整消息；`Cancelled`、`UpstreamFailed` 和 `IncompleteStream` 最多允许末尾一条中断已交付前缀。超过 16 条或单条正文超过 4 KiB 时拒绝整个回合。同一回合重试须复用原 turn id 与完整 canonical payload，不得从剩余流式缓冲重建。
 
 `fixtures/sdk-host-readiness/` 里的 generic host fixture 与 Beetle-derived fixture 走同一条路径。Beetle-derived 数据只是当前合同的 host evidence，不是 SDK 特殊分支或兼容分支。
 

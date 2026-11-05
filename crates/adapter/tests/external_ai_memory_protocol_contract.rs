@@ -81,9 +81,9 @@ fn turn(turn_id: &str) -> CanonicalTurnDelta {
         },
         actor: None,
         input_messages: vec![TranscriptInputMessage::user("synthetic protocol user")],
-        assistant_message: Some(TranscriptInputMessage::assistant(
-            "synthetic protocol assistant",
-        )),
+        assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+            TranscriptInputMessage::assistant("synthetic protocol assistant"),
+        )],
         tool_observations: Vec::new(),
         external_content_used: false,
         candidate_ids: Vec::new(),

@@ -241,7 +241,9 @@ fn request(runtime: &MemoryRuntime, turn_id: &str) -> MemoryTurnFinalizeRequest 
             },
             actor: None,
             input_messages: vec![TranscriptInputMessage::user("unpack archive")],
-            assistant_message: Some(TranscriptInputMessage::assistant("Archive verified")),
+            assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                TranscriptInputMessage::assistant("Archive verified"),
+            )],
             tool_observations: canonical_observations,
             external_content_used: false,
             candidate_ids: Vec::new(),

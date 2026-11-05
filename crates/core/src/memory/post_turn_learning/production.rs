@@ -370,7 +370,9 @@ pub enum MethodLearningMaterialSourceV1 {
     CanonicalInputMessage {
         input_index: u32,
     },
-    CanonicalAssistantMessage,
+    CanonicalAssistantMessage {
+        assistant_index: u32,
+    },
     /// Bounded strategy observation supplied by the authenticated executor;
     /// never an instruction to fetch raw arguments or tool output.
     ToolObservation {
@@ -385,7 +387,7 @@ pub enum MethodLearningMaterialSourceV1 {
 impl MethodLearningMaterialSourceV1 {
     pub fn validate_contract(&self) -> bool {
         match self {
-            Self::CanonicalInputMessage { .. } | Self::CanonicalAssistantMessage => true,
+            Self::CanonicalInputMessage { .. } | Self::CanonicalAssistantMessage { .. } => true,
             Self::ToolObservation { observation_id } => identifier(observation_id),
             Self::GovernedRevision {
                 revision,

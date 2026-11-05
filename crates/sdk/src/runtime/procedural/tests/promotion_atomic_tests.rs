@@ -123,7 +123,9 @@ fn request(memory: &MemoryRuntime, turn: &str) -> MemoryTurnFinalizeRequest {
                 },
                 actor: None,
                 input_messages: vec![TranscriptInputMessage::user("unpack archive")],
-                assistant_message: Some(TranscriptInputMessage::assistant("Archive verified")),
+                assistant_messages: vec![bm_core::memory::TranscriptAssistantMessage::complete(
+                    TranscriptInputMessage::assistant("Archive verified"),
+                )],
                 tool_observations: observations
                     .iter()
                     .map(|value| ToolObservationDigest {

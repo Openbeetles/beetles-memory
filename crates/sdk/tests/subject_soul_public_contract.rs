@@ -100,9 +100,11 @@ mod signed_turn_source_closure {
                 input_messages: vec![TranscriptInputMessage::user(
                     "Please distinguish evidence from guesses.",
                 )],
-                assistant_message: Some(TranscriptInputMessage::assistant(
-                    "I will state what is known and what remains uncertain.",
-                )),
+                assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+                    TranscriptInputMessage::assistant(
+                        "I will state what is known and what remains uncertain.",
+                    ),
+                )],
                 tool_observations: Vec::new(),
                 external_content_used: false,
                 candidate_ids: Vec::new(),

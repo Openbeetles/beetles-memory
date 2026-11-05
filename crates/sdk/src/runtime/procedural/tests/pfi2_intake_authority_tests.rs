@@ -127,7 +127,9 @@ fn request(memory: &MemoryRuntime, id: &str) -> MemoryTurnFinalizeRequest {
             },
             actor: None,
             input_messages: vec![TranscriptInputMessage::user("synthetic extraction")],
-            assistant_message: Some(TranscriptInputMessage::assistant("failed safely")),
+            assistant_messages: vec![bm_core::memory::TranscriptAssistantMessage::complete(
+                TranscriptInputMessage::assistant("failed safely"),
+            )],
             tool_observations: vec![ToolObservationDigest {
                 observation_id: format!("obs-{id}"),
                 call_id: format!("call-{id}"),
@@ -225,6 +227,47 @@ fn pl3_material_request(memory: &MemoryRuntime, id: &str) -> MemoryTurnFinalizeR
         }],
     }];
     request
+}
+
+#[test]
+fn assistant_method_material_resolves_exact_message_and_rejects_interrupted_prefix() {
+    let platform = platform();
+    let memory = runtime(&platform, &default_agent_subject_id("pfi2-agent"));
+    let mut input = pl3_material_request(&memory, "pl3-multiple-assistant-sources");
+    input.turn.assistant_messages = vec![
+        TranscriptAssistantMessage::complete(TranscriptInputMessage::assistant(
+            "First assistant message has no verification method.",
+        )),
+        TranscriptAssistantMessage::complete(TranscriptInputMessage::assistant(
+            "Compare the received checksum against the authenticated expected checksum.",
+        )),
+    ];
+    let material = &mut input.learning.method_learning_inputs[0].materials[0];
+    material.source =
+        MethodLearningMaterialSourceV1::CanonicalAssistantMessage { assistant_index: 1 };
+    material.text = input.turn.assistant_messages[1].message.content.clone();
+    assert!(memory
+        .resolve_production_learning_input_sources(&input)
+        .is_ok());
+
+    let mut wrong_index = input.clone();
+    wrong_index.learning.method_learning_inputs[0].materials[0].source =
+        MethodLearningMaterialSourceV1::CanonicalAssistantMessage { assistant_index: 0 };
+    assert!(memory
+        .resolve_production_learning_input_sources(&wrong_index)
+        .is_err());
+
+    let mut interrupted = input;
+    interrupted.turn.delivery_status = MemoryTurnDeliveryStatus::Cancelled;
+    interrupted.turn.assistant_messages[1] =
+        TranscriptAssistantMessage::interrupted_delivered_prefix(
+            TranscriptInputMessage::assistant(
+                "Compare the received checksum against the authenticated expected checksum.",
+            ),
+        );
+    assert!(memory
+        .resolve_production_learning_input_sources(&interrupted)
+        .is_err());
 }
 
 #[test]

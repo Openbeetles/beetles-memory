@@ -1,7 +1,7 @@
 use super::*;
 use crate::memory::{
     CanonicalTurnDelta, ConversationKey, ConversationScope, IngressKind, MemoryTurnProtocol,
-    MemoryTurnSource, TranscriptInputMessage,
+    MemoryTurnSource, TranscriptAssistantMessage, TranscriptInputMessage,
 };
 
 fn fixture() -> (
@@ -56,9 +56,11 @@ fn fixture_for(
         input_messages: vec![TranscriptInputMessage::user(
             "When you admitted uncertainty instead of guessing, I could trust the answer.",
         )],
-        assistant_message: Some(TranscriptInputMessage::assistant(
-            "I will keep distinguishing what I know from what still needs checking.",
-        )),
+        assistant_messages: vec![TranscriptAssistantMessage::complete(
+            TranscriptInputMessage::assistant(
+                "I will keep distinguishing what I know from what still needs checking.",
+            ),
+        )],
         tool_observations: vec![],
         external_content_used: false,
         candidate_ids: vec![],
@@ -350,10 +352,8 @@ fn retry_cannot_make_another_sample_and_source_change_invalidates_evidence() {
     transcript.updated_at += 1;
     evidence.validate_source(&admission, &transcript).unwrap();
     let mut corrected = transcript.clone();
-    corrected
-        .assistant_message
-        .as_mut()
-        .unwrap()
+    corrected.assistant_messages[0]
+        .message
         .content
         .push_str(" Corrected canonical content.");
     assert!(evidence.validate_source(&admission, &corrected).is_err());

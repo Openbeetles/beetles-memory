@@ -52,9 +52,9 @@ fn transcript_budget_turn(turn_id: &str) -> CanonicalTurnDelta {
         input_messages: vec![TranscriptInputMessage::user(format!(
             "budget user {turn_id}"
         ))],
-        assistant_message: Some(TranscriptInputMessage::assistant(format!(
-            "budget assistant {turn_id}"
-        ))),
+        assistant_messages: vec![bm_sdk::TranscriptAssistantMessage::complete(
+            TranscriptInputMessage::assistant(format!("budget assistant {turn_id}")),
+        )],
         tool_observations: Vec::new(),
         external_content_used: false,
         candidate_ids: Vec::new(),
@@ -412,9 +412,10 @@ fn transcript_attr_budget_limits_visible_message_attrs_and_reports_redaction() {
         .expect("raw replay");
     let turn = &raw.slice.turns[0];
     let message_id = turn
-        .assistant_message
-        .as_ref()
+        .assistant_messages
+        .first()
         .expect("assistant message")
+        .message
         .message_id
         .clone();
     let attrs = (0..3)
@@ -445,10 +446,10 @@ fn transcript_attr_budget_limits_visible_message_attrs_and_reports_redaction() {
         .expect("budgeted replay");
 
     let assistant = replay.slice.turns[0]
-        .assistant_message
-        .as_ref()
+        .assistant_messages
+        .first()
         .expect("assistant message");
-    assert_eq!(assistant.attrs.len(), 1);
+    assert_eq!(assistant.message.attrs.len(), 1);
     assert!(replay.slice.redactions.iter().any(|redaction| {
         redaction.attr_id.as_deref() == Some("budget-attr-1")
             && redaction.attr_key.as_deref() == Some("host.budget.model_usage_1")

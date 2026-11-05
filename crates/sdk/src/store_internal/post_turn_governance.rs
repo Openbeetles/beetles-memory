@@ -3074,9 +3074,9 @@ mod tests {
             },
             actor: None,
             input_messages: vec![TranscriptInputMessage::user("Synthetic governance source")],
-            assistant_message: Some(TranscriptInputMessage::assistant(
-                "Synthetic delivered answer",
-            )),
+            assistant_messages: vec![bm_core::memory::TranscriptAssistantMessage::complete(
+                TranscriptInputMessage::assistant("Synthetic delivered answer"),
+            )],
             tool_observations: Vec::new(),
             external_content_used: false,
             candidate_ids: Vec::new(),

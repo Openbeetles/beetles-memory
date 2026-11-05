@@ -1,6 +1,6 @@
 # 快速开始
 
-当 Rust 宿主通过 SDK 内嵌 Beetle Memory 时，从本文开始。协议部署场景先读本文，再读 [Adapter 合同](adapters.md)。
+Rust 宿主通过 SDK 内嵌 0.12.0 源码版本时，从本文开始。其 Store v17 和有序 `assistant_messages` 合同见[发布说明](release-notes-0.12.0.md)。协议部署场景先读本文，再读 [Adapter 合同](adapters.md)。
 
 ## 依赖
 
@@ -11,14 +11,16 @@
 bm-sdk = { path = "crates/sdk", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
-外部仓库使用源码 tag，无需等待 crates.io 发布：
+`v0.12.0` tag 完成发布与回读后，外部仓库可使用该源码 tag，无需等待 crates.io 发布：
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.11.2", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.11.2", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.12.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.12.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 宿主必须按操作系统只选择一个 desktop embedded feature：`profile-desktop-macos-embedded-sdk`、`profile-desktop-windows-embedded-sdk` 或 `profile-desktop-linux-embedded-sdk`。Linux 桌面宿主禁止借用 server 或 dev-full profile。
+
+已发布的 v0.11.2 tag 仍对应 Store v16。Store v17 不读取 v16；在数据 owner 决定旧数据处理方式前，该版本应使用新 Store。
 
 ## 构建 Runtime
 
