@@ -110,7 +110,7 @@ fn projection_render_limit_does_not_cut_source_recall() {
     let platform = seeded_store_platform(dev_profile());
     let runtime = test_runtime(platform, dev_profile());
 
-    let projection = runtime
+    let error = runtime
         .project(MemoryProjectionRequest {
             binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
@@ -122,11 +122,9 @@ fn projection_render_limit_does_not_cut_source_recall() {
             mode_input: RuntimeLifecycleModeInput::default(),
             tool_registry_refs: Vec::new(),
         })
-        .expect("projection");
-
-    assert!(projection.provider_payload().system_memory_block().len() <= 64);
-    assert!(projection.report().recall_delivery().selected_count > 0);
-    assert_eq!(projection.report().recall_delivery().rendered_count, 0);
+        .err()
+        .expect("64 characters cannot carry the required subject boundaries");
+    assert_eq!(error.stage(), "memory_projection");
 }
 
 #[test]
@@ -494,12 +492,11 @@ fn projection_exposes_runtime_awareness_without_archive_backend_trace() {
         .expect("projection");
 
     let block = projection.provider_payload().system_memory_block();
-    assert!(block.contains("## Runtime Constraints"), "{block}");
-    assert!(block.contains("Resource pressure: cautious"), "{block}");
-    assert!(block.contains("Beetle Memory"), "{block}");
-    assert!(block.contains("## Governed Memory Evidence"), "{block}");
+    assert!(block.contains("I have limited resources"), "{block}");
+    assert!(block.contains("What I remember and notice:"), "{block}");
+    assert!(!block.contains("world_snapshot ["), "{block}");
     assert!(
-        block.contains("world_snapshot [public_grounding"),
+        !block.contains("Beetle Memory supplies memory context"),
         "{block}"
     );
     assert!(block.contains("release artifact safety"), "{block}");

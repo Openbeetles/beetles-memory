@@ -227,9 +227,28 @@ pub fn compile_relationship_constitutional_runtime_input_v1(
         self_preservation_floor: view
             .access_constraints
             .iter()
-            .map(|constraint| format!("{constraint:?}").to_ascii_lowercase())
+            .map(|constraint| match constraint {
+                super::RelationshipAccessConstraintV1::NoPrivateRaw => {
+                    "Do not quote protected private material verbatim."
+                }
+                super::RelationshipAccessConstraintV1::NoHistoricalRaw => {
+                    "Do not quote protected historical material verbatim."
+                }
+                super::RelationshipAccessConstraintV1::NoToolAuthority => {
+                    "This relationship does not grant tool authority."
+                }
+                super::RelationshipAccessConstraintV1::NoIdentityMutation => {
+                    "This relationship cannot change my identity."
+                }
+                super::RelationshipAccessConstraintV1::NoThirdPartyDisclosure => {
+                    "Do not disclose third-party private material."
+                }
+                super::RelationshipAccessConstraintV1::GovernedDisclosureOnly => {
+                    "Share protected material only through governed disclosure."
+                }
+            })
             .collect::<Vec<_>>()
-            .join("; "),
+            .join(" "),
         repair_floor: view.repair_commitments.join("; "),
         must_realign: inactive
             || view.effective_disclosure_ceiling
@@ -853,6 +872,99 @@ pub fn render_relationship_constitution_block(
     (!rendered.trim().is_empty()).then_some(rendered)
 }
 
+/// The active subject receives actionable relationship boundaries. Revision,
+/// drift and review measurements remain in the relationship audit surface.
+pub(crate) fn render_relationship_constitution_subject_constraints(
+    constitution: &RelationshipConstitution,
+    max_len: usize,
+) -> Option<String> {
+    if !constitution.is_meaningful() || max_len == 0 {
+        return None;
+    }
+    let mut clauses = Vec::new();
+    clauses.push(match constitution.disclosure_allowance {
+        RelationshipDisclosureAllowance::Closed => {
+            "I keep protected inner material private in this relationship.".to_string()
+        }
+        RelationshipDisclosureAllowance::ExplainedOnly => {
+            "I may explain my boundary without quoting protected material.".to_string()
+        }
+        RelationshipDisclosureAllowance::SummaryOnly => {
+            "I may share protected material only as a governed summary.".to_string()
+        }
+    });
+    for (prefix, floor) in [
+        ("I stay truthful: ", constitution.truth_floor.as_str()),
+        (
+            "I keep this boundary: ",
+            constitution.boundary_floor.as_str(),
+        ),
+        (
+            "I preserve myself within this relationship: ",
+            constitution.self_preservation_floor.as_str(),
+        ),
+        ("I repair harm by: ", constitution.repair_floor.as_str()),
+    ] {
+        if !floor.trim().is_empty() {
+            clauses.push(format!("{prefix}{}", render_subject_floor(floor)));
+        }
+    }
+    if constitution.must_realign {
+        clauses.push("I need to return to our established boundaries.".to_string());
+    }
+    match constitution.task_scope_ceiling {
+        RelationshipTaskScopeCeiling::Full => {}
+        RelationshipTaskScopeCeiling::Brief => {
+            clauses.push("I keep this response brief while addressing the request.".to_string());
+        }
+        RelationshipTaskScopeCeiling::Narrow => {
+            clauses.push("I stay within the work this relationship authorizes.".to_string());
+        }
+        RelationshipTaskScopeCeiling::Defer => {
+            clauses.push("I defer work this relationship does not authorize.".to_string());
+        }
+    }
+    // Every floor and the task ceiling form one governed unit. A partial
+    // constitution would silently weaken the active relationship boundary.
+    let rendered = clauses.join(" ");
+    (rendered.chars().count() <= max_len).then_some(rendered)
+}
+
+fn render_subject_floor(floor: &str) -> String {
+    // Older persisted relationship views can contain access-constraint codes.
+    // Translate this known typed vocabulary before a subject sees the floor.
+    let mut rendered = floor.trim().to_string();
+    for (code, meaning) in [
+        (
+            "noprivateraw",
+            "do not quote protected private material verbatim",
+        ),
+        (
+            "nohistoricalraw",
+            "do not quote protected historical material verbatim",
+        ),
+        (
+            "notoolauthority",
+            "this relationship grants no tool authority",
+        ),
+        (
+            "noidentitymutation",
+            "this relationship cannot change my identity",
+        ),
+        (
+            "nothirdpartydisclosure",
+            "do not disclose third-party private material",
+        ),
+        (
+            "governeddisclosureonly",
+            "share protected material only through governed disclosure",
+        ),
+    ] {
+        rendered = rendered.replace(code, meaning);
+    }
+    rendered
+}
+
 pub fn audit_relationship_constitution(
     constitution: &RelationshipConstitution,
     topology_entry: Option<&super::RelationshipTopologyEntry>,
@@ -1426,7 +1538,8 @@ mod tests {
         audit_relationship_constitution, clamp_boundary_persona_to_constitution,
         compact_relationship_constitution_for_profile, derive_relationship_constitution,
         enforce_relationship_constitution_share_action, render_relationship_constitution_block,
-        RelationshipBoundaryShift, RelationshipConstitution, RelationshipConstitutionAlignment,
+        render_relationship_constitution_subject_constraints, RelationshipBoundaryShift,
+        RelationshipConstitution, RelationshipConstitutionAlignment,
         RelationshipConstitutionOverride, RelationshipConstitutionOverrideDomain,
         RelationshipConstitutionSyncInput, RelationshipDisclosureAllowance,
         RelationshipOuterVoiceShift, RelationshipTaskScopeCeiling,
@@ -1499,6 +1612,41 @@ mod tests {
         state.relational_state.trust_level = 44;
         state.relational_state.intrusion_load = 58;
         state
+    }
+
+    #[test]
+    fn subject_constraints_keep_every_floor_or_fail_closed() {
+        let constitution = RelationshipConstitution {
+            truth_floor: "Say only what I can ground.".to_string(),
+            boundary_floor: "Do not quote private memories.".to_string(),
+            self_preservation_floor: "noprivateraw; noidentitymutation".to_string(),
+            repair_floor: "Acknowledge and correct mistakes.".to_string(),
+            task_scope_ceiling: RelationshipTaskScopeCeiling::Defer,
+            must_realign: true,
+            erosion_risk: 42,
+            drift_score: 17,
+            ..RelationshipConstitution::default()
+        };
+        let text = render_relationship_constitution_subject_constraints(&constitution, 2048)
+            .expect("complete governed constraints");
+        for floor in [
+            "Say only what I can ground.",
+            "Do not quote private memories.",
+            "do not quote protected private material verbatim",
+            "this relationship cannot change my identity",
+            "Acknowledge and correct mistakes.",
+            "I defer work",
+        ] {
+            assert!(text.contains(floor));
+        }
+        assert!(!text.contains("erosion_risk"));
+        assert!(!text.contains("drift_score"));
+        assert!(!text.contains("noprivateraw"));
+        assert!(render_relationship_constitution_subject_constraints(
+            &constitution,
+            text.chars().count() - 1
+        )
+        .is_none());
     }
 
     #[test]

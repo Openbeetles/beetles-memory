@@ -1,6 +1,6 @@
 # Integration Guide
 
-This guide describes how to embed the 0.12.0 source version into a Rust project through `bm-sdk`: ordered `assistant_messages`, settled interruption prefixes, post-turn input V3, semantic Job V4, and Store v17. The published v0.11.2 tag remains the Store v16 contract. No compatibility reader or automatic migration is provided; a verified Git tag identifies a released source.
+This guide describes how to embed the 0.13.0 source release through `bm-sdk`: first-person inhabited subject projection, ordered `assistant_messages`, settled interruption prefixes, post-turn input V3, semantic Job V4, and Store v17. The published v0.12.0 tag retains its original projection text; a verified Git tag identifies a released source. No compatibility reader or automatic migration is provided.
 
 The historical 0.11.2 long-term control contract described in [API changes](api.md#runtime-operations) uses material v6 and control revision v4. The 0.12.0 source retains those contracts while changing transcript turn input and Store schema. The historical v0.10.0 tag remains unchanged.
 
@@ -28,11 +28,11 @@ From this repository:
 bm-sdk = { path = "crates/sdk", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
-Use the same source tag for every Beetle crate. Source release does not mean crates.io publication. After the `v0.12.0` tag is published and verified, an external consumer can use:
+Use the same source tag for every Beetle crate. Source release does not mean crates.io publication. With the `v0.13.0` source tag published and verified by remote readback, an external macOS SDK consumer can use:
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.12.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.12.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.13.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.13.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 Use exactly one profile feature for a build. Linux desktop, Linux device, and Linux server are distinct deployment targets; do not substitute one for another.
@@ -131,10 +131,12 @@ let projection = runtime.project(MemoryProjectionRequest {
 let preview_block = projection.provider_payload().system_memory_block();
 ```
 
+The SDK compiles model delivery from admitted sources of the mounted subject. Device state and world awareness can ground the current situation; raw diagnostic field names and source references are not presented as self-description. A missing trusted device identity is omitted. Disclosure and work boundaries remain in the block. If `system_max_len` cannot hold the minimum complete boundaries, `project` fails. Hosts must handle that error rather than trimming an SDK block and sending the remainder.
+
 `Preview` is inspection-only and returns no selection receipt. For a real model/tool
 turn, choose a stable turn id once at request ingress, project with
 `ProceduralProjectionBindingV1::Turn { turn_id }`, and use that projected block in
-model-context assembly. Pass the complete returned `selection_receipt` unchanged in
+model-context assembly unchanged, checking the bytes actually sent to the Provider against the Turn receipt digest. Pass the complete returned `selection_receipt` unchanged in
 `PostTurnLearningInputV3` when finalizing the same canonical turn. A retry of that
 turn reuses its id and receipt; a separate turn gets a new id even when the input
 text is identical. Never reconstruct a receipt from selected ids or digests.
@@ -186,7 +188,7 @@ Its `expected_revision: None` is only for this fresh ephemeral Store. Persistent
 existing binding references and manage revisions explicitly, never automatically regrant on each
 startup or turn. Adapt `GovernanceBindingSource` and `GovernanceCredentialResolver` to the product's
 one configuration owner for real model execution; they are deliberately unconfigured here.
-See the [0.12.0 source release notes](release-notes-0.12.0.md) for the current API and Store boundary; the [0.11.2 source release notes](release-notes-0.11.2.md) remain the published historical contract.
+See the [0.13.0 source release notes](release-notes-0.13.0.md) for the current model-delivery contract and the [0.12.0 source release notes](release-notes-0.12.0.md) for the published Store v17 and transcript baseline.
 
 The host remains responsible for final ordering of system, developer, user, and
 tool messages.

@@ -1,12 +1,11 @@
 //! Archive evidence plane: transcript / daily notes / turn logs as non-canonical sources.
 
 use crate::memory::{MemoryStore, SessionStore, TurnLedgerStore};
-use crate::util::truncate_content_to_max;
 
 use super::{
-    memory_capability_profile, render_turn_observation_ledger_block,
-    search_archive_records_detailed, select_archive_hits_for_prompt_with_report,
-    ArchiveSearchQuery, MemoryProfile, MAX_ARCHIVE_SEARCH_LIMIT,
+    memory_capability_profile, search_archive_records_detailed,
+    select_archive_hits_for_prompt_with_report, ArchiveSearchQuery, MemoryProfile,
+    MAX_ARCHIVE_SEARCH_LIMIT,
 };
 
 const MAX_ARCHIVE_EVIDENCE_BLOCK_LEN: usize = 768;
@@ -20,32 +19,11 @@ fn archive_prompt_source_label(source: super::ArchiveRecordSource) -> &'static s
     }
 }
 
-fn archive_prompt_cues(hit: &super::ArchiveSearchHit) -> String {
-    let cues = hit
-        .cues
-        .iter()
-        .filter_map(|cue| {
-            let cue = cue.trim();
-            if cue.is_empty() || cue.starts_with("match:") || cue.starts_with("recent+") {
-                None
-            } else {
-                Some(cue)
-            }
-        })
-        .collect::<Vec<_>>();
-    if cues.is_empty() {
-        "supporting evidence".to_string()
-    } else {
-        cues.join(", ")
-    }
-}
-
 fn render_archive_prompt_hit(hit: &super::ArchiveSearchHit) -> String {
     format!(
-        "- [{}] {} ({})",
+        "I recall this fragment from a past {}: {}. I should verify it before treating it as settled fact.",
         archive_prompt_source_label(hit.source),
-        hit.excerpt,
-        archive_prompt_cues(hit)
+        hit.excerpt.trim_end_matches(&['.', '。'][..]),
     )
 }
 
@@ -94,9 +72,7 @@ pub fn build_archive_evidence_block(
         );
     }
 
-    let mut out = String::from(
-        "## Archive evidence\nSupporting records only. These are evidence sources, not canonical shared memory. Use them to verify, cite, or distill factual memory updates.\n",
-    );
+    let mut out = String::new();
     let mut appended = 0usize;
     for hit in selected.into_iter().take(max_items) {
         let line = render_archive_prompt_hit(&hit);
@@ -117,9 +93,7 @@ fn build_archive_fallback_block(
     chat_id: &str,
     block_max_len: usize,
 ) -> Option<String> {
-    let mut out = String::from(
-        "## Archive evidence\nSupporting records only. These are evidence sources, not canonical shared memory. Use them to verify, cite, or distill factual memory updates.\n",
-    );
+    let mut out = String::new();
     let mut appended = 0usize;
     for message in session_store
         .load_recent(chat_id, 3)
@@ -131,10 +105,14 @@ fn build_archive_fallback_block(
         if content.is_empty() {
             continue;
         }
+        let speaker = if message.role == "user" {
+            "the user"
+        } else {
+            "myself"
+        };
         let line = format!(
-            "- [{}] {} (fallback transcript)",
-            message.role.to_uppercase(),
-            truncate_content_to_max(content, 160)
+            "I recall {speaker} saying: {}. I should verify this older record before relying on it.",
+            content.trim_end_matches(&['.', '。'][..])
         );
         if out.len().saturating_add(line.len()).saturating_add(1) > block_max_len {
             break;
@@ -152,9 +130,8 @@ fn build_archive_fallback_block(
         {
             if let Ok(note) = memory_store.get_daily_note(&name) {
                 let line = format!(
-                    "- [{}] {} (fallback daily note)",
-                    name,
-                    truncate_content_to_max(note.trim(), 160)
+                    "I recall this from an earlier note: {}. I should verify it before relying on it.",
+                    note.trim().trim_end_matches(&['.', '。'][..])
                 );
                 if out.len().saturating_add(line.len()).saturating_add(1) <= block_max_len {
                     out.push_str(&line);
@@ -167,30 +144,17 @@ fn build_archive_fallback_block(
     if appended == 0 {
         match turn_ledger_store.get(chat_id) {
             Ok(Some(ledger)) => {
-                let mut preview = [
-                    (!ledger.reason.trim().is_empty())
-                        .then(|| format!("reason={}", ledger.reason.trim())),
-                    (!ledger.user_preview.trim().is_empty())
-                        .then(|| format!("user={}", ledger.user_preview.trim())),
-                    (!ledger.reply_preview.trim().is_empty())
-                        .then(|| format!("reply={}", ledger.reply_preview.trim())),
-                ]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>();
-                if let Some(observation_summary) =
-                    ledger.observation.as_ref().and_then(|observation| {
-                        render_turn_observation_ledger_block(observation, 220)
-                            .map(|block| block.lines().skip(1).collect::<Vec<_>>().join(" | "))
-                    })
-                {
-                    preview.push(format!("observation={observation_summary}"));
-                }
-                let preview = preview.join("; ");
+                let preview = if !ledger.user_preview.trim().is_empty() {
+                    format!("I recall the user saying: {}", ledger.user_preview.trim())
+                } else if !ledger.reply_preview.trim().is_empty() {
+                    format!("I recall saying: {}", ledger.reply_preview.trim())
+                } else {
+                    String::new()
+                };
                 if !preview.is_empty() {
                     let line = format!(
-                        "- [turn log] {} (fallback execution log)",
-                        truncate_content_to_max(&preview, 160)
+                        "{}. I should verify this older record before relying on it.",
+                        preview.trim_end_matches(&['.', '。'][..])
                     );
                     if out.len().saturating_add(line.len()).saturating_add(1) <= block_max_len {
                         out.push_str(&line);
@@ -200,17 +164,7 @@ fn build_archive_fallback_block(
                 }
             }
             Ok(None) => {}
-            Err(error) => {
-                let line = format!(
-                    "- [turn log] unavailable (fallback degraded: {})",
-                    error.stage()
-                );
-                if out.len().saturating_add(line.len()).saturating_add(1) <= block_max_len {
-                    out.push_str(&line);
-                    out.push('\n');
-                    appended += 1;
-                }
-            }
+            Err(_) => {}
         }
     }
     (appended > 0).then(|| out.trim_end().to_string())
@@ -312,7 +266,7 @@ mod tests {
         )
         .expect("archive evidence block");
 
-        assert!(block.contains("## Archive evidence"));
+        assert!(block.starts_with("I recall"));
         assert!(block.contains("release patch verification"));
         for forbidden in [
             "recall trace",

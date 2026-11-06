@@ -2,6 +2,16 @@
 
 SDK API 是主要入口。宿主项目应通过 `bm-sdk` 进入，或通过 `bm-entry` 加协议 adapter 进入；不应自行实现记忆 schema、store envelope、replay 格式或 adapter dispatch 规则。
 
+## 0.13.0：主体投影交付
+
+`bm-sdk` 0.13.0 源码版本。
+
+`MemoryRuntime::project()` 仍由 Beetle Memory 编译来源、主体、披露边界和工作约束。`projection.provider_payload().system_memory_block()` 是当前挂载主体的唯一模型交付文本；它以第一人称承载有根据的记忆和当前处境，不把 SDK 内部 envelope、opaque 来源引用、治理数值或设备诊断字段直接呈现给模型。事实内容保留其原语言。`projection.report()` 仍提供安全的诊断、来源和裁剪报告；宿主不得自行重排或重渲染记忆。
+
+设备与资源状态仍是主体世界感知的来源。身份锚点、身体归属、真实设备事实与当前感受分别编译；缺少可信设备身份时不以 `subject_id` 代替。披露边界和工作完整性仍进入模型交付，容不下最低完整语义单元的 `system_max_len` 请求会失败，不返回截断的半份协议。Turn 回执继续绑定最终交付块；宿主须原样注入并核对实际发送内容。
+
+此次调整不改变 Store v17 的持久数据合同。macOS SDK 定向验收与其他平台、真实 Provider 和 GUI 验收分别记录；发布身份以正式 tag 和回读为准。
+
 ## 0.12.0：Transcript Commit
 
 `bm-sdk` 0.12.0 使用有序的 `CanonicalTurnDelta.assistant_messages: Vec<TranscriptAssistantMessage>`，每条带 `Complete` 或 `InterruptedDeliveredPrefix` 结算状态；`Cancelled` 回合可保留已结算的助手输出。下文 SDK Transcript 合同列出状态与容量规则；[发布说明](release-notes-0.12.0.md)说明 Store v17 clean break。Store v17 不读取 Store v16。发布身份以对应 Git tag 与远端回读为准。

@@ -1,6 +1,6 @@
 # 集成文档
 
-本文描述如何通过 `bm-sdk` 接入 0.12.0 源码版本：有序 `assistant_messages`、中断已结算前缀、post-turn input V3、semantic Job V4 和 Store v17。已发布的 v0.11.2 tag 仍对应 Store v16。当前没有兼容读取或自动迁移；已验证的 Git tag 才能确定源码发布身份。
+本文描述如何通过 `bm-sdk` 接入 0.13.0 源码版本：第一人称主体投影、有序 `assistant_messages`、中断已结算前缀、post-turn input V3、semantic Job V4 和 Store v17。已发布的 v0.12.0 tag 保留其原有投影文本；已验证的 Git tag 才能确定新源码发布身份。当前没有兼容读取或自动迁移。
 
 [API 变更](api.md#runtime-操作)所述历史 0.11.2 长期记忆控制合同使用 material v6 / control revision v4；0.12.0 源码保留这些合同，同时改变 transcript 回合输入和 Store schema。历史 v0.10.0 tag 不变。
 
@@ -28,11 +28,11 @@
 bm-sdk = { path = "crates/sdk", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
-所有 Beetle crate 必须来自同一源码 tag。源码发布不代表 crates.io 上传；`v0.12.0` tag 发布并完成回读后，外部项目可以这样接入：
+所有 Beetle crate 必须来自同一源码 tag。源码发布不代表 crates.io 上传；`v0.13.0` 源码 tag 发布并完成远端回读后，外部 macOS SDK 消费者可这样接入：
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.12.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.12.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.13.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.13.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 每次构建只使用一个 profile feature。Linux desktop、Linux device 与 Linux server 是三个不同部署目标，禁止相互替代。
@@ -130,9 +130,11 @@ let projection = runtime.project(MemoryProjectionRequest {
 let preview_block = projection.provider_payload().system_memory_block();
 ```
 
+模型交付块已由 SDK 从当前挂载主体的已准入来源编译。设备状态和世界感知可以形成有根据的当前处境，但 SDK 不把原始运维字段或来源引用当作主体自述；缺可信设备身份时省略设备身份。披露与工作边界继续随块交付。`system_max_len` 装不下最低完整边界时 `project` 返回错误，宿主应处理该错误，不得截断 SDK 返回文本后继续发送。
+
 `Preview` 只用于检查，不返回 selection receipt。真实 model/tool turn 必须由宿主在请求入口
 一次性选择稳定 turn id，再用 `ProceduralProjectionBindingV1::Turn { turn_id }` 投影并把
-该 memory block 放入模型上下文。完成同一个 canonical turn 时，要在
+该 memory block 原样放入模型上下文，并核对最终发往 Provider 的字节与 Turn 回执摘要一致。完成同一个 canonical turn 时，要在
 `PostTurnLearningInputV3` 中原样提交完整 `selection_receipt`。同一 turn 的重试复用 id 与
 receipt；即使输入正文相同，另一个 turn 也必须使用新 id。禁止从 selected ids 或 digest
 重建 receipt。
@@ -176,7 +178,7 @@ Linux/Windows 配置分别增加 `--no-default-features --features desktop-linux
 示例的 `expected_revision: None` 只用于本次新建的易失 Store。持久宿主应保存/查询既有 binding 引用并显式管理其 revision，
 不能在每次启动或每个回合自动重授权限。真实模型配置与凭证分别通过既有 `GovernanceBindingSource`、
 `GovernanceCredentialResolver` 接入产品的同一配置真源；本示例刻意不配置它们。
-当前 API 与 Store 边界见 [0.12.0 源码发布说明](release-notes-0.12.0.md)；[0.11.2 源码发布说明](release-notes-0.11.2.md)保留已发布历史合同。
+当前模型交付合同见 [0.13.0 源码版本说明](release-notes-0.13.0.md)；已发布的 Store v17 与 transcript 基线见 [0.12.0 源码发布说明](release-notes-0.12.0.md)。
 
 system、developer、user、tool message 的最终排序仍归宿主 prompt assembly。
 

@@ -574,7 +574,7 @@ fn four_independent_production_observations_form_governed_core_and_project() {
     );
     let block = projected.provider_payload().system_memory_block();
     assert!(
-        block.contains("Situated now:"),
+        block.contains("I am here in our current conversation."),
         "must exercise a nonempty owned Subject Shell"
     );
     assert!(

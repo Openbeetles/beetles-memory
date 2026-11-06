@@ -37,6 +37,10 @@ fn runtime(provider: Arc<dyn UserLocalTimeProvider>) -> MemoryRuntime {
 }
 
 fn project(runtime: &MemoryRuntime, budget: usize) -> String {
+    try_project(runtime, budget).unwrap()
+}
+
+fn try_project(runtime: &MemoryRuntime, budget: usize) -> Result<String> {
     runtime
         .project(MemoryProjectionRequest {
             binding: ProceduralProjectionBindingV1::Preview,
@@ -49,10 +53,12 @@ fn project(runtime: &MemoryRuntime, budget: usize) -> String {
             structured_query_facets: Vec::new(),
             tool_registry_refs: Vec::new(),
         })
-        .unwrap()
-        .provider_payload()
-        .system_memory_block()
-        .to_owned()
+        .map(|projection| {
+            projection
+                .provider_payload()
+                .system_memory_block()
+                .to_owned()
+        })
 }
 
 #[test]
@@ -64,7 +70,7 @@ fn formal_projection_uses_device_time_with_zone_and_refreshes_without_remount() 
         first.contains("2026-10-29 14:14:00 UTC+08:00 [Asia/Shanghai]"),
         "{first}"
     );
-    assert_eq!(first.matches("User device local time:").count(), 1);
+    assert_eq!(first.matches("The user's local time is").count(), 1);
     assert!(!first.contains("Outer scene now"));
     assert!(!first.contains("06:14:00"));
 
@@ -128,12 +134,16 @@ fn limited_formal_projection_never_delivers_a_clock_without_timezone() {
     let zone = Arc::new(DeviceZone(Mutex::new(Some((20_700, "Asia/Kathmandu")))));
     let runtime = runtime(zone);
     for budget in [128, 512, 2048] {
-        let payload = project(&runtime, budget);
-        if payload.contains("User device local time:") {
-            assert!(
-                payload.contains("2026-10-29 11:59:00 UTC+05:45 [Asia/Kathmandu]"),
-                "{payload}"
-            );
+        match try_project(&runtime, budget) {
+            Ok(payload) => {
+                if payload.contains("The user's local time is") {
+                    assert!(
+                        payload.contains("2026-10-29 11:59:00 UTC+05:45 [Asia/Kathmandu]"),
+                        "{payload}"
+                    );
+                }
+            }
+            Err(error) => assert_eq!(error.stage(), "memory_projection"),
         }
     }
     assert!(project(&runtime, 4096).contains("UTC+05:45 [Asia/Kathmandu]"));

@@ -20,7 +20,7 @@ Beetle Memory 是面向 agent 系统的 Rust 记忆运行时。它提供 SDK-fir
 | 模型网关与透明本地模型控制 | `bm-llm-gateway`, `bm-ollama-transparent` |
 | Adapters | `bm-cli`, `bm-http`, `bm-wss`, `bm-mcp`, `bm-a2a` |
 
-已发布的 [v0.11.2 Git tag](docs/zh-CN/release-notes-0.11.2.md) 使用 Store v16 与 [显式程序性证据声明权](docs/zh-CN/api.md#程序性证据声明权)。当前 [0.12.0 源码版本](docs/zh-CN/release-notes-0.12.0.md) 使用 Store v17，支持有序多助手消息与中断已交付前缀。Store v17 不兼容读取 v16，也不自动迁移；新版本打开旧 Store 必须明确失败且不改动旧数据。发布身份以已验证的 Git tag 为准，不以工作树版本号代替；crates.io、二进制和部署分别需要独立发布证据。仓库包含 `examples/` 下的五个 smoke 示例，以及 `fixtures/platform/capabilities/` 下的 profile capability fixtures。
+当前 [0.13.0 源码版本](docs/zh-CN/release-notes-0.13.0.md) 通过 macOS SDK 交付第一人称宿主体记忆。上一 [0.12.0 源码版本](docs/zh-CN/release-notes-0.12.0.md) 引入 Store v17、有序多助手消息与中断已交付前缀。Store v17 不兼容读取 v16，也不自动迁移；新版本打开旧 Store 必须明确失败且不改动旧数据。发布身份以已验证的 Git tag 为准，不以工作树版本号代替；crates.io、二进制和部署分别需要独立发布证据。仓库包含 `examples/` 下的五个 smoke 示例，以及 `fixtures/platform/capabilities/` 下的 profile capability fixtures。
 
 ## 能力范围
 

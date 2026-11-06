@@ -92,7 +92,7 @@ needles=(
   "source_authority"
   "protected private runtime context"
   "no final second LLM judge"
-  "Work Integrity Covenant"
+  "work integrity enforced"
   "roleplay prompt rejected"
   "redacted private envelope"
   "soul_growth_proposal"

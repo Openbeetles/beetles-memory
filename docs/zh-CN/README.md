@@ -1,6 +1,6 @@
 # Beetle Memory 开发者文档
 
-Beetle Memory 通过 `bm-sdk` 集成，或通过 `bm-entry` 加协议 adapter 独立部署。接入 0.12.0 源码先看[快速开始](getting-started.md)、[集成文档](integration.md)及[发布说明](release-notes-0.12.0.md)；已发布的 v0.11.2 tag 仍是历史 Store v16 合同。
+Beetle Memory 通过 `bm-sdk` 集成，或通过 `bm-entry` 加协议 adapter 独立部署。[0.13.0 源码发布说明](release-notes-0.13.0.md)、[集成文档](integration.md)、[API 表面](api.md)与[快速开始](getting-started.md)描述当前的主体交付合同。[0.12.0 发布说明](release-notes-0.12.0.md)记录上一源码 tag 及其原模型交付文本。
 
 - [架构文档](architecture.md)
 - [集成文档](integration.md)
@@ -15,6 +15,7 @@ Beetle Memory 通过 `bm-sdk` 集成，或通过 `bm-entry` 加协议 adapter �
 - [回放与归档](replay-and-archive.md)
 - [运维与检查](operator-guide.md)
 - [发布清单](release-checklist.md)
+- [0.13.0 源码发布说明](release-notes-0.13.0.md)
 - [0.12.0 源码发布说明](release-notes-0.12.0.md)
 - [0.11.2 源码发布说明](release-notes-0.11.2.md)
 - [0.11.1 源码发布说明](release-notes-0.11.1.md)

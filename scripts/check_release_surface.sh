@@ -53,6 +53,7 @@ required_docs=(
   "docs/en/adapters.md"
   "docs/en/operator-guide.md"
   "docs/en/release-checklist.md"
+  "docs/en/release-notes-0.13.0.md"
   "docs/en/release-notes-0.12.0.md"
   "docs/en/release-notes-0.11.2.md"
   "docs/en/release-notes-0.11.1.md"
@@ -76,6 +77,7 @@ required_docs=(
   "docs/zh-CN/adapters.md"
   "docs/zh-CN/operator-guide.md"
   "docs/zh-CN/release-checklist.md"
+  "docs/zh-CN/release-notes-0.13.0.md"
   "docs/zh-CN/release-notes-0.12.0.md"
   "docs/zh-CN/release-notes-0.11.2.md"
   "docs/zh-CN/release-notes-0.11.1.md"
@@ -104,7 +106,7 @@ for doc in "${required_docs[@]}"; do
   fi
 done
 
-release_version="0.12.0"
+release_version="0.13.0"
 version_manifests=(
   "crates/core/Cargo.toml"
   "crates/store-contract-tests/Cargo.toml"
@@ -191,6 +193,15 @@ for desktop_identity in apps/desktop/package.json apps/desktop/package-lock.json
   }
 done
 
+for doc in docs/en/release-notes-0.13.0.md docs/zh-CN/release-notes-0.13.0.md; do
+  for marker in 'Store v17' 'macOS SDK' 'system_memory_block'; do
+    rg -F -qi "$marker" "$doc" || {
+      echo "0.13.0 source notes omit required projection marker: doc=$doc marker=$marker" >&2
+      exit 1
+    }
+  done
+done
+
 for doc in docs/en/release-notes-0.12.0.md docs/zh-CN/release-notes-0.12.0.md; do
   for marker in 'Store v17' 'Store v16' 'assistant_messages' 'InterruptedDeliveredPrefix' 'DeleteRaw'; do
     rg -F -q "$marker" "$doc" || {
@@ -270,7 +281,7 @@ current_persistence_truth_docs=(
   "dev-docs/entry-runtime-plan.md"
   "dev-docs/release-surface-plan.md"
   "dev-docs/runtime-lifecycle-plan.md"
-  "dev-docs/agent-context-substrate-refactor-plan.md"
+  "dev-docs/inhabited-subject-projection-refactor-plan.md"
   "dev-docs/conversation-transcript-attribute-plane-plan.md"
   "dev-docs/conversation-transcript-governance-hardening-plan.md"
   "dev-docs/conversation-transcript-substrate-plan.md"
@@ -426,8 +437,18 @@ for doc in "${required_docs[@]}"; do
       echo "release surface dev-doc is not indexed: $doc" >&2
       exit 1
     }
+  elif [[ "$doc" == docs/en/* ]]; then
+    rg -q "$(basename "$doc")" docs/en/README.md || {
+      echo "release surface English doc is not indexed: $doc" >&2
+      exit 1
+    }
+  elif [[ "$doc" == docs/zh-CN/* ]]; then
+    rg -q "$(basename "$doc")" docs/zh-CN/README.md || {
+      echo "release surface Chinese doc is not indexed: $doc" >&2
+      exit 1
+    }
   else
-    rg -q "$doc" README.md || {
+    rg -q "$doc" README.md README.zh-CN.md || {
       echo "release surface public doc is not indexed in README: $doc" >&2
       exit 1
     }

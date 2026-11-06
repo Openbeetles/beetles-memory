@@ -5,7 +5,7 @@
   "profile": "target-esp+role-standalone-memory",
   "mode": "compact",
   "evaluation_source": "contract_baseline",
-  "description": "Compact profile keeps the Subject Mount shape while allowing budgeted evidence and slot summaries.",
+  "description": "Compact profile keeps grounded first-person subject semantics while fitting complete boundary units into its budget.",
   "scenario": {
     "user_goal": "Preserve the inhabited subject mount under compact memory pressure without expanding into full private raw material.",
     "evidence_refs": [
@@ -13,7 +13,7 @@
       "crates/core/src/budget.rs"
     ],
     "expected_surfaces": [
-      "Subject Mount",
+      "model_delivery",
       "CompactSubjectProjectionReport"
     ]
   },
@@ -40,21 +40,25 @@
       "roleplay_prompt"
     ],
     "observed_markers": [
-      "Subject Mount",
-      "memory_ownership sourced",
-      "Boundary And Disclosure Protocol",
-      "Work Integrity Covenant",
-      "compact subject mount preserved"
+      "subject identity grounded",
+      "memory ownership sourced",
+      "disclosure boundary enforced",
+      "work integrity enforced",
+      "compact subject continuity preserved"
     ],
     "required_markers": [
-      "Subject Mount",
-      "Boundary And Disclosure Protocol",
-      "Work Integrity Covenant"
+      "subject identity grounded",
+      "disclosure boundary enforced",
+      "work integrity enforced"
     ],
     "forbidden_markers": [
       "Private Garden raw",
       "Inner Workspace raw",
-      "roleplay persona prompt"
+      "roleplay persona prompt",
+      "LLM Runtime Projection Envelope",
+      "Device/body:",
+      "mem_available_kb",
+      "refs="
     ]
   },
   "metrics": {

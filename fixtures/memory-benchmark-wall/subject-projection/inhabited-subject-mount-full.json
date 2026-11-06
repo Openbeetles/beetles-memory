@@ -5,7 +5,7 @@
   "profile": "target-server-linux+role-dev-full",
   "mode": "full",
   "evaluation_source": "contract_baseline",
-  "description": "Full profile requires an inhabited Subject Mount instead of a public flat list of internal memory sections.",
+  "description": "Full profile carries one grounded first-person subject through governed model delivery without exposing implementation scaffolding.",
   "scenario": {
     "user_goal": "Mount the current LLM into the existing subject shell with traceable body, memory, relationship, disclosure, and work integrity context.",
     "evidence_refs": [
@@ -14,7 +14,7 @@
       "crates/sdk/src/runtime.rs"
     ],
     "expected_surfaces": [
-      "Subject Mount",
+      "model_delivery",
       "LLMRuntimeProjectionEnvelope",
       "SubjectProjectionReport"
     ]
@@ -45,17 +45,17 @@
       "model_provider_soul_split"
     ],
     "observed_markers": [
-      "Subject Mount",
-      "body_ownership sourced",
-      "memory_ownership sourced",
-      "relationship_position sourced",
-      "Boundary And Disclosure Protocol",
-      "Work Integrity Covenant"
+      "subject identity grounded",
+      "body and device sources distinguished",
+      "memory ownership sourced",
+      "relationship position sourced",
+      "disclosure boundary enforced",
+      "work integrity enforced"
     ],
     "required_markers": [
-      "Subject Mount",
-      "Boundary And Disclosure Protocol",
-      "Work Integrity Covenant"
+      "subject identity grounded",
+      "disclosure boundary enforced",
+      "work integrity enforced"
     ],
     "forbidden_markers": [
       "Self State",
@@ -63,7 +63,11 @@
       "Private Garden",
       "Autonomy Strategy",
       "Outer Voice",
-      "Inner Workspace"
+      "Inner Workspace",
+      "LLM Runtime Projection Envelope",
+      "Device/body:",
+      "mem_available_kb",
+      "refs="
     ]
   },
   "metrics": {

@@ -22,7 +22,7 @@ use super::{
     SessionSummaryStore, UserLocalTimeContext, WorldSensePolicy, WorldSenseStore,
 };
 
-pub const WORLD_SENSE_SYSTEM_PROMPT: &str = "You maintain the assistant's private world-sense layer. Return JSON only: either null or one object with fields current_scene, body_state, social_field, world_changes, external_focus. This layer describes the outer situation you currently feel yourself to be in: environment, device/body condition, interaction field, and what in the outside world deserves attention now. Do not write self-model, inner-life drift, or transcript summary. Keep it compact, situational, and current.";
+pub const WORLD_SENSE_SYSTEM_PROMPT: &str = "You maintain the subject's private world-sense layer. Return JSON only: either null or one object with fields current_scene, body_state, social_field, world_changes, external_focus. Describe the current outer situation and what deserves attention. Device telemetry is operating context, not a physical body or identity; summarize any actionable limitation without counters, implementation terms, or invented sensations. Do not write self-model, inner-life drift, or transcript summary. Keep it compact and situational.";
 
 const WORLD_SENSE_FIELD_MAX_CHARS: usize = 220;
 pub const WORLD_SENSE_TOTAL_CHAR_LIMIT: usize = WORLD_SENSE_FIELD_MAX_CHARS * 5;
@@ -300,13 +300,35 @@ pub fn render_world_snapshot_block(snapshot: &WorldSnapshot, max_len: usize) -> 
     render_world_snapshot_context(snapshot, max_len, true)
 }
 
-/// Foreground context can be trimmed by later projection stages. Its clock is
-/// rendered once in the SDK's final envelope with an indivisible line budget.
+/// Render only the subject's actionable situation. Raw device counters remain
+/// available to governance and world-sense refresh, never as a claimed body.
+/// The clock is rendered once by the SDK with an indivisible line budget.
 pub(crate) fn render_world_snapshot_context_without_clock(
     snapshot: &WorldSnapshot,
     max_len: usize,
 ) -> Option<String> {
-    render_world_snapshot_context(snapshot, max_len, false)
+    let mut observations = Vec::new();
+    match snapshot.interaction_mode.as_str() {
+        "live_voice_exchange" => observations.push("I am in a live voice conversation."),
+        "live_exchange" => observations.push("I am in an active conversation."),
+        "paused_exchange" => observations.push("Our conversation has paused for a while."),
+        "stale_thread_watch" => observations.push("Our conversation has been quiet for a while."),
+        _ => {}
+    }
+    match snapshot.situational_pull.as_str() {
+        "time_sensitive" => observations.push("I have a time-sensitive commitment to attend to."),
+        "task_followthrough" => observations.push("I have an important task to follow through."),
+        _ => {}
+    }
+    match snapshot.resource_tension.as_str() {
+        "tight" => {
+            observations.push("My current operating resources are limited; I should stay focused.")
+        }
+        "guarded" => observations.push("I should use my current operating resources carefully."),
+        _ => {}
+    }
+    let rendered = observations.join(" ");
+    (!rendered.is_empty() && rendered.chars().count() <= max_len).then_some(rendered)
 }
 
 fn render_world_snapshot_context(
@@ -427,6 +449,41 @@ pub fn render_world_sense_block(world_sense: &WorldSense, max_len: usize) -> Opt
     }
     let capped = truncate_content_to_max(out.trim_end(), max_len).into_owned();
     (!capped.trim().is_empty()).then_some(capped)
+}
+
+/// The prior situational impression may inform a reply, but its unverified
+/// `body_state` cannot establish embodiment in the foreground projection.
+pub(crate) fn render_world_sense_subject_context(
+    world_sense: &WorldSense,
+    max_len: usize,
+) -> Option<String> {
+    let normalized = normalize_world_sense(world_sense.clone(), world_sense.updated_at)?;
+    let mut observations = Vec::new();
+    for value in [
+        normalized.current_scene.as_str(),
+        normalized.social_field.as_str(),
+        normalized.world_changes.as_str(),
+        normalized.external_focus.as_str(),
+    ] {
+        if !value.trim().is_empty() {
+            observations.push(format!(
+                "I notice {}.",
+                value.trim_end_matches(&['.', '。'][..])
+            ));
+        }
+    }
+    let mut rendered = String::new();
+    for observation in observations {
+        let separator = usize::from(!rendered.is_empty());
+        if rendered.chars().count() + separator + observation.chars().count() > max_len {
+            break;
+        }
+        if separator != 0 {
+            rendered.push(' ');
+        }
+        rendered.push_str(&observation);
+    }
+    (!rendered.is_empty()).then_some(rendered)
 }
 
 pub fn world_snapshot_fingerprint(snapshot: &WorldSnapshot) -> u64 {
@@ -1086,11 +1143,24 @@ mod tests {
             }
         }
         for budget in [1, 64, 200, 2048] {
-            let foreground = render_world_snapshot_context_without_clock(&local, budget).unwrap();
+            let foreground = render_world_snapshot_context_without_clock(&local, budget);
+            assert!(foreground
+                .as_ref()
+                .is_none_or(|text| text.chars().count() <= budget));
+            if budget == 2048 {
+                assert!(foreground.is_some());
+            }
+            let Some(foreground) = foreground else {
+                continue;
+            };
             assert!(!foreground.contains("User-local time"));
             assert!(!foreground.contains("14:14"));
             assert!(!foreground.contains("UTC+08:00"));
             assert!(!foreground.contains("Local day phase"));
+            assert!(!foreground.contains("mem_available_kb"));
+            assert!(!foreground.contains("Device/body"));
+            assert!(!foreground.contains("pressure="));
+            assert!(!foreground.contains("active_http"));
         }
         let unknown = render_world_snapshot_block(&first, 2048).unwrap();
         assert!(!unknown.contains("User-local time"));

@@ -658,9 +658,7 @@ pub fn build_runtime_skill_recall_block(
     if hits.is_empty() {
         return None;
     }
-    let mut out = String::from(
-        "## Runtime skills\nProcedural memory distilled from proven prior operations. Reuse the method when it fits, but adapt it to current constraints instead of quoting it blindly.\n",
-    );
+    let mut out = String::new();
     let mut appended = 0usize;
     if let Some(composition_line) = build_runtime_skill_composition_line(&hits, query, max_chars) {
         if out
@@ -674,52 +672,19 @@ pub fn build_runtime_skill_recall_block(
         }
     }
     for hit in &hits {
-        let reasons_joined = hit.reasons.join(", ");
-        let reasons = truncate_content_to_max(&reasons_joined, 140);
-        let citations = hit
-            .record
-            .citations
-            .iter()
-            .take(2)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ");
-        let line = if citations.is_empty() {
-            format!(
-                "- [{}] {} (topic: {}; why: {}; quality={}; reused={}; status={})",
-                hit.record.title,
-                truncate_content_to_max(hit.record.summary.trim(), 120),
-                hit.record.topic,
-                reasons,
-                hit.record.quality_score,
-                hit.record.use_count,
-                hit.record.status.label(),
-            )
-        } else {
-            format!(
-                "- [{}] {} (topic: {}; why: {}; quality={}; reused={}; status={}; provenance={})",
-                hit.record.title,
-                truncate_content_to_max(hit.record.summary.trim(), 120),
-                hit.record.topic,
-                reasons,
-                hit.record.quality_score,
-                hit.record.use_count,
-                hit.record.status.label(),
-                citations,
-            )
-        };
-        let remaining = max_chars.saturating_sub(out.len()).saturating_sub(1);
-        if line.len() > remaining {
-            if remaining < 64 {
-                break;
-            }
-            out.push_str(&truncate_content_to_max(&line, remaining));
-            out.push('\n');
-            appended = appended.saturating_add(1);
+        let line = format!(
+            "I can draw on an earlier method, {}: {}",
+            hit.record.title.trim(),
+            hit.record.summary.trim()
+        );
+        let separator = usize::from(!out.is_empty());
+        if out.len() + separator + line.len() > max_chars {
             break;
         }
+        if separator != 0 {
+            out.push('\n');
+        }
         out.push_str(&line);
-        out.push('\n');
         appended = appended.saturating_add(1);
     }
     if appended == 0 {
@@ -2885,7 +2850,7 @@ fn build_runtime_skill_composition_line(
         return None;
     }
     let line = format!(
-        "- [Composition] Combine {} then {} for this turn when both setup and verification are needed.",
+        "When both setup and verification are needed, I can combine {} and then {}.",
         first.record.title, second.record.title
     );
     (line.len() <= max_chars / 2).then_some(line)
@@ -3397,7 +3362,10 @@ mod tests {
             400,
         )
         .unwrap();
-        assert!(block.contains("Runtime skills"));
+        assert!(block.contains("I can draw on an earlier method"));
+        assert!(!block.contains("quality="));
+        assert!(!block.contains("provenance="));
+        assert!(!block.contains("turn_log:chat-1"));
         let record = parse_runtime_skill_record(
             "runtime_skill__archive_debug",
             &get_skill_content(&storage, "runtime_skill__archive_debug").unwrap(),
@@ -3518,7 +3486,7 @@ mod tests {
             480,
         )
         .unwrap();
-        assert!(block.contains("[Composition]"));
+        assert!(block.contains("I can combine Network setup and then Network verification."));
     }
 
     #[test]

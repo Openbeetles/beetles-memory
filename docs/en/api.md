@@ -2,6 +2,16 @@
 
 The SDK API is the primary entry point. Host projects should enter through `bm-sdk` or through `bm-entry` plus a protocol adapter. They should not implement their own memory schema, store envelope, replay format, or adapter dispatch rules.
 
+## 0.13.0: inhabited subject delivery
+
+`bm-sdk` 0.13.0 source release.
+
+`MemoryRuntime::project()` continues to compile sources, the mounted subject, disclosure boundaries, and work constraints inside Beetle Memory. `projection.provider_payload().system_memory_block()` is the single model-delivery text for that subject. It carries grounded memory and current situation in the first person without exposing the SDK envelope, opaque source references, governance counters, or raw device diagnostic field names. Factual evidence retains its source language. `projection.report()` remains the safe source for diagnostics, provenance, and trim decisions; hosts must not rearrange or rerender memory.
+
+Device and resource state remain sources of the subject's world awareness. Identity, body ownership, trusted device facts, and current feeling are compiled separately; a missing device identity is not replaced with `subject_id`. Disclosure and work-integrity semantics remain in model delivery. A `system_max_len` that cannot hold the required complete semantic units fails instead of returning a partial protocol. The Turn receipt continues to bind the final block; hosts must inject it unchanged and verify the bytes actually sent.
+
+This change retains the Store v17 persistence contract. macOS SDK targeted validation is reported separately from other platforms, real Providers, and GUI validation. Release identity requires the final tag and remote readback.
+
 ## 0.12.0: transcript commit
 
 `bm-sdk` 0.12.0 adds ordered `CanonicalTurnDelta.assistant_messages: Vec<TranscriptAssistantMessage>` with `Complete` and `InterruptedDeliveredPrefix` settlements. `Cancelled` turns can retain settled assistant output. The SDK transcript contract below gives status and size rules; [release notes](release-notes-0.12.0.md) describe the Store v17 break. Store v17 does not read Store v16. Release identity follows the corresponding Git tag and remote readback.

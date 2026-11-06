@@ -2397,42 +2397,7 @@ where
     }
     let lookup = lookup_long_term_memory_slot(store, slot, 0).ok()?;
     let entry = lookup.entry?;
-    let evidence = long_term_memory_evidence_summary(&entry, now_secs);
-    let mut out = String::from("## Long-term memory (exact slot)\n");
-    let body = render_exact_long_term_memory_body(&entry, &evidence);
-    if out.len().saturating_add(body.len()) > max_len {
-        return render_long_term_memory_block(&[entry], max_len);
-    }
-    out.push_str(&body);
-    Some(out)
-}
-
-fn render_exact_long_term_memory_body(
-    entry: &LongTermMemoryEntry,
-    evidence: &LongTermMemoryEvidenceSummary,
-) -> String {
-    let mut out = String::new();
-    let _ = writeln!(out, "Slot: [{}:{}]", entry.kind.label(), entry.topic);
-    let _ = writeln!(out, "Content: {}", entry.content);
-    let _ = writeln!(out, "Evidence: {}", evidence.summary);
-    let _ = write!(
-        out,
-        "Provenance: source={} scope={}",
-        entry.source_type.label(),
-        entry.source_scope.label()
-    );
-    if let Some(source_chat_id) = entry.source_chat_id.as_deref() {
-        let _ = write!(out, " chat={}", source_chat_id);
-    }
-    if let Some(source_revision) = entry.source_revision {
-        let _ = write!(out, " source_revision={source_revision}");
-    }
-    let _ = write!(out, " owner_revision={}", entry.owner_revision);
-    out.push('\n');
-    if !entry.supporting_citations.is_empty() {
-        let _ = writeln!(out, "Citations: {}", entry.supporting_citations.join(", "));
-    }
-    out
+    render_long_term_memory_block_with_now(&[entry], max_len, now_secs)
 }
 
 fn reorder_recall_candidates_for_query(
@@ -2498,141 +2463,37 @@ pub(crate) fn render_long_term_memory_block_with_now(
         return None;
     }
     let mut out = String::with_capacity(max_len.min(MAX_LONG_TERM_MEMORY_BLOCK_LEN));
-    out.push_str("## Long-term memory\n");
-    let mut active = Vec::new();
-    let mut personal = Vec::new();
-    let mut facts = Vec::new();
     for entry in entries {
-        match entry.kind {
-            LongTermMemoryKind::Project
-            | LongTermMemoryKind::Task
-            | LongTermMemoryKind::Constraint => active.push(entry),
-            LongTermMemoryKind::Preference
-            | LongTermMemoryKind::Profile
-            | LongTermMemoryKind::Relationship => personal.push(entry),
-            LongTermMemoryKind::Fact => facts.push(entry),
-        }
-    }
-    render_long_term_memory_section(&mut out, "Active context", &active, max_len, now_secs);
-    render_long_term_memory_section(&mut out, "User profile", &personal, max_len, now_secs);
-    render_long_term_memory_section(&mut out, "Facts", &facts, max_len, now_secs);
-    if out.trim() == "## Long-term memory" {
-        None
-    } else {
-        Some(out.trim_end().to_string())
-    }
-}
-
-fn render_long_term_memory_section(
-    out: &mut String,
-    title: &str,
-    entries: &[&LongTermMemoryEntry],
-    max_len: usize,
-    now_secs: u64,
-) {
-    if entries.is_empty() {
-        return;
-    }
-    let section_start = out.len();
-    let header = format!("\n### {title}\n");
-    if out.len().saturating_add(header.len()) > max_len {
-        return;
-    }
-    out.push_str(&header);
-    let mut appended = 0usize;
-    for entry in entries {
-        let line_with_keywords = render_long_term_memory_line(entry, true, now_secs);
+        let line = render_long_term_memory_line(entry, now_secs);
+        let separator = usize::from(!out.is_empty());
         if out
             .len()
-            .saturating_add(line_with_keywords.len())
-            .saturating_add(1)
-            <= max_len
+            .saturating_add(separator)
+            .saturating_add(line.len())
+            > max_len
         {
-            out.push_str(&line_with_keywords);
-            out.push('\n');
-            appended += 1;
-            continue;
+            break;
         }
-        let line_without_keywords = render_long_term_memory_line(entry, false, now_secs);
-        if out
-            .len()
-            .saturating_add(line_without_keywords.len())
-            .saturating_add(1)
-            <= max_len
-        {
-            out.push_str(&line_without_keywords);
+        if separator != 0 {
             out.push('\n');
-            appended += 1;
-            continue;
         }
-        break;
+        out.push_str(&line);
     }
-    if appended == 0 {
-        out.truncate(section_start);
-    }
+    (!out.is_empty()).then_some(out)
 }
 
-fn render_long_term_memory_line(
-    entry: &LongTermMemoryEntry,
-    include_keywords: bool,
-    now_secs: u64,
-) -> String {
-    let mut tags = vec![
-        evidence_state_for_entry(entry, now_secs)
-            .label()
-            .to_string(),
-        format!("source: {}", entry.source_type.label()),
-        entry.source_scope.label().to_string(),
-        entry.confidence.label().to_string(),
-    ];
-    if !matches!(entry.freshness, LongTermMemoryFreshness::Stable) {
-        tags.push(entry.freshness.label().to_string());
-    }
-    if let Some(label) = effective_stale_hint(entry, now_secs).label() {
-        tags.push(label.to_string());
-    }
-    if matches!(
-        age_state_for_entry(entry, now_secs),
-        LongTermMemoryAgeState::Aging | LongTermMemoryAgeState::Stale
-    ) {
-        if let Some(age_hint) = render_age_hint(entry, now_secs) {
-            tags.push(age_hint);
+fn render_long_term_memory_line(entry: &LongTermMemoryEntry, now_secs: u64) -> String {
+    let mut line = format!("I remember: {}", entry.content.trim());
+    match evidence_state_for_entry(entry, now_secs) {
+        LongTermMemoryEvidenceState::NeedsReview => {
+            line.push_str(" This may have changed; I should verify it before relying on it.");
         }
-    }
-    let evidence_count =
-        effective_evidence_count(entry.supporting_citations.len(), entry.evidence_count);
-    if evidence_count > 0 {
-        tags.push(format!("evidence={evidence_count}"));
-    }
-    if !entry.supporting_citations.is_empty() {
-        let preview_count = entry.supporting_citations.len().min(2);
-        let mut preview = entry.supporting_citations[..preview_count].join(", ");
-        if entry.supporting_citations.len() > preview_count {
-            preview.push_str(&format!(
-                " +{}",
-                entry.supporting_citations.len() - preview_count
-            ));
+        LongTermMemoryEvidenceState::PossiblyStale => {
+            line.push_str(" This may be out of date.");
         }
-        tags.push(format!("cites: {preview}"));
+        LongTermMemoryEvidenceState::StableFact | LongTermMemoryEvidenceState::RecentState => {}
     }
-    if include_keywords && !entry.keywords.is_empty() {
-        format!(
-            "- [{}:{}] {} ({}, keywords: {})",
-            entry.kind.label(),
-            entry.topic,
-            entry.content,
-            tags.join("; "),
-            entry.keywords.join(", ")
-        )
-    } else {
-        format!(
-            "- [{}:{}] {} ({})",
-            entry.kind.label(),
-            entry.topic,
-            entry.content,
-            tags.join("; ")
-        )
-    }
+    line
 }
 
 fn build_recent_recall_grounding(
@@ -3498,8 +3359,8 @@ mod tests {
         )
         .unwrap();
 
-        assert!(block.contains("Long-term memory"));
-        assert!(block.contains("preference:response_style"));
+        assert!(block.contains("I remember: User prefers direct technical answers."));
+        assert!(!block.contains("preference:response_style"));
     }
 
     #[test]
@@ -3772,7 +3633,7 @@ mod tests {
     }
 
     #[test]
-    fn render_long_term_memory_block_includes_evidence_summary() {
+    fn render_long_term_memory_block_keeps_provenance_off_subject_surface() {
         let mut entry = test_entry(
             "ltm-1",
             LongTermMemoryKind::Fact,
@@ -3792,12 +3653,13 @@ mod tests {
 
         let block = render_long_term_memory_block_with_now(&[entry], 512, 2).unwrap();
 
-        assert!(block.contains("evidence=2"));
-        assert!(block.contains("cites: transcript:chat-a#message=1"));
+        assert!(block.contains("I remember: 当前主模型是 OpenAI。"));
+        assert!(!block.contains("evidence="));
+        assert!(!block.contains("transcript:chat-a"));
     }
 
     #[test]
-    fn exact_slot_block_surfaces_evidence_and_provenance() {
+    fn exact_slot_block_preserves_content_without_source_codes() {
         let slot = LongTermMemorySlot {
             kind: LongTermMemoryKind::Fact,
             topic: "primary_llm".to_string(),
@@ -3822,9 +3684,9 @@ mod tests {
 
         let block = render_exact_long_term_memory_block(&store, &slot, 512).unwrap();
 
-        assert!(block.contains("Evidence:"));
-        assert!(block.contains("Provenance:"));
-        assert!(block.contains("Citations:"));
+        assert!(block.contains("I remember: 当前主模型是 OpenAI。"));
+        assert!(!block.contains("source_revision"));
+        assert!(!block.contains("transcript:chat-a"));
     }
 
     #[test]
@@ -4229,11 +4091,11 @@ mod tests {
         )
         .expect("rendered long-term memory block");
 
-        assert_eq!(block.matches("[task:current_focus]").count(), 1);
-        assert!(block.contains("### Active context"));
-        assert!(block.contains("### User profile"));
-        assert!(block.contains("[project:platform_memory]"));
-        assert!(block.contains("[preference:response_style]"));
+        assert_eq!(block.matches("Continue memory redesign").count(), 1);
+        assert!(block.contains("I remember: Continue memory redesign"));
+        assert!(block.contains("Shared memory policy stays aligned."));
+        assert!(block.contains("User prefers direct technical answers."));
+        assert!(!block.contains("[task:current_focus]"));
     }
 
     #[test]

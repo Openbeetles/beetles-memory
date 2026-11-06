@@ -1,10 +1,13 @@
 use crate::agent::{load_active_work_for_chat, ActiveWorkRecord};
 use crate::task_execution::{
-    active_task_run_for_chat, build_task_recall_bundle, render_task_workspace_block, TaskRunRecord,
+    active_task_run_for_chat, build_task_recall_bundle, TaskArtifactRecord, TaskRunRecord,
 };
 use std::collections::BTreeSet;
 
-use super::world_sense::render_world_snapshot_context_without_clock;
+use super::relationship_constitution::render_relationship_constitution_subject_constraints;
+use super::world_sense::{
+    render_world_sense_subject_context, render_world_snapshot_context_without_clock,
+};
 
 use super::{
     build_archive_evidence_block, build_continuity_recall_query, build_self_state,
@@ -14,16 +17,15 @@ use super::{
     inspect_continuity_capsule_recall, load_world_snapshot_reminders, load_world_snapshot_tasks,
     memory_capability_profile, memory_policy, parse_explicit_long_term_slot_query,
     recall_long_term_memory_block, relationship_scope_id, render_autonomy_strategy_block,
-    render_continuity_capsule_block, render_exact_long_term_memory_block,
-    render_execution_state_block, render_inner_life_block, render_mental_privacy_boundary_block,
-    render_outer_voice_block, render_persistent_self_authored_core_block,
-    render_private_doc_workspace_block, render_private_garden_block,
-    render_relationship_constitution_block, render_relationship_portfolio_block,
-    render_self_continuity_block, render_self_model_block, render_self_state_block,
-    render_turn_observation_ledger_block, render_work_continuity_block, render_world_sense_block,
-    ContinuityCapsuleRecallInspectionInput, ContinuityCapsuleScopeKind, MemoryProfile,
-    PromptMemoryContextParams, PromptRecallRouterDecision, RecallPlane, RecallQuery,
-    RecallSelectionReport, SessionMessage, WorldSnapshotContext, MAX_WORK_CONTINUITY_BLOCK_LEN,
+    render_exact_long_term_memory_block, render_inner_life_block,
+    render_mental_privacy_boundary_block, render_outer_voice_block,
+    render_persistent_self_authored_core_block, render_private_doc_workspace_block,
+    render_private_garden_block, render_relationship_portfolio_block, render_self_continuity_block,
+    render_self_model_block, render_self_state_block, ContinuityCapsule,
+    ContinuityCapsuleRecallInspectionInput, ContinuityCapsuleScopeKind, ExecutionState,
+    ExecutionStatus, MemoryProfile, PromptMemoryContextParams, PromptRecallRouterDecision,
+    RecallPlane, RecallQuery, RecallSelectionReport, SessionMessage, WorkContinuityRecord,
+    WorldSnapshotContext, MAX_WORK_CONTINUITY_BLOCK_LEN,
 };
 
 pub(crate) struct PromptContextSeed {
@@ -324,7 +326,7 @@ pub(crate) fn load_session_stage(
         })
         .flatten();
     let execution_state_text = active_work.as_ref().and_then(|record| {
-        render_execution_state_block(
+        render_execution_subject_context(
             &record.execution_state_projection(),
             memory_policy(seed.profile).execution_state.render_max_len,
         )
@@ -332,7 +334,7 @@ pub(crate) fn load_session_stage(
     let work_continuity_text =
         super::build_work_continuity_record(active_work.as_deref(), summary_text.as_deref())
             .and_then(|record| {
-                render_work_continuity_block(
+                render_work_subject_context(
                     &record,
                     params.system_max_len.min(MAX_WORK_CONTINUITY_BLOCK_LEN),
                 )
@@ -343,7 +345,7 @@ pub(crate) fn load_session_stage(
                 .task_artifact_store
                 .list_for_run(&record.run.run_id, 4)
         });
-        render_task_workspace_block(record, &artifacts, 600)
+        render_task_subject_context(record, &artifacts, 600)
     });
     let task_recall_bundle = active_task_run.as_ref().and_then(|record| {
         build_task_recall_bundle(
@@ -501,20 +503,16 @@ pub(crate) fn load_constitutional_stage(
             .map(Box::new)
         })
         .flatten();
-    let recent_turn_ledger = params
+    // Delivery receipts and recent messages describe the actual prior turn.
+    // The turn ledger is operator diagnostics and may be stale for this reply.
+    // Read health still matters even though the diagnostic text is not mounted.
+    let _ = params
         .turn_ledger_store
         .get(&seed.relationship_id)
         .inspect_err(|error| {
             health.record("recent_turn_ledger", error);
-        })
-        .ok()
-        .flatten();
-    let recent_turn_observation_text = recent_turn_ledger
-        .as_ref()
-        .and_then(|ledger| ledger.observation.as_ref())
-        .and_then(|observation| {
-            render_turn_observation_ledger_block(observation, params.system_max_len.clamp(160, 320))
         });
+    let recent_turn_observation_text = None;
     let self_authored_core_text = self_authored_core
         .as_ref()
         .and_then(|core| render_persistent_self_authored_core_block(core, 420));
@@ -556,13 +554,13 @@ pub(crate) fn load_constitutional_stage(
             });
     let relationship_constitution_text =
         relationship_constitution.as_ref().and_then(|constitution| {
-            render_relationship_constitution_block(
+            // The old section share is a preview budget, not the amount of
+            // constitutional authority available to the active subject.
+            // Keep the complete unit here; the final SDK envelope accounts
+            // for it as mandatory and rejects a reply if it cannot fit.
+            render_relationship_constitution_subject_constraints(
                 constitution,
-                super::profile::prompt_context_normalization_budget(
-                    seed.profile.into(),
-                    params.system_max_len,
-                )
-                .constitutional_stack_max_len,
+                params.system_max_len,
             )
         });
 
@@ -659,7 +657,7 @@ pub(crate) fn load_private_projection_stage(
                 params.world_sense_store.get(&seed.relationship_id)
             })
             .and_then(|world_sense| {
-                render_world_sense_block(
+                render_world_sense_subject_context(
                     &world_sense,
                     memory_policy(seed.profile).world_sense.render_max_len,
                 )
@@ -863,7 +861,7 @@ pub(crate) fn load_governed_memory_stage(
     let continuity_capsule_text = seed
         .governed_memory_enabled
         .then(|| {
-            render_continuity_capsule_block(&continuity_capsules, params.system_max_len.min(480))
+            render_continuity_subject_context(&continuity_capsules, params.system_max_len.min(480))
         })
         .flatten();
     let archive_evidence_text =
@@ -1018,9 +1016,187 @@ pub(crate) fn load_governed_memory_stage(
     })
 }
 
+fn subject_observation(lead: &str, value: &str) -> Option<String> {
+    let value = value.trim().trim_end_matches(&['.', '。'][..]);
+    (!value.is_empty()).then(|| format!("{lead}{value}."))
+}
+
+fn render_subject_observations(observations: Vec<String>, max_len: usize) -> Option<String> {
+    let mut rendered = String::new();
+    for observation in observations {
+        let separator = usize::from(!rendered.is_empty());
+        if rendered.len() + separator + observation.len() > max_len {
+            break;
+        }
+        if separator != 0 {
+            rendered.push(' ');
+        }
+        rendered.push_str(&observation);
+    }
+    (!rendered.is_empty()).then_some(rendered)
+}
+
+fn render_work_subject_context(record: &WorkContinuityRecord, max_len: usize) -> Option<String> {
+    if !record.is_meaningful() {
+        return None;
+    }
+    let observations = [
+        subject_observation("I am working on: ", &record.focus),
+        subject_observation("I have made this progress: ", &record.progress_summary),
+        subject_observation("I am blocked by: ", &record.blocker),
+        subject_observation("My next step is: ", &record.next_action),
+        subject_observation("My recent outcome was: ", &record.recent_outcome),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    render_subject_observations(observations, max_len)
+}
+
+fn render_execution_subject_context(state: &ExecutionState, max_len: usize) -> Option<String> {
+    if !state.is_meaningful() {
+        return None;
+    }
+    let constraints = state
+        .active_constraints
+        .iter()
+        .filter_map(|constraint| {
+            subject_observation("I must respect this constraint: ", constraint)
+        })
+        .collect::<Vec<_>>();
+    let mandatory_len =
+        constraints.iter().map(String::len).sum::<usize>() + constraints.len().saturating_sub(1);
+    if mandatory_len > max_len {
+        return None;
+    }
+    let mut observations = constraints;
+    if state.status == ExecutionStatus::Blocked {
+        observations.push("My current work is blocked.".to_string());
+    }
+    for (lead, value) in [
+        ("My goal is: ", state.goal.as_str()),
+        ("I have made this progress: ", state.progress.as_str()),
+        ("I am blocked by: ", state.blocker.as_str()),
+        ("My next step is: ", state.next_action.as_str()),
+        ("My latest result was: ", state.last_output.as_str()),
+    ] {
+        if let Some(observation) = subject_observation(lead, value) {
+            observations.push(observation);
+        }
+    }
+    render_subject_observations(observations, max_len)
+}
+
+fn render_task_subject_context(
+    record: &TaskRunRecord,
+    artifacts: &[TaskArtifactRecord],
+    max_len: usize,
+) -> Option<String> {
+    let mut observations = Vec::new();
+    for (lead, value) in [
+        ("I am working on: ", record.run.title.as_str()),
+        ("My goal is: ", record.plan.goal.as_str()),
+        (
+            "I will consider it complete when: ",
+            record.plan.completion_definition.as_str(),
+        ),
+    ] {
+        if let Some(observation) = subject_observation(lead, value) {
+            observations.push(observation);
+        }
+    }
+    if let Some(step) = record
+        .plan
+        .ordered_steps
+        .iter()
+        .find(|step| step.step_id == record.run.current_step_id)
+    {
+        if let Some(observation) = subject_observation("My current step is: ", &step.title) {
+            observations.push(observation);
+        }
+    }
+    for artifact in artifacts.iter().take(2) {
+        if let Some(observation) =
+            subject_observation("I have this recent result: ", &artifact.artifact.summary)
+        {
+            observations.push(observation);
+        }
+    }
+    if let Some(observation) = subject_observation("I am blocked by: ", &record.run.failure_reason)
+    {
+        observations.push(observation);
+    }
+    render_subject_observations(observations, max_len)
+}
+
+fn render_continuity_subject_context(
+    capsules: &[ContinuityCapsule],
+    max_len: usize,
+) -> Option<String> {
+    let mut observations = Vec::new();
+    for capsule in capsules {
+        for (lead, value) in [
+            ("I remember this ongoing matter: ", capsule.summary.as_str()),
+            ("I reached this outcome: ", capsule.outcome.as_str()),
+            ("My next step is: ", capsule.next_step.as_str()),
+        ] {
+            if let Some(observation) = subject_observation(lead, value) {
+                observations.push(observation);
+            }
+        }
+        for unresolved in &capsule.unresolved {
+            if let Some(observation) = subject_observation("I still need to resolve: ", unresolved)
+            {
+                observations.push(observation);
+            }
+        }
+    }
+    render_subject_observations(observations, max_len)
+}
+
 #[cfg(test)]
 mod stack_shape_tests {
     use super::*;
+
+    #[test]
+    fn foreground_work_and_continuity_exclude_operator_identifiers() {
+        let work = WorkContinuityRecord {
+            focus: "ship the release".to_string(),
+            next_action: "verify the macOS package".to_string(),
+            active_artifact_refs: vec!["artifact:123".to_string()],
+            ..WorkContinuityRecord::default()
+        };
+        let rendered = render_work_subject_context(&work, 400).unwrap();
+        assert!(rendered.contains("I am working on: ship the release."));
+        assert!(!rendered.contains("artifact:123"));
+        assert!(!rendered.contains("## Work Continuity"));
+
+        let capsules = vec![ContinuityCapsule {
+            summary: "the release is in progress".to_string(),
+            next_step: "verify the macOS package".to_string(),
+            provenance_refs: vec!["opaque:evidence:123".to_string()],
+            ..ContinuityCapsule::default()
+        }];
+        let rendered = render_continuity_subject_context(&capsules, 400).unwrap();
+        assert!(rendered.contains("I remember this ongoing matter"));
+        assert!(!rendered.contains("opaque:evidence:123"));
+        assert!(!rendered.contains("Provenance:"));
+    }
+
+    #[test]
+    fn foreground_execution_keeps_task_constraints_without_status_codes() {
+        let state = ExecutionState {
+            status: ExecutionStatus::Blocked,
+            goal: "verify the release".to_string(),
+            active_constraints: vec!["use the approved package".to_string()],
+            ..ExecutionState::default()
+        };
+        let rendered = render_execution_subject_context(&state, 400).unwrap();
+        assert!(rendered.contains("My current work is blocked."));
+        assert!(rendered.contains("I must respect this constraint: use the approved package."));
+        assert!(!rendered.contains("Status:"));
+        assert!(!rendered.contains("## Execution State"));
+    }
 
     #[test]
     fn prompt_stage_structs_stay_small_enough_for_esp_prepare_chain() {

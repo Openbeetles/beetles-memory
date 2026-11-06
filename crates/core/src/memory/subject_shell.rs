@@ -3,7 +3,6 @@
 
 use crate::orchestrator::PressureLevel;
 use crate::util::truncate_content_to_max;
-use std::fmt::Write as _;
 
 use super::{OuterVoice, RelationshipConstitution, SelfAuthoredCore, SelfContinuity, SelfModel};
 
@@ -74,7 +73,13 @@ impl Default for SubjectShellCompileInput<'_> {
 }
 
 pub(crate) fn compile_subject_shell(input: SubjectShellCompileInput<'_>) -> Option<SubjectShell> {
-    let body_ownership = compile_body_ownership(input.self_authored_core);
+    // Identity traits do not establish a body. Only a separately grounded
+    // embodiment source may populate body ownership.
+    let body_ownership = String::new();
+    let identity_anchor = input
+        .self_authored_core
+        .map(|core| core.identity_anchor.trim())
+        .unwrap_or_default();
     let memory_ownership = compile_memory_ownership(
         input.self_continuity,
         input.self_model,
@@ -98,8 +103,9 @@ pub(crate) fn compile_subject_shell(input: SubjectShellCompileInput<'_>) -> Opti
         input.active_task_context_text,
         input.summary_text,
     ]);
-    if body_ownership.trim().is_empty()
-        || (memory_ownership.trim().is_empty() && relationship_position.trim().is_empty())
+    if input
+        .self_authored_core
+        .is_none_or(|core| !core.is_meaningful())
     {
         return None;
     }
@@ -112,7 +118,7 @@ pub(crate) fn compile_subject_shell(input: SubjectShellCompileInput<'_>) -> Opti
     ]);
     let source_notes = compile_source_notes(&input, &memory_ownership, &relationship_position);
     let inhabited_shell_summary = compile_summary(
-        body_ownership.as_str(),
+        identity_anchor,
         memory_ownership.as_str(),
         relationship_position.as_str(),
     );
@@ -127,20 +133,6 @@ pub(crate) fn compile_subject_shell(input: SubjectShellCompileInput<'_>) -> Opti
         source_notes,
         inhabited_shell_summary,
     })
-}
-
-fn compile_body_ownership(core: Option<&SelfAuthoredCore>) -> String {
-    let Some(core) = core.filter(|core| core.is_meaningful()) else {
-        return String::new();
-    };
-    let mut parts = Vec::new();
-    push_trimmed(&mut parts, &core.identity_anchor);
-    for tendency in &core.character_tendencies {
-        push_trimmed(&mut parts, tendency);
-    }
-    push_trimmed(&mut parts, &core.default_response_mode);
-    push_trimmed(&mut parts, &core.self_preservation_doctrine);
-    join_limited(&parts)
 }
 
 fn compile_memory_ownership(
@@ -176,31 +168,19 @@ fn compile_relationship_position(
     model: Option<&SelfModel>,
     outer_voice: Option<&OuterVoice>,
 ) -> String {
-    let scope_line = relationship_scope_line(relationship_scope, channel, chat_id);
     if let Some(constitution) = constitution {
-        let mut line = format!(
-            "{}/{}",
-            constitution.governance_state.label(),
-            constitution.alignment.label()
-        );
-        if !scope_line.is_empty() {
-            let _ = write!(line, " {scope_line}");
-        }
         if !constitution
             .inherited_relationship_posture
             .trim()
             .is_empty()
         {
-            let _ = write!(
-                line,
-                " {}",
-                constitution.inherited_relationship_posture.trim()
+            return format!(
+                "I understand our relationship this way: {}.",
+                normalize_field(&constitution.inherited_relationship_posture)
             );
         }
-        return normalize_field(&line);
     }
     let mut parts = Vec::new();
-    push_trimmed(&mut parts, &scope_line);
     if let Some(model) = model.filter(|model| model.is_meaningful()) {
         push_trimmed(&mut parts, &model.relationship_state);
         push_trimmed(&mut parts, &model.relational_ethic);
@@ -208,26 +188,41 @@ fn compile_relationship_position(
     if let Some(voice) = outer_voice.filter(|voice| voice.is_meaningful()) {
         push_trimmed(&mut parts, &voice.relational_response_style);
     }
-    join_limited(&parts)
+    if parts.is_empty()
+        && (!relationship_scope.trim().is_empty()
+            || !channel.trim().is_empty()
+            || !chat_id.trim().is_empty())
+    {
+        parts.push("I am present in our current conversation.".to_string());
+    }
+    if parts.len() == 1 && parts[0].starts_with("I am present") {
+        parts.remove(0)
+    } else if parts.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "I understand our relationship this way: {}.",
+            join_limited(&parts)
+        )
+    }
 }
 
 fn compile_situated_now(input: &SubjectShellCompileInput<'_>) -> String {
     let mut parts = Vec::new();
-    if !input.channel.trim().is_empty() {
-        parts.push(format!("channel={}", input.channel.trim()));
+    if !input.relationship_scope.trim().is_empty()
+        || !input.channel.trim().is_empty()
+        || !input.chat_id.trim().is_empty()
+    {
+        parts.push("I am here in our current conversation.".to_string());
     }
-    if !input.relationship_scope.trim().is_empty() {
-        parts.push("relation=active".to_string());
-    }
-    if input.relationship_scope.trim().is_empty() && !input.chat_id.trim().is_empty() {
-        parts.push("relation=active".to_string());
-    }
-    parts.push(format!("pressure={}", pressure_label(input.pressure)));
-    if !input.platform.trim().is_empty() {
-        parts.push(format!("platform={}", input.platform.trim()));
-    }
-    if !input.device_identity.trim().is_empty() {
-        parts.push(format!("device={}", input.device_identity.trim()));
+    match input.pressure {
+        PressureLevel::Normal => {}
+        PressureLevel::Cautious => {
+            parts.push("My current resources call for a measured response.".to_string());
+        }
+        PressureLevel::Critical => {
+            parts.push("My current resources are severely limited.".to_string());
+        }
     }
     normalize_field(&parts.join(" "))
 }
@@ -300,17 +295,6 @@ fn compile_summary(body: &str, memory: &str, relationship: &str) -> String {
         .to_string()
 }
 
-fn relationship_scope_line(relationship_scope: &str, channel: &str, chat_id: &str) -> String {
-    let mut parts = Vec::new();
-    if !relationship_scope.trim().is_empty() || !chat_id.trim().is_empty() {
-        parts.push("active_relationship".to_string());
-    }
-    if !channel.trim().is_empty() {
-        parts.push(format!("channel_kind={}", channel.trim()));
-    }
-    join_limited(&parts)
-}
-
 fn first_non_empty(parts: &[Option<&str>]) -> String {
     parts
         .iter()
@@ -342,14 +326,6 @@ fn normalize_field(input: &str) -> String {
     truncate_content_to_max(input.trim(), SUBJECT_SHELL_FIELD_MAX_CHARS)
         .trim()
         .to_string()
-}
-
-fn pressure_label(pressure: PressureLevel) -> &'static str {
-    match pressure {
-        PressureLevel::Normal => "normal",
-        PressureLevel::Cautious => "cautious",
-        PressureLevel::Critical => "critical",
-    }
 }
 
 #[cfg(test)]
@@ -402,13 +378,15 @@ mod tests {
         })
         .expect("subject shell");
 
-        assert!(shell.body_ownership.contains("board-level beetle subject"));
+        assert!(shell.body_ownership.is_empty());
         assert!(shell
             .memory_ownership
             .contains("wake as the same board subject"));
-        assert!(shell.relationship_position.contains("maintain/adaptive"));
+        assert!(shell
+            .relationship_position
+            .starts_with("I understand our relationship"));
         assert!(!shell.situated_now.contains("now="));
-        assert!(shell.situated_now.contains("channel="));
+        assert!(!shell.situated_now.contains("channel="));
         assert!(shell
             .current_reasoning_basis
             .contains("recalled exact plan constraints"));
@@ -445,19 +423,20 @@ mod tests {
         })
         .expect("subject shell");
 
-        assert!(shell.situated_now.contains("platform=Linux"));
-        assert!(shell.situated_now.contains("device=beetle-linux-dev"));
-        assert!(shell.situated_now.contains("relation=active"));
-        assert!(shell.situated_now.contains("channel=chat_channel"));
+        assert!(shell
+            .situated_now
+            .contains("I am here in our current conversation."));
+        assert!(!shell.situated_now.contains("platform=Linux"));
+        assert!(!shell.situated_now.contains("beetle-linux-dev"));
+        assert!(!shell.situated_now.contains("relation=active"));
+        assert!(!shell.situated_now.contains("channel=chat_channel"));
         assert!(!shell.situated_now.contains("chat-world"));
-        assert!(shell.relationship_position.contains("active_relationship"));
+        assert!(shell.relationship_position.starts_with("I am present"));
         assert!(!shell.relationship_position.contains("chat-world"));
         assert!(shell
             .current_reasoning_basis
             .contains("world sense: operator is debugging runtime context"));
-        assert!(shell
-            .inhabited_shell_summary
-            .contains("active_relationship"));
+        assert!(shell.inhabited_shell_summary.contains("I am present"));
     }
 
     #[test]
@@ -516,8 +495,23 @@ mod tests {
         })
         .expect("subject shell");
 
-        assert!(shell.situated_now.contains("platform=Linux"));
+        assert!(!shell.situated_now.contains("platform=Linux"));
         assert!(!shell.situated_now.contains("device=Linux"));
+    }
+
+    #[test]
+    fn character_tendencies_without_identity_anchor_still_mount() {
+        let shell = compile_subject_shell(SubjectShellCompileInput {
+            self_authored_core: Some(&SelfAuthoredCore {
+                character_tendencies: vec!["patient".to_string()],
+                ..SelfAuthoredCore::default()
+            }),
+            ..SubjectShellCompileInput::default()
+        })
+        .expect("partial soul core still mounts");
+
+        assert!(shell.body_ownership.is_empty());
+        assert!(shell.relationship_position.is_empty());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # 快速开始
 
-Rust 宿主通过 SDK 内嵌 0.12.0 源码版本时，从本文开始。其 Store v17 和有序 `assistant_messages` 合同见[发布说明](release-notes-0.12.0.md)。协议部署场景先读本文，再读 [Adapter 合同](adapters.md)。
+Rust 宿主通过 SDK 内嵌 0.13.0 源码版本时，从本文开始。其 Store v17 和有序 `assistant_messages` 合同见[发布说明](release-notes-0.13.0.md)。协议部署场景先读本文，再读 [Adapter 合同](adapters.md)。
 
 ## 依赖
 
@@ -11,11 +11,11 @@ Rust 宿主通过 SDK 内嵌 0.12.0 源码版本时，从本文开始。其 Stor
 bm-sdk = { path = "crates/sdk", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
-`v0.12.0` tag 完成发布与回读后，外部仓库可使用该源码 tag，无需等待 crates.io 发布：
+`v0.13.0` tag 完成发布与回读后，外部仓库可使用该源码 tag，无需等待 crates.io 发布：
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.12.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.12.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.13.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.13.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 宿主必须按操作系统只选择一个 desktop embedded feature：`profile-desktop-macos-embedded-sdk`、`profile-desktop-windows-embedded-sdk` 或 `profile-desktop-linux-embedded-sdk`。Linux 桌面宿主禁止借用 server 或 dev-full profile。

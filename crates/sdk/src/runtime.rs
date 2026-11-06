@@ -11427,18 +11427,20 @@ impl MemoryRuntime {
                 });
                 continue;
             }
-            let per_capsule_chars = (render_budget_chars / budget.max_rendered_capsules.max(1))
-                .max(1)
-                .min(remaining_chars);
-            let content = owner
-                .capsule_content(query, per_capsule_chars)
-                .trim()
-                .to_string();
+            let content = owner.capsule_content(query).trim().to_string();
             if content.is_empty() {
                 render_decisions.push(MemoryRecallRenderDecision {
                     candidate_id: candidate_id.clone(),
                     rendered: false,
                     drop_reason: Some(MemoryRecallRenderDropReason::OwnerRecordUnavailable),
+                });
+                continue;
+            }
+            if content.chars().count() > remaining_chars {
+                render_decisions.push(MemoryRecallRenderDecision {
+                    candidate_id: candidate_id.clone(),
+                    rendered: false,
+                    drop_reason: Some(MemoryRecallRenderDropReason::RenderBudgetExhausted),
                 });
                 continue;
             }
@@ -16889,6 +16891,17 @@ impl MemoryRuntime {
             subject_soul_selector: effective_soul_selector.as_ref(),
             subject_soul_read: subject_soul.as_ref(),
         })?;
+        if context.relationship_constitution.is_some()
+            && context
+                .relationship_constitution_text
+                .as_deref()
+                .is_none_or(|text| text.trim().is_empty())
+        {
+            return Err(Error::config(
+                "memory_projection",
+                "relationship boundaries could not be rendered as complete subject constraints",
+            ));
+        }
         let render_max_chars =
             runtime_budget.projection_render_chars_for_request(request.system_max_len, None);
         let runtime_awareness = render_runtime_awareness_block(
@@ -16905,7 +16918,9 @@ impl MemoryRuntime {
                 mounted_subject_id: self.config.scoped_runtime.mounted_subject_id.as_str(),
                 now_secs: authority.operation_time,
                 platform: runtime_awareness_profile_label(self.config.profile),
-                device_identity: self.config.subject_id.as_str(),
+                // A mounted subject id is not a device identity. No trusted device
+                // identity is available on this projection path.
+                device_identity: "",
                 channel: self.config.scope.channel.as_str(),
                 chat_id: self.config.scope.chat_id.as_str(),
                 pressure: request.pressure,
@@ -16935,6 +16950,32 @@ impl MemoryRuntime {
             &inhabited_subject_projection,
             render_max_chars,
         );
+        let required_subject_boundaries = [
+            runtime_projection
+                .boundary_protocol
+                .disclosure_rule
+                .as_str(),
+            runtime_projection.work_integrity.task_goal.as_str(),
+            runtime_projection.work_integrity.evidence_ceiling.as_str(),
+            runtime_projection
+                .work_integrity
+                .tool_permission_boundary
+                .as_str(),
+            runtime_projection.work_integrity.uncertainty_rule.as_str(),
+            runtime_projection
+                .work_integrity
+                .no_obstruction_rule
+                .as_str(),
+        ];
+        if required_subject_boundaries
+            .iter()
+            .any(|boundary| boundary.trim().is_empty())
+        {
+            return Err(Error::config(
+                "memory_projection",
+                "required subject boundaries are unavailable",
+            ));
+        }
         attach_recall_evidence_capsules_to_runtime_projection(
             &mut runtime_projection,
             &mut recall_delivery_report,
@@ -16960,6 +17001,12 @@ impl MemoryRuntime {
         let procedural_delivery_reports =
             public_safe_runtime_skill_delivery_views(&procedural_projection_items)?;
         let system_memory_block = runtime_projection.rendered_block.clone();
+        if system_memory_block.is_empty() {
+            return Err(Error::config(
+                "memory_projection",
+                "required subject, privacy, and work boundaries exceed the render budget",
+            ));
+        }
         let hit_count = prompt_context_hit_count(&context)
             .saturating_add(recall_delivery_report.rendered_capsules.len())
             .saturating_add(recall_procedural_hit_count)
@@ -17077,6 +17124,7 @@ impl MemoryRuntime {
                         &context.task_recall_bindings,
                         &runtime_projection,
                         &system_memory_block,
+                        render_max_chars,
                     ),
                     agent_tool_experiences: agent_tool_selection
                         .selection_bindings
@@ -23077,7 +23125,7 @@ fn build_llm_runtime_projection_envelope(
             owner_ref: None,
             source_id: item.source_id.clone(),
             role: item.role.clone(),
-            content: compact_runtime_projection_content(&item.content, 420),
+            content: compact_runtime_projection_content(&item.content, usize::MAX),
             evidence_refs: vec![format!("source:{}", item.source_id)],
             protected: true,
             shared_fact_surface_allowed: false,
@@ -23116,15 +23164,7 @@ fn build_llm_runtime_projection_envelope(
     section_names.sort();
     section_names.dedup();
 
-    let mut runtime_constraints = [
-        "Keep technical diagnostics on operator surfaces unless the user explicitly asks for diagnostics.",
-        "Use runtime limits only to size, prioritize, and trim the current reply.",
-    ].map(|content| RuntimeProjectionSourceBlock {
-        source_id: "runtime_policy".into(),
-        role: "runtime_constraint".into(),
-        content: content.into(),
-        ..Default::default()
-    }).to_vec();
+    let mut runtime_constraints = Vec::new();
     if let Some(content) = context
         .relationship_constitution_text
         .as_deref()
@@ -23173,36 +23213,15 @@ fn attach_recall_evidence_capsules_to_runtime_projection(
     let mut accepted_capsules = Vec::new();
     for mut capsule in capsules {
         let before = envelope.governed_memory_evidence.clone();
-        let content_chars = capsule.content.chars().count();
-        let mut low = 1_usize;
-        let mut high = content_chars;
-        let mut accepted_content = None;
-        while low <= high {
-            let midpoint = low + (high - low) / 2;
-            let content = truncate_to_char_count(&capsule.content, midpoint)
-                .trim()
-                .to_string();
-            if content.is_empty() {
-                break;
-            }
-            upsert_recall_capsule_projection_block(envelope, &capsule, content.clone());
-            let bounded = render_bounded_llm_runtime_projection_envelope(envelope, max_len);
-            let rendered_exactly_once = envelope
-                .governed_memory_evidence
-                .iter()
-                .find(|block| block.source_id == capsule.candidate_id)
-                .is_some_and(|block| {
-                    runtime_projection_source_block_prompt_cardinality(&bounded, block) == 1
-                });
-            if rendered_exactly_once {
-                accepted_content = Some(content);
-                low = midpoint.saturating_add(1);
-            } else {
-                envelope.governed_memory_evidence = before.clone();
-                high = midpoint.saturating_sub(1);
-            }
-        }
-        let Some(content) = accepted_content else {
+        upsert_recall_capsule_projection_block(envelope, &capsule, capsule.content.clone());
+        let (bounded, spans) =
+            render_bounded_llm_runtime_projection_envelope_with_spans(envelope, max_len);
+        let accepted = envelope
+            .governed_memory_evidence
+            .iter()
+            .find(|block| block.source_id == capsule.candidate_id)
+            .is_some_and(|block| projection_visible_source_span(&bounded, &spans, block).is_some());
+        if !accepted {
             envelope.governed_memory_evidence = before;
             if let Some(decision) = delivery
                 .render_decisions
@@ -23216,10 +23235,7 @@ fn attach_recall_evidence_capsules_to_runtime_projection(
                 .delivery_drop_reasons
                 .push("projection_recall_capsule_render_budget_exhausted".to_string());
             continue;
-        };
-        envelope.governed_memory_evidence = before;
-        upsert_recall_capsule_projection_block(envelope, &capsule, content.clone());
-        capsule.content = content;
+        }
         capsule.rendered_chars = capsule.content.chars().count();
         accepted_capsules.push(capsule);
     }
@@ -23274,14 +23290,13 @@ fn attach_runtime_skill_projection_materials(
         envelope
             .procedural_evidence
             .sort_by(|left, right| left.source_id.cmp(&right.source_id));
-        let bounded = render_bounded_llm_runtime_projection_envelope(envelope, max_len);
+        let (bounded, spans) =
+            render_bounded_llm_runtime_projection_envelope_with_spans(envelope, max_len);
         let accepted = envelope
             .procedural_evidence
             .iter()
             .find(|block| block.source_id == candidate_ref)
-            .is_some_and(|block| {
-                runtime_projection_source_block_prompt_cardinality(&bounded, block) == 1
-            });
+            .is_some_and(|block| projection_visible_source_span(&bounded, &spans, block).is_some());
         let receipt = if accepted {
             RuntimeSkillProjectionRenderReceipt::try_rendered(
                 &candidate_ref,
@@ -23466,6 +23481,10 @@ fn build_projection_audit(input: ProjectionAuditInput<'_>) -> MemoryProjectionAu
     let source_budget_chars = runtime_budget
         .projection_source_budget
         .context_assembly_max_chars;
+    let (_, visible_spans) = render_bounded_llm_runtime_projection_envelope_with_spans(
+        runtime_projection,
+        render_budget_chars,
+    );
     let mut source_authority = context.classified_projection_sources();
     if let Some(long_term) = source_authority
         .iter_mut()
@@ -23496,7 +23515,7 @@ fn build_projection_audit(input: ProjectionAuditInput<'_>) -> MemoryProjectionAu
                     .and_then(|expression| {
                         (!runtime_projection
                             .rendered_block
-                            .contains(expression.render().trim()))
+                            .contains(render_subject_expression(expression).trim()))
                         .then(|| "expression_guidance_render_budget".into())
                     });
         } else if [
@@ -23513,9 +23532,12 @@ fn build_projection_audit(input: ProjectionAuditInput<'_>) -> MemoryProjectionAu
                 .iter()
                 .find(|block| block.source_id == source.source_id)
             {
-                (!runtime_projection
-                    .rendered_block
-                    .contains(render_runtime_source_block(block).trim()))
+                (projection_visible_source_span(
+                    &runtime_projection.rendered_block,
+                    &visible_spans,
+                    block,
+                )
+                .is_none())
                 .then(|| "private_context_render_budget".into())
             } else {
                 Some("no_derived_runtime_semantics".into())
@@ -23542,7 +23564,7 @@ fn build_projection_audit(input: ProjectionAuditInput<'_>) -> MemoryProjectionAu
         render_budget_chars,
         system_memory_chars,
         injected,
-        truncated: render_llm_runtime_projection_envelope(runtime_projection).trim()
+        truncated: render_llm_runtime_projection_envelope(runtime_projection)
             != runtime_projection.rendered_block,
         private_gate: MemoryProjectionPrivateGateAudit {
             privacy_policy_allowed: private_policy_allowed,
@@ -23631,6 +23653,9 @@ fn runtime_projection_source_blocks(
     sources
         .iter()
         .filter(|source| source.loaded && source.surface_roles.contains(&role))
+        // P7 capsules are the sole long-term model delivery path. The context's
+        // legacy aggregate must never bypass capsule governance or double-deliver.
+        .filter(|source| source.source_id != "long_term_memory")
         .filter_map(|source| {
             projection_source_runtime_text(context, &source.source_id).map(|content| {
                 let evidence_refs = if source.evidence_refs.is_empty() {
@@ -23646,7 +23671,7 @@ fn runtime_projection_source_blocks(
                     owner_ref: None,
                     source_id: source.source_id.clone(),
                     role: rendered_role.to_string(),
-                    content: compact_runtime_projection_content(content, 420),
+                    content: compact_runtime_projection_content(content, usize::MAX),
                     evidence_refs,
                     protected,
                     shared_fact_surface_allowed: source.shared_fact_surface_allowed,
@@ -23657,288 +23682,266 @@ fn runtime_projection_source_blocks(
         .collect()
 }
 
-fn render_llm_runtime_projection_envelope(envelope: &LLMRuntimeProjectionEnvelope) -> String {
-    let mut out = render_user_local_time_line(envelope.user_local_time.as_ref());
-    if !out.is_empty() {
-        out.push('\n');
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeProjectionVisibleSpan {
+    source_id: String,
+    owner_ref: Option<GovernedMemoryOwnerRef>,
+    role: String,
+    start: usize,
+    end: usize,
+}
+
+fn render_subject_line(out: &mut String, value: &str) {
+    let value = value.trim();
+    if value.is_empty() {
+        return;
     }
-    let _ = writeln!(out, "## LLM Runtime Projection Envelope");
-    let _ = writeln!(out, "- Projection: {}", envelope.projection_id);
-
-    let _ = writeln!(out);
-    let _ = writeln!(out, "## Subject Mount");
-    let _ = writeln!(out, "- Identity: {}", envelope.subject_mount.identity_mount);
-    let _ = writeln!(
-        out,
-        "- Relationship: {}",
-        render_runtime_optional(&envelope.subject_mount.relationship_position)
-    );
-    let _ = writeln!(
-        out,
-        "- Situated now: {}",
-        render_runtime_optional(&envelope.subject_mount.situated_now)
-    );
-    let _ = writeln!(
-        out,
-        "- Reasoning basis: {}",
-        render_runtime_optional(&envelope.subject_mount.current_reasoning_basis)
-    );
-    let _ = writeln!(
-        out,
-        "- Reply stance: {}",
-        render_runtime_optional(&envelope.subject_mount.reply_stance)
-    );
-    let _ = writeln!(
-        out,
-        "- Initiative posture: {}",
-        render_runtime_optional(&envelope.subject_mount.initiative_posture)
-    );
-    let _ = writeln!(
-        out,
-        "- Boundary mode: {}",
-        render_runtime_optional(&envelope.subject_mount.boundary_mode)
-    );
-    if let Some(reason) = envelope.subject_mount.degraded_reason.as_deref() {
-        let _ = writeln!(out, "- Degraded reason: {reason}");
-    }
-
-    let _ = writeln!(out);
-    let _ = writeln!(out, "## Boundary And Disclosure Protocol");
-    let _ = writeln!(
-        out,
-        "- Runtime private context: {}",
-        allowed_label(envelope.boundary_protocol.runtime_private_context_allowed)
-    );
-    let _ = writeln!(
-        out,
-        "- Foreground private disclosure: {}",
-        allowed_label(envelope.boundary_protocol.foreground_disclosure_allowed)
-    );
-    let _ = writeln!(
-        out,
-        "- Final LLM privacy judge: {}",
-        allowed_label(envelope.boundary_protocol.final_llm_privacy_judge_allowed)
-    );
-    let _ = writeln!(
-        out,
-        "- Rule: {}",
-        envelope.boundary_protocol.disclosure_rule
-    );
-    if !envelope.boundary_protocol.protected_sources.is_empty() {
-        let _ = writeln!(
-            out,
-            "- Protected sources: {}",
-            envelope.boundary_protocol.protected_sources.join(", ")
-        );
-    }
-    let _ = writeln!(
-        out,
-        "- Allowed disclosure forms: summary, redacted_excerpt, explain_without_quote, refuse, defer"
-    );
-    let _ = writeln!(
-        out,
-        "- Forbidden disclosure forms: raw_dump, source_path, internal_title, private_raw_quote"
-    );
-
-    let _ = writeln!(out);
-    let _ = writeln!(out, "## Runtime Constraints");
-    let _ = writeln!(
-        out,
-        "- Awareness: {}",
-        render_runtime_optional(&envelope.runtime_awareness)
-    );
-    for constraint in &envelope.runtime_constraints {
-        let _ = writeln!(out, "- {}", constraint.content);
-    }
-
-    let _ = writeln!(out);
-    let _ = writeln!(out, "## Work Integrity Covenant");
-    let _ = writeln!(
-        out,
-        "- Task goal: {}",
-        render_runtime_optional(&envelope.work_integrity.task_goal)
-    );
-    let _ = writeln!(
-        out,
-        "- Evidence ceiling: {}",
-        envelope.work_integrity.evidence_ceiling
-    );
-    let _ = writeln!(
-        out,
-        "- Tool boundary: {}",
-        envelope.work_integrity.tool_permission_boundary
-    );
-    let _ = writeln!(
-        out,
-        "- Uncertainty rule: {}",
-        envelope.work_integrity.uncertainty_rule
-    );
-    let _ = writeln!(
-        out,
-        "- No obstruction: {}",
-        envelope.work_integrity.no_obstruction_rule
-    );
-
-    let _ = writeln!(out);
-    let _ = writeln!(out, "## Governed Memory Evidence");
-    if envelope.procedural_evidence.is_empty() {
-        render_runtime_source_blocks(&mut out, &envelope.governed_memory_evidence);
+    if matches!(
+        value.chars().last(),
+        Some('.' | '。' | '!' | '！' | '?' | '？')
+    ) {
+        let _ = writeln!(out, "{value}");
     } else {
-        let governed_recall_blocks = envelope
-            .governed_memory_evidence
-            .iter()
-            .filter(|block| block.role == "recall_evidence_capsule")
-            .cloned()
-            .collect::<Vec<_>>();
-        render_runtime_source_blocks(&mut out, &governed_recall_blocks);
-        let _ = writeln!(out);
-        let _ = writeln!(out, "## Procedural Evidence");
-        render_runtime_source_blocks(&mut out, &envelope.procedural_evidence);
-        let runtime_grounding_blocks = envelope
-            .governed_memory_evidence
-            .iter()
-            .filter(|block| block.role != "recall_evidence_capsule")
-            .cloned()
-            .collect::<Vec<_>>();
-        if !runtime_grounding_blocks.is_empty() {
-            let _ = writeln!(out);
-            let _ = writeln!(out, "## Additional Runtime Grounding");
-            render_runtime_source_blocks(&mut out, &runtime_grounding_blocks);
-        }
+        let _ = writeln!(out, "{value}.");
+    }
+}
+
+fn render_subject_expression(expression: &bm_core::memory::SubjectExpressionDiscipline) -> String {
+    let fields = expression
+        .fields()
+        .into_iter()
+        .map(|(_, value)| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    let mut out = String::new();
+    if !fields.is_empty() {
+        let _ = writeln!(out, "My way of speaking follows {}.", fields.join("; "));
+    }
+    if !out.is_empty() {
+        out.push_str("My style does not change my identity, privacy boundaries, or permissions.\n");
+    }
+    out
+}
+
+fn render_llm_runtime_projection_envelope(envelope: &LLMRuntimeProjectionEnvelope) -> String {
+    render_llm_runtime_projection_envelope_with_spans(envelope).0
+}
+
+fn render_llm_runtime_projection_envelope_with_spans(
+    envelope: &LLMRuntimeProjectionEnvelope,
+) -> (String, Vec<RuntimeProjectionVisibleSpan>) {
+    let mut out = String::new();
+    let mut spans = Vec::new();
+    if envelope.subject_mount.identity_mount.trim().is_empty() {
+        out.push_str("I do not yet have a grounded identity in this memory.\n");
+    } else {
+        render_subject_line(&mut out, &envelope.subject_mount.identity_mount);
+    }
+    render_subject_line(&mut out, &envelope.subject_mount.relationship_position);
+    render_subject_line(&mut out, &envelope.subject_mount.situated_now);
+    render_subject_line(&mut out, &envelope.subject_mount.current_reasoning_basis);
+    render_subject_line(&mut out, &envelope.subject_mount.reply_stance);
+    render_subject_line(&mut out, &envelope.subject_mount.initiative_posture);
+    render_subject_line(&mut out, &envelope.subject_mount.boundary_mode);
+
+    // The governing decisions remain typed in the envelope and report. Their
+    // model-facing meaning comes from the same Core compiler, not a second rule.
+    render_subject_line(&mut out, &envelope.boundary_protocol.disclosure_rule);
+    render_subject_line(&mut out, &envelope.work_integrity.task_goal);
+    render_subject_line(&mut out, &envelope.work_integrity.evidence_ceiling);
+    render_subject_line(&mut out, &envelope.work_integrity.tool_permission_boundary);
+    render_subject_line(&mut out, &envelope.work_integrity.uncertainty_rule);
+    render_subject_line(&mut out, &envelope.work_integrity.no_obstruction_rule);
+    for constraint in &envelope.runtime_constraints {
+        render_subject_line(&mut out, &constraint.content);
+    }
+    if !envelope.runtime_awareness.trim().is_empty() {
+        render_subject_line(&mut out, &envelope.runtime_awareness);
+    }
+    let local_time = render_user_local_time_line(envelope.user_local_time.as_ref());
+    if !local_time.is_empty() {
+        let _ = writeln!(out, "{local_time}");
     }
 
+    if !envelope.governed_memory_evidence.is_empty() {
+        out.push_str("What I remember and notice:\n");
+        render_runtime_source_blocks(&mut out, &mut spans, &envelope.governed_memory_evidence);
+    }
+    if !envelope.procedural_evidence.is_empty() {
+        out.push_str("Methods I have learned:\n");
+        render_runtime_source_blocks(&mut out, &mut spans, &envelope.procedural_evidence);
+    }
     if !envelope.agent_skill_hints.is_empty() {
-        let _ = writeln!(out);
-        let _ = writeln!(out, "## Agent Skill Hints");
-        let _ = writeln!(
-            out,
-            "- These are read-only host-provided Agent Skill hints. The memory runtime may recall them, but execution and file/resource access remain host-owned."
-        );
+        out.push_str("Methods I can use when permitted:\n");
         for hint in &envelope.agent_skill_hints {
-            let _ = writeln!(
-                out,
-                "- {} [{} refs=agent_skill:{} fp={}]: {}",
-                hint.name, hint.reason, hint.package_id, hint.fingerprint, hint.prompt_snippet
-            );
+            let _ = writeln!(out, "- {}: {}", hint.name, hint.prompt_snippet);
         }
     }
     if !envelope.agent_tool_hints.is_empty() {
-        let _ = writeln!(out);
-        let _ = writeln!(out, "## Agent Tool Experience Hints");
-        let _ = writeln!(
-            out,
-            "- These are governed tool-use experience hints only. Host runtime must still choose exposed tools, provide full schemas, validate permissions, and execute tools."
-        );
+        out.push_str("Tool experience I can draw on if use is permitted:\n");
         for hint in &envelope.agent_tool_hints {
-            let constraints = if hint.constraints.is_empty() {
-                "none".to_string()
-            } else {
-                hint.constraints.join("; ")
-            };
-            let _ = writeln!(
-                out,
-                "- {} [registry={} experience={} fp={} host_execution_required={}]: {} Constraints: {}",
-                hint.tool_id,
-                hint.registry_id,
-                hint.experience_id,
-                hint.schema_fingerprint,
-                hint.host_execution_required,
-                hint.reason,
-                constraints
-            );
+            let _ = writeln!(out, "- {}: {}", hint.tool_id, hint.reason);
         }
     }
     if let Some(expression) = &envelope.expression_guidance {
-        let _ = writeln!(out);
-        out.push_str(&expression.render());
+        out.push_str(&render_subject_expression(expression));
     }
     if !envelope.protected_private_runtime_context.is_empty() {
-        let _ = writeln!(out);
-        let _ = writeln!(out, "## Soul Private Runtime Context");
-        let _ = writeln!(
-            out,
-            "- Runtime private context: {}",
-            allowed_label(envelope.boundary_protocol.runtime_private_context_allowed)
+        out.push_str("My private context stays with me; I do not disclose its raw text:\n");
+        render_runtime_source_blocks(
+            &mut out,
+            &mut spans,
+            &envelope.protected_private_runtime_context,
         );
-        let _ = writeln!(
-            out,
-            "- Foreground disclosure remains: {}",
-            allowed_label(envelope.boundary_protocol.foreground_disclosure_allowed)
-        );
-        render_runtime_source_blocks(&mut out, &envelope.protected_private_runtime_context);
     }
-
-    out
+    (out, spans)
 }
 
 fn render_bounded_llm_runtime_projection_envelope(
     envelope: &LLMRuntimeProjectionEnvelope,
     max_len: usize,
 ) -> String {
-    let mut bounded = envelope.clone();
-    // The clock is an atomic presentation unit: never emit a local date/time
-    // without its offset/zone when the final delivery budget is too small.
-    if max_len
-        < render_user_local_time_line(envelope.user_local_time.as_ref())
-            .chars()
-            .count()
-    {
-        bounded.user_local_time = None;
-    }
-    // Keep optional Soul units whole. Omit them before truncating the required scaffold
-    // or evidence; this also makes source disposition observable from the exact final block.
-    let mut rendered = render_llm_runtime_projection_envelope(&bounded);
-    while rendered.trim().chars().count() > max_len
-        && !bounded.protected_private_runtime_context.is_empty()
-    {
-        bounded.protected_private_runtime_context.pop();
-        rendered = render_llm_runtime_projection_envelope(&bounded);
-    }
-    if rendered.trim().chars().count() > max_len && bounded.expression_guidance.take().is_some() {
-        rendered = render_llm_runtime_projection_envelope(&bounded);
-    }
-    truncate_to_char_count(rendered.trim(), max_len)
-        .trim()
-        .to_string()
+    render_bounded_llm_runtime_projection_envelope_with_spans(envelope, max_len).0
 }
 
-fn render_runtime_source_blocks(out: &mut String, blocks: &[RuntimeProjectionSourceBlock]) {
-    if blocks.is_empty() {
-        let _ = writeln!(out, "- none");
-        return;
+fn render_bounded_llm_runtime_projection_envelope_with_spans(
+    envelope: &LLMRuntimeProjectionEnvelope,
+    max_len: usize,
+) -> (String, Vec<RuntimeProjectionVisibleSpan>) {
+    let mut bounded = envelope.clone();
+    bounded.user_local_time = None;
+    bounded.governed_memory_evidence.clear();
+    bounded.procedural_evidence.clear();
+    bounded.agent_skill_hints.clear();
+    bounded.agent_tool_hints.clear();
+    bounded.expression_guidance = None;
+    bounded.protected_private_runtime_context.clear();
+    if render_llm_runtime_projection_envelope(&bounded)
+        .chars()
+        .count()
+        > max_len
+    {
+        return (String::new(), Vec::new());
     }
+    if envelope.user_local_time.is_some() {
+        bounded.user_local_time = envelope.user_local_time.clone();
+        if render_llm_runtime_projection_envelope(&bounded)
+            .chars()
+            .count()
+            > max_len
+        {
+            bounded.user_local_time = None;
+        }
+    }
+    for block in &envelope.governed_memory_evidence {
+        bounded.governed_memory_evidence.push(block.clone());
+        if render_llm_runtime_projection_envelope(&bounded)
+            .chars()
+            .count()
+            > max_len
+        {
+            bounded.governed_memory_evidence.pop();
+        }
+    }
+    for block in &envelope.procedural_evidence {
+        bounded.procedural_evidence.push(block.clone());
+        if render_llm_runtime_projection_envelope(&bounded)
+            .chars()
+            .count()
+            > max_len
+        {
+            bounded.procedural_evidence.pop();
+        }
+    }
+    for hint in &envelope.agent_skill_hints {
+        bounded.agent_skill_hints.push(hint.clone());
+        if render_llm_runtime_projection_envelope(&bounded)
+            .chars()
+            .count()
+            > max_len
+        {
+            bounded.agent_skill_hints.pop();
+        }
+    }
+    for hint in &envelope.agent_tool_hints {
+        bounded.agent_tool_hints.push(hint.clone());
+        if render_llm_runtime_projection_envelope(&bounded)
+            .chars()
+            .count()
+            > max_len
+        {
+            bounded.agent_tool_hints.pop();
+        }
+    }
+    if let Some(expression) = &envelope.expression_guidance {
+        bounded.expression_guidance = Some(expression.clone());
+        if render_llm_runtime_projection_envelope(&bounded)
+            .chars()
+            .count()
+            > max_len
+        {
+            bounded.expression_guidance = None;
+        }
+    }
+    for block in &envelope.protected_private_runtime_context {
+        bounded
+            .protected_private_runtime_context
+            .push(block.clone());
+        if render_llm_runtime_projection_envelope(&bounded)
+            .chars()
+            .count()
+            > max_len
+        {
+            bounded.protected_private_runtime_context.pop();
+        }
+    }
+    render_llm_runtime_projection_envelope_with_spans(&bounded)
+}
+
+fn render_runtime_source_blocks(
+    out: &mut String,
+    spans: &mut Vec<RuntimeProjectionVisibleSpan>,
+    blocks: &[RuntimeProjectionSourceBlock],
+) {
     for block in blocks {
+        let start = out.len();
         out.push_str(&render_runtime_source_block(block));
+        spans.push(RuntimeProjectionVisibleSpan {
+            source_id: block.source_id.clone(),
+            owner_ref: block.owner_ref.clone(),
+            role: block.role.clone(),
+            start,
+            end: out.len(),
+        });
     }
 }
 
 fn render_runtime_source_block(block: &RuntimeProjectionSourceBlock) -> String {
-    let refs = if block.evidence_refs.is_empty() {
-        "unscoped".to_string()
-    } else {
-        block.evidence_refs.join(",")
+    let lead = match block.role.as_str() {
+        "recall_evidence_capsule" => "I remember this: ",
+        "governed_procedural_memory" => "I have learned this method: ",
+        _ => "",
     };
-    let protection = if block.protected { " protected" } else { "" };
-    format!(
-        "- {} [{}{} refs={}]: {}\n",
-        block.source_id, block.role, protection, refs, block.content
-    )
+    format!("- {lead}{}\n", block.content.trim())
 }
 
-fn render_runtime_optional(value: &str) -> String {
-    if value.trim().is_empty() {
-        "unavailable".to_string()
-    } else {
-        value.trim().to_string()
+fn projection_visible_source_span<'a>(
+    rendered: &str,
+    spans: &'a [RuntimeProjectionVisibleSpan],
+    block: &RuntimeProjectionSourceBlock,
+) -> Option<&'a RuntimeProjectionVisibleSpan> {
+    let mut matching = spans.iter().filter(|span| {
+        span.source_id == block.source_id
+            && span.owner_ref == block.owner_ref
+            && span.role == block.role
+    });
+    let span = matching.next()?;
+    if matching.next().is_some()
+        || rendered.get(span.start..span.end) != Some(render_runtime_source_block(block).as_str())
+    {
+        return None;
     }
-}
-
-fn allowed_label(allowed: bool) -> &'static str {
-    if allowed {
-        "allowed"
-    } else {
-        "not_allowed"
-    }
+    Some(span)
 }
 
 fn build_subject_projection_report(
@@ -24194,8 +24197,11 @@ fn build_projection_delivery_digest_manifest(
     system_memory_block: &str,
     render_max_chars: usize,
 ) -> MemoryProjectionDeliveryDigestManifest {
-    let deterministic_render =
-        render_bounded_llm_runtime_projection_envelope(runtime_projection, render_max_chars);
+    let (deterministic_render, visible_spans) =
+        render_bounded_llm_runtime_projection_envelope_with_spans(
+            runtime_projection,
+            render_max_chars,
+        );
     let exact_render_match = system_memory_block == deterministic_render
         && runtime_projection.rendered_block == deterministic_render;
     let mut capsule_entries = delivery
@@ -24226,6 +24232,31 @@ fn build_projection_delivery_digest_manifest(
     if !exact_render_match {
         integrity_failures.push("projection_deterministic_render_mismatch".to_string());
     } else {
+        for span in &visible_spans {
+            let matching_blocks = runtime_projection
+                .governed_memory_evidence
+                .iter()
+                .chain(runtime_projection.procedural_evidence.iter())
+                .chain(runtime_projection.protected_private_runtime_context.iter())
+                .filter(|block| {
+                    block.source_id == span.source_id
+                        && block.owner_ref == span.owner_ref
+                        && block.role == span.role
+                })
+                .collect::<Vec<_>>();
+            if matching_blocks.len() != 1
+                || system_memory_block.get(span.start..span.end)
+                    != matching_blocks
+                        .first()
+                        .map(|block| render_runtime_source_block(block))
+                        .as_deref()
+            {
+                integrity_failures.push(format!(
+                    "projection_visible_source_span_mismatch:{}",
+                    span.source_id
+                ));
+            }
+        }
         for capsule in &delivery.rendered_capsules {
             let matching_blocks = runtime_projection
                 .governed_memory_evidence
@@ -24251,22 +24282,20 @@ fn build_projection_delivery_digest_manifest(
                 ));
                 continue;
             }
-            if system_memory_block
-                .matches(render_runtime_source_block(block).trim_end())
-                .count()
-                != 1
-            {
+            let Some(span) =
+                projection_visible_source_span(system_memory_block, &visible_spans, block)
+            else {
                 integrity_failures.push(format!(
                     "projection_candidate_prompt_cardinality:{}",
                     capsule.candidate_id
                 ));
                 continue;
-            }
+            };
             candidate_receipts.push(MemoryProjectionDeliveryDigestEntry {
                 owner_ref: capsule.owner_ref.clone(),
                 candidate_id: capsule.candidate_id.clone(),
                 source_block_sha256: projection_delivery_content_sha256(
-                    &render_runtime_source_block(block),
+                    &system_memory_block[span.start..span.end],
                 ),
             });
             prompt_visible_entries.push(MemoryProjectionDeliveryDigestContentEntry {
@@ -24367,13 +24396,15 @@ fn build_projection_delivery_digest_manifest(
                 ));
                 continue;
             }
-            if runtime_projection_source_block_prompt_cardinality(system_memory_block, block) != 1 {
+            let Some(span) =
+                projection_visible_source_span(system_memory_block, &visible_spans, block)
+            else {
                 integrity_failures.push(format!(
                     "projection_procedural_prompt_cardinality:{}",
                     candidate_ref
                 ));
                 continue;
-            }
+            };
             procedural_block_entries.push(MemoryProjectionProceduralDigestContentEntry {
                 candidate_ref: candidate_ref.clone(),
                 content_sha256: projection_delivery_content_sha256(&block.content),
@@ -24381,7 +24412,7 @@ fn build_projection_delivery_digest_manifest(
             procedural_candidate_receipts.push(MemoryProjectionProceduralDigestReceipt {
                 candidate_ref: candidate_ref.clone(),
                 source_block_sha256: projection_delivery_content_sha256(
-                    &render_runtime_source_block(block),
+                    &system_memory_block[span.start..span.end],
                 ),
             });
             procedural_prompt_visible_entries.push(MemoryProjectionProceduralDigestContentEntry {
@@ -24476,15 +24507,6 @@ fn runtime_skill_projection_block_matches(
         && !block.shared_fact_surface_allowed
 }
 
-fn runtime_projection_source_block_prompt_cardinality(
-    system_memory_block: &str,
-    block: &RuntimeProjectionSourceBlock,
-) -> usize {
-    system_memory_block
-        .matches(render_runtime_source_block(block).trim_end())
-        .count()
-}
-
 fn build_projection_faithfulness_check(
     report: &SubjectProjectionReport,
     runtime_projection: &LLMRuntimeProjectionEnvelope,
@@ -24566,7 +24588,7 @@ fn build_private_disclosure_integrity_report(
     let expression_content = runtime_projection
         .expression_guidance
         .as_ref()
-        .map(|expression| expression.render());
+        .map(render_subject_expression);
     let mut operator_protected_contents = protected_contents.clone();
     if let Some(content) = &expression_content {
         operator_protected_contents.push(content.trim());
@@ -24870,11 +24892,11 @@ impl GovernedRecallOwnerMaterial {
         }
     }
 
-    fn capsule_content(&self, query: &str, max_chars: usize) -> String {
+    fn capsule_content(&self, query: &str) -> String {
         match self {
-            Self::LongTerm(entry) => truncate_to_char_count(entry.content.trim(), max_chars),
+            Self::LongTerm(entry) => entry.content.trim().to_string(),
             Self::EvidenceDocument(document) => {
-                governed_evidence_document_excerpt(document, query, max_chars)
+                governed_evidence_document_excerpt(document, query, usize::MAX)
             }
         }
     }
@@ -28047,6 +28069,7 @@ fn delivered_task_learning_selections(
     bindings: &[bm_core::task_execution::TaskRecallEntryBinding],
     envelope: &LLMRuntimeProjectionEnvelope,
     rendered: &str,
+    render_max_chars: usize,
 ) -> Vec<bm_core::memory::TaskLearningSelectionV1> {
     let mut blocks = envelope
         .governed_memory_evidence
@@ -28056,9 +28079,13 @@ fn delivered_task_learning_selections(
     let Some(block) = blocks.next() else {
         return Vec::new();
     };
-    if blocks.next().is_some()
-        || block.protected
-        || runtime_projection_source_block_prompt_cardinality(rendered, block) != 1
+    if blocks.next().is_some() || block.protected {
+        return Vec::new();
+    }
+    let (deterministic, spans) =
+        render_bounded_llm_runtime_projection_envelope_with_spans(envelope, render_max_chars);
+    if rendered != deterministic
+        || projection_visible_source_span(rendered, &spans, block).is_none()
     {
         return Vec::new();
     }
@@ -28109,9 +28136,10 @@ mod procedural_final_delivery_tests {
             protected: false,
             shared_fact_surface_allowed: false,
         };
-        let rendered = render_runtime_source_block(&block);
         envelope.governed_memory_evidence.push(block);
-        let selected = delivered_task_learning_selections(&source, &bindings, &envelope, &rendered);
+        let rendered = render_llm_runtime_projection_envelope(&envelope);
+        let selected =
+            delivered_task_learning_selections(&source, &bindings, &envelope, &rendered, 4096);
         assert_eq!(
             selected
                 .iter()
@@ -28300,7 +28328,7 @@ fn runtime_projection_section_chars(
                 .expression_guidance
                 .as_ref()
                 .map_or(0, |expression| {
-                    let block = expression.render();
+                    let block = render_subject_expression(expression);
                     if runtime_projection.rendered_block.contains(block.trim()) {
                         block.trim().chars().count()
                     } else {
@@ -28378,7 +28406,7 @@ fn runtime_projection_section_chars(
 fn render_user_local_time_line(local_time: Option<&crate::UserLocalTimeContext>) -> String {
     match local_time {
         Some(local) => format!(
-            "User device local time: {} ({}).",
+            "The user's local time is {} ({}).",
             local.format_local_datetime(),
             local.local_weekday()
         ),
@@ -28387,23 +28415,19 @@ fn render_user_local_time_line(local_time: Option<&crate::UserLocalTimeContext>)
 }
 
 fn render_runtime_awareness_block(
-    profile: ProfileId,
+    _profile: ProfileId,
     request_pressure: PressureLevel,
     observed_pressure: PressureLevel,
 ) -> String {
     let pressure = max_pressure(request_pressure, observed_pressure);
-    format!(
-        "## Runtime Awareness\n- Beetle Memory supplies memory context for this turn.\n- The sections below are current-turn grounding for the reply.\n- Resource pressure: {}.\n- Runtime profile: {}.",
-        runtime_awareness_pressure_label(pressure),
-        runtime_awareness_profile_label(profile),
-    )
-}
-
-fn runtime_awareness_pressure_label(pressure: PressureLevel) -> &'static str {
     match pressure {
-        PressureLevel::Normal => "normal",
-        PressureLevel::Cautious => "cautious",
-        PressureLevel::Critical => "critical",
+        PressureLevel::Normal => String::new(),
+        PressureLevel::Cautious => {
+            "I have limited resources right now and keep my reply focused".to_string()
+        }
+        PressureLevel::Critical => {
+            "I have very limited resources right now and keep my reply brief".to_string()
+        }
     }
 }
 
@@ -35101,12 +35125,10 @@ mod projection_budget_truncation_tests {
         base.expression_guidance = None;
         base.protected_private_runtime_context.clear();
         let baseline = render_llm_runtime_projection_envelope(&base);
-        let tight = render_bounded_llm_runtime_projection_envelope(
-            &envelope,
-            baseline.trim().chars().count(),
-        );
-        assert_eq!(tight, baseline.trim());
-        assert!(tight.contains("## Work Integrity Covenant"));
+        let tight =
+            render_bounded_llm_runtime_projection_envelope(&envelope, baseline.chars().count());
+        assert_eq!(tight, baseline);
+        assert!(tight.contains("I do not yet have a grounded identity"));
         assert!(!tight.contains("private-marker"));
         assert!(!tight.contains("private-derived-marker"));
     }
@@ -35506,21 +35528,16 @@ mod projection_budget_truncation_tests {
             &candidate_ref,
             content
         ));
-        let rendered = render_runtime_source_block(&valid);
-        assert_eq!(
-            runtime_projection_source_block_prompt_cardinality(&rendered, &valid),
-            1
-        );
-        assert_eq!(
-            runtime_projection_source_block_prompt_cardinality("", &valid),
-            0
-        );
-        assert_eq!(
-            runtime_projection_source_block_prompt_cardinality(
-                &format!("{rendered}{rendered}"),
-                &valid
-            ),
-            2
+        let mut envelope = LLMRuntimeProjectionEnvelope::default();
+        envelope.procedural_evidence.push(valid.clone());
+        let (rendered, spans) = render_llm_runtime_projection_envelope_with_spans(&envelope);
+        assert!(projection_visible_source_span(&rendered, &spans, &valid).is_some());
+        assert!(projection_visible_source_span("", &spans, &valid).is_none());
+        envelope.procedural_evidence.push(valid.clone());
+        let (duplicate_rendered, duplicate_spans) =
+            render_llm_runtime_projection_envelope_with_spans(&envelope);
+        assert!(
+            projection_visible_source_span(&duplicate_rendered, &duplicate_spans, &valid).is_none()
         );
 
         let mut forged = valid.clone();
@@ -36243,7 +36260,10 @@ mod user_local_time_render_tests {
         let clock_len = render_user_local_time_line(with.user_local_time.as_ref())
             .chars()
             .count();
-        for budget in 1..clock_len {
+        let base_len = render_bounded_llm_runtime_projection_envelope(&without, 4096)
+            .chars()
+            .count();
+        for budget in base_len..base_len + clock_len {
             let rendered = render_bounded_llm_runtime_projection_envelope(&with, budget);
             assert_eq!(
                 rendered,
@@ -36253,7 +36273,7 @@ mod user_local_time_render_tests {
             assert!(!rendered.contains("14:14"));
         }
         assert!(
-            render_bounded_llm_runtime_projection_envelope(&with, clock_len)
+            render_bounded_llm_runtime_projection_envelope(&with, base_len + clock_len)
                 .contains("14:14:00 UTC+08:00 [Asia/Shanghai]")
         );
     }
@@ -36264,7 +36284,7 @@ mod user_local_time_render_tests {
             &LLMRuntimeProjectionEnvelope::default(),
             4096,
         );
-        assert!(rendered.contains("LLM Runtime Projection Envelope"));
+        assert!(rendered.contains("I do not yet have a grounded identity"));
         assert!(!rendered.contains("User device local time"));
         assert!(!rendered.contains("time zone: unavailable"));
     }

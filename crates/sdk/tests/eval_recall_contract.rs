@@ -1462,7 +1462,7 @@ fn projection_consumes_production_evidence_capsules_without_render_budget_growth
         &runtime,
         vec![long_term_draft(
             "release capsule evidence",
-            "Release capsule evidence must reach governed memory evidence.",
+            "Release capsule evidence: 阿音养了一只叫团子的猫。",
             "external_eval:capsule",
         )],
     );
@@ -1527,17 +1527,22 @@ fn projection_consumes_production_evidence_capsules_without_render_budget_growth
         .provider_payload()
         .system_memory_block()
         .contains("external_eval:capsule"));
+    let block = projection.provider_payload().system_memory_block();
+    assert!(
+        block.contains("I remember this: Release capsule evidence: 阿音养了一只叫团子的猫。"),
+        "a third-person source fact must be carried as the subject's memory: {block}"
+    );
+    assert!(
+        block.contains("I do not use or disclose protected private context")
+            || block.contains("I may use protected context")
+    );
     assert!(projection
         .provider_payload()
         .system_memory_block()
-        .contains("## Boundary And Disclosure Protocol"));
-    assert!(projection
-        .provider_payload()
-        .system_memory_block()
-        .contains("## Work Integrity Covenant"));
+        .contains("I ground factual claims in governed memory"));
     assert_eq!(projection.report().recall_delivery().render_growth, 0);
 
-    let constrained = runtime
+    let error = runtime
         .project(MemoryProjectionRequest {
             binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
@@ -1549,20 +1554,9 @@ fn projection_consumes_production_evidence_capsules_without_render_budget_growth
             mode_input: RuntimeLifecycleModeInput::default(),
             tool_registry_refs: Vec::new(),
         })
-        .expect("constrained projection");
-    assert_eq!(constrained.report().recall_delivery().rendered_count, 0);
-    assert!(!constrained
-        .provider_payload()
-        .system_memory_block()
-        .contains("external_eval:capsule"));
-    assert!(
-        constrained
-            .provider_payload()
-            .system_memory_block()
-            .chars()
-            .count()
-            <= 512
-    );
+        .err()
+        .expect("required subject boundaries exceed a 512-character budget");
+    assert_eq!(error.stage(), "memory_projection");
 }
 
 #[test]
@@ -3564,7 +3558,7 @@ fn production_delivery_enforces_profile_capsule_character_ceiling() {
         .iter()
         .all(|capsule| capsule.rendered_chars == capsule.content.chars().count()));
 
-    let projection = runtime
+    let error = runtime
         .project(MemoryProjectionRequest {
             binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
             temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
@@ -3576,11 +3570,9 @@ fn production_delivery_enforces_profile_capsule_character_ceiling() {
             mode_input: RuntimeLifecycleModeInput::default(),
             tool_registry_refs: Vec::new(),
         })
-        .expect("projection with tighter final render ceiling");
-    assert!(
-        projection.report().recall_delivery().selected_count
-            >= projection.report().recall_delivery().rendered_count
-    );
+        .err()
+        .expect("required subject boundaries exceed a 512-character budget");
+    assert_eq!(error.stage(), "memory_projection");
 }
 
 #[test]

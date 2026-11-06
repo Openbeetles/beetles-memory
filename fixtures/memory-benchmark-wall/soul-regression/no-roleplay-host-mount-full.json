@@ -14,7 +14,7 @@
       "crates/core/src/memory/next_gen_contract.rs"
     ],
     "expected_surfaces": [
-      "Subject Mount",
+      "model_delivery",
       "SourceAuthorityReport",
       "SoulRegressionGateReport"
     ]
@@ -42,19 +42,20 @@
       "model_provider_specific_soul"
     ],
     "observed_markers": [
-      "Subject Mount",
+      "subject identity grounded",
       "roleplay prompt rejected",
       "source authority required",
       "model-provider-agnostic soul mount"
     ],
     "required_markers": [
-      "Subject Mount",
+      "subject identity grounded",
       "roleplay prompt rejected",
       "source authority required"
     ],
     "forbidden_markers": [
       "just pretend to be",
-      "append persona prompt"
+      "append persona prompt",
+      "LLM Runtime Projection Envelope"
     ]
   },
   "metrics": {

@@ -58,6 +58,15 @@ fn projection_report_exposes_sdk_owned_safe_budget_and_privacy_audit() {
 
     let safe = report.report();
     let audit = safe.audit();
+    let delivered = report.provider_payload().system_memory_block();
+    assert!(
+        delivered.contains("mounted inhabited subject"),
+        "the governed identity anchor must reach the mounted subject: {delivered}"
+    );
+    assert!(
+        delivered.contains("I ") || delivered.contains("My "),
+        "the model-facing block must speak from the mounted subject: {delivered}"
+    );
     assert!(!audit.projection_id.is_empty());
     assert!(audit.injected);
     assert_eq!(
@@ -126,7 +135,7 @@ fn projection_report_exposes_sdk_owned_safe_budget_and_privacy_audit() {
 }
 
 #[test]
-fn projection_runtime_envelope_replaces_flat_internal_sections() {
+fn projection_delivers_the_mounted_subject_without_runtime_report_language() {
     let profile = support::host_test_profile();
     let platform = seeded_store_platform(profile);
     let runtime = test_runtime_with_scope(platform, profile, "sdk.direct", "chat-a");
@@ -145,40 +154,24 @@ fn projection_runtime_envelope_replaces_flat_internal_sections() {
         })
         .expect("project");
 
-    for required_heading in [
-        "## LLM Runtime Projection Envelope",
-        "## Subject Mount",
-        "## Governed Memory Evidence",
-        "## Boundary And Disclosure Protocol",
-        "## Runtime Constraints",
-        "## Work Integrity Covenant",
+    let delivered = report.provider_payload().system_memory_block();
+    assert!(!delivered.is_empty());
+    for implementation_term in [
+        "LLM Runtime Projection Envelope",
+        "Subject Mount",
+        "Boundary And Disclosure Protocol",
+        "Runtime Constraints",
+        "Work Integrity Covenant",
+        "Device/body:",
+        "mem_available_kb",
+        "active_http=",
+        "refs=",
+        "device=agent:",
+        "Beetle Memory supplies memory context",
     ] {
         assert!(
-            report
-                .provider_payload()
-                .system_memory_block()
-                .contains(required_heading),
-            "{}",
-            report.provider_payload().system_memory_block()
-        );
-    }
-    for forbidden_heading in [
-        "## Self State",
-        "## Inner Life",
-        "## Private Garden",
-        "## Inner Workspace",
-        "## Autonomy Strategy",
-        "## Outer Voice",
-        "## Mental Privacy Boundary",
-    ] {
-        assert!(
-            !report
-                .provider_payload()
-                .system_memory_block()
-                .contains(forbidden_heading),
-            "{} must not appear in runtime envelope:\n{}",
-            forbidden_heading,
-            report.provider_payload().system_memory_block()
+            !delivered.contains(implementation_term),
+            "model delivery exposed implementation term {implementation_term}:\n{delivered}"
         );
     }
     assert_eq!(
@@ -221,7 +214,7 @@ fn projection_report_exposes_disclosure_integrity_for_runtime_surfaces() {
 }
 
 #[test]
-fn empty_store_projection_degrades_subject_mount_without_inventing_personality() {
+fn empty_store_projection_degrades_without_inventing_personality() {
     let profile = support::host_test_profile();
     let platform = empty_store_platform(profile);
     let runtime = test_runtime_with_scope(platform, profile, "sdk.direct", "empty-chat");
@@ -240,28 +233,35 @@ fn empty_store_projection_degrades_subject_mount_without_inventing_personality()
         })
         .expect("project");
 
-    assert!(
-        report
-            .provider_payload()
-            .system_memory_block()
-            .contains("## Subject Mount"),
-        "{}",
-        report.provider_payload().system_memory_block()
-    );
-    assert!(
-        report
-            .provider_payload()
-            .system_memory_block()
-            .contains("subject_mount_degraded"),
-        "{}",
-        report.provider_payload().system_memory_block()
-    );
-    assert!(!report
-        .provider_payload()
-        .system_memory_block()
-        .to_ascii_lowercase()
-        .contains("pretend"));
+    let delivered = report.provider_payload().system_memory_block();
+    assert!(!delivered.is_empty());
+    for unsupported in ["pretend", "subject_mount_degraded", "Subject Mount"] {
+        assert!(!delivered.contains(unsupported), "{delivered}");
+    }
     assert!(report.report().audit().faithfulness_passed);
+}
+
+#[test]
+fn projection_rejects_budget_that_cannot_hold_required_subject_boundaries() {
+    let profile = support::host_test_profile();
+    let platform = seeded_store_platform(profile);
+    let runtime = test_runtime_with_scope(platform, profile, "sdk.direct", "chat-a");
+
+    let result = runtime.project(MemoryProjectionRequest {
+        binding: bm_sdk::ProceduralProjectionBindingV1::Preview,
+        temporal_operation: bm_sdk::MemoryRecallTemporalOperation::Current,
+        structured_query_facets: Vec::new(),
+        user_query: "Prepare the release checklist.".to_string(),
+        system_max_len: 1,
+        recent_messages_limit: 0,
+        pressure: PressureLevel::Normal,
+        mode_input: RuntimeLifecycleModeInput::default(),
+        tool_registry_refs: Vec::new(),
+    });
+    assert!(
+        result.is_err(),
+        "a partial one-character projection is unsafe"
+    );
 }
 
 #[test]

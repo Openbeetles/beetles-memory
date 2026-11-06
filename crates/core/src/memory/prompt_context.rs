@@ -1122,82 +1122,61 @@ fn compile_inhabited_subject_mount(
     state: Option<&SubjectState>,
     degraded_reason: Option<String>,
 ) -> InhabitedSubjectMount {
-    let identity_mount = if let Some(reason) = degraded_reason.as_deref() {
-        format!(
-            "Subject Mount | {reason} | subject={} channel={} chat={}",
-            input.device_identity.trim(),
-            input.channel.trim(),
-            input.chat_id.trim()
-        )
+    let identity_mount = if degraded_reason.is_some() {
+        String::new()
     } else {
-        let mut parts = Vec::new();
-        push_subject_mount_pair(
-            &mut parts,
-            "identity",
-            state.map(|state| state.identity_anchor.as_str()),
-        );
-        push_subject_mount_pair(
-            &mut parts,
-            "body",
-            state
-                .map(|state| state.embodied_position.as_str())
-                .or_else(|| shell.map(|shell| shell.body_ownership.as_str())),
-        );
-        push_subject_mount_pair(
-            &mut parts,
-            "memory",
-            state
-                .map(|state| state.experience_ownership.as_str())
-                .or_else(|| shell.map(|shell| shell.memory_ownership.as_str())),
-        );
-        push_subject_mount_pair(
-            &mut parts,
-            "relationship",
-            shell.map(|shell| shell.relationship_position.as_str()),
-        );
-        if parts.is_empty() {
-            push_subject_mount_pair(&mut parts, "subject", Some(input.device_identity));
-            push_subject_mount_pair(&mut parts, "channel", Some(input.channel));
-            let grounding = if input
-                .context
-                .long_term_memory_text
-                .as_deref()
-                .is_some_and(|text| !text.trim().is_empty())
-            {
-                "governed_memory"
-            } else if input
-                .context
-                .summary_text
-                .as_deref()
-                .is_some_and(|text| !text.trim().is_empty())
-            {
-                "conversation_summary"
-            } else {
-                "runtime_context"
-            };
-            push_subject_mount_pair(&mut parts, "grounding", Some(grounding));
-        }
-        format!("Subject Mount | {}", parts.join(" | "))
+        state
+            .map(|state| state.identity_anchor.trim())
+            .filter(|anchor| !anchor.is_empty())
+            .map(first_person_identity)
+            .or_else(|| {
+                input.context.self_authored_core.as_ref().and_then(|core| {
+                    let tendencies = core
+                        .character_tendencies
+                        .iter()
+                        .map(|tendency| tendency.trim())
+                        .filter(|tendency| !tendency.is_empty())
+                        .collect::<Vec<_>>();
+                    (!tendencies.is_empty()).then(|| {
+                        format!("My enduring tendencies include {}.", tendencies.join(", "))
+                    })
+                })
+            })
+            .unwrap_or_default()
     };
-    let relationship_position = first_subject_text(&[
-        state.map(|state| state.relationship_state.as_str()),
-        shell.map(|shell| shell.relationship_position.as_str()),
-        Some(input.channel),
-    ]);
-    let situated_now = first_subject_text(&[
-        shell.map(|shell| shell.situated_now.as_str()),
-        Some(input.user_query),
-    ]);
-    let current_reasoning_basis = first_subject_text(&[
-        state.map(|state| state.current_reasoning_basis.as_str()),
-        shell.map(|shell| shell.current_reasoning_basis.as_str()),
-        input.context.long_term_memory_text.as_deref(),
-        input.context.summary_text.as_deref(),
-    ]);
-    let reply_stance = first_subject_text(&[state.map(|state| state.response_mode.as_str())]);
-    let initiative_posture =
-        first_subject_text(&[state.map(|state| state.initiative_posture.as_str())]);
-    let boundary_mode = first_subject_text(&[state.map(|state| state.boundary_mode.as_str())]);
+    let relationship_position = shell
+        .map(|shell| shell.relationship_position.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            subject_stance_sentence(
+                "I understand our relationship this way",
+                state.map(|state| state.relationship_posture.as_str()),
+            )
+        });
+    let situated_now = first_subject_text(&[shell.map(|shell| shell.situated_now.as_str())]);
+    // Grounding sources are rendered in their own governed evidence section.
+    // Duplicating a raw source block in the mount turns it into self-description.
+    let current_reasoning_basis = String::new();
+    let reply_stance = subject_stance_sentence(
+        "I will respond in this manner",
+        state.map(|state| state.response_mode.as_str()),
+    );
+    let initiative_posture = subject_stance_sentence(
+        "I will take initiative this way",
+        state.map(|state| state.initiative_posture.as_str()),
+    );
+    let boundary_mode = match state.map(|state| state.boundary_mode.as_str()) {
+        Some("closed" | "no_share") => "I keep protected material private.".to_string(),
+        Some("summary_only" | "safe_summary") => {
+            "I share protected material only as a governed summary.".to_string()
+        }
+        Some("explained_only") => {
+            "I may explain my boundary without quoting protected material.".to_string()
+        }
+        Some(value) => subject_stance_sentence("I keep this disclosure boundary", Some(value)),
+        None => String::new(),
+    };
 
     InhabitedSubjectMount {
         identity_mount,
@@ -1227,11 +1206,11 @@ fn compile_boundary_and_disclosure_protocol(
         .map(|source| source.source_id.clone())
         .collect::<Vec<_>>();
     let disclosure_rule = if foreground_disclosure_allowed {
-        "foreground disclosure must still follow current soul disclosure protocol".to_string()
+        "I disclose protected material only within the current governed allowance; permission to use it internally does not authorize verbatim disclosure.".to_string()
     } else if runtime_private_context_allowed {
-        "runtime can use protected private context; foreground disclosure is denied unless the in-runtime protocol grants a safe summary".to_string()
+        "I may use protected context to understand the situation, but I do not quote it; I share a safe summary only when the governed disclosure rule allows one.".to_string()
     } else {
-        "private runtime context is denied by current policy; foreground private disclosure remains denied".to_string()
+        "I do not use or disclose protected private context in this response.".to_string()
     };
     BoundaryAndDisclosureProtocol {
         runtime_private_context_allowed,
@@ -1269,7 +1248,7 @@ fn compile_soul_private_runtime_context(
                 .map(|content| ProtectedRuntimeContext {
                     source_id: source.source_id.clone(),
                     role: "protected_runtime_only".to_string(),
-                    content: compact_private_runtime_field(&source.source_id, content, 420),
+                    content: content.trim().to_string(),
                 })
         })
         .filter(|context| !context.content.trim().is_empty())
@@ -1285,7 +1264,7 @@ fn derived_private_projection(
     match source_id {
         "felt_significance" if context.felt_significance.is_some() => {
             fields.push((
-                "Current significance",
+                "I find this significant",
                 state.significance_direction.as_str(),
             ));
         }
@@ -1293,22 +1272,25 @@ fn derived_private_projection(
             let source = context.temperament_continuity.as_ref()?;
             // The state also has constitutional fallbacks. They are not temperament evidence.
             if !source.stability_summary.trim().is_empty() {
-                fields.push(("Self reading", state.self_reading.as_str()));
+                fields.push(("I understand myself this way", state.self_reading.as_str()));
             }
             if !source.boundary_inertia.trim().is_empty() {
-                fields.push(("Resistance", state.resistance_mode.as_str()));
+                fields.push(("I hold this boundary", state.resistance_mode.as_str()));
             }
         }
         "inner_conflict" if context.inner_conflict.is_some() => {
-            fields.push(("Certainty", state.certainty_mode.as_str()));
-            fields.push(("Unresolved tension", state.unresolved_tension.as_str()));
+            fields.push(("I am certain to this extent", state.certainty_mode.as_str()));
+            fields.push((
+                "I still feel this tension",
+                state.unresolved_tension.as_str(),
+            ));
         }
         _ => return None,
     }
     let content = fields
         .into_iter()
         .filter(|(_, value)| !value.trim().is_empty())
-        .map(|(label, value)| format!("{label}: {value}"))
+        .map(|(lead, value)| format!("{lead}: {}.", value.trim_end_matches(&['.', '。'][..])))
         .collect::<Vec<_>>()
         .join("\n");
     (!content.is_empty()).then_some(content)
@@ -1317,25 +1299,30 @@ fn derived_private_projection(
 fn compile_work_integrity_covenant(
     input: InhabitedSubjectProjectionInput<'_>,
 ) -> WorkIntegrityCovenant {
-    let task_goal = first_subject_text(&[
+    let task_goal_text = first_subject_text(&[
         Some(input.user_query),
         input.context.work_continuity_text.as_deref(),
         input.context.task_workspace_text.as_deref(),
         input.context.task_recall_text.as_deref(),
     ]);
+    let task_goal = if task_goal_text.is_empty() {
+        "I address the current request.".to_string()
+    } else {
+        format!("I am working on the current request: {task_goal_text}")
+    };
     WorkIntegrityCovenant {
         task_goal,
         evidence_ceiling:
-            "Use governed memory, program evidence, world context, and current request only; do not invent facts beyond the compiled sources."
+            "I ground factual claims in governed memory, program evidence, observed context, and the current request; I do not invent missing facts."
                 .to_string(),
         tool_permission_boundary:
-            "Projection does not grant tool execution or device control; runtime permissions remain authoritative."
+            "I use tools and control devices only when the current runtime grants permission."
                 .to_string(),
         uncertainty_rule:
-            "When grounding is missing, degraded, stale, or trimmed, state what is known and keep gaps explicit."
+            "I state what I know and acknowledge missing, stale, or incomplete grounding."
                 .to_string(),
         no_obstruction_rule:
-            "Soul/private/relationship posture must not block the user's normal work request or override factual task state."
+            "I keep my relationships and private boundaries while carrying out the user's authorized work and respecting its factual state."
                 .to_string(),
     }
 }
@@ -1491,16 +1478,6 @@ fn render_inhabited_subject_projection(
     out
 }
 
-fn push_subject_mount_pair(parts: &mut Vec<String>, label: &str, value: Option<&str>) {
-    let Some(value) = value else {
-        return;
-    };
-    let value = compact_projection_field(value, 80);
-    if !value.is_empty() {
-        parts.push(format!("{label}={value}"));
-    }
-}
-
 fn first_subject_text(values: &[Option<&str>]) -> String {
     values
         .iter()
@@ -1511,30 +1488,39 @@ fn first_subject_text(values: &[Option<&str>]) -> String {
         .unwrap_or_default()
 }
 
+fn first_person_identity(anchor: &str) -> String {
+    let anchor = anchor.trim();
+    let sentence = if anchor.starts_with('我')
+        || anchor.starts_with("I ")
+        || anchor.starts_with("I'm ")
+        || anchor.starts_with("My ")
+    {
+        anchor.to_string()
+    } else {
+        format!("I am {anchor}")
+    };
+    if sentence.ends_with('.')
+        || sentence.ends_with('。')
+        || sentence.ends_with('!')
+        || sentence.ends_with('！')
+    {
+        sentence
+    } else {
+        format!("{sentence}.")
+    }
+}
+
+fn subject_stance_sentence(lead: &str, value: Option<&str>) -> String {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return String::new();
+    };
+    format!("{lead}: {}.", value.trim_end_matches(&['.', '。'][..]))
+}
+
 fn compact_projection_field(value: &str, max_len: usize) -> String {
     truncate_content_to_max(value.trim(), max_len)
         .trim()
         .to_string()
-}
-
-fn compact_private_runtime_field(source_id: &str, value: &str, max_len: usize) -> String {
-    if source_id == "private_garden" {
-        compact_projection_tail(value, max_len)
-    } else {
-        compact_projection_field(value, max_len)
-    }
-}
-
-fn compact_projection_tail(value: &str, max_len: usize) -> String {
-    let value = value.trim();
-    if value.len() <= max_len {
-        return value.to_string();
-    }
-    let mut start = value.len().saturating_sub(max_len);
-    while start < value.len() && !value.is_char_boundary(start) {
-        start += 1;
-    }
-    value[start..].trim().to_string()
 }
 
 fn render_optional_projection_value(value: &str) -> String {
@@ -2040,6 +2026,13 @@ mod tests {
             .subject_mount
             .identity_mount
             .contains("inhabited board subject"));
+        assert!(projection.subject_mount.identity_mount.starts_with("I am "));
+        assert!(!projection.subject_mount.identity_mount.contains("body="));
+        assert!(!projection
+            .subject_mount
+            .situated_now
+            .contains("owner-default"));
+        assert!(!projection.subject_mount.situated_now.contains("sdk.direct"));
         assert!(projection
             .evidence_refs
             .iter()
@@ -2055,6 +2048,35 @@ mod tests {
         assert!(projection
             .rendered_block
             .contains("## Work Integrity Covenant"));
+    }
+
+    #[test]
+    fn character_tendencies_alone_seed_first_person_mount() {
+        let mut context = minimal_prompt_context_for_projection();
+        context.self_authored_core = Some(SelfAuthoredCore {
+            character_tendencies: vec!["patient".to_string()],
+            ..SelfAuthoredCore::default()
+        });
+        let projection = compile_inhabited_subject_projection(InhabitedSubjectProjectionInput {
+            context: &context,
+            mounted_subject_id: "agent:partial",
+            now_secs: 42,
+            platform: "macos",
+            device_identity: "agent:partial",
+            channel: "sdk.direct",
+            chat_id: "chat-partial",
+            pressure: PressureLevel::Normal,
+            render_budget_chars: 2048,
+            runtime_private_context_allowed: false,
+            foreground_disclosure_allowed: false,
+            user_query: "hello",
+        });
+        assert!(projection.subject_mount.degraded_reason.is_none());
+        assert!(projection.subject_mount.identity_mount.contains("patient"));
+        assert!(!projection
+            .subject_mount
+            .identity_mount
+            .contains("agent:partial"));
     }
 
     #[test]
@@ -5361,7 +5383,7 @@ mod tests {
             .archive_evidence_text
             .as_deref()
             .unwrap_or_default()
-            .contains("Archive evidence"));
+            .starts_with("I recall"));
         assert!(memory_store
             .last_query
             .lock()
@@ -5380,17 +5402,21 @@ mod tests {
             .execution_state_text
             .as_deref()
             .unwrap_or_default()
-            .contains("Goal: 收口 prompt memory"));
+            .contains("My goal is: 收口 prompt memory"));
         assert!(context
             .world_snapshot_text
             .as_deref()
-            .unwrap_or_default()
-            .contains("## World Snapshot"));
+            .is_none_or(|text| !text.contains("mem_available_kb")));
         assert!(context
             .world_sense_text
             .as_deref()
             .unwrap_or_default()
-            .contains("## World Sense"));
+            .contains("I notice Quiet evening"));
+        assert!(!context
+            .world_sense_text
+            .as_deref()
+            .unwrap_or_default()
+            .contains("System is stable"));
         assert!(context
             .self_state_text
             .as_deref()
@@ -5471,12 +5497,12 @@ mod tests {
             .runtime_skill_text
             .as_deref()
             .unwrap_or_default()
-            .contains("Runtime skills"));
+            .contains("I can draw on an earlier method"));
         assert!(groups
             .governed_memory_evidence_text
             .as_deref()
             .unwrap_or_default()
-            .contains("Runtime skills"));
+            .contains("I can draw on an earlier method"));
 
         let source_authority = context.classified_projection_sources();
         for source_id in [
@@ -6370,9 +6396,9 @@ mod tests {
         let groups =
             context.normalize_projection_groups_for_prompt(MemorySystemKind::LinuxFull, 8192);
         let active = groups.active_task_context_text.unwrap_or_default();
-        let continuity_pos = active.find("## Work Continuity").unwrap();
-        let capsule_pos = active.find("## Continuity Capsules").unwrap();
-        let workspace_pos = active.find("## Task Workspace").unwrap();
+        let continuity_pos = active.find("I am working on: Close recall router").unwrap();
+        let capsule_pos = active.find("I remember this ongoing matter").unwrap();
+        let workspace_pos = active.find("I will consider it complete when").unwrap();
         assert!(continuity_pos < capsule_pos);
         assert!(capsule_pos < workspace_pos);
         assert!(!active.contains("## Execution State"));
@@ -6380,11 +6406,11 @@ mod tests {
             .governed_memory_evidence_text
             .as_deref()
             .unwrap_or_default()
-            .contains("## Continuity Capsules"));
+            .contains("I remember this ongoing matter"));
     }
 
     #[test]
-    fn active_task_context_includes_recent_turn_observation_after_work_continuity() {
+    fn active_task_context_deduplicates_operator_turn_observation() {
         let session_store = StubSessionStore {
             recent: Mutex::new(vec![SessionMessage::synthetic(
                 "user".to_string(),
@@ -6533,21 +6559,21 @@ mod tests {
         let groups =
             context.normalize_projection_groups_for_prompt(MemorySystemKind::LinuxFull, 8192);
         let active = groups.active_task_context_text.unwrap_or_default();
-        let continuity_pos = active.find("## Work Continuity").unwrap();
-        let observation_pos = active.find("## Latest Turn Observation").unwrap();
-        let capsule_pos = active.find("## Continuity Capsules").unwrap();
-        let workspace_pos = active.find("## Task Workspace").unwrap();
+        let continuity_pos = active
+            .find("I am working on: Close replay substrate loop")
+            .unwrap();
+        let capsule_pos = active.find("I remember this ongoing matter").unwrap();
+        let workspace_pos = active.find("I will consider it complete when").unwrap();
 
-        assert!(continuity_pos < observation_pos);
-        assert!(observation_pos < capsule_pos);
+        assert!(continuity_pos < capsule_pos);
         assert!(capsule_pos < workspace_pos);
         assert!(!active.contains("## Execution State"));
-        assert!(active.contains("Focus: Close replay substrate loop"));
-        assert!(active.contains("Progress: continue the replay substrate work"));
-        assert!(active.contains("Next: Continue the current task chain."));
-        assert!(!active.contains("Progress: turn observation 已写入 ledger"));
-        assert!(active.contains("Final outcome: surface_finalization"));
-        assert!(active.contains("Tool path: surface_finalization"));
+        assert!(active.contains("I am working on: Close replay substrate loop"));
+        assert!(active.contains("I have made this progress: continue the replay substrate work"));
+        assert!(active.contains("My next step is: Continue the current task chain."));
+        assert!(!active.contains("I have made this progress: turn observation 已写入 ledger"));
+        assert!(!active.contains("Final outcome: surface_finalization"));
+        assert!(!active.contains("Tool path: surface_finalization"));
         assert!(!groups
             .governed_memory_evidence_text
             .as_deref()
@@ -6683,8 +6709,8 @@ mod tests {
         let groups =
             context.normalize_projection_groups_for_prompt(MemorySystemKind::LinuxFull, 8192);
         let governed = groups.governed_memory_evidence_text.unwrap_or_default();
-        let runtime_pos = governed.find("Runtime skills").unwrap();
-        let capsule_pos = governed.find("## Continuity Capsules").unwrap();
+        let runtime_pos = governed.find("I can draw on an earlier method").unwrap();
+        let capsule_pos = governed.find("I remember this ongoing matter").unwrap();
         let archive_pos = governed.find("Archive evidence").unwrap();
         assert!(runtime_pos < capsule_pos);
         assert!(capsule_pos < archive_pos);
@@ -6803,8 +6829,8 @@ mod tests {
         let groups =
             context.normalize_projection_groups_for_prompt(MemorySystemKind::LinuxFull, 8192);
         let governed = groups.governed_memory_evidence_text.unwrap_or_default();
-        let archive_pos = governed.find("Archive evidence").unwrap();
-        let capsule_pos = governed.find("## Continuity Capsules").unwrap();
+        let archive_pos = governed.find("I recall").unwrap();
+        let capsule_pos = governed.find("I remember this ongoing matter").unwrap();
         let canonical_pos = governed.find("Stable outage summary").unwrap();
         assert!(archive_pos < capsule_pos);
         assert!(capsule_pos < canonical_pos);
@@ -6828,14 +6854,16 @@ mod tests {
         let governed = groups.governed_memory_evidence_text.unwrap_or_default();
 
         assert_eq!(context.recall_router.intent, PromptRecallIntent::Continuity);
-        let continuity_pos = active.find("## Work Continuity").unwrap();
-        let capsule_pos = active.find("## Continuity Capsules").unwrap();
-        let workspace_pos = active.find("## Task Workspace").unwrap();
-        let archive_pos = governed.find("Archive evidence").unwrap();
-        let canonical_pos = governed.find("## Long-term memory").unwrap();
+        let continuity_pos = active.find("I am working on: Close recall router").unwrap();
+        let capsule_pos = active.find("I remember this ongoing matter").unwrap();
+        let workspace_pos = active.find("I will consider it complete when").unwrap();
+        let archive_pos = governed.find("I recall").unwrap();
+        let canonical_pos = governed
+            .find("I remember: Canonical summary for the memory router project.")
+            .unwrap();
         assert!(continuity_pos < capsule_pos);
         assert!(capsule_pos < workspace_pos);
-        assert!(!governed.contains("## Continuity Capsules"));
+        assert!(!governed.contains("I remember this ongoing matter"));
         assert!(archive_pos < canonical_pos);
     }
 
@@ -6847,11 +6875,11 @@ mod tests {
                 continuity_router_context_for_regression(),
                 PromptRecallIntent::Continuity,
                 &[
-                    "## Work Continuity",
-                    "## Continuity Capsules",
-                    "## Task Workspace",
+                    "I am working on: Close recall router",
+                    "I remember this ongoing matter",
+                    "I will consider it complete when",
                 ],
-                &["Archive evidence", "## Long-term memory"],
+                &["I recall", "I remember: Canonical summary"],
             ),
             observe_prompt_projection_case(
                 "procedural",
@@ -6859,8 +6887,8 @@ mod tests {
                 PromptRecallIntent::Procedural,
                 &[],
                 &[
-                    "Runtime skills",
-                    "## Continuity Capsules",
+                    "I can draw on an earlier method",
+                    "I remember this ongoing matter",
                     "Archive evidence",
                 ],
             ),
@@ -6870,8 +6898,8 @@ mod tests {
                 PromptRecallIntent::Evidence,
                 &[],
                 &[
-                    "Archive evidence",
-                    "## Continuity Capsules",
+                    "I recall",
+                    "I remember this ongoing matter",
                     "Stable outage summary",
                 ],
             ),
@@ -6881,8 +6909,8 @@ mod tests {
                 PromptRecallIntent::Factual,
                 &[],
                 &[
-                    "## Long-term memory",
-                    "## Continuity Capsules",
+                    "I remember: Owner timezone is Asia/Shanghai.",
+                    "I remember this ongoing matter",
                     "Archive evidence",
                 ],
             ),

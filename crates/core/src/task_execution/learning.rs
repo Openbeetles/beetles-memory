@@ -1237,49 +1237,28 @@ pub fn build_task_recall_bundle(
     if hits.is_empty() {
         return None;
     }
-    let mut out = String::from(
-        "## Task Recall Bundle\nUse governed task-learning only when it fits this run.\n",
-    );
-    out.push_str(&format!(
-        "Run: {} | backend: {}\n",
-        active_run.run.run_id,
-        backend.label()
-    ));
+    let mut out = String::new();
     let mut entries = Vec::new();
     for hit in hits {
-        let reason_preview = hit
-            .reasons
-            .iter()
-            .take(3)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ");
-        let line = format!(
-            "- [{} / {} / {}] {} (why: {}; route={})",
-            hit.record.kind.label(),
-            hit.record.topic,
-            hit.record.run_id,
-            truncate_content_to_max(hit.record.summary.trim(), 88),
-            truncate_content_to_max(&reason_preview, 96),
-            hit.record.route.label(),
-        );
-        let remaining = max_len.saturating_sub(out.len()).saturating_sub(1);
-        if remaining < 64 {
+        let line = format!("I learned from earlier work: {}", hit.record.summary.trim());
+        let separator = usize::from(!out.is_empty());
+        if out.len() + separator + line.len() > max_len {
             break;
         }
-        if line.len() > remaining {
-            out.push_str(&truncate_content_to_max(&line, remaining));
+        if separator != 0 {
             out.push('\n');
-            break;
         }
         out.push_str(&line);
-        out.push('\n');
         entries.push(TaskRecallEntryBinding {
             learning_id: hit.record.learning_id.clone(),
             learning_digest: hit.record.canonical_content_digest().ok()?,
             rendered_text: line,
         });
     }
+    if entries.is_empty() {
+        return None;
+    }
+    let _ = backend; // Retrieval backend remains in the inspection report, not the subject text.
     Some(TaskRecallBundle {
         rendered_text: out.trim_end().to_string(),
         entries,
@@ -2542,10 +2521,12 @@ mod tests {
         )
         .expect("task recall bundle should be built");
 
-        assert!(bundle.rendered_text.contains("## Task Recall Bundle"));
-        assert!(bundle.rendered_text.contains("apply_release_patch"));
-        assert!(bundle.rendered_text.contains("runtime_skill"));
-        assert!(bundle.rendered_text.contains("release_blocker"));
+        assert!(bundle
+            .rendered_text
+            .contains("I learned from earlier work:"));
+        assert!(!bundle.rendered_text.contains("## Task Recall Bundle"));
+        assert!(!bundle.rendered_text.contains("runtime_skill"));
+        assert!(!bundle.rendered_text.contains("route="));
         assert!(!bundle.entries.is_empty());
         for entry in &bundle.entries {
             assert!(bundle.rendered_text.contains(&entry.rendered_text));
@@ -2564,13 +2545,12 @@ mod tests {
             "chat-1",
             "Need the release fix path",
             first_offset + first.rendered_text.len() - 1,
-        )
-        .unwrap();
+        );
         assert!(
-            !partial
+            partial.is_none_or(|bundle| !bundle
                 .entries
                 .iter()
-                .any(|entry| entry.learning_id == first.learning_id),
+                .any(|entry| entry.learning_id == first.learning_id)),
             "a partially rendered entry cannot authorize usage feedback"
         );
         let mut changed = store.get(&first.learning_id).unwrap().unwrap();
