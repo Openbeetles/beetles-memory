@@ -51,6 +51,16 @@ use crate::StorePhysicalOwningScope;
 use sha2::{Digest, Sha256};
 
 use crate::store_internal::config::{profile_memory_system_kind, StoreBackendKind};
+use crate::store_internal::perception::{
+    PerceptionEpisodeEvidenceV1, PerceptionEpisodeTombstoneV1, PerceptionHistoricalAuthorizationV1,
+    PerceptionSourceAuthorizationV1, PerceptionSourceEpisodeCountV1, PerceptionSourceFenceV1,
+    PerceptionSourceRetentionBanV1, PerceptionTurnTaintV1, PERCEPTION_EPISODE_NAMESPACE,
+    PERCEPTION_EPISODE_TOMBSTONE_NAMESPACE, PERCEPTION_HISTORICAL_AUTHORIZATION_NAMESPACE,
+    PERCEPTION_MEDIA_NAMESPACE, PERCEPTION_SOURCE_AUTHORIZATION_NAMESPACE,
+    PERCEPTION_SOURCE_DEPENDENTS_NAMESPACE, PERCEPTION_SOURCE_EPISODE_COUNT_NAMESPACE,
+    PERCEPTION_SOURCE_FENCE_NAMESPACE, PERCEPTION_SOURCE_RETENTION_BAN_NAMESPACE,
+    PERCEPTION_TURN_TAINT_NAMESPACE,
+};
 use crate::store_internal::recall_index::{
     decode_typed_recall_index, ActiveTaskRunByChatIndex, ArchiveRecallManifest,
     ContinuityCapsuleScopeIndex, ConversationRecallManifest, ConversationTranscriptAuxManifest,
@@ -61,8 +71,8 @@ use crate::store_internal::recall_index::{
     TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE,
 };
 
-pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema_v17";
-pub const STORE_SCHEMA_VERSION: u32 = 17;
+pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema_v18";
+pub const STORE_SCHEMA_VERSION: u32 = 18;
 pub(crate) const LONG_TERM_VERSION_MATERIAL_NAMESPACE: &str = "long_term_version_materials";
 pub(crate) const LONG_TERM_HEAD_MANIFEST_NAMESPACE: &str = "long_term_head_manifests";
 pub(crate) const LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE: &str =
@@ -295,12 +305,22 @@ pub(crate) enum StoreJsonDecoderKind {
     SubjectSoulRelationshipProjection,
     SubjectSoulOperationResult,
     RelationshipSourceOperationResult,
+    PerceptionEpisodeEvidence,
+    PerceptionEpisodeTombstone,
+    PerceptionSourceDependents,
+    PerceptionTurnTaint,
+    PerceptionSourceFence,
+    PerceptionSourceAuthorization,
+    PerceptionHistoricalAuthorization,
+    PerceptionSourceRetentionBan,
+    PerceptionSourceEpisodeCount,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StoreBlobDecoderKind {
     OpaqueExisting,
     GenericSkill,
+    PerceptionMediaEvidence,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -629,6 +649,42 @@ pub(crate) const STORE_JSON_NAMESPACE_REGISTRY: &[StoreJsonNamespaceContract] = 
         RELATIONSHIP_SOURCE_OPERATION_RESULT_NAMESPACE,
         StoreJsonDecoderKind::RelationshipSourceOperationResult,
     ),
+    typed_json_namespace(
+        PERCEPTION_EPISODE_NAMESPACE,
+        StoreJsonDecoderKind::PerceptionEpisodeEvidence,
+    ),
+    typed_json_namespace(
+        PERCEPTION_EPISODE_TOMBSTONE_NAMESPACE,
+        StoreJsonDecoderKind::PerceptionEpisodeTombstone,
+    ),
+    typed_json_namespace(
+        PERCEPTION_SOURCE_DEPENDENTS_NAMESPACE,
+        StoreJsonDecoderKind::PerceptionSourceDependents,
+    ),
+    typed_json_namespace(
+        PERCEPTION_TURN_TAINT_NAMESPACE,
+        StoreJsonDecoderKind::PerceptionTurnTaint,
+    ),
+    typed_json_namespace(
+        PERCEPTION_SOURCE_FENCE_NAMESPACE,
+        StoreJsonDecoderKind::PerceptionSourceFence,
+    ),
+    typed_json_namespace(
+        PERCEPTION_SOURCE_AUTHORIZATION_NAMESPACE,
+        StoreJsonDecoderKind::PerceptionSourceAuthorization,
+    ),
+    typed_json_namespace(
+        PERCEPTION_HISTORICAL_AUTHORIZATION_NAMESPACE,
+        StoreJsonDecoderKind::PerceptionHistoricalAuthorization,
+    ),
+    typed_json_namespace(
+        PERCEPTION_SOURCE_RETENTION_BAN_NAMESPACE,
+        StoreJsonDecoderKind::PerceptionSourceRetentionBan,
+    ),
+    typed_json_namespace(
+        PERCEPTION_SOURCE_EPISODE_COUNT_NAMESPACE,
+        StoreJsonDecoderKind::PerceptionSourceEpisodeCount,
+    ),
 ];
 
 pub(crate) const STORE_BLOB_NAMESPACE_REGISTRY: &[StoreBlobNamespaceContract] = &[
@@ -639,6 +695,10 @@ pub(crate) const STORE_BLOB_NAMESPACE_REGISTRY: &[StoreBlobNamespaceContract] = 
     },
     opaque_blob_namespace("memory"),
     opaque_blob_namespace("daily"),
+    StoreBlobNamespaceContract {
+        namespace: PERCEPTION_MEDIA_NAMESPACE,
+        decoder_kind: StoreBlobDecoderKind::PerceptionMediaEvidence,
+    },
 ];
 
 const fn opaque_json_namespace(namespace: &'static str) -> StoreJsonNamespaceContract {
@@ -882,6 +942,10 @@ impl RelationshipSourceDurableOperationResultV1 {
 pub(crate) fn store_memory_space_archive_json_namespaces() -> impl Iterator<Item = &'static str> {
     store_json_namespaces().filter(|namespace| {
         *namespace != super::procedural_selection::NAMESPACE
+            && *namespace != PERCEPTION_EPISODE_TOMBSTONE_NAMESPACE
+            && *namespace != PERCEPTION_SOURCE_FENCE_NAMESPACE
+            && *namespace != PERCEPTION_SOURCE_AUTHORIZATION_NAMESPACE
+            && *namespace != PERCEPTION_SOURCE_RETENTION_BAN_NAMESPACE
             && !is_runtime_skill_protected_json_namespace(namespace)
             && !is_subject_soul_protected_json_namespace(namespace)
             && !is_relationship_source_protected_json_namespace(namespace)
@@ -991,19 +1055,137 @@ fn validate_store_json_value(
                     || evidence.owner.soul_id != document.soul_id
                     || evidence.generation != document.generation
                     || !document.source_lineage.iter().any(|source| {
-                        source.memory_space_id == evidence.source.memory_space_id
-                            && source.subject_id == evidence.source.mounted_subject_id
-                            && source.channel_id == evidence.source.channel_id
-                            && source.conversation_id == evidence.source.conversation_id
-                            && source.turn_id == evidence.source.turn_id
-                            && source.sequence == evidence.source_sequence
-                            && source.canonical_turn_digest == evidence.canonical_turn_digest
+                        source.transcript().is_some_and(|source| {
+                            source.memory_space_id == evidence.source.memory_space_id
+                                && source.subject_id == evidence.source.mounted_subject_id
+                                && source.channel_id == evidence.source.channel_id
+                                && source.conversation_id == evidence.source.conversation_id
+                                && source.turn_id == evidence.source.turn_id
+                                && source.sequence == evidence.source_sequence
+                                && source.canonical_turn_digest == evidence.canonical_turn_digest
+                        })
                     })
                 {
                     return Err(invalid(
                         "persona evidence lacks exact generation/source lineage".into(),
                     ));
                 }
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::PerceptionEpisodeEvidence => {
+            let episode = decode_json::<PerceptionEpisodeEvidenceV1>(value, invalid)?;
+            episode
+                .validate_contract()
+                .map_err(|error| invalid(error.to_string()))?;
+            if episode.key().map_err(|error| invalid(error.to_string()))? != key {
+                return Err(invalid("perception episode owner key mismatch".into()));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::PerceptionEpisodeTombstone => {
+            let tombstone = decode_json::<PerceptionEpisodeTombstoneV1>(value, invalid)?;
+            tombstone
+                .validate_contract()
+                .map_err(|error| invalid(error.to_string()))?;
+            if tombstone
+                .key()
+                .map_err(|error| invalid(error.to_string()))?
+                != key
+            {
+                return Err(invalid("perception episode tombstone key mismatch".into()));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::PerceptionSourceDependents => {
+            let root =
+                decode_json::<bm_core::memory::PerceptionSourceDependentsRootV1>(value, invalid)?;
+            root.validate_contract()
+                .map_err(|error| invalid(error.to_string()))?;
+            let expected = crate::store_internal::perception::perception_episode_storage_key(
+                &root.source.memory_space_id,
+                &root.source.subject_id,
+                &root.source.source,
+                &root.source.episode_id,
+            )
+            .map_err(|error| invalid(error.to_string()))?;
+            if expected != key {
+                return Err(invalid("perception dependents root key mismatch".into()));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::PerceptionTurnTaint => {
+            let taint = decode_json::<PerceptionTurnTaintV1>(value, invalid)?;
+            taint
+                .validate_contract()
+                .map_err(|error| invalid(error.to_string()))?;
+            if taint.key().map_err(|error| invalid(error.to_string()))? != key {
+                return Err(invalid("perception turn taint key mismatch".into()));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::PerceptionSourceFence => {
+            let fence = decode_json::<PerceptionSourceFenceV1>(value, invalid)?;
+            fence
+                .validate_contract()
+                .map_err(|error| invalid(error.to_string()))?;
+            if fence.key().map_err(|error| invalid(error.to_string()))? != key {
+                return Err(invalid("perception source fence key mismatch".into()));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::PerceptionSourceAuthorization => {
+            let authorization = decode_json::<PerceptionSourceAuthorizationV1>(value, invalid)?;
+            authorization
+                .validate_contract()
+                .map_err(|error| invalid(error.to_string()))?;
+            if authorization
+                .key()
+                .map_err(|error| invalid(error.to_string()))?
+                != key
+            {
+                return Err(invalid(
+                    "perception source authorization key mismatch".into(),
+                ));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::PerceptionHistoricalAuthorization => {
+            let historical = decode_json::<PerceptionHistoricalAuthorizationV1>(value, invalid)?;
+            historical
+                .validate_contract()
+                .map_err(|error| invalid(error.to_string()))?;
+            if historical
+                .key()
+                .map_err(|error| invalid(error.to_string()))?
+                != key
+            {
+                return Err(invalid(
+                    "perception historical authorization key mismatch".into(),
+                ));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::PerceptionSourceRetentionBan => {
+            let ban = decode_json::<PerceptionSourceRetentionBanV1>(value, invalid)?;
+            ban.validate_contract()
+                .map_err(|error| invalid(error.to_string()))?;
+            if ban.key().map_err(|error| invalid(error.to_string()))? != key {
+                return Err(invalid(
+                    "perception source retention ban key mismatch".into(),
+                ));
+            }
+            Ok(())
+        }
+        StoreJsonDecoderKind::PerceptionSourceEpisodeCount => {
+            let count = decode_json::<PerceptionSourceEpisodeCountV1>(value, invalid)?;
+            count
+                .validate_contract()
+                .map_err(|error| invalid(error.to_string()))?;
+            if count.key().map_err(|error| invalid(error.to_string()))? != key {
+                return Err(invalid(
+                    "perception source episode count key mismatch".into(),
+                ));
             }
             Ok(())
         }
@@ -2336,6 +2518,22 @@ pub(crate) fn classify_store_blob_address(
             ));
         }
     }
+    if namespace == PERCEPTION_MEDIA_NAMESPACE {
+        if key.len() != "media:episode:sha256:".len() + 64
+            || !key.starts_with("media:episode:sha256:")
+            || !key["media:episode:sha256:".len()..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Ok(StoreAddressAdmission::Unknown);
+        }
+        if value.is_some_and(|bytes| bytes.is_empty() || bytes.len() > 8 * 1024 * 1024) {
+            return Err(Error::config(
+                "perception_media_admission",
+                "durable media exceeds the bounded evidence budget",
+            ));
+        }
+    }
     Ok(StoreAddressAdmission::Active(contract.decoder_kind))
 }
 
@@ -3340,14 +3538,14 @@ mod tests {
     }
 
     #[test]
-    fn store_schema_identity_is_exactly_v17_and_rejects_v16() {
-        assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v17");
-        assert_eq!(STORE_SCHEMA_VERSION, 17);
+    fn store_schema_identity_is_exactly_v18_and_rejects_v17() {
+        assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v18");
+        assert_eq!(STORE_SCHEMA_VERSION, 18);
         assert!(
             validate_store_schema_identity(STORE_SCHEMA_ID, STORE_SCHEMA_VERSION, "test").is_ok()
         );
         assert!(
-            validate_store_schema_identity("beetle_memory_store_schema_v16", 16, "test").is_err()
+            validate_store_schema_identity("beetle_memory_store_schema_v17", 17, "test").is_err()
         );
         assert!(
             validate_store_schema_identity("beetle_memory_store_schema_v14", 14, "test").is_err()

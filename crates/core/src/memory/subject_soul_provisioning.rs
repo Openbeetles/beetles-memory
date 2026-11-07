@@ -20,7 +20,7 @@ use crate::util::truncate_content_to_max;
 mod source_lineage;
 pub use source_lineage::*;
 
-pub const SUBJECT_SOUL_SCHEMA_VERSION: u32 = 2;
+pub const SUBJECT_SOUL_SCHEMA_VERSION: u32 = 3;
 pub const SUBJECT_SOUL_MAX_CLAUSE_CHARS: usize = 220;
 pub const SUBJECT_SOUL_MAX_CLAUSES_PER_FIELD: usize = 16;
 pub const SUBJECT_SOUL_MAX_TOTAL_CHARS: usize = 4_096;

@@ -1,5 +1,13 @@
 use super::*;
+use crate::store_internal::perception::{
+    perception_episode_storage_key, PerceptionEpisodeEvidenceV1, PERCEPTION_EPISODE_NAMESPACE,
+    PERCEPTION_EPISODE_TOMBSTONE_NAMESPACE,
+};
 use crate::store_internal::transcript_turn_storage_key;
+use bm_core::memory::{
+    plan_visual_long_term_draft, PerceptionEpisodeSourceRef, PerceptionRetentionCeiling,
+    VisualLongTermDraft,
+};
 
 /// SDK-resolved source authority; callers and model output cannot supply a clock.
 #[derive(Clone, Copy)]
@@ -7,10 +15,160 @@ pub(super) struct LongTermSourceContext<'a> {
     pub platform: Option<&'a StorePlatform>,
     pub memory_space_id: &'a str,
     pub mounted_subject_id: &'a str,
+    pub mounted_relationship_id: Option<&'a str>,
     pub admitted_turn: Option<&'a TranscriptTurnRecord>,
 }
 
 impl LongTermSourceContext<'_> {
+    fn load_perception_episode(
+        &self,
+        source: &PerceptionEpisodeSourceRef,
+        preconditions: &mut Vec<StoreJsonPrecondition>,
+    ) -> Result<PerceptionEpisodeEvidenceV1> {
+        source.validate_contract()?;
+        if source.memory_space_id != self.memory_space_id
+            || source.subject_id != self.mounted_subject_id
+            || source.relationship_id.as_deref() != self.mounted_relationship_id
+        {
+            return Err(Error::config(
+                "long_term_perception_source",
+                "perception source belongs to another mounted subject",
+            ));
+        }
+        let platform = self.platform.ok_or_else(|| {
+            Error::config(
+                "long_term_perception_source",
+                "episode Store owner is required",
+            )
+        })?;
+        let key = perception_episode_storage_key(
+            &source.memory_space_id,
+            &source.subject_id,
+            &source.source,
+            &source.episode_id,
+        )?;
+        let value = platform
+            .read_known_json_docs(PERCEPTION_EPISODE_NAMESPACE, std::slice::from_ref(&key))?
+            .into_iter()
+            .next()
+            .map(|document| document.value)
+            .ok_or_else(|| {
+                Error::config(
+                    "long_term_perception_source",
+                    "episode owner is unavailable",
+                )
+            })?;
+        let episode: PerceptionEpisodeEvidenceV1 = serde_json::from_value(value.clone())
+            .map_err(|error| Error::config("long_term_perception_source", error.to_string()))?;
+        if episode.source_ref()? != *source
+            || episode.retention_ceiling < PerceptionRetentionCeiling::DurableSemantic
+        {
+            return Err(Error::config(
+                "long_term_perception_source",
+                "episode digest or retention differs",
+            ));
+        }
+        if !platform
+            .read_known_json_docs(
+                PERCEPTION_EPISODE_TOMBSTONE_NAMESPACE,
+                std::slice::from_ref(&key),
+            )?
+            .is_empty()
+        {
+            return Err(Error::config(
+                "long_term_perception_source",
+                "episode was withdrawn",
+            ));
+        }
+        merge_json_preconditions(
+            preconditions,
+            vec![
+                json_precondition(PERCEPTION_EPISODE_NAMESPACE, &key, Some(value)),
+                json_precondition(PERCEPTION_EPISODE_TOMBSTONE_NAMESPACE, &key, None),
+            ],
+        )?;
+        Ok(episode)
+    }
+
+    pub(super) fn admit_visual_draft(
+        &self,
+        visual: &VisualLongTermDraft,
+        preconditions: &mut Vec<StoreJsonPrecondition>,
+    ) -> Result<PerceptionEpisodeSourceRef> {
+        let episode = self.load_perception_episode(&visual.source, preconditions)?;
+        let observation = episode.observation.as_ref().ok_or_else(|| {
+            Error::config(
+                "long_term_perception_source",
+                "episode has no Beetle observation",
+            )
+        })?;
+        if observation.input_id != visual.observation_input_id {
+            return Err(Error::config(
+                "long_term_perception_source",
+                "observation input differs from visual draft",
+            ));
+        }
+        let expected =
+            plan_visual_long_term_draft(observation, &visual.source, episode.source_kind)?
+                .ok_or_else(|| {
+                    Error::config(
+                        "long_term_perception_source",
+                        "visual fact policy rejected source",
+                    )
+                })?;
+        if expected != *visual {
+            return Err(Error::config(
+                "long_term_perception_source",
+                "visual draft differs from governed episode",
+            ));
+        }
+        Ok(visual.source.clone())
+    }
+
+    fn validate_direct_visual_entry_source(
+        &self,
+        entry: &LongTermMemoryEntry,
+        source: &PerceptionEpisodeSourceRef,
+        preconditions: &mut Vec<StoreJsonPrecondition>,
+    ) -> Result<()> {
+        let episode = self.load_perception_episode(source, preconditions)?;
+        let observation = episode.observation.as_ref().ok_or_else(|| {
+            Error::config(
+                "long_term_perception_source",
+                "episode has no Beetle observation",
+            )
+        })?;
+        let planned = plan_visual_long_term_draft(observation, source, episode.source_kind)?
+            .ok_or_else(|| {
+                Error::config(
+                    "long_term_perception_source",
+                    "visual fact policy rejected source",
+                )
+            })?;
+        let draft = &planned.draft;
+        if entry.kind != draft.kind
+            || entry.topic != draft.topic
+            || entry.content != draft.content
+            || entry.keywords != draft.keywords
+            || entry.privacy != draft.privacy
+            || entry.source_chat_id != draft.source_chat_id
+            || Some(entry.source_type) != draft.source_type
+            || Some(entry.source_scope) != draft.source_scope
+            || entry.subject_visibility != draft.subject_visibility
+            || entry.provenance != draft.provenance
+            || Some(entry.confidence) != draft.confidence
+            || Some(entry.freshness) != draft.freshness
+            || Some(entry.stale_hint) != draft.stale_hint
+            || Some(entry.observed_at) != draft.observed_at
+            || entry.source_revision != draft.source_revision
+        {
+            return Err(Error::config(
+                "long_term_perception_source",
+                "long-term owner differs from governed visual draft",
+            ));
+        }
+        Ok(())
+    }
     fn resolve(
         &self,
         citation: &str,
@@ -85,6 +243,12 @@ impl LongTermSourceContext<'_> {
         // A durable job has one immutable factual input. Historic grounding does
         // not advance the authority of that input, nor veto a genuinely new turn.
         if let Some(turn) = self.admitted_turn {
+            if !turn.perception_source_uses.is_empty() {
+                return Err(Error::config(
+                    "long_term_perception_source",
+                    "visual Transcript cannot enter generic long-term learning",
+                ));
+            }
             append_source_precondition(turn, preconditions)?;
             return Ok((
                 vec![turn_source(turn)],
@@ -95,6 +259,12 @@ impl LongTermSourceContext<'_> {
         let mut revision: Option<u64> = None;
         for citation in citations {
             if let Some((source, record)) = self.resolve(citation)? {
+                if !record.perception_source_uses.is_empty() {
+                    return Err(Error::config(
+                        "long_term_perception_source",
+                        "visual Transcript cannot enter generic long-term learning",
+                    ));
+                }
                 revision = Some(revision.map_or(record.factual_admission_revision, |prior| {
                     prior.min(record.factual_admission_revision)
                 }));
@@ -114,6 +284,17 @@ impl LongTermSourceContext<'_> {
         preconditions: &mut Vec<StoreJsonPrecondition>,
     ) -> Result<()> {
         let mut sources = Vec::new();
+        let direct_sources = entry.perception_sources.clone();
+        let mut perception_sources = prior
+            .map(|entry| entry.perception_sources.clone())
+            .unwrap_or_default();
+        for source in direct_sources {
+            if prior.is_some_and(|old| old.perception_sources.contains(&source)) {
+                continue;
+            }
+            self.validate_direct_visual_entry_source(entry, &source, preconditions)?;
+            perception_sources.push(source);
+        }
         for citation in entry.supporting_citations.iter().map(String::as_str).chain(
             entry.canonical_entities.iter().flat_map(|entity| {
                 entity
@@ -131,11 +312,23 @@ impl LongTermSourceContext<'_> {
             }) {
                 sources.push(inherited.clone());
             } else if let Some((source, record)) = self.resolve(citation)? {
+                if !record.perception_source_uses.is_empty() {
+                    return Err(Error::config(
+                        "long_term_perception_source",
+                        "visual Transcript cannot enter generic long-term learning",
+                    ));
+                }
                 append_source_precondition(&record, preconditions)?;
                 sources.push(source);
             }
         }
         if let Some(turn) = self.admitted_turn {
+            if !turn.perception_source_uses.is_empty() {
+                return Err(Error::config(
+                    "long_term_perception_source",
+                    "visual Transcript cannot enter generic long-term learning",
+                ));
+            }
             let source = turn_source(turn);
             let citation = source.display_citation();
             if !entry.supporting_citations.contains(&citation) {
@@ -147,6 +340,9 @@ impl LongTermSourceContext<'_> {
         sources.sort_by_key(TranscriptEvidenceRef::display_citation);
         sources.dedup();
         entry.transcript_sources = sources;
+        perception_sources.sort();
+        perception_sources.dedup();
+        entry.perception_sources = perception_sources;
         Ok(())
     }
 }

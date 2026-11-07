@@ -696,6 +696,8 @@ enum LongTermMemoryAgeState {
 pub struct LongTermMemoryEntry {
     /// Exact canonical sources, resolved by the SDK and retained as provenance after withdrawal.
     pub transcript_sources: Vec<super::TranscriptEvidenceRef>,
+    /// Perception episodes that influenced this entire owner revision, including its text and facets.
+    pub perception_sources: Vec<super::PerceptionEpisodeSourceRef>,
     /// Space-wide factual revision at the last explicit content control transition.
     pub control_barrier_scope_revision: Option<u64>,
     pub id: String,
@@ -738,6 +740,19 @@ pub struct LongTermMemoryEntry {
 
 /// 待写入的长期记忆草稿。
 impl LongTermMemoryEntry {
+    /// A withheld perception source invalidates the whole derived revision.
+    pub fn redact_perception_derived(mut self) -> Self {
+        if !self.perception_sources.is_empty() {
+            self.content.clear();
+            self.topic.clear();
+            self.keywords.clear();
+            self.canonical_entities.clear();
+            self.supporting_citations.clear();
+            self.evidence_count = 0;
+        }
+        self
+    }
+
     /// A read-only evidence projection. Accepted content and immutable provenance stay owned by the material.
     pub fn project_transcript_evidence(
         &self,
@@ -768,6 +783,14 @@ impl LongTermMemoryEntry {
             .retain(|source| allowed.contains(&source.display_citation()));
         projected.evidence_count =
             u32::try_from(projected.supporting_citations.len()).unwrap_or(u32::MAX);
+        // A visual-derived owner is indivisible. Removing its last admissible
+        // transcript source also removes every readable fact and facet value.
+        if !projected.perception_sources.is_empty()
+            && !self.transcript_sources.is_empty()
+            && projected.transcript_sources.len() != self.transcript_sources.len()
+        {
+            projected = projected.redact_perception_derived();
+        }
         projected
     }
 }
@@ -974,6 +997,7 @@ impl LongTermMemoryQuery {
         now_secs: u64,
     ) -> Vec<LongTermMemoryEntry> {
         let normalized = self.normalized();
+        entries.retain(|entry| !entry.content.is_empty());
         entries.retain(|entry| long_term_memory_matches_query(entry, &normalized, now_secs));
         entries.sort_by(|left, right| {
             compare_long_term_memory_query_results(left, right, &normalized)
@@ -1352,6 +1376,7 @@ fn long_term_memory_entry_from_normalized_draft(
     );
     LongTermMemoryEntry {
         transcript_sources: Vec::new(),
+        perception_sources: Vec::new(),
         control_barrier_scope_revision: None,
 
         id,
@@ -2367,6 +2392,44 @@ where
     render_long_term_memory_block_with_now(&selected, block_max_len, now_secs)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LongTermVisualReplayLineage {
+    pub owner_id: String,
+    pub owner_revision: u64,
+    pub perception_sources: Vec<super::PerceptionEpisodeSourceRef>,
+}
+
+pub(crate) struct LongTermRenderedBlock {
+    pub text: String,
+    pub visual_lineage: Vec<LongTermVisualReplayLineage>,
+}
+
+pub(crate) fn recall_long_term_memory_block_with_lineage<S>(
+    store: &S,
+    chat_id: &str,
+    user_query: &str,
+    summary_text: Option<&str>,
+    recent_messages: &[SessionMessage],
+    system_max_len: usize,
+    profile: MemoryProfile,
+) -> Option<LongTermRenderedBlock>
+where
+    S: LongTermMemoryReadStore + ?Sized,
+{
+    let now_secs = crate::util::current_unix_secs();
+    let policy = memory_policy(profile).long_term_recall;
+    let block_max_len = policy.recall_block_max_len(system_max_len);
+    let selected = recall_long_term_memory_entries(
+        store,
+        chat_id,
+        user_query,
+        summary_text,
+        recent_messages,
+        profile,
+    );
+    render_long_term_memory_block_with_lineage(&selected, block_max_len, now_secs)
+}
+
 pub fn render_exact_long_term_memory_block<S>(
     store: &S,
     slot: &LongTermMemorySlot,
@@ -2381,6 +2444,22 @@ where
         max_len,
         crate::util::current_unix_secs(),
     )
+}
+
+pub(crate) fn render_exact_long_term_memory_block_with_lineage<S>(
+    store: &S,
+    slot: &LongTermMemorySlot,
+    max_len: usize,
+) -> Option<LongTermRenderedBlock>
+where
+    S: LongTermMemoryReadStore + ?Sized,
+{
+    if max_len < 32 {
+        return None;
+    }
+    let lookup = lookup_long_term_memory_slot(store, slot, 0).ok()?;
+    let entry = lookup.entry?;
+    render_long_term_memory_block_with_lineage(&[entry], max_len, crate::util::current_unix_secs())
 }
 
 fn render_exact_long_term_memory_block_with_now<S>(
@@ -2459,10 +2538,19 @@ pub(crate) fn render_long_term_memory_block_with_now(
     max_len: usize,
     now_secs: u64,
 ) -> Option<String> {
+    render_long_term_memory_block_with_lineage(entries, max_len, now_secs).map(|block| block.text)
+}
+
+pub(crate) fn render_long_term_memory_block_with_lineage(
+    entries: &[LongTermMemoryEntry],
+    max_len: usize,
+    now_secs: u64,
+) -> Option<LongTermRenderedBlock> {
     if entries.is_empty() || max_len < 32 {
         return None;
     }
     let mut out = String::with_capacity(max_len.min(MAX_LONG_TERM_MEMORY_BLOCK_LEN));
+    let mut visual_lineage = Vec::new();
     for entry in entries {
         let line = render_long_term_memory_line(entry, now_secs);
         let separator = usize::from(!out.is_empty());
@@ -2478,8 +2566,18 @@ pub(crate) fn render_long_term_memory_block_with_now(
             out.push('\n');
         }
         out.push_str(&line);
+        if !entry.perception_sources.is_empty() {
+            visual_lineage.push(LongTermVisualReplayLineage {
+                owner_id: entry.id.clone(),
+                owner_revision: entry.owner_revision,
+                perception_sources: entry.perception_sources.clone(),
+            });
+        }
     }
-    (!out.is_empty()).then_some(out)
+    (!out.is_empty()).then_some(LongTermRenderedBlock {
+        text: out,
+        visual_lineage,
+    })
 }
 
 fn render_long_term_memory_line(entry: &LongTermMemoryEntry, now_secs: u64) -> String {
@@ -3143,6 +3241,7 @@ mod tests {
     ) -> LongTermMemoryEntry {
         canonicalize_long_term_memory_entry(LongTermMemoryEntry {
             transcript_sources: Vec::new(),
+            perception_sources: Vec::new(),
             control_barrier_scope_revision: None,
 
             id: id.to_string(),
@@ -3367,6 +3466,7 @@ mod tests {
     fn canonicalize_long_term_memory_entry_fills_updated_at() {
         let entry = canonicalize_long_term_memory_entry(LongTermMemoryEntry {
             transcript_sources: Vec::new(),
+            perception_sources: Vec::new(),
             control_barrier_scope_revision: None,
 
             id: "ltm-1".to_string(),
@@ -3404,6 +3504,7 @@ mod tests {
     fn canonicalize_long_term_memory_entry_rejects_missing_typed_topic() {
         let entry = canonicalize_long_term_memory_entry(LongTermMemoryEntry {
             transcript_sources: Vec::new(),
+            perception_sources: Vec::new(),
             control_barrier_scope_revision: None,
 
             id: "ltm-1".to_string(),
@@ -3739,6 +3840,7 @@ mod tests {
     fn canonicalize_long_term_memory_entry_defaults_evidence_fields() {
         let entry = canonicalize_long_term_memory_entry(LongTermMemoryEntry {
             transcript_sources: Vec::new(),
+            perception_sources: Vec::new(),
             control_barrier_scope_revision: None,
 
             id: "ltm-1".to_string(),
@@ -3818,6 +3920,57 @@ mod tests {
             canonical.provenance.source_authority,
             MemoryEvidenceAuthority::ModelInferred
         );
+    }
+
+    #[test]
+    fn withdrawing_any_transcript_from_visual_owner_redacts_whole_fact() {
+        let mut entry = test_entry(
+            "visual-fact",
+            LongTermMemoryKind::Fact,
+            "red_dress",
+            "The current user wore a red dress.",
+            vec!["red", "dress"],
+            Some("chat-1"),
+            10,
+            10,
+        );
+        entry.transcript_sources = vec![crate::memory::TranscriptEvidenceRef {
+            memory_space_id: "space-1".into(),
+            channel_id: "local".into(),
+            conversation_id: "chat-1".into(),
+            turn_id: "turn-1".into(),
+            message_id: None,
+            subject_id: Some("soul-1".into()),
+            authority: None,
+        }];
+        entry.perception_sources = vec![crate::memory::PerceptionEpisodeSourceRef {
+            memory_space_id: "space-1".into(),
+            subject_id: "soul-1".into(),
+            relationship_id: None,
+            source: crate::memory::PerceptionSourceKey {
+                host_id: "host-1".into(),
+                device_id: Some("device-1".into()),
+                source_id: "camera-1".into(),
+                source_generation: 1,
+            },
+            revoke_epoch: 1,
+            episode_id: "episode-1".into(),
+            content_digest: format!("sha256:{}", "a".repeat(64)),
+        }];
+        let projected = entry.project_transcript_evidence(|_| false);
+        assert!(projected.content.is_empty());
+        assert!(projected.topic.is_empty());
+        assert!(projected.keywords.is_empty());
+        assert!(projected.canonical_entities.is_empty());
+        assert!(projected.supporting_citations.is_empty());
+        assert_eq!(projected.perception_sources, entry.perception_sources);
+        assert!(LongTermMemoryQuery::default()
+            .filter_sort_all_entries(vec![projected], 11)
+            .is_empty());
+        entry.transcript_sources.clear();
+        let direct = entry.project_transcript_evidence(|_| false);
+        assert_eq!(direct.content, entry.content);
+        assert_eq!(direct.topic, entry.topic);
     }
 
     #[test]
@@ -4212,5 +4365,55 @@ mod tests {
         assert_eq!(selected.len(), 2);
         assert_eq!(selected[0].topic, "current_focus");
         assert_eq!(selected[1].topic, "response_style");
+    }
+
+    #[test]
+    fn rendered_long_term_visual_lineage_excludes_budget_dropped_owner() {
+        let source = super::super::PerceptionEpisodeSourceRef {
+            memory_space_id: "space".into(),
+            subject_id: "soul".into(),
+            relationship_id: None,
+            source: super::super::PerceptionSourceKey {
+                host_id: "host".into(),
+                device_id: Some("device".into()),
+                source_id: "eye".into(),
+                source_generation: 1,
+            },
+            revoke_epoch: 0,
+            episode_id: "episode".into(),
+            content_digest: format!("sha256:{}", "a".repeat(64)),
+        };
+        let mut first = test_entry(
+            "first",
+            LongTermMemoryKind::Fact,
+            "first",
+            "I saw this stable first visual fact",
+            vec![],
+            None,
+            1,
+            1,
+        );
+        first.perception_sources.push(source.clone());
+        let mut second = test_entry(
+            "second",
+            LongTermMemoryKind::Fact,
+            "second",
+            "second visual fact",
+            vec![],
+            None,
+            1,
+            1,
+        );
+        second.perception_sources.push(source);
+        let exact_first_len = render_long_term_memory_line(&first, 1).len();
+        let block = render_long_term_memory_block_with_lineage(
+            &[first.clone(), second],
+            exact_first_len,
+            1,
+        )
+        .unwrap();
+        assert_eq!(block.visual_lineage.len(), 1);
+        assert_eq!(block.visual_lineage[0].owner_id, first.id);
+        assert_eq!(block.visual_lineage[0].owner_revision, first.owner_revision);
     }
 }

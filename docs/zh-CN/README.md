@@ -1,6 +1,6 @@
 # Beetle Memory 开发者文档
 
-Beetle Memory 通过 `bm-sdk` 集成，或通过 `bm-entry` 加协议 adapter 独立部署。[0.13.0 源码发布说明](release-notes-0.13.0.md)、[集成文档](integration.md)、[API 表面](api.md)与[快速开始](getting-started.md)描述当前的主体交付合同。[0.12.0 发布说明](release-notes-0.12.0.md)记录上一源码 tag 及其原模型交付文本。
+Beetle Memory 通过 `bm-sdk` 集成，或通过 `bm-entry` 加协议 adapter 独立部署。[0.14.0 macOS SDK 源码说明](release-notes-0.14.0.md)介绍视觉感知、受治理的记忆与 Store v18；[0.13.0 源码说明](release-notes-0.13.0.md)记录第一人称宿主体交付。更广的 SDK 合同见[集成文档](integration.md)、[API 表面](api.md)与[快速开始](getting-started.md)。版本只有完成 Git tag 验证后才算发布。
 
 - [架构文档](architecture.md)
 - [集成文档](integration.md)
@@ -15,6 +15,7 @@ Beetle Memory 通过 `bm-sdk` 集成，或通过 `bm-entry` 加协议 adapter �
 - [回放与归档](replay-and-archive.md)
 - [运维与检查](operator-guide.md)
 - [发布清单](release-checklist.md)
+- [0.14.0 macOS SDK 源码发布说明](release-notes-0.14.0.md)
 - [0.13.0 源码发布说明](release-notes-0.13.0.md)
 - [0.12.0 源码发布说明](release-notes-0.12.0.md)
 - [0.11.2 源码发布说明](release-notes-0.11.2.md)

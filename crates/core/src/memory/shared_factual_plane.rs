@@ -866,6 +866,7 @@ mod tests {
         let store = StubLongTermMemoryStore {
             entries: vec![LongTermMemoryEntry {
                 transcript_sources: Vec::new(),
+                perception_sources: Vec::new(),
                 control_barrier_scope_revision: None,
 
                 id: "ltm-1".to_string(),
@@ -949,6 +950,7 @@ mod tests {
 
         let entry = LongTermMemoryEntry {
             transcript_sources: Vec::new(),
+            perception_sources: Vec::new(),
             control_barrier_scope_revision: None,
 
             id: "ltm-audio".to_string(),

@@ -856,6 +856,13 @@ impl MemoryRuntime {
                 return Err(feedback_error(Key::RepairRequired));
             }
         }
+        if self
+            .visual_turn_persisted_taint(&request.turn.turn_id)?
+            .is_some()
+            || !self.visual_turn_sources(&request.turn.turn_id)?.is_empty()
+        {
+            return Err(feedback_error(Key::RepairRequired));
+        }
         let plan = bm_core::memory::plan_canonical_turn_delta_with_transcript(
             self.config.platform.session_store().as_ref(),
             transcript_store.as_ref(),
@@ -865,6 +872,15 @@ impl MemoryRuntime {
                 host_refs: Vec::new(),
                 learning_evidence: Some(evidence.clone()),
                 conversation_alias: self.conversation_alias_from_delta(&request.turn)?,
+                perception_retention: None,
+                perception_source_uses: Vec::new(),
+                external_content_manifest: None,
+                mounted_relationship_id: self
+                    .config
+                    .scoped_runtime
+                    .relationship_scope
+                    .as_ref()
+                    .map(|scope| scope.relationship_id.clone()),
                 now_secs: self.config.clock.now_secs(),
             },
         )?;

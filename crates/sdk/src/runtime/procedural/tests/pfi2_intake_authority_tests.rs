@@ -330,11 +330,17 @@ fn pl3_public_intake_material_requires_own_claim_and_exact_source_fragment() {
             host_refs: vec![],
             learning_evidence: Some(missing_evidence),
             conversation_alias: None,
+            perception_retention: None,
+            perception_source_uses: Vec::new(),
+            external_content_manifest: None,
+            mounted_relationship_id: None,
             now_secs: 1_800_000_000,
         },
     )
     .unwrap()
-    .commit_with(|intent| platform.append_authorized_canonical_turn(intent, &proof))
+    .commit_with(|intent| {
+        platform.append_authorized_canonical_turn_with_perception(intent, &proof, &[])
+    })
     .unwrap();
     governor
         .control_procedural_producer(crate::MemoryProceduralProducerControlRequest {
@@ -704,6 +710,10 @@ fn pfi2_public_store_append_cannot_copy_a_durable_producer_grant() {
             host_refs: vec![],
             learning_evidence: Some(evidence),
             conversation_alias: None,
+            perception_retention: None,
+            perception_source_uses: Vec::new(),
+            external_content_manifest: None,
+            mounted_relationship_id: None,
             now_secs: 1_800_000_000,
         },
     )
@@ -760,6 +770,10 @@ fn pfi2_intake_proof_is_exact_and_fenced_across_retry_and_revocation() {
                 host_refs: vec![],
                 learning_evidence: Some(evidence),
                 conversation_alias: None,
+                perception_retention: None,
+                perception_source_uses: Vec::new(),
+                external_content_manifest: None,
+                mounted_relationship_id: None,
                 now_secs: 1_800_000_000,
             },
         )
@@ -770,7 +784,13 @@ fn pfi2_intake_proof_is_exact_and_fenced_across_retry_and_revocation() {
     let (plan_b, _) = make_plan("proof-b");
     let before = image(&platform);
     assert!(plan_b
-        .commit_with(|intent| platform.append_authorized_canonical_turn(intent, &proof_a))
+        .commit_with(
+            |intent| platform.append_authorized_canonical_turn_with_perception(
+                intent,
+                &proof_a,
+                &[]
+            )
+        )
         .is_err());
     assert_eq!(image(&platform), before);
     let foreign_platform = self::platform();
@@ -795,7 +815,9 @@ fn pfi2_intake_proof_is_exact_and_fenced_across_retry_and_revocation() {
     );
     let (gap_plan, gap_proof) = make_plan("gap-active");
     gap_plan
-        .commit_with(|intent| platform.append_authorized_canonical_turn(intent, &gap_proof))
+        .commit_with(|intent| {
+            platform.append_authorized_canonical_turn_with_perception(intent, &gap_proof, &[])
+        })
         .unwrap();
     let recovered = memory
         .finalize_turn_with_procedural_evidence(&capability, request(&memory, "gap-active"))
@@ -855,7 +877,13 @@ fn pfi2_intake_proof_is_exact_and_fenced_across_retry_and_revocation() {
     }
     let (revoked_gap_plan, revoked_gap_proof) = make_plan("gap-revoked");
     revoked_gap_plan
-        .commit_with(|intent| platform.append_authorized_canonical_turn(intent, &revoked_gap_proof))
+        .commit_with(|intent| {
+            platform.append_authorized_canonical_turn_with_perception(
+                intent,
+                &revoked_gap_proof,
+                &[],
+            )
+        })
         .unwrap();
     let (stale_plan, stale_proof) = make_plan("revoke-race");
     governor
@@ -872,7 +900,13 @@ fn pfi2_intake_proof_is_exact_and_fenced_across_retry_and_revocation() {
         .is_err());
     assert_eq!(image(&platform), revoked);
     assert!(stale_plan
-        .commit_with(|intent| platform.append_authorized_canonical_turn(intent, &stale_proof))
+        .commit_with(
+            |intent| platform.append_authorized_canonical_turn_with_perception(
+                intent,
+                &stale_proof,
+                &[]
+            )
+        )
         .is_err());
     assert!(memory
         .finalize_turn_with_procedural_evidence(&capability, request(&memory, "after-revoke"))
@@ -1081,6 +1115,10 @@ fn pfi2_governed_source_revision_fences_intake_and_claimed_application() {
             host_refs: vec![],
             learning_evidence: Some(evidence),
             conversation_alias: None,
+            perception_retention: None,
+            perception_source_uses: Vec::new(),
+            external_content_manifest: None,
+            mounted_relationship_id: None,
             now_secs: 1_800_000_000,
         },
     )
@@ -1119,8 +1157,10 @@ fn pfi2_governed_source_revision_fences_intake_and_claimed_application() {
         .finalize_turn_with_procedural_evidence(&capability, candidate("source-after-change"))
         .is_err());
     assert!(
-        plan.commit_with(|intent| platform.append_authorized_canonical_turn(intent, &proof))
-            .is_err(),
+        plan.commit_with(
+            |intent| platform.append_authorized_canonical_turn_with_perception(intent, &proof, &[])
+        )
+        .is_err(),
         "an exact source read must be CAS-fenced against withdrawal before commit"
     );
     assert!(memory

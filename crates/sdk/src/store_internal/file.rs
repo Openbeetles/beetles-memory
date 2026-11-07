@@ -3204,189 +3204,58 @@ impl StoreEngine for FileStoreEngine {
         })
     }
 
+    fn read_scoped_projection_with_visual_media(
+        &self,
+        request: &crate::StoreScopedProjectionRequest,
+        capacity: StoreCapacityBudget,
+    ) -> Result<super::engine::StoreScopedVisualMediaProjection> {
+        self.with_shared_backend("store_scoped_visual_media", || {
+            let scoped_json = self.read_scoped_json_unlocked_exact(request, capacity)?;
+            let events = if request.include_events {
+                self.read_scoped_events_unlocked_bounded(
+                    &request.scope,
+                    capacity,
+                    scoped_json.logical_bytes,
+                )?
+            } else {
+                Vec::new()
+            };
+            let projection = read_scoped_projection_from_parts(
+                request,
+                capacity,
+                &scoped_json.documents,
+                &events,
+            )?;
+            super::engine::collect_scoped_visual_media_under_fence(
+                projection,
+                capacity,
+                |key, remaining| {
+                    self.get_blob_unlocked_bounded(
+                        super::perception::PERCEPTION_MEDIA_NAMESPACE,
+                        key,
+                        remaining,
+                    )
+                    .map(|value| value.map(|(bytes, _)| bytes))
+                },
+            )
+        })
+    }
+
     fn replace_scoped_projection(
         &self,
         request: &crate::StoreScopedProjectionReplaceRequest,
         admission: &StoreTransactionAdmission,
     ) -> Result<crate::StoreScopedProjectionReplaceReport> {
-        let _lock = self.acquire_backend_lock(true, "store_scoped_projection")?;
-        self.recover_transaction_if_needed()?;
-        admission.validate_inside_engine_fence(self.capacity, &self.admission_authority)?;
+        self.replace_scoped_projection_internal(request, None, admission)
+    }
 
-        let projection_request = crate::StoreScopedProjectionRequest {
-            scope: request.scope.clone(),
-            json_namespaces: request.json_namespaces.clone(),
-            include_events: false,
-        };
-        let mut deleted = self
-            .read_scoped_json_unlocked_exact(&projection_request, admission.operation_capacity())?;
-        let scoped_before = deleted.documents.clone();
-        let protected = deleted
-            .documents
-            .iter()
-            .filter_map(|(address, value)| {
-                crate::store_internal::engine::json_document_is_preserved_by_scoped_projection(
-                    &address.0, value, request,
-                )
-                .map(|protected| protected.then_some(address.clone()))
-                .transpose()
-            })
-            .collect::<Result<BTreeSet<_>>>()?;
-        for address in protected {
-            deleted.documents.remove(&address);
-        }
-
-        for doc in &request.json_docs {
-            if let Some(existing) = self.get_json_value_unlocked(&doc.namespace, &doc.key)? {
-                if !deleted
-                    .documents
-                    .contains_key(&(doc.namespace.clone(), doc.key.clone()))
-                    && !crate::store_internal::transaction::existing_scoped_search_owner_is_replaceable(
-                        &doc.namespace, &doc.key, &existing, &request.scope,
-                        |namespace, key| self.get_json_value_unlocked(namespace, key),
-                    )?
-                {
-                    return Err(Error::config(
-                        "store_scoped_projection",
-                        format!(
-                            "replacement address {}/{} is owned by another projection scope",
-                            doc.namespace, doc.key
-                        ),
-                    ));
-                }
-                deleted
-                    .documents
-                    .entry((doc.namespace.clone(), doc.key.clone()))
-                    .or_insert(existing);
-            }
-        }
-
-        let existing_events = self.read_events_unlocked()?;
-        let actual = super::platform::scoped_projection_source::actual_projection(
-            request,
-            admission.operation_capacity(),
-            &scoped_before,
-            &existing_events,
-        )?;
-        let source_closure = super::platform::scoped_projection_source::prepare(
-            request,
-            &actual,
-            admission.operation_capacity(),
-            |namespace, key| self.get_json_value_unlocked(namespace, key),
-        )?;
-        let deleted_events = existing_events
-            .iter()
-            .filter(|event| {
-                crate::store_internal::engine::event_is_replaced_by_scoped_projection(
-                    event, request,
-                )
-            })
-            .count();
-        let mut next_events = existing_events
-            .iter()
-            .filter(|event| {
-                !crate::store_internal::engine::event_is_replaced_by_scoped_projection(
-                    event, request,
-                )
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        next_events.extend(request.events.iter().cloned());
-        next_events.extend(source_closure.events.iter().cloned());
-        let mut event_ids = BTreeSet::new();
-        if next_events
-            .iter()
-            .any(|event| !event_ids.insert(event.event_id.as_str()))
-        {
-            return Err(Error::config(
-                "store_scoped_projection",
-                "replacement would create a duplicate event id",
-            ));
-        }
-
-        let next_entries = self
-            .json_entry_count()?
-            .saturating_add(self.blob_entry_count()?)
-            .saturating_sub(deleted.documents.len())
-            .saturating_add(request.json_docs.len())
-            .saturating_add(source_closure.added_entries());
-        validate_scoped_projection_post_image(
-            admission,
-            request,
-            next_entries,
-            std::iter::once(self.blob_total_bytes()?),
-            std::iter::empty(),
-            next_events.len(),
-        )?;
-
-        let mut touched = deleted.documents.keys().cloned().collect::<BTreeSet<_>>();
-        touched.extend(
-            request
-                .json_docs
-                .iter()
-                .map(|doc| (doc.namespace.clone(), doc.key.clone())),
-        );
-        touched.extend(source_closure.before.keys().cloned());
-        let before = FileTransactionImage {
-            json: touched
-                .iter()
-                .map(|(namespace, key)| FileTransactionJsonValue {
-                    namespace: namespace.clone(),
-                    key: key.clone(),
-                    value: deleted
-                        .documents
-                        .get(&(namespace.clone(), key.clone()))
-                        .cloned()
-                        .or_else(|| {
-                            source_closure
-                                .before
-                                .get(&(namespace.clone(), key.clone()))
-                                .cloned()
-                                .flatten()
-                        }),
-                })
-                .collect(),
-            blobs: Vec::new(),
-            events: FileTransactionEventsImage::Replace {
-                events: existing_events,
-            },
-        };
-        let replacements = request
-            .json_docs
-            .iter()
-            .chain(&source_closure.documents)
-            .map(|doc| ((doc.namespace.clone(), doc.key.clone()), doc.value.clone()))
-            .collect::<BTreeMap<_, _>>();
-        let after = FileTransactionImage {
-            json: touched
-                .iter()
-                .map(|(namespace, key)| FileTransactionJsonValue {
-                    namespace: namespace.clone(),
-                    key: key.clone(),
-                    value: replacements.get(&(namespace.clone(), key.clone())).cloned(),
-                })
-                .collect(),
-            blobs: Vec::new(),
-            events: FileTransactionEventsImage::Replace {
-                events: next_events,
-            },
-        };
-        let mut journal =
-            FileTransactionJournal::new(source_closure.transaction_id, before, after)?;
-        self.write_transaction_journal(&journal)?;
-        self.restore_transaction_image(&journal.after)?;
-        journal.state = FileTransactionJournalState::Committed;
-        journal.refresh_checksum()?;
-        self.write_transaction_journal(&journal)?;
-        self.remove_transaction_journal("store_scoped_projection")?;
-
-        Ok(crate::StoreScopedProjectionReplaceReport {
-            admission_report_id: admission.report_id().to_string(),
-            deleted_json: deleted.documents.len(),
-            inserted_json: request.json_docs.len(),
-            deleted_events,
-            inserted_events: request.events.len(),
-        })
+    fn replace_scoped_projection_with_visual_media(
+        &self,
+        request: &crate::StoreScopedProjectionReplaceRequest,
+        media_blobs: &[StoreSnapshotBlob],
+        admission: &StoreTransactionAdmission,
+    ) -> Result<crate::StoreScopedProjectionReplaceReport> {
+        self.replace_scoped_projection_internal(request, Some(media_blobs), admission)
     }
 
     fn get_json_value(&self, namespace: &str, key: &str) -> Result<Option<Value>> {
@@ -4207,5 +4076,320 @@ mod tests {
 
         drop(engine);
         fs::remove_dir_all(root).expect("remove file store fixture");
+    }
+}
+
+impl FileStoreEngine {
+    fn replace_scoped_projection_internal(
+        &self,
+        request: &crate::StoreScopedProjectionReplaceRequest,
+        media_blobs: Option<&[StoreSnapshotBlob]>,
+        admission: &StoreTransactionAdmission,
+    ) -> Result<crate::StoreScopedProjectionReplaceReport> {
+        let _lock = self.acquire_backend_lock(true, "store_scoped_projection")?;
+        self.recover_transaction_if_needed()?;
+        admission.validate_inside_engine_fence(self.capacity, &self.admission_authority)?;
+        if media_blobs.is_none() {
+            super::engine::reject_visual_episode_in_plain_scoped_replace(request)?;
+        }
+        crate::store_internal::transaction::validate_visual_archive_import_against_live(
+            request,
+            |namespace, key| self.get_json_value_unlocked(namespace, key),
+        )?;
+
+        let projection_request = crate::StoreScopedProjectionRequest {
+            scope: request.scope.clone(),
+            json_namespaces: request.json_namespaces.clone(),
+            include_events: false,
+        };
+        let mut deleted = self
+            .read_scoped_json_unlocked_exact(&projection_request, admission.operation_capacity())?;
+        let scoped_before = deleted.documents.clone();
+        let protected = deleted
+            .documents
+            .iter()
+            .filter_map(|(address, value)| {
+                crate::store_internal::engine::json_document_is_preserved_by_scoped_projection(
+                    &address.0, value, request,
+                )
+                .map(|protected| protected.then_some(address.clone()))
+                .transpose()
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
+        for address in protected {
+            deleted.documents.remove(&address);
+        }
+        let (visual_plan, existing_media) = if let Some(blobs) = media_blobs {
+            let before_docs = deleted
+                .documents
+                .iter()
+                .map(|((namespace, key), value)| crate::StoreSnapshotJsonDoc {
+                    namespace: namespace.clone(),
+                    key: key.clone(),
+                    value: value.clone(),
+                })
+                .collect::<Vec<_>>();
+            let plan = super::engine::plan_scoped_visual_media_replace(
+                request,
+                &before_docs,
+                blobs,
+                admission.operation_capacity(),
+            )?;
+            let owners = super::engine::scoped_visual_media_owners(&request.scope, &before_docs)?;
+            let mut existing = BTreeMap::new();
+            let mut remaining = admission.operation_capacity().blob_max_bytes;
+            for (key, owner) in &owners {
+                if owner.byte_len > remaining {
+                    return Err(Error::config(
+                        "store_scoped_visual_media",
+                        "old media exceeds pinned import budget",
+                    ));
+                }
+                let (value, read_bytes) = self
+                    .get_blob_unlocked_bounded(
+                        super::perception::PERCEPTION_MEDIA_NAMESPACE,
+                        key,
+                        remaining,
+                    )?
+                    .ok_or_else(|| {
+                        Error::config("store_scoped_visual_media", "old media owner has no blob")
+                    })?;
+                remaining = remaining.saturating_sub(read_bytes);
+                existing.insert(key.clone(), value);
+            }
+            let old_blobs = existing
+                .iter()
+                .map(|(key, value)| StoreSnapshotBlob {
+                    namespace: super::perception::PERCEPTION_MEDIA_NAMESPACE.into(),
+                    key: key.clone(),
+                    value: value.clone(),
+                })
+                .collect::<Vec<_>>();
+            super::engine::validate_scoped_visual_media_blobs(
+                &owners,
+                &old_blobs,
+                admission.operation_capacity(),
+            )?;
+            for blob in blobs {
+                if !plan.deleted_keys.contains(&blob.key)
+                    && self
+                        .blob_value_len_unlocked(
+                            super::perception::PERCEPTION_MEDIA_NAMESPACE,
+                            &blob.key,
+                        )?
+                        .is_some()
+                {
+                    return Err(Error::config(
+                        "store_scoped_visual_media",
+                        "new media key is owned outside the replaced projection",
+                    ));
+                }
+            }
+            (Some(plan), existing)
+        } else {
+            (None, BTreeMap::new())
+        };
+
+        for doc in &request.json_docs {
+            if let Some(existing) = self.get_json_value_unlocked(&doc.namespace, &doc.key)? {
+                if !deleted
+                    .documents
+                    .contains_key(&(doc.namespace.clone(), doc.key.clone()))
+                    && !crate::store_internal::transaction::existing_scoped_search_owner_is_replaceable(
+                        &doc.namespace, &doc.key, &existing, &request.scope,
+                        |namespace, key| self.get_json_value_unlocked(namespace, key),
+                    )?
+                {
+                    return Err(Error::config(
+                        "store_scoped_projection",
+                        format!(
+                            "replacement address {}/{} is owned by another projection scope",
+                            doc.namespace, doc.key
+                        ),
+                    ));
+                }
+                deleted
+                    .documents
+                    .entry((doc.namespace.clone(), doc.key.clone()))
+                    .or_insert(existing);
+            }
+        }
+
+        let existing_events = self.read_events_unlocked()?;
+        let actual = super::platform::scoped_projection_source::actual_projection(
+            request,
+            admission.operation_capacity(),
+            &scoped_before,
+            &existing_events,
+        )?;
+        let source_closure = super::platform::scoped_projection_source::prepare(
+            request,
+            &actual,
+            admission.operation_capacity(),
+            |namespace, key| self.get_json_value_unlocked(namespace, key),
+        )?;
+        let deleted_events = existing_events
+            .iter()
+            .filter(|event| {
+                crate::store_internal::engine::event_is_replaced_by_scoped_projection(
+                    event, request,
+                )
+            })
+            .count();
+        let mut next_events = existing_events
+            .iter()
+            .filter(|event| {
+                !crate::store_internal::engine::event_is_replaced_by_scoped_projection(
+                    event, request,
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        next_events.extend(request.events.iter().cloned());
+        next_events.extend(source_closure.events.iter().cloned());
+        let mut event_ids = BTreeSet::new();
+        if next_events
+            .iter()
+            .any(|event| !event_ids.insert(event.event_id.as_str()))
+        {
+            return Err(Error::config(
+                "store_scoped_projection",
+                "replacement would create a duplicate event id",
+            ));
+        }
+
+        let next_entries = self
+            .json_entry_count()?
+            .saturating_add(self.blob_entry_count()?)
+            .saturating_sub(deleted.documents.len())
+            .saturating_add(request.json_docs.len())
+            .saturating_add(source_closure.added_entries())
+            .saturating_sub(
+                visual_plan
+                    .as_ref()
+                    .map_or(0, |plan| plan.deleted_keys.len()),
+            )
+            .saturating_add(media_blobs.map_or(0, |blobs| blobs.len()));
+        let retained_blob_bytes = self
+            .blob_total_bytes()?
+            .checked_sub(existing_media.values().map(Vec::len).sum::<usize>())
+            .ok_or_else(|| {
+                Error::config(
+                    "store_scoped_visual_media",
+                    "old media bytes exceed Store total",
+                )
+            })?;
+        validate_scoped_projection_post_image(
+            admission,
+            request,
+            next_entries,
+            std::iter::once(retained_blob_bytes),
+            media_blobs
+                .into_iter()
+                .flatten()
+                .map(|blob| blob.value.len()),
+            next_events.len(),
+        )?;
+
+        let mut touched_media = visual_plan
+            .as_ref()
+            .map(|plan| plan.deleted_keys.clone())
+            .unwrap_or_default();
+        touched_media.extend(
+            media_blobs
+                .into_iter()
+                .flatten()
+                .map(|blob| blob.key.clone()),
+        );
+        let replacement_media = media_blobs
+            .into_iter()
+            .flatten()
+            .map(|blob| (blob.key.as_str(), &blob.value))
+            .collect::<BTreeMap<_, _>>();
+
+        let mut touched = deleted.documents.keys().cloned().collect::<BTreeSet<_>>();
+        touched.extend(
+            request
+                .json_docs
+                .iter()
+                .map(|doc| (doc.namespace.clone(), doc.key.clone())),
+        );
+        touched.extend(source_closure.before.keys().cloned());
+        let before = FileTransactionImage {
+            json: touched
+                .iter()
+                .map(|(namespace, key)| FileTransactionJsonValue {
+                    namespace: namespace.clone(),
+                    key: key.clone(),
+                    value: deleted
+                        .documents
+                        .get(&(namespace.clone(), key.clone()))
+                        .cloned()
+                        .or_else(|| {
+                            source_closure
+                                .before
+                                .get(&(namespace.clone(), key.clone()))
+                                .cloned()
+                                .flatten()
+                        }),
+                })
+                .collect(),
+            blobs: touched_media
+                .iter()
+                .map(|key| FileTransactionBlobValue {
+                    namespace: super::perception::PERCEPTION_MEDIA_NAMESPACE.into(),
+                    key: key.clone(),
+                    value: existing_media.get(key).cloned(),
+                })
+                .collect(),
+            events: FileTransactionEventsImage::Replace {
+                events: existing_events,
+            },
+        };
+        let replacements = request
+            .json_docs
+            .iter()
+            .chain(&source_closure.documents)
+            .map(|doc| ((doc.namespace.clone(), doc.key.clone()), doc.value.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let after = FileTransactionImage {
+            json: touched
+                .iter()
+                .map(|(namespace, key)| FileTransactionJsonValue {
+                    namespace: namespace.clone(),
+                    key: key.clone(),
+                    value: replacements.get(&(namespace.clone(), key.clone())).cloned(),
+                })
+                .collect(),
+            blobs: touched_media
+                .iter()
+                .map(|key| FileTransactionBlobValue {
+                    namespace: super::perception::PERCEPTION_MEDIA_NAMESPACE.into(),
+                    key: key.clone(),
+                    value: replacement_media
+                        .get(key.as_str())
+                        .map(|value| (*value).clone()),
+                })
+                .collect(),
+            events: FileTransactionEventsImage::Replace {
+                events: next_events,
+            },
+        };
+        let mut journal =
+            FileTransactionJournal::new(source_closure.transaction_id, before, after)?;
+        self.write_transaction_journal(&journal)?;
+        self.restore_transaction_image(&journal.after)?;
+        journal.state = FileTransactionJournalState::Committed;
+        journal.refresh_checksum()?;
+        self.write_transaction_journal(&journal)?;
+        self.remove_transaction_journal("store_scoped_projection")?;
+
+        Ok(crate::StoreScopedProjectionReplaceReport {
+            admission_report_id: admission.report_id().to_string(),
+            deleted_json: deleted.documents.len(),
+            inserted_json: request.json_docs.len(),
+            deleted_events,
+            inserted_events: request.events.len(),
+        })
     }
 }

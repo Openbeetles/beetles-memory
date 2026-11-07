@@ -1479,6 +1479,7 @@ pub struct ProviderProjectionPayload {
     pub(crate) system_memory_block: String,
     pub(crate) recent_messages: Vec<SessionMessage>,
     pub(crate) agent_tool_hints: Vec<AgentToolHint>,
+    pub(crate) visual_delivery: Option<crate::ProviderVisualDeliveryPacket>,
 }
 
 impl ProviderProjectionPayload {
@@ -1492,6 +1493,12 @@ impl ProviderProjectionPayload {
 
     pub fn agent_tool_hints(&self) -> &[AgentToolHint] {
         &self.agent_tool_hints
+    }
+
+    /// Real media parts prepared for this turn. The host must return an exact
+    /// API-boundary receipt before any reply derived from them is learnable.
+    pub fn visual_delivery(&self) -> Option<&crate::ProviderVisualDeliveryPacket> {
+        self.visual_delivery.as_ref()
     }
 }
 
@@ -2263,6 +2270,7 @@ impl MemoryArchiveScope {
 enum GovernedScopeArchiveEntryKind {
     Json,
     Event,
+    Blob,
 }
 
 impl GovernedScopeArchiveEntryKind {
@@ -2270,6 +2278,7 @@ impl GovernedScopeArchiveEntryKind {
         match self {
             Self::Json => "json",
             Self::Event => "event",
+            Self::Blob => "blob",
         }
     }
 }
@@ -2292,6 +2301,18 @@ impl GovernedScopeArchiveEntry {
         Self::from_value(GovernedScopeArchiveEntryKind::Event, plane, event_id, value)
     }
 
+    pub fn blob(namespace: &str, key: &str, value: &[u8]) -> Result<Self> {
+        require_canonical_archive_identity(namespace, "namespace_or_plane")?;
+        require_canonical_archive_identity(key, "key_or_event_id")?;
+        Ok(Self {
+            kind: GovernedScopeArchiveEntryKind::Blob,
+            namespace_or_plane: namespace.to_string(),
+            key_or_event_id: key.to_string(),
+            canonical_bytes: value.len(),
+            content_sha256: format!("{:x}", Sha256::digest(value)),
+        })
+    }
+
     fn from_value(
         kind: GovernedScopeArchiveEntryKind,
         namespace_or_plane: &str,
@@ -2311,13 +2332,13 @@ impl GovernedScopeArchiveEntry {
     }
 }
 
-pub const GOVERNED_SCOPE_ARCHIVE_ROOT_SCHEMA_VERSION: u32 = 1;
+pub const GOVERNED_SCOPE_ARCHIVE_ROOT_SCHEMA_VERSION: u32 = 2;
 const GOVERNED_SCOPE_ARCHIVE_ROOT_DIGEST_DOMAIN: &str =
-    "beetle_memory_governed_scope_archive_root_v1";
+    "beetle_memory_governed_scope_archive_root_v2";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GovernedScopeArchiveRootV1 {
+pub struct GovernedScopeArchiveRootV2 {
     pub schema_version: u32,
     pub store_schema_id: String,
     pub store_schema_version: u32,
@@ -2325,12 +2346,14 @@ pub struct GovernedScopeArchiveRootV1 {
     pub private_material_policy: MemorySpacePrivateMaterialPolicy,
     pub json_doc_count: u64,
     pub event_count: u64,
+    pub blob_count: u64,
     pub json_bytes: u64,
     pub event_bytes: u64,
+    pub blob_bytes: u64,
     pub closure_sha256: String,
 }
 
-impl GovernedScopeArchiveRootV1 {
+impl GovernedScopeArchiveRootV2 {
     pub fn build(
         scope: MemoryArchiveScope,
         private_material_policy: MemorySpacePrivateMaterialPolicy,
@@ -2357,8 +2380,10 @@ impl GovernedScopeArchiveRootV1 {
 
         let mut json_doc_count = 0_usize;
         let mut event_count = 0_usize;
+        let mut blob_count = 0_usize;
         let mut json_bytes = 0_usize;
         let mut event_bytes = 0_usize;
+        let mut blob_bytes = 0_usize;
         for entry in &entries {
             match entry.kind {
                 GovernedScopeArchiveEntryKind::Json => {
@@ -2389,16 +2414,34 @@ impl GovernedScopeArchiveRootV1 {
                                 )
                             })?;
                 }
+                GovernedScopeArchiveEntryKind::Blob => {
+                    blob_count = blob_count.checked_add(1).ok_or_else(|| {
+                        Error::config("governed_scope_archive_root", "blob count overflow")
+                    })?;
+                    blob_bytes =
+                        blob_bytes
+                            .checked_add(entry.canonical_bytes)
+                            .ok_or_else(|| {
+                                Error::config(
+                                    "governed_scope_archive_root",
+                                    "blob byte count overflow",
+                                )
+                            })?;
+                }
             }
         }
 
         let closure_sha256 = archive_root_digest(
             &scope,
             private_material_policy,
-            json_doc_count,
-            event_count,
-            json_bytes,
-            event_bytes,
+            ArchiveRootCounts {
+                json_docs: json_doc_count,
+                events: event_count,
+                blobs: blob_count,
+                json_bytes,
+                event_bytes,
+                blob_bytes,
+            },
             &entries,
         )?;
         Ok(Self {
@@ -2409,8 +2452,10 @@ impl GovernedScopeArchiveRootV1 {
             private_material_policy,
             json_doc_count: bounded_archive_count("json_doc_count", json_doc_count)?,
             event_count: bounded_archive_count("event_count", event_count)?,
+            blob_count: bounded_archive_count("blob_count", blob_count)?,
             json_bytes: bounded_archive_count("json_bytes", json_bytes)?,
             event_bytes: bounded_archive_count("event_bytes", event_bytes)?,
+            blob_bytes: bounded_archive_count("blob_bytes", blob_bytes)?,
             closure_sha256,
         })
     }
@@ -2475,13 +2520,19 @@ fn canonical_archive_json(value: &Value) -> Result<Vec<u8>> {
     Ok(output)
 }
 
+struct ArchiveRootCounts {
+    json_docs: usize,
+    events: usize,
+    blobs: usize,
+    json_bytes: usize,
+    event_bytes: usize,
+    blob_bytes: usize,
+}
+
 fn archive_root_digest(
     scope: &MemoryArchiveScope,
     private_material_policy: MemorySpacePrivateMaterialPolicy,
-    json_doc_count: usize,
-    event_count: usize,
-    json_bytes: usize,
-    event_bytes: usize,
+    counts: ArchiveRootCounts,
     entries: &[GovernedScopeArchiveEntry],
 ) -> Result<String> {
     let mut hasher = Sha256::new();
@@ -2509,7 +2560,14 @@ fn archive_root_digest(
             MemorySpacePrivateMaterialPolicy::IncludePrivate => b"include_private",
         },
     );
-    for count in [json_doc_count, event_count, json_bytes, event_bytes] {
+    for count in [
+        counts.json_docs,
+        counts.events,
+        counts.blobs,
+        counts.json_bytes,
+        counts.event_bytes,
+        counts.blob_bytes,
+    ] {
         let count = u64::try_from(count).map_err(|_| {
             Error::config(
                 "governed_scope_archive_root",
@@ -2573,7 +2631,7 @@ pub struct MemorySpaceExportReport {
 
 #[derive(Clone, PartialEq)]
 pub struct MemorySpaceArchive {
-    root: GovernedScopeArchiveRootV1,
+    root: GovernedScopeArchiveRootV2,
     snapshot: StoreSnapshot,
 }
 
@@ -2592,18 +2650,18 @@ impl std::fmt::Debug for MemorySpaceArchive {
 }
 
 impl MemorySpaceArchive {
-    pub(crate) fn from_snapshot(root: GovernedScopeArchiveRootV1, snapshot: StoreSnapshot) -> Self {
+    pub(crate) fn from_snapshot(root: GovernedScopeArchiveRootV2, snapshot: StoreSnapshot) -> Self {
         Self { root, snapshot }
     }
 
-    pub fn root(&self) -> &GovernedScopeArchiveRootV1 {
+    pub fn root(&self) -> &GovernedScopeArchiveRootV2 {
         &self.root
     }
 
     #[cfg(feature = "nonproduction-replay-harness")]
     pub fn with_replaced_root_for_nonproduction_harness(
         &self,
-        root: GovernedScopeArchiveRootV1,
+        root: GovernedScopeArchiveRootV2,
     ) -> Self {
         Self {
             root,
@@ -2670,7 +2728,7 @@ impl std::error::Error for MemorySpaceImportConflict {}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemorySpaceImportReport {
     pub imported_scope: MemoryArchiveScope,
-    pub archive_root: GovernedScopeArchiveRootV1,
+    pub archive_root: GovernedScopeArchiveRootV2,
     pub deleted_json_docs: usize,
     pub inserted_json_docs: usize,
     pub deleted_events: usize,

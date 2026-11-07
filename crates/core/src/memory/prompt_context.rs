@@ -19,10 +19,11 @@ use super::{
     relationship_scope_id, AutonomyStrategyStore, ContinuityCapsuleStore, ExecutionStateStore,
     FeltSignificanceStore, InnerConflictStore, InnerLifeStore, LongTermMemoryReadStore,
     LongTermMemoryStore, MemoryStore, MemorySystemKind, MentalPrivacyStore, OuterVoiceStore,
-    PrivateDocStore, PrivateGardenStore, PromptRecallIntent, PromptRecallRouterDecision,
-    RelationshipPortfolioStore, RelationshipTopologyStore, RemindAtStore, SelfAuthoredCoreStore,
-    SelfContinuityStore, SelfModelStore, SessionMessage, SessionStore, SessionSummaryStore,
-    SubjectShell, SubjectShellCompileInput, SubjectSoulRelationshipRuntimeInputV1,
+    PerceptionCapabilitySnapshot, PrivateDocStore, PrivateGardenStore, PromptRecallIntent,
+    PromptRecallRouterDecision, RelationshipPortfolioStore, RelationshipTopologyStore,
+    RemindAtStore, SelfAuthoredCoreStore, SelfContinuityStore, SelfModelStore, SessionMessage,
+    SessionMessageReplayLineage, SessionStore, SessionSummaryStore, SubjectShell,
+    SubjectShellCompileInput, SubjectSoulRelationshipRuntimeInputV1,
     SubjectSoulRelationshipRuntimeReadStore, TemperamentContinuityStore,
     TurnContinuityEvidenceStore, TurnLedgerStore, WorldSenseStore,
 };
@@ -72,6 +73,8 @@ pub struct PromptMemoryContext {
     pub mental_privacy_adjudication_text: Option<String>,
     pub mental_privacy_text: Option<String>,
     pub recent_messages: Vec<SessionMessage>,
+    pub recent_message_lineage: Vec<SessionMessageReplayLineage>,
+    pub long_term_visual_lineage: Vec<super::LongTermVisualReplayLineage>,
     recall_router: PromptRecallRouterDecision,
 }
 
@@ -79,9 +82,50 @@ pub struct PromptRuntimeCarry {
     pub summary_text: Option<String>,
     pub long_term_memory_text: Option<String>,
     pub recent_messages: Vec<SessionMessage>,
+    pub recent_message_lineage: Vec<SessionMessageReplayLineage>,
+    pub long_term_visual_lineage: Vec<super::LongTermVisualReplayLineage>,
     pub prompt_recall_intent: PromptRecallIntent,
     pub runtime_skill_selected_ids: Vec<String>,
     pub task_recall_selected_ids: Vec<String>,
+}
+
+impl PromptRuntimeCarry {
+    /// Call after appending any session-local messages and before final delivery.
+    /// The text lane and typed source lane must name the same ordered messages.
+    pub fn validate_replay_lineage(&self) -> crate::error::Result<()> {
+        if self.recent_messages.len() != self.recent_message_lineage.len()
+            || self
+                .recent_messages
+                .iter()
+                .zip(&self.recent_message_lineage)
+                .any(|(message, lineage)| message.message_id != lineage.message_id)
+        {
+            return Err(crate::error::Error::config(
+                "prompt_replay_lineage",
+                "recent messages and replay sources are not aligned",
+            ));
+        }
+        for lineage in &self.recent_message_lineage {
+            for source in &lineage.perception_sources {
+                source.validate_contract()?;
+            }
+        }
+        for owner in &self.long_term_visual_lineage {
+            if owner.owner_id.trim().is_empty()
+                || owner.owner_revision == 0
+                || owner.perception_sources.is_empty()
+            {
+                return Err(crate::error::Error::config(
+                    "prompt_replay_lineage",
+                    "visual long-term owner binding is invalid",
+                ));
+            }
+            for source in &owner.perception_sources {
+                source.validate_contract()?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,6 +195,7 @@ pub struct InhabitedSubjectProjectionInput<'a> {
     pub runtime_private_context_allowed: bool,
     pub foreground_disclosure_allowed: bool,
     pub user_query: &'a str,
+    pub perception_capabilities: &'a [PerceptionCapabilitySnapshot],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -283,6 +328,26 @@ pub fn compile_inhabited_subject_projection(
     let work_integrity_covenant = compile_work_integrity_covenant(input);
     let evidence_refs = compile_inhabited_subject_evidence_refs(&classified_sources, mounted);
     let mut dropped_candidates = Vec::new();
+    for capability in input.perception_capabilities.iter().skip(4) {
+        dropped_candidates.push(InhabitedSubjectDroppedCandidate {
+            candidate_id: format!(
+                "perception_capability:{}:{}",
+                capability.host_id, capability.device_id
+            ),
+            reason: "perception_capability_budget".into(),
+        });
+    }
+    for capability in input.perception_capabilities.iter().take(4) {
+        if capability.validate_contract().is_err() {
+            dropped_candidates.push(InhabitedSubjectDroppedCandidate {
+                candidate_id: format!(
+                    "perception_capability:{}:{}",
+                    capability.host_id, capability.device_id
+                ),
+                reason: "invalid_perception_capability".into(),
+            });
+        }
+    }
     if let Some(reason) = degraded_reason.as_deref() {
         dropped_candidates.push(InhabitedSubjectDroppedCandidate {
             candidate_id: "subject_mount".to_string(),
@@ -388,6 +453,8 @@ impl PromptMemoryContext {
             summary_text: self.summary_text,
             long_term_memory_text: self.long_term_memory_text,
             recent_messages: self.recent_messages,
+            recent_message_lineage: self.recent_message_lineage,
+            long_term_visual_lineage: self.long_term_visual_lineage,
             prompt_recall_intent: self.recall_router.intent,
             runtime_skill_selected_ids: self.runtime_skill_recall_report.selected_ids,
             task_recall_selected_ids: self
@@ -1154,7 +1221,20 @@ fn compile_inhabited_subject_mount(
                 state.map(|state| state.relationship_posture.as_str()),
             )
         });
-    let situated_now = first_subject_text(&[shell.map(|shell| shell.situated_now.as_str())]);
+    let mut situated_now = first_subject_text(&[shell.map(|shell| shell.situated_now.as_str())]);
+    let capability_text = input
+        .perception_capabilities
+        .iter()
+        .take(4)
+        .filter_map(|capability| capability.subject_sentence().ok())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !capability_text.is_empty() {
+        if !situated_now.is_empty() {
+            situated_now.push(' ');
+        }
+        situated_now.push_str(&capability_text);
+    }
     // Grounding sources are rendered in their own governed evidence section.
     // Duplicating a raw source block in the mount turns it into self-description.
     let current_reasoning_basis = String::new();
@@ -1724,6 +1804,7 @@ fn load_prompt_memory_context_inner(params: PromptMemoryContextParams<'_>) -> Pr
         };
     let super::prompt_context_stages::PromptGovernedMemoryStage {
         long_term_memory_text,
+        long_term_visual_lineage,
         continuity_capsule_text,
         archive_evidence_text,
         runtime_skill_text,
@@ -1786,6 +1867,8 @@ fn load_prompt_memory_context_inner(params: PromptMemoryContextParams<'_>) -> Pr
         mental_privacy_adjudication_text: None,
         mental_privacy_text: private_projection.mental_privacy_text,
         recent_messages: session.recent_messages,
+        recent_message_lineage: session.recent_message_lineage,
+        long_term_visual_lineage,
         recall_router,
     }
 }
@@ -1917,6 +2000,8 @@ mod tests {
                 "user".to_string(),
                 "hello".to_string(),
             )],
+            recent_message_lineage: Vec::new(),
+            long_term_visual_lineage: Vec::new(),
             recall_router: PromptRecallRouterDecision {
                 intent: PromptRecallIntent::Factual,
             },
@@ -1972,6 +2057,8 @@ mod tests {
             mental_privacy_adjudication_text: Some("privacy".to_string()),
             mental_privacy_text: None,
             recent_messages: Vec::new(),
+            recent_message_lineage: Vec::new(),
+            long_term_visual_lineage: Vec::new(),
             recall_router: PromptRecallRouterDecision {
                 intent: PromptRecallIntent::Factual,
             },
@@ -2019,6 +2106,7 @@ mod tests {
             runtime_private_context_allowed: true,
             foreground_disclosure_allowed: false,
             user_query: "finish release work",
+            perception_capabilities: &[],
         });
 
         assert!(projection.subject_mount.degraded_reason.is_none());
@@ -2070,6 +2158,7 @@ mod tests {
             runtime_private_context_allowed: false,
             foreground_disclosure_allowed: false,
             user_query: "hello",
+            perception_capabilities: &[],
         });
         assert!(projection.subject_mount.degraded_reason.is_none());
         assert!(projection.subject_mount.identity_mount.contains("patient"));
@@ -2096,6 +2185,7 @@ mod tests {
             runtime_private_context_allowed: false,
             foreground_disclosure_allowed: false,
             user_query: "what do you know",
+            perception_capabilities: &[],
         });
 
         assert_eq!(
@@ -2128,6 +2218,7 @@ mod tests {
             runtime_private_context_allowed: private,
             foreground_disclosure_allowed: false,
             user_query: "continue the task",
+            perception_capabilities: &[],
         })
     }
 
@@ -2319,6 +2410,8 @@ mod tests {
             mental_privacy_adjudication_text: None,
             mental_privacy_text: None,
             recent_messages: Vec::new(),
+            recent_message_lineage: Vec::new(),
+            long_term_visual_lineage: Vec::new(),
             recall_router: PromptRecallRouterDecision {
                 intent: PromptRecallIntent::Factual,
             },
@@ -2373,6 +2466,8 @@ mod tests {
             mental_privacy_adjudication_text: Some(repeated.clone()),
             mental_privacy_text: Some(repeated),
             recent_messages: Vec::new(),
+            recent_message_lineage: Vec::new(),
+            long_term_visual_lineage: Vec::new(),
             recall_router: PromptRecallRouterDecision {
                 intent: PromptRecallIntent::Factual,
             },
@@ -2478,6 +2573,8 @@ mod tests {
             mental_privacy_adjudication_text: None,
             mental_privacy_text: None,
             recent_messages: Vec::new(),
+            recent_message_lineage: Vec::new(),
+            long_term_visual_lineage: Vec::new(),
             recall_router: PromptRecallRouterDecision {
                 intent: PromptRecallIntent::Factual,
             },
@@ -2706,6 +2803,7 @@ mod tests {
         let long_term_memory_store = StubLongTermMemoryStore {
             entries: Mutex::new(vec![LongTermMemoryEntry {
                 transcript_sources: Vec::new(),
+                perception_sources: Vec::new(),
                 control_barrier_scope_revision: None,
 
                 id: "pref:coffee".to_string(),
@@ -5109,6 +5207,7 @@ mod tests {
         let memory_store = StubLongTermMemoryStore {
             entries: Mutex::new(vec![LongTermMemoryEntry {
                 transcript_sources: Vec::new(),
+                perception_sources: Vec::new(),
                 control_barrier_scope_revision: None,
 
                 id: "pref-coffee".to_string(),
@@ -5620,6 +5719,7 @@ mod tests {
         let memory_store = StubLongTermMemoryStore {
             entries: Mutex::new(vec![LongTermMemoryEntry {
                 transcript_sources: Vec::new(),
+                perception_sources: Vec::new(),
                 control_barrier_scope_revision: None,
 
                 id: "pref-coffee".to_string(),
@@ -6272,6 +6372,7 @@ mod tests {
         let memory_store = StubLongTermMemoryStore {
             entries: Mutex::new(vec![LongTermMemoryEntry {
                 transcript_sources: Vec::new(),
+                perception_sources: Vec::new(),
                 control_barrier_scope_revision: None,
 
                 id: "memory-router".to_string(),
@@ -6590,6 +6691,7 @@ mod tests {
         let memory_store = StubLongTermMemoryStore {
             entries: Mutex::new(vec![LongTermMemoryEntry {
                 transcript_sources: Vec::new(),
+                perception_sources: Vec::new(),
                 control_barrier_scope_revision: None,
 
                 id: "project-release".to_string(),
@@ -6723,6 +6825,7 @@ mod tests {
         let memory_store = StubLongTermMemoryStore {
             entries: Mutex::new(vec![LongTermMemoryEntry {
                 transcript_sources: Vec::new(),
+                perception_sources: Vec::new(),
                 control_barrier_scope_revision: None,
 
                 id: "network-outage-summary".to_string(),
@@ -6981,6 +7084,7 @@ mod tests {
         let memory_store = StubLongTermMemoryStore {
             entries: Mutex::new(vec![LongTermMemoryEntry {
                 transcript_sources: Vec::new(),
+                perception_sources: Vec::new(),
                 control_barrier_scope_revision: None,
 
                 id: "memory-router".to_string(),
@@ -7111,6 +7215,7 @@ mod tests {
         let memory_store = StubLongTermMemoryStore {
             entries: Mutex::new(vec![LongTermMemoryEntry {
                 transcript_sources: Vec::new(),
+                perception_sources: Vec::new(),
                 control_barrier_scope_revision: None,
 
                 id: "project-release".to_string(),
@@ -7234,6 +7339,7 @@ mod tests {
         let memory_store = StubLongTermMemoryStore {
             entries: Mutex::new(vec![LongTermMemoryEntry {
                 transcript_sources: Vec::new(),
+                perception_sources: Vec::new(),
                 control_barrier_scope_revision: None,
 
                 id: "network-outage-summary".to_string(),
@@ -7343,6 +7449,7 @@ mod tests {
         let memory_store = StubLongTermMemoryStore {
             entries: Mutex::new(vec![LongTermMemoryEntry {
                 transcript_sources: Vec::new(),
+                perception_sources: Vec::new(),
                 control_barrier_scope_revision: None,
 
                 id: "profile-owner-timezone".to_string(),

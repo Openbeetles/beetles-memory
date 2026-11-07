@@ -4341,6 +4341,7 @@ mod tests {
             owner_revision,
             governed_content: LongTermMemoryGovernedContent {
                 transcript_sources: Vec::new(),
+                perception_sources: Vec::new(),
                 control_barrier_scope_revision: None,
                 kind: LongTermMemoryKind::Fact,
                 topic: "deployment".into(),

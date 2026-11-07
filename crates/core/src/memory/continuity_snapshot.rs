@@ -1509,6 +1509,7 @@ mod tests {
     fn sample_entry(kind: LongTermMemoryKind, topic: &str) -> LongTermMemoryEntry {
         LongTermMemoryEntry {
             transcript_sources: Vec::new(),
+            perception_sources: Vec::new(),
             control_barrier_scope_revision: None,
 
             id: format!("{}:{}", kind.label(), topic),

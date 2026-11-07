@@ -1,5 +1,7 @@
 pub(crate) mod governed_indexes;
 mod long_term_sources;
+pub mod perception_memory;
+mod visual_long_term;
 pub(crate) use long_term_sources::LongTermControlAuthorization;
 use long_term_sources::LongTermSourceContext;
 use std::cell::RefCell;
@@ -1513,7 +1515,7 @@ pub struct MemoryRuntimeConfig {
     pub(crate) platform: Arc<dyn Platform>,
     long_term_memory_read_store: Arc<dyn LongTermMemoryReadStore>,
     long_term_memory_control_store: Arc<dyn LongTermMemoryControlReadStore>,
-    store_platform: Option<StorePlatform>,
+    pub(crate) store_platform: Option<StorePlatform>,
     procedural_selection_signer:
         Option<crate::store_internal::procedural_selection::ProceduralSelectionSigner>,
     pub llm: Option<Arc<dyn LlmClient>>,
@@ -1538,6 +1540,7 @@ pub struct MemoryRuntime {
     last_conversation_id: Mutex<Option<String>>,
     governance_current_binding: Mutex<Option<PostTurnGovernanceExecutionBindingV1>>,
     learning_wake_sinks: Mutex<Vec<Weak<dyn crate::MemoryLearningWakeSink>>>,
+    pub(crate) perception: Mutex<crate::perception::RuntimePerceptionState>,
 }
 
 struct GovernedLongTermMemoryReadView<'a> {
@@ -3655,6 +3658,7 @@ impl PlanningSubjectSoulGenerationStores {
         owner: &SubjectSoulOwnerV1,
         generation: u64,
         revision: Option<u64>,
+        current_persona_transcript: Option<&TranscriptTurnRecord>,
     ) -> Result<Vec<SubjectSoulGenerationLayerMutationV1>> {
         let input_sources = self.base.persona.read_sources()?;
         let changes = self
@@ -3686,16 +3690,41 @@ impl PlanningSubjectSoulGenerationStores {
                                     "invalid pending observation",
                                 )
                             })?;
-                        vec![bm_core::memory::SubjectSoulSourceRefV1 {
-                            memory_space_id: evidence.source.memory_space_id,
-                            subject_id: evidence.source.mounted_subject_id,
-                            channel_id: evidence.source.channel_id,
-                            conversation_id: evidence.source.conversation_id,
-                            turn_id: evidence.source.turn_id,
-                            sequence: evidence.source_sequence,
-                            canonical_turn_digest: evidence.canonical_turn_digest,
-                            transcript_content_digest: evidence.source_transcript_digest,
-                        }]
+                        if let Some(record) = current_persona_transcript {
+                            if record.key.memory_space_id != evidence.source.memory_space_id
+                                || record.subject != evidence.source.mounted_subject_id
+                                || record.key.channel_id != evidence.source.channel_id
+                                || record.key.conversation_id != evidence.source.conversation_id
+                                || record.turn_id != evidence.source.turn_id
+                            {
+                                return Err(Error::config(
+                                    "post_turn.persona_evidence",
+                                    "persona evidence differs from its exact current Transcript",
+                                ));
+                            }
+                            bm_core::memory::SubjectSoulSourceRefV1::closure_from_transcript(record)
+                                .map_err(|error| {
+                                    Error::config("post_turn.persona_evidence", error.to_string())
+                                })?
+                        } else if evidence.visual_observations.is_empty() {
+                            vec![bm_core::memory::SubjectSoulSourceRefV1::Transcript(
+                                bm_core::memory::SubjectSoulTranscriptSourceRefV1 {
+                                    memory_space_id: evidence.source.memory_space_id,
+                                    subject_id: evidence.source.mounted_subject_id,
+                                    channel_id: evidence.source.channel_id,
+                                    conversation_id: evidence.source.conversation_id,
+                                    turn_id: evidence.source.turn_id,
+                                    sequence: evidence.source_sequence,
+                                    canonical_turn_digest: evidence.canonical_turn_digest,
+                                    transcript_content_digest: evidence.source_transcript_digest,
+                                },
+                            )]
+                        } else {
+                            return Err(Error::config(
+                                "post_turn.persona_evidence",
+                                "visual persona evidence requires its exact current Transcript",
+                            ));
+                        }
                     } else {
                         bm_core::memory::merge_subject_soul_source_lineage_v1(
                             owner,
@@ -9476,6 +9505,12 @@ impl MemoryRuntime {
                     platform: self.config.store_platform.as_ref(),
                     memory_space_id: &self.config.memory_space_id,
                     mounted_subject_id: &self.config.scoped_runtime.mounted_subject_id,
+                    mounted_relationship_id: self
+                        .config
+                        .scoped_runtime
+                        .relationship_scope
+                        .as_ref()
+                        .map(|scope| scope.relationship_id.as_str()),
                     admitted_turn: None,
                 },
             )?;
@@ -12246,6 +12281,12 @@ impl MemoryRuntime {
                 platform: self.config.store_platform.as_ref(),
                 memory_space_id: &self.config.memory_space_id,
                 mounted_subject_id: &self.config.scoped_runtime.mounted_subject_id,
+                mounted_relationship_id: self
+                    .config
+                    .scoped_runtime
+                    .relationship_scope
+                    .as_ref()
+                    .map(|scope| scope.relationship_id.as_str()),
                 admitted_turn: ctx.admitted_turn,
             },
         )?;
@@ -12381,6 +12422,12 @@ impl MemoryRuntime {
                 platform: self.config.store_platform.as_ref(),
                 memory_space_id: &self.config.memory_space_id,
                 mounted_subject_id: &self.config.scoped_runtime.mounted_subject_id,
+                mounted_relationship_id: self
+                    .config
+                    .scoped_runtime
+                    .relationship_scope
+                    .as_ref()
+                    .map(|scope| scope.relationship_id.as_str()),
                 admitted_turn: None,
             },
         )?;
@@ -12495,6 +12542,12 @@ impl MemoryRuntime {
                     factual_owner_id: &self.config.memory_space_id,
                     expected_actor_subject_id: &self.config.scoped_runtime.actor_subject_id,
                     mounted_subject_id: &self.config.scoped_runtime.mounted_subject_id,
+                    mounted_relationship_id: self
+                        .config
+                        .scoped_runtime
+                        .relationship_scope
+                        .as_ref()
+                        .map(|scope| scope.relationship_id.as_str()),
                     human_confirmation_authority: human_confirmation_authority.as_ref(),
                     store_platform: self.config.store_platform.as_ref().ok_or_else(|| {
                         Error::config("long_term_version_plan", "store platform is required")
@@ -13244,6 +13297,7 @@ impl MemoryRuntime {
                 governed_state_budget.max_validity_joins,
                 governed_state_budget.max_as_of_candidates,
             )?;
+            self.materialize_visual_long_term_sources(context, &authority.runtime_budget)?;
             return Ok(ProductionRecallReadViewMaterialization::Ready {
                 read_view: context.take_materialized_view(),
                 runtime_skill_materializer,
@@ -13630,6 +13684,7 @@ impl MemoryRuntime {
         }
         self.materialize_graph_recall_closure(context, &authority.runtime_budget)?;
         self.materialize_cached_long_term_owner_closures(context, &authority.runtime_budget)?;
+        self.materialize_visual_long_term_sources(context, &authority.runtime_budget)?;
         Ok(ProductionRecallReadViewMaterialization::Ready {
             read_view: context.take_materialized_view(),
             runtime_skill_materializer,
@@ -13939,6 +13994,65 @@ impl MemoryRuntime {
                 budget.max_validity_joins,
             )?;
         }
+        Ok(())
+    }
+
+    fn materialize_visual_long_term_sources(
+        &self,
+        context: &mut RecallImmutableReadContext<'_>,
+        runtime_budget: &RuntimeBudgetReport,
+    ) -> Result<()> {
+        use crate::store_internal::perception::{
+            perception_episode_storage_key, PERCEPTION_EPISODE_NAMESPACE,
+            PERCEPTION_EPISODE_TOMBSTONE_NAMESPACE,
+        };
+        let materials = context.cached_json_docs::<LongTermMemoryVersionMaterial>(
+            crate::store_internal::LONG_TERM_VERSION_MATERIAL_NAMESPACE,
+        )?;
+        let max_sources = runtime_budget
+            .governed_state_budget
+            .max_validity_joins
+            .saturating_mul(
+                runtime_budget
+                    .governed_state_budget
+                    .max_retained_long_term_revisions_per_owner,
+            );
+        let mut sources = BTreeSet::new();
+        for material in materials {
+            for source in &material.governed_content.perception_sources {
+                source.validate_contract()?;
+                if source.memory_space_id != self.config.memory_space_id
+                    || source.subject_id != self.config.scoped_runtime.mounted_subject_id
+                {
+                    return Err(Error::config(
+                        "production_recall_materialize",
+                        "visual long-term source escapes the mounted subject",
+                    ));
+                }
+                sources.insert(perception_episode_storage_key(
+                    &source.memory_space_id,
+                    &source.subject_id,
+                    &source.source,
+                    &source.episode_id,
+                )?);
+                if sources.len() > max_sources {
+                    return Err(Error::config(
+                        "production_recall_materialize",
+                        "visual long-term source read budget exceeded",
+                    ));
+                }
+            }
+        }
+        let addresses = sources
+            .into_iter()
+            .flat_map(|key| {
+                [
+                    (PERCEPTION_EPISODE_NAMESPACE.to_string(), key.clone()),
+                    (PERCEPTION_EPISODE_TOMBSTONE_NAMESPACE.to_string(), key),
+                ]
+            })
+            .collect::<Vec<_>>();
+        context.read_json_values(&addresses)?;
         Ok(())
     }
 
@@ -16754,6 +16868,18 @@ impl MemoryRuntime {
         self.project_with_subject_soul_selector(request, None)
     }
 
+    /// Projects visual tool availability for the exact registered host device
+    /// executing this turn. Other devices remain present in the subject's
+    /// awareness but are not callable through this host without a separate
+    /// cross-device authorization path.
+    pub fn project_for_perception_host(
+        &self,
+        request: MemoryProjectionRequest,
+        host: &crate::PerceptionHostHandle,
+    ) -> Result<MemoryProjectionOutput> {
+        self.project_with_perception_host_context(request, None, Some(host))
+    }
+
     /// Projects with an optional exact Subject Soul generation/revision root.
     /// `None` selects Current only for a Current temporal operation; historical
     /// requests without an exact Soul selector omit Soul material fail closed.
@@ -16762,10 +16888,23 @@ impl MemoryRuntime {
         request: MemoryProjectionRequest,
         subject_soul_selector: Option<SubjectSoulReadSelectorV1>,
     ) -> Result<MemoryProjectionOutput> {
+        self.project_with_perception_host_context(request, subject_soul_selector, None)
+    }
+
+    fn project_with_perception_host_context(
+        &self,
+        request: MemoryProjectionRequest,
+        subject_soul_selector: Option<SubjectSoulReadSelectorV1>,
+        perception_host: Option<&crate::PerceptionHostHandle>,
+    ) -> Result<MemoryProjectionOutput> {
         if RuntimeBudgetLease::active_report(&self.config.runtime_budget_authority).is_none() {
             let lease = self.acquire_runtime_budget_lease()?;
             return self.execute_with_runtime_budget_lease(&lease, || {
-                self.project_with_subject_soul_selector(request, subject_soul_selector)
+                self.project_with_perception_host_context(
+                    request,
+                    subject_soul_selector,
+                    perception_host,
+                )
             });
         }
         self.ensure_visible("project", self.capabilities.projection)?;
@@ -16912,9 +17051,11 @@ impl MemoryRuntime {
         let runtime_private_context_allowed =
             self.config.privacy_policy.private_plane_projection_allowed
                 && lifecycle.admission.private_depth_allowed;
+        let perception_capabilities = self.current_perception_capabilities(perception_host)?;
         let inhabited_subject_projection =
             compile_inhabited_subject_projection(InhabitedSubjectProjectionInput {
                 context: &context,
+                perception_capabilities: &perception_capabilities,
                 mounted_subject_id: self.config.scoped_runtime.mounted_subject_id.as_str(),
                 now_secs: authority.operation_time,
                 platform: runtime_awareness_profile_label(self.config.profile),
@@ -17246,11 +17387,99 @@ impl MemoryRuntime {
             "projection_completed",
             &telemetry_payload,
         )?;
-        let prompt_carry = context.into_runtime_carry();
+        let mut prompt_carry = context.into_runtime_carry();
+        let (ephemeral_messages, ephemeral_source_keys) = self.ephemeral_visual_context()?;
+        prompt_carry
+            .recent_message_lineage
+            .extend(ephemeral_messages.iter().map(|message| {
+                bm_core::memory::SessionMessageReplayLineage {
+                    message_id: message.message_id.clone(),
+                    transcript_ref: None,
+                    perception_sources: Vec::new(),
+                }
+            }));
+        prompt_carry.recent_messages.extend(ephemeral_messages);
+        if prompt_carry.recent_messages.len() > request.recent_messages_limit {
+            let excess = prompt_carry.recent_messages.len() - request.recent_messages_limit;
+            prompt_carry.recent_messages.drain(..excess);
+            prompt_carry.recent_message_lineage.drain(..excess);
+        }
+        prompt_carry
+            .validate_replay_lineage()
+            .map_err(|error| Error::config("visual_replay_lineage", error.to_string()))?;
+        let ephemeral_delivered = prompt_carry
+            .recent_messages
+            .iter()
+            .any(|message| message.message_id.starts_with("visual-ephemeral:"));
+        if let bm_core::memory::ProceduralProjectionBindingV1::Turn { turn_id } = &request.binding {
+            let mut long_term_visual_lineage = prompt_carry.long_term_visual_lineage.clone();
+            for capsule in &recall_delivery_report.rendered_capsules {
+                if capsule.owner_ref.owner_plane != GovernedMemoryOwnerPlane::LongTerm {
+                    continue;
+                }
+                let state = long_term_recall_closure
+                    .owner_states
+                    .get(&capsule.owner_ref)
+                    .ok_or_else(|| {
+                        Error::config(
+                            "visual_replay_lineage",
+                            "rendered visual owner lacks request-pinned long-term state",
+                        )
+                    })?;
+                let entry = state.projection.material.to_current_projection()?;
+                if !entry.perception_sources.is_empty() {
+                    long_term_visual_lineage.push(bm_core::memory::LongTermVisualReplayLineage {
+                        owner_id: capsule.owner_ref.owner_id.clone(),
+                        owner_revision: state.projection.material.owner_revision,
+                        perception_sources: entry.perception_sources,
+                    });
+                }
+            }
+            let subject_visual_sources = subject_soul
+                .as_ref()
+                .and_then(|read| read.selected_material.as_ref())
+                .map(|material| {
+                    material
+                        .source_lineage
+                        .iter()
+                        .filter_map(|source| match source {
+                            bm_core::memory::SubjectSoulSourceRefV1::Perception(source) => {
+                                Some(source.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            self.record_visual_projection_replay(
+                turn_id,
+                &prompt_carry.recent_message_lineage,
+                &long_term_visual_lineage,
+                if ephemeral_delivered {
+                    &ephemeral_source_keys
+                } else {
+                    &[]
+                },
+                &subject_visual_sources,
+            )?;
+        }
+        let visual_delivery = self.prepare_visual_for_project(&request.binding, perception_host)?;
+        if let (Some(host), Some(packet)) = (perception_host, visual_delivery.as_ref()) {
+            if packet.parts.iter().any(|part| {
+                part.source_key.host_id != host.host_id()
+                    || part.source_key.device_id.as_deref() != host.device_id()
+            }) {
+                return Err(Error::config(
+                    "visual_project_host",
+                    "visual media packet is outside the executing host device",
+                ));
+            }
+        }
         let provider_payload = ProviderProjectionPayload {
             system_memory_block,
             recent_messages: prompt_carry.recent_messages,
             agent_tool_hints: runtime_projection.agent_tool_hints.clone(),
+            visual_delivery,
         };
         let (governed_public_report, governed_operator_report) = build_governed_safe_reports(
             &authority,
@@ -17486,6 +17715,22 @@ impl MemoryRuntime {
                 .execute_with_runtime_budget_lease(&lease, || self.maintain(http, llm, request));
         }
         self.ensure_visible("maintain", self.capabilities.maintenance)?;
+        let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
+            Error::config(
+                "maintain",
+                "governed Store is required for perception taint check",
+            )
+        })?;
+        if store_platform.has_perception_taint_in_session(
+            &self.config.memory_space_id,
+            &self.config.subject_id,
+            self.config.scope.conversation_id_or_chat_id(),
+        )? {
+            return Err(Error::config(
+                "maintain",
+                "visual session cannot enter unbound free-text maintenance",
+            ));
+        }
         let lifecycle = self.start_lifecycle(
             RuntimeLifecycleOperation::Maintain,
             RuntimeLifecycleTrigger::PostReply,
@@ -17523,6 +17768,12 @@ impl MemoryRuntime {
                 platform: self.config.store_platform.as_ref(),
                 memory_space_id: &self.config.memory_space_id,
                 mounted_subject_id: &self.config.scoped_runtime.mounted_subject_id,
+                mounted_relationship_id: self
+                    .config
+                    .scoped_runtime
+                    .relationship_scope
+                    .as_ref()
+                    .map(|scope| scope.relationship_id.as_str()),
                 admitted_turn: None,
             },
         )?;
@@ -17703,13 +17954,129 @@ impl MemoryRuntime {
             &self.config.scoped_runtime,
             &request.turn,
         )?;
+        self.verify_visual_user_attachments(&request.turn)?;
+        let (mut perception_retention, mut perception_candidates) =
+            self.visual_turn_episode_candidates(&request.turn.turn_id)?;
+        let visual_replay = self.visual_replay_receipt(&request.turn.turn_id)?;
+        let external_content_manifest = if self.visual_sdk_profile_supported() {
+            self.turn_external_content_manifest(&request.turn.turn_id)?
+        } else {
+            None
+        };
+        // A prior visual reply may be replayed through recent_messages. Until
+        // exact replay lineage is attached to this turn, derived text cannot
+        // enter the durable text-learning path without its visual source.
+        let prior_visual_session = if let Some(store) = self.config.store_platform.as_ref() {
+            store.has_other_perception_taint_in_session(
+                &self.config.memory_space_id,
+                &self.config.subject_id,
+                self.config.scope.conversation_id_or_chat_id(),
+                &request.turn.turn_id,
+            )?
+        } else {
+            false
+        };
+        let exact_visual_replay =
+            visual_replay
+                .as_ref()
+                .is_some_and(|(uses, ephemeral, unresolved)| {
+                    !uses.is_empty() && !ephemeral && !unresolved
+                });
+        let attested_no_visual_replay =
+            visual_replay
+                .as_ref()
+                .is_none_or(|(uses, ephemeral, unresolved)| {
+                    uses.is_empty() && !ephemeral && !unresolved
+                })
+                && perception_candidates.is_empty()
+                && external_content_manifest.as_ref().is_some_and(|manifest| {
+                    manifest.completeness
+                        == bm_core::memory::ExternalContentCompletenessV1::HostAttestedComplete
+                        && manifest.uses.iter().all(|usage| {
+                            matches!(
+                                usage,
+                                bm_core::memory::TranscriptExternalContentUseV1::Other { .. }
+                            )
+                        })
+                });
+        if prior_visual_session && !exact_visual_replay && !attested_no_visual_replay {
+            perception_retention = Some(bm_core::memory::PerceptionRetentionCeiling::CurrentTurn);
+            perception_candidates.clear();
+        }
+        if request.turn.assistant_messages.is_empty() {
+            perception_candidates.clear();
+        }
+        let input_count = u64::try_from(request.turn.input_messages.len())
+            .map_err(|_| Error::config("visual_turn_finalize", "input count overflow"))?;
+        let mut perception_source_uses = perception_candidates
+            .iter()
+            .map(|(intake, completed_assistant_count)| {
+                if usize::try_from(*completed_assistant_count)
+                    .ok()
+                    .is_none_or(|count| count >= request.turn.assistant_messages.len())
+                {
+                    return Err(Error::config(
+                        "visual_turn_finalize",
+                        "visual step has no following assistant message in the canonical turn",
+                    ));
+                }
+                Ok(bm_core::memory::TranscriptPerceptionSourceUseV1 {
+                    source: intake.episode.source_ref()?,
+                    first_affected_assistant_sequence: input_count
+                        .saturating_add(u64::from(*completed_assistant_count))
+                        .saturating_add(1),
+                    delivery: bm_core::memory::PerceptionReplyEvidenceV1::HostAttested {
+                        receipt_digest: intake
+                            .episode
+                            .delivery
+                            .as_ref()
+                            .ok_or_else(|| {
+                                Error::config(
+                                    "visual_turn_finalize",
+                                    "durable episode lacks host delivery proof",
+                                )
+                            })?
+                            .receipt_sha256
+                            .clone(),
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if perception_retention
+            .is_some_and(bm_core::memory::PerceptionRetentionCeiling::permits_durable_semantic)
+            && !request.turn.assistant_messages.is_empty()
+        {
+            if let Some((replayed, false, false)) = &visual_replay {
+                for replay in replayed {
+                    perception_source_uses.push(bm_core::memory::TranscriptPerceptionSourceUseV1 {
+                        source: replay.source.clone(),
+                        first_affected_assistant_sequence: input_count.saturating_add(1),
+                        delivery: bm_core::memory::PerceptionReplyEvidenceV1::ReplayedOwner {
+                            owner: replay.owner.clone(),
+                        },
+                    });
+                }
+            }
+        }
+        perception_source_uses.sort();
+        let has_visual_source_uses = !perception_source_uses.is_empty();
+        let has_external_content_manifest = external_content_manifest.is_some();
+        let perception_episodes = perception_candidates
+            .into_iter()
+            .map(|(intake, _)| intake)
+            .collect::<Vec<_>>();
         let conversation_alias = self.conversation_alias_from_delta(&request.turn)?;
         let platform = self.config.platform.as_ref();
         let session_store = platform.session_store();
         let transcript_store = platform.conversation_transcript_store();
         let learning_evidence = self.build_post_turn_learning_evidence(&request, producer)?;
         let intake_authority = producer
-            .filter(|_| request.learning.has_authorized_content())
+            .filter(|_| {
+                request.learning.has_authorized_content()
+                    && perception_retention.is_none_or(
+                        bm_core::memory::PerceptionRetentionCeiling::permits_durable_semantic,
+                    )
+            })
             .map(|context| -> Result<_> {
                 let mut source_preconditions = context.source_preconditions.clone();
                 merge_json_preconditions(
@@ -17742,8 +18109,23 @@ impl MemoryRuntime {
             &request.turn,
             CanonicalTurnTranscriptCommitOptions {
                 host_refs: Vec::new(),
-                learning_evidence: Some(learning_evidence),
+                learning_evidence: if perception_retention
+                    .is_some_and(|ceiling| !ceiling.permits_durable_semantic())
+                {
+                    None
+                } else {
+                    Some(learning_evidence)
+                },
                 conversation_alias: conversation_alias.clone(),
+                perception_retention,
+                perception_source_uses,
+                external_content_manifest,
+                mounted_relationship_id: self
+                    .config
+                    .scoped_runtime
+                    .relationship_scope
+                    .as_ref()
+                    .map(|scope| scope.relationship_id.clone()),
                 now_secs: self.config.clock.now_secs(),
             },
         )?;
@@ -17753,20 +18135,51 @@ impl MemoryRuntime {
                     .store_platform
                     .as_ref()
                     .expect("evidence requires StorePlatform")
-                    .append_authorized_canonical_turn(intent, authority)
+                    .append_authorized_canonical_turn_with_perception(
+                        intent,
+                        authority,
+                        &perception_episodes,
+                    )
+            } else if !perception_episodes.is_empty() || has_visual_source_uses {
+                self.config
+                    .store_platform
+                    .as_ref()
+                    .expect("visual episode requires StorePlatform")
+                    .append_canonical_turn_with_perception(intent, &perception_episodes)
             } else {
                 transcript_store.append_canonical_turn_intent(intent)
             }
         })?;
+        if has_external_content_manifest {
+            self.clear_turn_external_content_manifest(&request.turn.turn_id)?;
+        }
         let transcript_commit = core_report.transcript_commit;
         let transcript_committed = transcript_commit
             .as_ref()
             .is_some_and(|report| report.committed);
         let session_commit = core_report.session_commit;
+        if transcript_commit.is_some() && !perception_episodes.is_empty() {
+            self.consolidate_visual_long_term_after_turn(&perception_episodes)?;
+        }
         if transcript_commit.is_some() {
             if let Some(alias) = conversation_alias.as_ref() {
                 self.remember_committed_conversation_id(&alias.conversation_id);
             }
+        }
+
+        let inherited_ephemeral_sources =
+            self.ephemeral_replay_source_keys(&request.turn.turn_id)?;
+        let current_turn_only_visual =
+            self.visual_turn_sources(&request.turn.turn_id)?
+                .iter()
+                .any(|(_, ceiling, _)| {
+                    *ceiling == bm_core::memory::PerceptionRetentionCeiling::CurrentTurn
+                });
+        if perception_retention
+            == Some(bm_core::memory::PerceptionRetentionCeiling::EphemeralSession)
+            || (!inherited_ephemeral_sources.is_empty() && !current_turn_only_visual)
+        {
+            self.remember_ephemeral_visual_turn(&request.turn, &inherited_ephemeral_sources)?;
         }
 
         if !session_commit.committed && !transcript_committed {
@@ -17820,6 +18233,15 @@ impl MemoryRuntime {
                 procedural_learning,
                 lifecycle_report,
             });
+        }
+
+        if perception_retention.is_some() {
+            return self.finalize_turn_without_maintenance(
+                session_commit,
+                transcript_commit,
+                &request,
+                "visual_post_turn_governance",
+            );
         }
 
         let Some(http) = http else {
@@ -18100,6 +18522,7 @@ impl MemoryRuntime {
                     &base.owner,
                     base.generation,
                     base.revision,
+                    None,
                 )?;
                 let mut additional_plan = MemoryStoreMutationPlan::default();
                 additional_plan
@@ -18207,6 +18630,14 @@ impl MemoryRuntime {
             now_secs,
             user_local_time,
         };
+        let perception_views = if self.visual_sdk_profile_supported() {
+            self.current_visual_views()?
+                .into_iter()
+                .map(bm_core::memory::PerceptionView::Visual)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         let plan = plan_self_runtime(
             operation_id,
             SelfRuntimeInitialPlanningStateV1 {
@@ -18216,6 +18647,7 @@ impl MemoryRuntime {
             http,
             governance_llm,
             SelfRuntimeContext {
+                perceptions: &perception_views,
                 mounted_subject_id: &base.owner.subject_id,
                 active_relationship_id: self
                     .config
@@ -18376,6 +18808,7 @@ impl MemoryRuntime {
             &base.owner,
             base.generation,
             base.revision,
+            None,
         )?;
         Ok(PostTurnSelfRuntimePlan {
             refresh_plan,
@@ -18759,6 +19192,7 @@ impl MemoryRuntime {
                     "canonical transcript record is missing after commit",
                 )
             })?;
+        let visual_governance = !record.perception_source_uses.is_empty();
         let now_secs = self.config.clock.now_secs();
         if record.sequence != transcript_commit.sequence {
             return Err(Error::conflict(
@@ -18773,11 +19207,15 @@ impl MemoryRuntime {
             blocking_reason,
             now_secs,
         )?;
-        let procedural_job = self.build_procedural_job_from_transcript(
-            &record,
-            &request.turn.conversation.chat_id,
-            now_secs,
-        )?;
+        let procedural_job = if visual_governance {
+            None
+        } else {
+            self.build_procedural_job_from_transcript(
+                &record,
+                &request.turn.conversation.chat_id,
+                now_secs,
+            )?
+        };
         let store_platform = self.config.store_platform.as_ref().ok_or_else(|| {
             Error::config(
                 "post_turn_governance_intent",
@@ -18823,7 +19261,12 @@ impl MemoryRuntime {
             _ => MemoryProceduralLearningIntentReport {
                 state: MemoryConsolidationState::NotScheduled,
                 job_id: None,
-                reason: "no_actionable_procedural_feedback".to_string(),
+                reason: if visual_governance {
+                    "visual_procedural_learning_not_admitted"
+                } else {
+                    "no_actionable_procedural_feedback"
+                }
+                .to_string(),
             },
         };
         Ok((semantic_report, procedural_report))
@@ -20239,6 +20682,104 @@ impl MemoryRuntime {
             &mut disclosure_http,
             governance_llm,
         )?;
+        if !transcript.perception_source_uses.is_empty() {
+            // Visual turns use the same durable governance lease and Soul owner
+            // transaction, but never enter the text-only private-garden,
+            // procedural, or legacy semantic refresh planners. Persist only
+            // exact, independently verified persona evidence here; the normal
+            // self-runtime can later distill multiple retained observations.
+            self.ensure_governance_disclosure_authority(store_platform, &leased)?;
+            let planned_at = self.config.clock.now_secs();
+            let completion_scope = self
+                .memory_write_transaction_scope()
+                .with_conversation(leased.identity.conversation_id.clone());
+            let semantic_governance =
+                PostTurnSemanticGovernanceReport::skipped("visual_persona_evidence_only");
+            let decision_summary =
+                PostTurnGovernanceDecisionSummaryV1::from_semantic_report(&semantic_governance)?;
+            let soul_plan = if let Some(evidence) = subject_soul_base.persona_evidence.as_ref() {
+                let verified_stores = VerifiedSubjectSoulProjectionStores::from_verified_read(
+                    &subject_soul_base.owner.subject_id,
+                    &subject_soul_base.owner,
+                    &subject_soul_base.verified,
+                    subject_soul_base.include_current_generation_layers,
+                    subject_soul_base.selected_core.clone(),
+                )?;
+                let persona_context = verified_stores
+                    .persona
+                    .clone()
+                    .with_current(subject_soul_base.turn_transcript.as_ref(), Some(evidence))?;
+                let planning = PlanningSubjectSoulGenerationStores::new(verified_stores);
+                planning.set_typed(
+                    SubjectSoulGenerationLayerKindV1::TurnPersonaEvidence,
+                    &evidence.evidence_id,
+                    evidence,
+                )?;
+                let layer_mutations = planning.into_layer_mutations(
+                    &subject_soul_base.owner,
+                    subject_soul_base.generation,
+                    subject_soul_base.revision,
+                    subject_soul_base.turn_transcript.as_ref(),
+                )?;
+                let operation_id = format!(
+                    "post-turn-visual-persona:{}:{}",
+                    leased.job_id, leased.lease_epoch
+                );
+                self.plan_subject_soul_autonomous_store_mutation(
+                    SubjectSoulAutonomousStoreMutationInput {
+                        base: &subject_soul_base,
+                        operation_id: &operation_id,
+                        layer_mutations,
+                        refresh_plan: &SelfAuthoredCoreRefreshPlanV1::Skipped,
+                        source_lineage: persona_context.read_sources()?,
+                        additional_plan: MemoryStoreMutationPlan::default(),
+                        scope: completion_scope.clone(),
+                        planned_at,
+                    },
+                )
+                .map_err(|error| Error::config("post_turn.visual_persona", error.to_string()))?
+            } else {
+                None
+            };
+            let job = if let Some(soul_plan) = soul_plan {
+                complete_governance_job_with_subject_soul_plan(
+                    store_platform,
+                    completion_scope,
+                    &self.runtime_budget(),
+                    &leased.job_id,
+                    &request.lease_owner,
+                    request.lease_epoch,
+                    decision_summary,
+                    soul_plan,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    planned_at,
+                )?
+                .job
+            } else {
+                complete_governance_job_with_memory_plan(
+                    store_platform,
+                    completion_scope,
+                    &self.runtime_budget(),
+                    &leased.job_id,
+                    &request.lease_owner,
+                    request.lease_epoch,
+                    decision_summary,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    planned_at,
+                )?
+            };
+            return Ok(MemoryGovernanceJobRunReport {
+                job,
+                private_garden_self_work: PostTurnPrivateGardenReport::skipped(
+                    "visual_persona_evidence_only",
+                ),
+                semantic_governance,
+            });
+        }
         let (private_garden_self_work, private_garden_soul, mut autonomous_additional) = self
             .plan_post_turn_private_garden(PostTurnPrivateGardenPlanningInput {
                 base: &subject_soul_base,
@@ -20762,6 +21303,12 @@ impl MemoryRuntime {
                 platform: self.config.store_platform.as_ref(),
                 memory_space_id: &self.config.memory_space_id,
                 mounted_subject_id: &self.config.scoped_runtime.mounted_subject_id,
+                mounted_relationship_id: self
+                    .config
+                    .scoped_runtime
+                    .relationship_scope
+                    .as_ref()
+                    .map(|scope| scope.relationship_id.as_str()),
                 admitted_turn: None,
             },
         )?;
@@ -20914,6 +21461,12 @@ impl MemoryRuntime {
                 platform: self.config.store_platform.as_ref(),
                 memory_space_id: &self.config.memory_space_id,
                 mounted_subject_id: &self.config.scoped_runtime.mounted_subject_id,
+                mounted_relationship_id: self
+                    .config
+                    .scoped_runtime
+                    .relationship_scope
+                    .as_ref()
+                    .map(|scope| scope.relationship_id.as_str()),
                 admitted_turn: None,
             },
         )?;
@@ -21005,6 +21558,16 @@ impl MemoryRuntime {
             &self.config.scoped_runtime,
             &request.turn,
         )?;
+        if self
+            .visual_turn_persisted_taint(&request.turn.turn_id)?
+            .is_some()
+            || !self.visual_turn_sources(&request.turn.turn_id)?.is_empty()
+        {
+            return Err(Error::config(
+                "visual_transcript_commit",
+                "visual turn cannot bypass governed retention and source lineage",
+            ));
+        }
         let conversation_alias = self.conversation_alias_from_delta(&request.turn)?;
         let lifecycle = self.start_lifecycle(
             RuntimeLifecycleOperation::Maintain,
@@ -21024,6 +21587,15 @@ impl MemoryRuntime {
                 host_refs: request.host_refs,
                 learning_evidence: None,
                 conversation_alias: conversation_alias.clone(),
+                perception_retention: None,
+                perception_source_uses: Vec::new(),
+                external_content_manifest: None,
+                mounted_relationship_id: self
+                    .config
+                    .scoped_runtime
+                    .relationship_scope
+                    .as_ref()
+                    .map(|scope| scope.relationship_id.clone()),
                 now_secs: self.config.clock.now_secs(),
             },
         )?;
@@ -21847,6 +22419,27 @@ impl MemoryRuntime {
         Ok(report)
     }
 
+    pub fn export_memory_space_with_visual_media(
+        &self,
+        request: MemorySpaceExportRequest,
+    ) -> Result<MemorySpaceExportReport> {
+        self.ensure_visible("export.memory_space.visual_media", self.capabilities.export)?;
+        self.ensure_runtime_archive_scope("export.memory_space.visual_media", &request.scope)?;
+        let platform = self.store_platform_for_memory_space("export.memory_space.visual_media")?;
+        let runtime_budget = self.runtime_budget();
+        let report = crate::export_memory_space_with_visual_media_from_platform_with_budget(
+            platform,
+            request,
+            Some(&runtime_budget),
+        )?;
+        self.audit(
+            "export.memory_space.visual_media",
+            true,
+            "visual_media_export_completed",
+        );
+        Ok(report)
+    }
+
     pub fn import_memory_space(
         &self,
         request: MemorySpaceImportRequest,
@@ -21912,6 +22505,12 @@ impl MemoryRuntime {
                 platform: self.config.store_platform.as_ref(),
                 memory_space_id: &self.config.memory_space_id,
                 mounted_subject_id: &self.config.scoped_runtime.mounted_subject_id,
+                mounted_relationship_id: self
+                    .config
+                    .scoped_runtime
+                    .relationship_scope
+                    .as_ref()
+                    .map(|scope| scope.relationship_id.as_str()),
                 admitted_turn: None,
             },
         )?;
@@ -25792,6 +26391,20 @@ fn parse_runtime_query_facets(
             }
         }
     }
+    if unique.len() >= limit {
+        return Ok(unique);
+    }
+
+    // Core owns free-text tokenization. Keep explicit structured facets first,
+    // then spend the profile-bounded remainder on grounded Chinese phrases.
+    for facet in QueryFacetParser::parse(QueryFacetInput::FreeText(query.to_string())).facets {
+        if !unique.iter().any(|existing| existing == &facet) {
+            unique.push(facet);
+        }
+        if unique.len() >= limit {
+            return Ok(unique);
+        }
+    }
 
     let mut text_facets =
         QueryFacetParser::parse(QueryFacetInput::TopicFull(query.to_string())).facets;
@@ -25820,6 +26433,31 @@ fn parse_runtime_query_facets(
         }
     }
     Ok(unique)
+}
+
+#[cfg(test)]
+mod visual_query_facet_tests {
+    use super::*;
+
+    #[test]
+    fn natural_chinese_visual_query_matches_bounded_keyword_without_overriding_structured_facets() {
+        let query = "你还记得那条红裙子吗？";
+        let keyword = QueryFacetParser::parse(QueryFacetInput::Keyword("红裙子".into()))
+            .facets
+            .into_iter()
+            .next()
+            .unwrap();
+        let facets = parse_runtime_query_facets(query, &[], 8).unwrap();
+        assert!(facets.len() <= 8);
+        assert!(facets.contains(&keyword));
+
+        let structured = QueryFacetInput::Kind(LongTermMemoryKind::Fact);
+        let expected = QueryFacetParser::parse(structured.clone()).facets;
+        assert_eq!(
+            parse_runtime_query_facets(query, &[structured], 1).unwrap(),
+            expected
+        );
+    }
 }
 
 fn facet_matches_query(facet: &MemoryFacet, query_facets: &[QueryFacet]) -> bool {
@@ -29556,6 +30194,7 @@ fn redacted_transcript_slice_to_session_records(
                 records.push(session_record_from_transcript_message(
                     key,
                     &turn.turn_id,
+                    &turn.subject,
                     message,
                     content,
                 ));
@@ -29567,6 +30206,7 @@ fn redacted_transcript_slice_to_session_records(
                 records.push(session_record_from_transcript_message(
                     key,
                     &turn.turn_id,
+                    &turn.subject,
                     message,
                     content,
                 ));
@@ -29594,6 +30234,7 @@ fn session_message_from_transcript_message(
 fn session_record_from_transcript_message(
     key: &ConversationKey,
     turn_id: &str,
+    subject_id: &str,
     message: &bm_core::memory::RedactedTranscriptMessage,
     content: &str,
 ) -> SessionMessageRecord {
@@ -29605,9 +30246,10 @@ fn session_record_from_transcript_message(
         conversation_id: key.conversation_id.clone(),
         turn_id: turn_id.to_string(),
         message_id: Some(message.message_id.clone()),
-        subject_id: None,
+        subject_id: Some(subject_id.to_string()),
         authority: Some(message.authority),
     });
+    record.perception_sources = message.perception_sources.clone();
     record
 }
 
@@ -31255,6 +31897,10 @@ impl<'a> PlanningLongTermMemoryStore<'a> {
             &next_scope,
             MemoryStoreEventKind::MemoryWrite,
         )?);
+        let (perception_root_mutations, perception_root_preconditions) =
+            store_platform.plan_perception_long_term_root_edges(&plan.mutations)?;
+        plan.mutations.extend(perception_root_mutations);
+        plan.preconditions.extend(perception_root_preconditions);
         let mut normalized_preconditions = Vec::new();
         merge_json_preconditions(&mut normalized_preconditions, plan.preconditions)?;
         plan.preconditions = normalized_preconditions;
@@ -31538,6 +32184,7 @@ struct LongTermOwnerPlanningContext<'a> {
     factual_owner_id: &'a str,
     expected_actor_subject_id: &'a str,
     mounted_subject_id: &'a str,
+    mounted_relationship_id: Option<&'a str>,
     human_confirmation_authority:
         Option<&'a bm_core::memory::LongTermMemoryHumanConfirmationAuthority>,
     store_platform: &'a StorePlatform,
@@ -31556,6 +32203,7 @@ fn plan_owner_writes(
         factual_owner_id,
         expected_actor_subject_id,
         mounted_subject_id,
+        mounted_relationship_id,
         human_confirmation_authority,
         store_platform,
         max_retained_revisions_per_owner,
@@ -31687,6 +32335,7 @@ fn plan_owner_writes(
             platform: Some(store_platform),
             memory_space_id,
             mounted_subject_id,
+            mounted_relationship_id,
             admitted_turn: None,
         },
         source_preconditions: Mutex::new(Vec::new()),
@@ -32896,6 +33545,7 @@ impl MemoryRuntimeBuilder {
             last_conversation_id: Mutex::new(None),
             governance_current_binding: Mutex::new(None),
             learning_wake_sinks: Mutex::new(Vec::new()),
+            perception: Mutex::new(crate::perception::RuntimePerceptionState::default()),
         };
         let lifecycle = runtime.start_lifecycle(
             RuntimeLifecycleOperation::Open,
@@ -33045,6 +33695,7 @@ mod eval_recall_candidate_identity_tests {
 #[cfg(all(test, feature = "nonproduction-replay-harness"))]
 mod recall_immutable_session_observer_tests {
     use super::*;
+    use crate::store_internal::StoreScopedVisualMediaProjection;
     use crate::store_internal::{
         StoreAdmissionAuthority, StoreBoundedKnownBlobRead, StoreBoundedKnownJsonRead,
         StoreBoundedKnownKeyReadResult, StoreImmutableReadSession, StoreReadSessionState,
@@ -33332,12 +33983,32 @@ mod recall_immutable_session_observer_tests {
             self.inner.read_scoped_projection(request, capacity)
         }
 
+        fn read_scoped_projection_with_visual_media(
+            &self,
+            request: &StoreScopedProjectionRequest,
+            capacity: StoreCapacityBudget,
+        ) -> Result<StoreScopedVisualMediaProjection> {
+            self.reject_direct_read_if_armed("read_scoped_projection_with_visual_media")?;
+            self.inner
+                .read_scoped_projection_with_visual_media(request, capacity)
+        }
+
         fn replace_scoped_projection(
             &self,
             request: &StoreScopedProjectionReplaceRequest,
             admission: &StoreTransactionAdmission,
         ) -> Result<StoreScopedProjectionReplaceReport> {
             self.inner.replace_scoped_projection(request, admission)
+        }
+
+        fn replace_scoped_projection_with_visual_media(
+            &self,
+            request: &StoreScopedProjectionReplaceRequest,
+            media_blobs: &[StoreSnapshotBlob],
+            admission: &StoreTransactionAdmission,
+        ) -> Result<StoreScopedProjectionReplaceReport> {
+            self.inner
+                .replace_scoped_projection_with_visual_media(request, media_blobs, admission)
         }
 
         fn get_json_value(&self, namespace: &str, key: &str) -> Result<Option<serde_json::Value>> {
@@ -35205,6 +35876,7 @@ mod projection_budget_truncation_tests {
                 let projection =
                     compile_inhabited_subject_projection(InhabitedSubjectProjectionInput {
                         context: &context,
+                        perception_capabilities: &[],
                         mounted_subject_id: "agent:agent-main",
                         now_secs: 42,
                         platform: "synthetic",
@@ -35277,6 +35949,7 @@ mod projection_budget_truncation_tests {
             let projection =
                 compile_inhabited_subject_projection(InhabitedSubjectProjectionInput {
                     context: &context,
+                    perception_capabilities: &[],
                     mounted_subject_id: "agent:agent-main",
                     now_secs: 42,
                     platform: "synthetic",

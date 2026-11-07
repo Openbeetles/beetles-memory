@@ -6181,11 +6181,17 @@ mod tests {
                 host_refs: vec![],
                 learning_evidence: Some(evidence),
                 conversation_alias: None,
+                perception_retention: None,
+                perception_source_uses: vec![],
+                external_content_manifest: None,
+                mounted_relationship_id: None,
                 now_secs,
             },
         )
         .unwrap()
-        .commit_with(|intent| platform.append_authorized_canonical_turn(intent, &proof))
+        .commit_with(|intent| {
+            platform.append_authorized_canonical_turn_with_perception(intent, &proof, &[])
+        })
         .unwrap();
         platform
             .get_turn(

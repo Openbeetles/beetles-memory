@@ -91,13 +91,13 @@ use super::{
     InternalMemoryLayerFocus, LongTermMemoryReadStore, MemoryGovernanceContext,
     MemoryGovernanceInput, MemoryHygieneContext, MemoryProfile, MemoryStore, MemorySystemKind,
     MentalPrivacyState, MentalPrivacyStore, OuterVoiceRefreshContext, OuterVoiceRefreshInput,
-    OuterVoiceRefreshOutcome, OuterVoiceStore, PersonalityGovernanceInspectionInput,
-    PrivateDocStore, PrivateDocWorkspaceRefreshContext, PrivateDocWorkspaceRefreshInput,
-    PrivateDocWorkspaceRefreshOutcome, PrivateGardenGovernanceContext,
-    PrivateGardenGovernanceInput, PrivateGardenGovernanceOutcome, PrivateGardenStore,
-    RelationshipConstitution, RelationshipConstitutionStore, RelationshipPortfolio,
-    RelationshipPortfolioSelectorInput, RelationshipPortfolioStore, RelationshipTopology,
-    RelationshipTopologyStore, RemindAtStore, SelfAuthoredCoreRefreshInput,
+    OuterVoiceRefreshOutcome, OuterVoiceStore, PerceptionView,
+    PersonalityGovernanceInspectionInput, PrivateDocStore, PrivateDocWorkspaceRefreshContext,
+    PrivateDocWorkspaceRefreshInput, PrivateDocWorkspaceRefreshOutcome,
+    PrivateGardenGovernanceContext, PrivateGardenGovernanceInput, PrivateGardenGovernanceOutcome,
+    PrivateGardenStore, RelationshipConstitution, RelationshipConstitutionStore,
+    RelationshipPortfolio, RelationshipPortfolioSelectorInput, RelationshipPortfolioStore,
+    RelationshipTopology, RelationshipTopologyStore, RemindAtStore, SelfAuthoredCoreRefreshInput,
     SelfAuthoredCoreRefreshPlanV1, SelfAuthoredCoreStore, SelfContinuityRefreshContext,
     SelfContinuityRefreshInput, SelfContinuityRefreshOutcome, SelfContinuityStore,
     SelfMemorySpaceBottleneck, SelfMemorySpacePressure, SelfModelRefreshContext,
@@ -212,6 +212,8 @@ pub struct SelfRuntimeContext<'a> {
     pub mounted_subject_id: &'a str,
     /// Exact active relationship owner. `None` keeps deterministic single-agent derivation.
     pub active_relationship_id: Option<&'a str>,
+    /// Operation-frozen, SDK-governed current sense views.
+    pub perceptions: &'a [PerceptionView],
     pub memory_system_kind: crate::memory::MemorySystemKind,
     pub session_store: &'a dyn SessionStore,
     pub memory_store: &'a dyn MemoryStore,
@@ -3533,6 +3535,7 @@ pub fn plan_self_runtime(
     let planning_context = SelfRuntimeContext {
         mounted_subject_id: ctx.mounted_subject_id,
         active_relationship_id: ctx.active_relationship_id,
+        perceptions: ctx.perceptions,
         memory_system_kind: ctx.memory_system_kind,
         session_store: ctx.session_store,
         memory_store: &memory_store,
@@ -4495,6 +4498,7 @@ mod tests {
         SelfRuntimeContext {
             mounted_subject_id: "agent:test",
             active_relationship_id: None,
+            perceptions: &[],
             memory_system_kind: MemorySystemKind::LinuxFull,
             session_store: stores,
             memory_store: stores,
@@ -5972,6 +5976,7 @@ mod tests {
             prior_user_channel: "chat_channel".to_string(),
             world_snapshot: crate::memory::WorldSnapshot {
                 now_secs: 42,
+                perceptions: Vec::new(),
                 user_local_time: None,
                 interaction_mode: "chat".to_string(),
                 activity_rhythm: "active".to_string(),

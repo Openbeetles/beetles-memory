@@ -18,8 +18,8 @@ use super::{
     memory_policy, relationship_scope_id, render_autonomy_strategy_block,
     render_execution_state_block, render_self_continuity_block, whole_record_lease_advanced,
     AutonomyStrategy, AutonomyStrategyStore, ExecutionState, ExecutionStateStore, MemoryProfile,
-    RemindAtStore, SelfContinuity, SelfContinuityStore, SessionMessage, SessionStore,
-    SessionSummaryStore, UserLocalTimeContext, WorldSensePolicy, WorldSenseStore,
+    PerceptionView, RemindAtStore, SelfContinuity, SelfContinuityStore, SessionMessage,
+    SessionStore, SessionSummaryStore, UserLocalTimeContext, WorldSensePolicy, WorldSenseStore,
 };
 
 pub const WORLD_SENSE_SYSTEM_PROMPT: &str = "You maintain the subject's private world-sense layer. Return JSON only: either null or one object with fields current_scene, body_state, social_field, world_changes, external_focus. Describe the current outer situation and what deserves attention. Device telemetry is operating context, not a physical body or identity; summarize any actionable limitation without counters, implementation terms, or invented sensations. Do not write self-model, inner-life drift, or transcript summary. Keep it compact and situational.";
@@ -33,6 +33,8 @@ const WORLD_REMINDER_PREVIEW_LIMIT: usize = 8;
 pub struct WorldSnapshot {
     /// UTC instant used for duration/due comparisons, never rendered as local time.
     pub now_secs: u64,
+    /// Metadata-only current sense views. Raw media belongs to the SDK's governed RAM owner.
+    pub perceptions: Vec<PerceptionView>,
     pub user_local_time: Option<UserLocalTimeContext>,
     pub interaction_mode: String,
     pub activity_rhythm: String,
@@ -96,6 +98,8 @@ pub struct WorldSnapshotContext<'a> {
     pub now_secs: u64,
     pub user_local_time: Option<&'a UserLocalTimeContext>,
     pub self_continuity: Option<&'a SelfContinuity>,
+    /// Frozen, governed source views selected by the caller for this operation.
+    pub perceptions: &'a [PerceptionView],
     pub remind_store: &'a dyn RemindAtStore,
     pub task_store: &'a dyn TaskStore,
 }
@@ -204,6 +208,15 @@ pub(crate) fn build_world_snapshot_from_commitments(
     if let Some(local_time) = ctx.user_local_time {
         local_time.validate_for_epoch(ctx.now_secs)?;
     }
+    if ctx.perceptions.len() > super::perception::MAX_WORLD_PERCEPTION_VIEWS {
+        return Err(crate::error::Error::invalid_input(
+            "world_snapshot_perceptions",
+            "too many current perception views",
+        ));
+    }
+    for perception in ctx.perceptions {
+        perception.validate_contract()?;
+    }
     let resource = crate::orchestrator::snapshot();
     let source_channel = normalize_channel(ctx.source_channel).to_string();
     let open_tasks = tasks
@@ -261,6 +274,7 @@ pub(crate) fn build_world_snapshot_from_commitments(
     .to_string();
     Ok(WorldSnapshot {
         now_secs: ctx.now_secs,
+        perceptions: ctx.perceptions.to_vec(),
         user_local_time: ctx.user_local_time.cloned(),
         interaction_mode,
         activity_rhythm,
@@ -943,6 +957,7 @@ mod tests {
     fn parse_world_sense_response_coerces_nested_fields() {
         let snapshot = WorldSnapshot {
             now_secs: 42,
+            perceptions: Vec::new(),
             user_local_time: None,
             interaction_mode: "live_exchange".to_string(),
             activity_rhythm: "steady".to_string(),
@@ -994,6 +1009,7 @@ mod tests {
         let block = render_world_snapshot_block(
             &WorldSnapshot {
                 now_secs: 42,
+                perceptions: Vec::new(),
                 user_local_time: None,
                 interaction_mode: "live_exchange".to_string(),
                 activity_rhythm: "steady".to_string(),
@@ -1052,6 +1068,7 @@ mod tests {
     fn sample_snapshot() -> WorldSnapshot {
         WorldSnapshot {
             now_secs: 42,
+            perceptions: Vec::new(),
             user_local_time: None,
             interaction_mode: "paused_exchange".to_string(),
             activity_rhythm: "steady".to_string(),

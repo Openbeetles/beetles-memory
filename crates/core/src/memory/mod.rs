@@ -50,6 +50,7 @@ mod mental_privacy;
 mod mutation_operation;
 mod next_gen_contract;
 mod outer_voice;
+mod perception;
 #[cfg(all(
     any(test, feature = "nonproduction-replay-harness"),
     not(any(target_arch = "xtensa", target_arch = "riscv32"))
@@ -105,6 +106,7 @@ mod turn_commit;
 mod turn_continuity_evidence;
 mod turn_ledger;
 mod turn_persona_learning;
+mod visual_long_term;
 mod work_continuity;
 mod world_sense;
 mod write_candidate;
@@ -210,8 +212,8 @@ pub use governed_evidence_document::{
 };
 pub use governed_memory_owner::{
     governed_long_term_owner_evidence_bindings, governed_memory_recall_candidate_id,
-    GovernedEvidenceBinding, GovernedMemoryOwnerPlane, GovernedMemoryOwnerRef,
-    GovernedOwnerRevisionRef,
+    perception_episode_safe_evidence_ref, GovernedEvidenceBinding, GovernedMemoryOwnerPlane,
+    GovernedMemoryOwnerRef, GovernedOwnerRevisionRef,
 };
 pub use governed_memory_validity::{
     build_current_dynamic_state_resolution_report, build_governed_recall_eligibility_report,
@@ -274,10 +276,10 @@ pub use long_term::{
     LongTermMemoryFreshness, LongTermMemoryKind, LongTermMemoryOwnerMutation,
     LongTermMemoryProvenance, LongTermMemoryQuery, LongTermMemoryReadStore, LongTermMemorySlot,
     LongTermMemorySlotLookup, LongTermMemorySourceScope, LongTermMemorySourceType,
-    LongTermMemoryStaleHint, LongTermMemoryStore, MemorySemanticJudgmentSource,
-    MemorySubjectVisibilityDecision, MemorySubjectVisibilityPolicy, MAX_LONG_TERM_MEMORY_BLOCK_LEN,
-    MAX_LONG_TERM_MEMORY_CONTENT_LEN, MAX_LONG_TERM_MEMORY_ITEMS, MAX_LONG_TERM_MEMORY_KEYWORDS,
-    MAX_LONG_TERM_MEMORY_KEYWORD_LEN, REL_PATH_LONG_TERM_MEMORIES,
+    LongTermMemoryStaleHint, LongTermMemoryStore, LongTermVisualReplayLineage,
+    MemorySemanticJudgmentSource, MemorySubjectVisibilityDecision, MemorySubjectVisibilityPolicy,
+    MAX_LONG_TERM_MEMORY_BLOCK_LEN, MAX_LONG_TERM_MEMORY_CONTENT_LEN, MAX_LONG_TERM_MEMORY_ITEMS,
+    MAX_LONG_TERM_MEMORY_KEYWORDS, MAX_LONG_TERM_MEMORY_KEYWORD_LEN, REL_PATH_LONG_TERM_MEMORIES,
 };
 pub(crate) use long_term::{
     canonicalize_long_term_memory_entry, compare_long_term_memory_query_results,
@@ -286,6 +288,9 @@ pub(crate) use long_term::{
     long_term_memory_evidence_state, long_term_memory_matches_query, merge_long_term_memory_entry,
     recall_long_term_memory_entries, score_long_term_memory_recall_breakdown,
     select_long_term_recall_entries, LongTermMemoryMergeGuardDecision,
+};
+pub(crate) use long_term::{
+    recall_long_term_memory_block_with_lineage, render_exact_long_term_memory_block_with_lineage,
 };
 pub use long_term_control::{
     bind_long_term_control_audit_batch, bind_long_term_version_mutation,
@@ -459,6 +464,21 @@ pub use outer_voice::{
     render_outer_voice_block, OuterVoice, OuterVoiceRefreshContext, OuterVoiceRefreshInput,
     OuterVoiceRefreshOutcome, SubjectExpressionDiscipline, OUTER_VOICE_SYSTEM_PROMPT,
     OUTER_VOICE_TOTAL_CHAR_LIMIT,
+};
+pub use perception::{
+    derive_contextual_user_attribution, perception_episode_semantic_digest, AttributionConfidence,
+    PerceptionCapabilitySnapshot, PerceptionCapabilityState, PerceptionEpisodeSourceRef,
+    PerceptionInputEnvelope, PerceptionMediaPart, PerceptionModality, PerceptionRetentionCeiling,
+    PerceptionScope, PerceptionSource, PerceptionSourceDependentEdgeV1,
+    PerceptionSourceDependentKindV1, PerceptionSourceDependentsRootV1, PerceptionSourceKey,
+    PerceptionSourceKind, PerceptionSourceRef, PerceptionTime, PerceptionUnavailableReason,
+    PerceptionView, SubjectAttribution, VisualAttributionDecision, VisualAttributionInput,
+    VisualCaptureContext, VisualCaptureForm, VisualClassification, VisualDerivationManifest,
+    VisualDeviceUse, VisualEvidenceOrigin, VisualFrame, VisualFrameStream, VisualImage,
+    VisualInput, VisualInputKind, VisualMediaUnit, VisualObservation, VisualObservationUncertainty,
+    VisualSceneAttributionEvidence, VisualSensitivity, VisualTileSource, VisualTransformKind,
+    VisualTransformStep, VisualVideo, VisualView, MAX_PERCEPTION_SOURCE_DEPENDENT_EDGES_V1,
+    MAX_WORLD_PERCEPTION_VIEWS, PERCEPTION_SOURCE_DEPENDENTS_SCHEMA_V1,
 };
 #[cfg(all(
     any(test, feature = "nonproduction-replay-harness"),
@@ -795,10 +815,10 @@ pub use subject_soul_provisioning::{
     SubjectSoulSelfAuthoredRevisionBasisV1, SubjectSoulSourceAuthorityV1,
     SubjectSoulSourceReadAvailabilityV1, SubjectSoulSourceRefV1, SubjectSoulSourceReviewBasisV1,
     SubjectSoulSourceReviewStateV1, SubjectSoulSourceWithdrawalIntentV1,
-    SubjectSoulTerminalActionV1, SubjectSoulTerminatedGenerationV1, SubjectSoulVerifiedSnapshotV1,
-    VerifiedSubjectSoulReadViewV1, SUBJECT_SOUL_MAX_CLAUSES_PER_FIELD,
-    SUBJECT_SOUL_MAX_CLAUSE_CHARS, SUBJECT_SOUL_MAX_SOURCE_LINEAGE, SUBJECT_SOUL_MAX_TOTAL_CHARS,
-    SUBJECT_SOUL_SCHEMA_VERSION,
+    SubjectSoulTerminalActionV1, SubjectSoulTerminatedGenerationV1,
+    SubjectSoulTranscriptSourceRefV1, SubjectSoulVerifiedSnapshotV1, VerifiedSubjectSoulReadViewV1,
+    SUBJECT_SOUL_MAX_CLAUSES_PER_FIELD, SUBJECT_SOUL_MAX_CLAUSE_CHARS,
+    SUBJECT_SOUL_MAX_SOURCE_LINEAGE, SUBJECT_SOUL_MAX_TOTAL_CHARS, SUBJECT_SOUL_SCHEMA_VERSION,
 };
 pub use subject_space::{
     SubjectContractValidation, SubjectDescriptor, SubjectKind, SubjectLifecycleState,
@@ -819,8 +839,9 @@ pub use transcript::{
     transcript_message_is_query_index_eligible, ActorAttribution, CanonicalTurnAppendIntent,
     CanonicalTurnTranscriptCommitReport, ConversationCatalogCandidatePage,
     ConversationCatalogEntry, ConversationCatalogHead, ConversationCatalogPage, ConversationKey,
-    ConversationTranscriptStore, DerivedMemoryPlane, DerivedMemoryRef, HostOpaqueRef,
-    HostRefRelation, HostRefVisibility, NormalizedTranscriptSearchQueryV1,
+    ConversationTranscriptStore, DerivedMemoryPlane, DerivedMemoryRef, ExternalContentCategoryV1,
+    ExternalContentCompletenessV1, HostOpaqueRef, HostRefRelation, HostRefVisibility,
+    NormalizedTranscriptSearchQueryV1, PerceptionReplayOwnerV1, PerceptionReplyEvidenceV1,
     RedactedTranscriptAssistantMessage, RedactedTranscriptMessage, RedactedTranscriptSlice,
     RedactedTranscriptTurn, TranscriptActivityBucket, TranscriptActivityCandidate,
     TranscriptActivityCandidateBucket, TranscriptActivityCandidateReport, TranscriptActivityQuery,
@@ -831,21 +852,23 @@ pub use transcript::{
     TranscriptAttrWriteRejection, TranscriptAttrWriteReport, TranscriptCatalogLifecycle,
     TranscriptCatalogQuery, TranscriptCommitReport, TranscriptConversationAlias,
     TranscriptCursorDisclosurePolicyV1, TranscriptCursorOperationKind, TranscriptEvidenceRef,
+    TranscriptExternalContentManifestV1, TranscriptExternalContentUseV1,
     TranscriptLifecycleAggregate, TranscriptLifecycleReport, TranscriptLifecycleRequest,
     TranscriptLifecycleState, TranscriptLifecycleStats, TranscriptLifecycleTransition,
-    TranscriptLocator, TranscriptMessageRecord, TranscriptQueryCursor, TranscriptRedactionReason,
-    TranscriptRedactionReportItem, TranscriptRedactionState, TranscriptRepairInspection,
-    TranscriptRepairIssue, TranscriptRepairIssueKind, TranscriptRepairReport,
-    TranscriptReplayAudit, TranscriptReplayView, TranscriptSearchCandidate,
-    TranscriptSearchCandidatePage, TranscriptSearchExcerpt, TranscriptSearchHit,
-    TranscriptSearchLifecycle, TranscriptSearchNormalizerV1, TranscriptSearchPage,
-    TranscriptSearchQuery, TranscriptSearchScope, TranscriptSearchSort, TranscriptTextHighlight,
-    TranscriptTimelineAnchor, TranscriptTimelineCandidatePage, TranscriptTimelinePage,
-    TranscriptTimelineQuery, TranscriptTurnCursor, TranscriptTurnPage, TranscriptTurnRecord,
-    TranscriptUtcRange, MAX_TRANSCRIPT_ACTIVITY_BUCKETS, MAX_TRANSCRIPT_INDEX_TERMS_PER_MESSAGE,
-    MAX_TRANSCRIPT_QUERY_CURSOR_BYTES, MAX_TRANSCRIPT_SEARCH_EXCERPT_CHARS,
-    MAX_TRANSCRIPT_SEARCH_QUERY_BYTES, MAX_TRANSCRIPT_SEARCH_QUERY_CHARS,
-    MAX_TRANSCRIPT_SEARCH_TERMS, TRANSCRIPT_CURSOR_DISCLOSURE_POLICY_SCHEMA_V1,
+    TranscriptLocator, TranscriptMessageRecord, TranscriptPerceptionSourceUseV1,
+    TranscriptQueryCursor, TranscriptRedactionReason, TranscriptRedactionReportItem,
+    TranscriptRedactionState, TranscriptRepairInspection, TranscriptRepairIssue,
+    TranscriptRepairIssueKind, TranscriptRepairReport, TranscriptReplayAudit, TranscriptReplayView,
+    TranscriptSearchCandidate, TranscriptSearchCandidatePage, TranscriptSearchExcerpt,
+    TranscriptSearchHit, TranscriptSearchLifecycle, TranscriptSearchNormalizerV1,
+    TranscriptSearchPage, TranscriptSearchQuery, TranscriptSearchScope, TranscriptSearchSort,
+    TranscriptTextHighlight, TranscriptTimelineAnchor, TranscriptTimelineCandidatePage,
+    TranscriptTimelinePage, TranscriptTimelineQuery, TranscriptTurnCursor, TranscriptTurnPage,
+    TranscriptTurnRecord, TranscriptUtcRange, MAX_TRANSCRIPT_ACTIVITY_BUCKETS,
+    MAX_TRANSCRIPT_INDEX_TERMS_PER_MESSAGE, MAX_TRANSCRIPT_QUERY_CURSOR_BYTES,
+    MAX_TRANSCRIPT_SEARCH_EXCERPT_CHARS, MAX_TRANSCRIPT_SEARCH_QUERY_BYTES,
+    MAX_TRANSCRIPT_SEARCH_QUERY_CHARS, MAX_TRANSCRIPT_SEARCH_TERMS,
+    TRANSCRIPT_CURSOR_DISCLOSURE_POLICY_SCHEMA_V1,
 };
 pub use turn_commit::{
     canonical_turn_learning_digest, commit_canonical_turn_delta_with_transcript,
@@ -881,9 +904,10 @@ pub use turn_ledger::{
 pub use turn_persona_learning::{
     GovernedTurnPersonaEvidenceV1, PersonaObservationRefV1, SoulTurnSourceAdmissionV1,
     SoulTurnSourcePurposeV1, TurnPersonaInterpretationScopeV1, TurnPersonaInterpretationV1,
-    MAX_PERSONA_INTERPRETATION_BYTES, MAX_PERSONA_OBSERVATION_QUOTE_BYTES,
-    MAX_PERSONA_OBSERVATION_REFS,
+    VisualPersonaObservationV1, MAX_PERSONA_INTERPRETATION_BYTES,
+    MAX_PERSONA_OBSERVATION_QUOTE_BYTES, MAX_PERSONA_OBSERVATION_REFS,
 };
+pub use visual_long_term::{plan_visual_long_term_draft, VisualLongTermDraft};
 pub use work_continuity::{
     build_work_continuity_record, render_work_continuity_block, WorkContinuityRecord,
     MAX_WORK_CONTINUITY_BLOCK_LEN,
@@ -1248,9 +1272,57 @@ pub struct SessionMessageRecord {
     pub speaker_id: String,
     pub speaker_kind: String,
     pub transcript_ref: Option<transcript::TranscriptEvidenceRef>,
+    /// Exact perception episodes inherited by this message, including replayed sources.
+    pub perception_sources: Vec<PerceptionEpisodeSourceRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionMessageReplayLineage {
+    pub message_id: String,
+    pub transcript_ref: Option<TranscriptEvidenceRef>,
+    pub perception_sources: Vec<PerceptionEpisodeSourceRef>,
+}
+
+impl SessionMessageReplayLineage {
+    pub fn from_record(record: &SessionMessageRecord) -> Result<Self> {
+        if record.message_id.is_empty()
+            || record.transcript_ref.as_ref().is_some_and(|reference| {
+                reference.message_id.as_deref() != Some(record.message_id.as_str())
+            })
+        {
+            return Err(crate::error::Error::config(
+                "session_message_replay_lineage",
+                "transcript reference must identify the exact message",
+            ));
+        }
+        let mut sources = record.perception_sources.clone();
+        for source in &sources {
+            source.validate_contract()?;
+            if record.transcript_ref.as_ref().is_some_and(|reference| {
+                reference.memory_space_id != source.memory_space_id
+                    || reference.subject_id.as_deref() != Some(source.subject_id.as_str())
+            }) {
+                return Err(crate::error::Error::config(
+                    "session_message_replay_lineage",
+                    "perception source escapes the transcript subject or space",
+                ));
+            }
+        }
+        sources.sort();
+        sources.dedup();
+        Ok(Self {
+            message_id: record.message_id.clone(),
+            transcript_ref: record.transcript_ref.clone(),
+            perception_sources: sources,
+        })
+    }
 }
 
 impl SessionMessageRecord {
+    pub fn replay_lineage(&self) -> Result<SessionMessageReplayLineage> {
+        SessionMessageReplayLineage::from_record(self)
+    }
+
     pub fn into_message(self) -> SessionMessage {
         SessionMessage {
             message_id: self.message_id,
@@ -1287,7 +1359,51 @@ impl From<SessionMessage> for SessionMessageRecord {
             speaker_id: message.speaker_id,
             speaker_kind: message.speaker_kind,
             transcript_ref: None,
+            perception_sources: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod session_replay_lineage_tests {
+    use super::*;
+
+    #[test]
+    fn record_lineage_requires_exact_message_and_subject() {
+        let mut record =
+            SessionMessageRecord::from(SessionMessage::synthetic("assistant", "saw red"));
+        record.transcript_ref = Some(TranscriptEvidenceRef {
+            memory_space_id: "space".into(),
+            channel_id: "local".into(),
+            conversation_id: "conversation".into(),
+            turn_id: "turn".into(),
+            message_id: Some(record.message_id.clone()),
+            subject_id: Some("soul".into()),
+            authority: Some(MemoryEvidenceAuthority::AssistantUtterance),
+        });
+        let source = PerceptionEpisodeSourceRef {
+            memory_space_id: "space".into(),
+            subject_id: "soul".into(),
+            relationship_id: None,
+            source: PerceptionSourceKey {
+                host_id: "host".into(),
+                device_id: Some("device".into()),
+                source_id: "eye".into(),
+                source_generation: 1,
+            },
+            revoke_epoch: 0,
+            episode_id: "episode".into(),
+            content_digest: format!("sha256:{}", "a".repeat(64)),
+        };
+        record.perception_sources = vec![source.clone(), source];
+        let lineage = record.replay_lineage().unwrap();
+        assert_eq!(lineage.perception_sources.len(), 1);
+        assert_eq!(lineage.message_id, record.message_id);
+        record.transcript_ref.as_mut().unwrap().message_id = Some("different".into());
+        assert!(record.replay_lineage().is_err());
+        record.transcript_ref.as_mut().unwrap().message_id = Some(record.message_id.clone());
+        record.perception_sources[0].subject_id = "other".into();
+        assert!(record.replay_lineage().is_err());
     }
 }
 

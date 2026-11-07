@@ -8,6 +8,7 @@ use serde_json::Value;
 use crate::enforce_event_key_budget;
 #[cfg(feature = "nonproduction-replay-harness")]
 use crate::store_budget_error;
+use crate::store_internal::snapshot::StoreSnapshotBlob;
 #[cfg(feature = "nonproduction-replay-harness")]
 use crate::store_internal::transaction::{
     read_consistent_from_state, validate_restore_post_image_blob_bytes,
@@ -27,7 +28,7 @@ use crate::{
 };
 #[cfg(feature = "nonproduction-replay-harness")]
 use crate::{
-    StoreConsistentReadRequest, StoreConsistentReadResult, StoreSnapshotBlob, StoreSnapshotJsonDoc,
+    StoreConsistentReadRequest, StoreConsistentReadResult, StoreSnapshotJsonDoc,
     StoreSnapshotReplaceReport,
 };
 
@@ -358,138 +359,44 @@ impl StoreEngine for InMemoryStoreEngine {
         read_scoped_projection_from_parts(request, capacity, &state.json, &state.events)
     }
 
+    fn read_scoped_projection_with_visual_media(
+        &self,
+        request: &crate::StoreScopedProjectionRequest,
+        capacity: StoreCapacityBudget,
+    ) -> Result<super::engine::StoreScopedVisualMediaProjection> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let projection =
+            read_scoped_projection_from_parts(request, capacity, &state.json, &state.events)?;
+        super::engine::collect_scoped_visual_media_under_fence(
+            projection,
+            capacity,
+            |key, _remaining| {
+                Ok(state
+                    .blobs
+                    .get(&(
+                        super::perception::PERCEPTION_MEDIA_NAMESPACE.into(),
+                        key.into(),
+                    ))
+                    .cloned())
+            },
+        )
+    }
+
     fn replace_scoped_projection(
         &self,
         request: &crate::StoreScopedProjectionReplaceRequest,
         admission: &StoreTransactionAdmission,
     ) -> Result<crate::StoreScopedProjectionReplaceReport> {
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        admission.validate_inside_engine_fence(self.capacity, &self.admission_authority)?;
-        let actual = super::platform::scoped_projection_source::actual_projection(
-            request,
-            admission.operation_capacity(),
-            &state.json,
-            &state.events,
-        )?;
-        let source_closure = super::platform::scoped_projection_source::prepare(
-            request,
-            &actual,
-            admission.operation_capacity(),
-            |namespace, key| Ok(state.json.get(&(namespace.into(), key.into())).cloned()),
-        )?;
-        let deleted_json = crate::store_internal::transaction::scoped_projection_json_addresses(
-            &request.json_namespaces,
-            &state.json,
-            &request.scope,
-            admission.operation_capacity(),
-        )?;
-        let deleted_json = deleted_json
-            .into_iter()
-            .filter_map(|address| {
-                state
-                    .json
-                    .get(&address)
-                    .map(|value| {
-                        crate::store_internal::engine::json_document_is_preserved_by_scoped_projection(
-                            &address.0, value, request,
-                        )
-                    })
-                    .transpose()
-                    .map(|protected| {
-                        (!protected.unwrap_or(false))
-                            .then_some(address)
-                    })
-                    .transpose()
-            })
-            .collect::<Result<BTreeSet<_>>>()?;
-        let deleted_events = state
-            .events
-            .iter()
-            .filter(|event| {
-                crate::store_internal::engine::event_is_replaced_by_scoped_projection(
-                    event, request,
-                )
-            })
-            .count();
-        let next_entries = state
-            .json
-            .len()
-            .saturating_add(state.blobs.len())
-            .saturating_sub(deleted_json.len())
-            .saturating_add(request.json_docs.len())
-            .saturating_add(source_closure.added_entries());
-        let next_events = state
-            .events
-            .len()
-            .saturating_sub(deleted_events)
-            .saturating_add(request.events.len())
-            .saturating_add(source_closure.events.len());
-        for doc in &request.json_docs {
-            let address = (doc.namespace.clone(), doc.key.clone());
-            if state.json.contains_key(&address) && !deleted_json.contains(&address) {
-                return Err(Error::config(
-                    "store_scoped_projection",
-                    format!(
-                        "replacement address {}/{} is owned by another projection scope",
-                        doc.namespace, doc.key
-                    ),
-                ));
-            }
-        }
-        let retained_event_ids = state
-            .events
-            .iter()
-            .filter(|event| {
-                !crate::store_internal::engine::event_is_replaced_by_scoped_projection(
-                    event, request,
-                )
-            })
-            .map(|event| event.event_id.as_str())
-            .collect::<BTreeSet<_>>();
-        if request
-            .events
-            .iter()
-            .chain(&source_closure.events)
-            .any(|event| retained_event_ids.contains(event.event_id.as_str()))
-        {
-            return Err(Error::config(
-                "store_scoped_projection",
-                "replacement would create a duplicate event id",
-            ));
-        }
-        validate_scoped_projection_post_image(
-            admission,
-            request,
-            next_entries,
-            state.blobs.values().map(Vec::len),
-            std::iter::empty(),
-            next_events,
-        )?;
-        for address in &deleted_json {
-            state.json.remove(address);
-        }
-        state.events.retain(|event| {
-            !crate::store_internal::engine::event_is_replaced_by_scoped_projection(event, request)
-        });
-        for doc in request.json_docs.iter().chain(&source_closure.documents) {
-            state
-                .json
-                .insert((doc.namespace.clone(), doc.key.clone()), doc.value.clone());
-        }
-        state.events.extend(request.events.iter().cloned());
-        state.events.extend(source_closure.events);
-        state.event_ids = state
-            .events
-            .iter()
-            .map(|event| event.event_id.clone())
-            .collect();
-        Ok(crate::StoreScopedProjectionReplaceReport {
-            admission_report_id: admission.report_id().to_string(),
-            deleted_json: deleted_json.len(),
-            inserted_json: request.json_docs.len(),
-            deleted_events,
-            inserted_events: request.events.len(),
-        })
+        self.replace_scoped_projection_internal(request, None, admission)
+    }
+
+    fn replace_scoped_projection_with_visual_media(
+        &self,
+        request: &crate::StoreScopedProjectionReplaceRequest,
+        media_blobs: &[StoreSnapshotBlob],
+        admission: &StoreTransactionAdmission,
+    ) -> Result<crate::StoreScopedProjectionReplaceReport> {
+        self.replace_scoped_projection_internal(request, Some(media_blobs), admission)
     }
 
     fn get_json_value(&self, namespace: &str, key: &str) -> Result<Option<Value>> {
@@ -735,4 +642,243 @@ fn namespace_set(namespaces: &[&str]) -> BTreeSet<String> {
         .iter()
         .map(|namespace| (*namespace).to_string())
         .collect()
+}
+
+impl InMemoryStoreEngine {
+    fn replace_scoped_projection_internal(
+        &self,
+        request: &crate::StoreScopedProjectionReplaceRequest,
+        media_blobs: Option<&[StoreSnapshotBlob]>,
+        admission: &StoreTransactionAdmission,
+    ) -> Result<crate::StoreScopedProjectionReplaceReport> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        admission.validate_inside_engine_fence(self.capacity, &self.admission_authority)?;
+        if media_blobs.is_none() {
+            super::engine::reject_visual_episode_in_plain_scoped_replace(request)?;
+        }
+        crate::store_internal::transaction::validate_visual_archive_import_against_live(
+            request,
+            |namespace, key| Ok(state.json.get(&(namespace.into(), key.into())).cloned()),
+        )?;
+        let actual = super::platform::scoped_projection_source::actual_projection(
+            request,
+            admission.operation_capacity(),
+            &state.json,
+            &state.events,
+        )?;
+        let source_closure = super::platform::scoped_projection_source::prepare(
+            request,
+            &actual,
+            admission.operation_capacity(),
+            |namespace, key| Ok(state.json.get(&(namespace.into(), key.into())).cloned()),
+        )?;
+        let deleted_json = crate::store_internal::transaction::scoped_projection_json_addresses(
+            &request.json_namespaces,
+            &state.json,
+            &request.scope,
+            admission.operation_capacity(),
+        )?;
+        let deleted_json = deleted_json
+            .into_iter()
+            .filter_map(|address| {
+                state
+                    .json
+                    .get(&address)
+                    .map(|value| {
+                        crate::store_internal::engine::json_document_is_preserved_by_scoped_projection(
+                            &address.0, value, request,
+                        )
+                    })
+                    .transpose()
+                    .map(|protected| {
+                        (!protected.unwrap_or(false))
+                            .then_some(address)
+                    })
+                    .transpose()
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
+        let visual_plan = media_blobs
+            .map(|blobs| {
+                let before_docs = deleted_json
+                    .iter()
+                    .filter_map(|(namespace, key)| {
+                        state
+                            .json
+                            .get(&(namespace.clone(), key.clone()))
+                            .map(|value| crate::StoreSnapshotJsonDoc {
+                                namespace: namespace.clone(),
+                                key: key.clone(),
+                                value: value.clone(),
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                let plan = super::engine::plan_scoped_visual_media_replace(
+                    request,
+                    &before_docs,
+                    blobs,
+                    admission.operation_capacity(),
+                )?;
+                let owners =
+                    super::engine::scoped_visual_media_owners(&request.scope, &before_docs)?;
+                let old_blobs = owners
+                    .keys()
+                    .map(|key| {
+                        state
+                            .blobs
+                            .get(&(
+                                super::perception::PERCEPTION_MEDIA_NAMESPACE.into(),
+                                key.clone(),
+                            ))
+                            .cloned()
+                            .map(|value| StoreSnapshotBlob {
+                                namespace: super::perception::PERCEPTION_MEDIA_NAMESPACE.into(),
+                                key: key.clone(),
+                                value,
+                            })
+                            .ok_or_else(|| {
+                                Error::config(
+                                    "store_scoped_visual_media",
+                                    "old media owner has no blob",
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                super::engine::validate_scoped_visual_media_blobs(
+                    &owners,
+                    &old_blobs,
+                    admission.operation_capacity(),
+                )?;
+                for blob in blobs {
+                    if state
+                        .blobs
+                        .contains_key(&(blob.namespace.clone(), blob.key.clone()))
+                        && !plan.deleted_keys.contains(&blob.key)
+                    {
+                        return Err(Error::config(
+                            "store_scoped_visual_media",
+                            "new media key is owned outside the replaced projection",
+                        ));
+                    }
+                }
+                Ok(plan)
+            })
+            .transpose()?;
+        let deleted_events = state
+            .events
+            .iter()
+            .filter(|event| {
+                crate::store_internal::engine::event_is_replaced_by_scoped_projection(
+                    event, request,
+                )
+            })
+            .count();
+        let next_entries = state
+            .json
+            .len()
+            .saturating_add(state.blobs.len())
+            .saturating_sub(deleted_json.len())
+            .saturating_add(request.json_docs.len())
+            .saturating_add(source_closure.added_entries())
+            .saturating_sub(
+                visual_plan
+                    .as_ref()
+                    .map_or(0, |plan| plan.deleted_keys.len()),
+            )
+            .saturating_add(media_blobs.map_or(0, |blobs| blobs.len()));
+        let next_events = state
+            .events
+            .len()
+            .saturating_sub(deleted_events)
+            .saturating_add(request.events.len())
+            .saturating_add(source_closure.events.len());
+        for doc in &request.json_docs {
+            let address = (doc.namespace.clone(), doc.key.clone());
+            if state.json.contains_key(&address) && !deleted_json.contains(&address) {
+                return Err(Error::config(
+                    "store_scoped_projection",
+                    format!(
+                        "replacement address {}/{} is owned by another projection scope",
+                        doc.namespace, doc.key
+                    ),
+                ));
+            }
+        }
+        let retained_event_ids = state
+            .events
+            .iter()
+            .filter(|event| {
+                !crate::store_internal::engine::event_is_replaced_by_scoped_projection(
+                    event, request,
+                )
+            })
+            .map(|event| event.event_id.as_str())
+            .collect::<BTreeSet<_>>();
+        if request
+            .events
+            .iter()
+            .chain(&source_closure.events)
+            .any(|event| retained_event_ids.contains(event.event_id.as_str()))
+        {
+            return Err(Error::config(
+                "store_scoped_projection",
+                "replacement would create a duplicate event id",
+            ));
+        }
+        validate_scoped_projection_post_image(
+            admission,
+            request,
+            next_entries,
+            state.blobs.iter().filter_map(|((namespace, key), value)| {
+                (!visual_plan.as_ref().is_some_and(|plan| {
+                    namespace == super::perception::PERCEPTION_MEDIA_NAMESPACE
+                        && plan.deleted_keys.contains(key)
+                }))
+                .then_some(value.len())
+            }),
+            media_blobs
+                .into_iter()
+                .flatten()
+                .map(|blob| blob.value.len()),
+            next_events,
+        )?;
+        if let Some(plan) = &visual_plan {
+            for key in &plan.deleted_keys {
+                state.blobs.remove(&(
+                    super::perception::PERCEPTION_MEDIA_NAMESPACE.into(),
+                    key.clone(),
+                ));
+            }
+            for blob in media_blobs.into_iter().flatten() {
+                state.blobs.insert(
+                    (blob.namespace.clone(), blob.key.clone()),
+                    blob.value.clone(),
+                );
+            }
+        }
+        for address in &deleted_json {
+            state.json.remove(address);
+        }
+        state.events.retain(|event| {
+            !crate::store_internal::engine::event_is_replaced_by_scoped_projection(event, request)
+        });
+        for doc in request.json_docs.iter().chain(&source_closure.documents) {
+            state
+                .json
+                .insert((doc.namespace.clone(), doc.key.clone()), doc.value.clone());
+        }
+        state.events.extend(request.events.iter().cloned());
+        state.events.extend(source_closure.events);
+        state.event_ids = state
+            .events
+            .iter()
+            .map(|event| event.event_id.clone())
+            .collect();
+        Ok(crate::StoreScopedProjectionReplaceReport {
+            admission_report_id: admission.report_id().to_string(),
+            deleted_json: deleted_json.len(),
+            inserted_json: request.json_docs.len(),
+            deleted_events,
+            inserted_events: request.events.len(),
+        })
+    }
 }

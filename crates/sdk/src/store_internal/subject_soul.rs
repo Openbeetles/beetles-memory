@@ -4321,15 +4321,32 @@ pub(super) mod tests {
 fn subject_soul_source_address(
     source: &bm_core::memory::SubjectSoulSourceRefV1,
 ) -> Result<(String, String)> {
-    let key = bm_core::memory::ConversationKey::new(
-        &source.memory_space_id,
-        &source.channel_id,
-        &source.conversation_id,
-    )?;
-    Ok((
-        "conversation_transcript".into(),
-        super::platform::transcript_turn_storage_key(&key, &source.subject_id, &source.turn_id),
-    ))
+    match source {
+        bm_core::memory::SubjectSoulSourceRefV1::Transcript(source) => {
+            let key = bm_core::memory::ConversationKey::new(
+                &source.memory_space_id,
+                &source.channel_id,
+                &source.conversation_id,
+            )?;
+            Ok((
+                "conversation_transcript".into(),
+                super::platform::transcript_turn_storage_key(
+                    &key,
+                    &source.subject_id,
+                    &source.turn_id,
+                ),
+            ))
+        }
+        bm_core::memory::SubjectSoulSourceRefV1::Perception(source) => Ok((
+            crate::store_internal::perception::PERCEPTION_EPISODE_NAMESPACE.into(),
+            crate::store_internal::perception::perception_episode_storage_key(
+                &source.memory_space_id,
+                &source.subject_id,
+                &source.source,
+                &source.episode_id,
+            )?,
+        )),
+    }
 }
 
 /// Address discovery only. Every backend resolves these keys inside its own
@@ -4500,6 +4517,50 @@ fn subject_soul_source_addresses(
     Ok(addresses)
 }
 
+fn validate_perception_soul_transcript_binding(
+    json: &BTreeMap<(String, String), Value>,
+    lineage: &[bm_core::memory::SubjectSoulSourceRefV1],
+) -> Result<()> {
+    use bm_core::memory::SubjectSoulSourceRefV1;
+    let visual = lineage
+        .iter()
+        .filter_map(|source| match source {
+            SubjectSoulSourceRefV1::Perception(source) => Some(source),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if visual.is_empty() {
+        return Ok(());
+    }
+    let transcripts = lineage
+        .iter()
+        .filter(|source| matches!(source, SubjectSoulSourceRefV1::Transcript(_)))
+        .map(|source| {
+            let record: bm_core::memory::TranscriptTurnRecord = decode_value(
+                json.get(&subject_soul_source_address(source)?)
+                    .ok_or_else(|| closure_error("visual Soul source lacks Transcript owner"))?,
+            )?;
+            if !source.matches_transcript(&record) {
+                return Err(closure_error("visual Soul Transcript source is withdrawn"));
+            }
+            Ok(record)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if visual.iter().any(|source| {
+        !transcripts.iter().any(|record| {
+            record
+                .perception_source_uses
+                .iter()
+                .any(|use_ref| &use_ref.source == *source)
+        })
+    }) {
+        return Err(closure_error(
+            "visual Soul lineage lacks exact Transcript-bound episode",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_subject_soul_sources(json: &BTreeMap<(String, String), Value>) -> Result<()> {
     for ((namespace, key), value) in json {
         if !is_subject_global_soul_json_namespace(namespace) {
@@ -4510,18 +4571,25 @@ fn validate_subject_soul_sources(json: &BTreeMap<(String, String), Value>) -> Re
             == bm_core::memory::SubjectSoulGenerationLayerKindV1::TurnPersonaEvidence
                 .canonical_namespace()
         {
-            if document.source_lineage.len() != 1 {
-                return Err(closure_error(
-                    "persona evidence requires its exact single canonical source",
-                ));
-            }
             let evidence: bm_core::memory::GovernedTurnPersonaEvidenceV1 =
                 decode_value(&document.body)?;
-            let source = &document.source_lineage[0];
+            let source = document
+                .source_lineage
+                .iter()
+                .find(|source| source.transcript().is_some())
+                .ok_or_else(|| closure_error("persona evidence requires a Transcript source"))?;
             let record: bm_core::memory::TranscriptTurnRecord = decode_value(
                 json.get(&subject_soul_source_address(source)?)
                     .ok_or_else(|| closure_error("persona evidence source is missing"))?,
             )?;
+            if document.source_lineage
+                != bm_core::memory::SubjectSoulSourceRefV1::closure_from_transcript(&record)
+                    .map_err(|error| closure_error(error.to_string()))?
+            {
+                return Err(closure_error(
+                    "persona evidence lacks exact visual and Transcript causal closure",
+                ));
+            }
             let admission = record
                 .learning_evidence
                 .as_ref()
@@ -4573,6 +4641,13 @@ fn validate_subject_soul_sources(json: &BTreeMap<(String, String), Value>) -> Re
             .validate_contract()
             .map_err(|error| closure_error(error.to_string()))?;
         for entry in &manifest.entries {
+            if !entry
+                .source_lineage
+                .iter()
+                .any(|source| manifest.source_review.withdrawn_sources.contains(source))
+            {
+                validate_perception_soul_transcript_binding(json, &entry.source_lineage)?;
+            }
             if !entry.source_lineage.is_empty() {
                 let value = json
                     .get(&(entry.namespace.clone(), entry.physical_key.clone()))
@@ -4607,33 +4682,47 @@ fn validate_subject_soul_sources(json: &BTreeMap<(String, String), Value>) -> Re
                 let value = json
                     .get(&subject_soul_source_address(source)?)
                     .ok_or_else(|| {
-                        closure_error(
-                            "Soul source lineage is missing its exact canonical Transcript",
-                        )
+                        closure_error("Soul source lineage is missing its exact owner")
                     })?;
-                let record: bm_core::memory::TranscriptTurnRecord = decode_value(value)?;
-                if !source.matches_transcript(&record) {
-                    return Err(closure_error(
-                        "withdrawn or corrected source remains in Soul generation closure",
-                    ));
-                }
-                let admission = record
-                    .learning_evidence
-                    .as_ref()
-                    .and_then(|evidence| evidence.selection_receipt.as_ref())
-                    .and_then(|receipt| receipt.soul_source_admission.as_ref())
-                    .ok_or_else(|| closure_error("source lacks signed Soul admission"))?;
-                if admission.owner.memory_space_id != manifest.memory_space_id
-                    || admission.owner.subject_id != manifest.subject_id
-                    || admission.owner.soul_id != manifest.soul_id
-                    || admission
-                        .generation()
-                        .map_err(|error| closure_error(error.to_string()))?
-                        != manifest.generation
-                {
-                    return Err(closure_error(
-                        "source admission differs from retained Soul generation",
-                    ));
+                match source {
+                    bm_core::memory::SubjectSoulSourceRefV1::Transcript(_) => {
+                        let record: bm_core::memory::TranscriptTurnRecord = decode_value(value)?;
+                        if !source.matches_transcript(&record) {
+                            return Err(closure_error(
+                                "withdrawn or corrected Transcript remains in Soul closure",
+                            ));
+                        }
+                        let admission = record
+                            .learning_evidence
+                            .as_ref()
+                            .and_then(|evidence| evidence.selection_receipt.as_ref())
+                            .and_then(|receipt| receipt.soul_source_admission.as_ref())
+                            .ok_or_else(|| closure_error("source lacks signed Soul admission"))?;
+                        if admission.owner.memory_space_id != manifest.memory_space_id
+                            || admission.owner.subject_id != manifest.subject_id
+                            || admission.owner.soul_id != manifest.soul_id
+                            || admission
+                                .generation()
+                                .map_err(|error| closure_error(error.to_string()))?
+                                != manifest.generation
+                        {
+                            return Err(closure_error(
+                                "source admission differs from retained Soul generation",
+                            ));
+                        }
+                    }
+                    bm_core::memory::SubjectSoulSourceRefV1::Perception(expected) => {
+                        let episode: crate::store_internal::perception::PerceptionEpisodeEvidenceV1 =
+                            decode_value(value)?;
+                        if episode.source_ref()? != *expected
+                            || episode.memory_space_id != manifest.memory_space_id
+                            || episode.subject_id != manifest.subject_id
+                        {
+                            return Err(closure_error(
+                                "Perception episode differs from exact Soul source",
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -4655,12 +4744,23 @@ fn validate_subject_soul_sources(json: &BTreeMap<(String, String), Value>) -> Re
         if manifest.source_review.denies_revision(&material) {
             continue;
         }
+        validate_perception_soul_transcript_binding(json, &material.source_lineage)?;
         for source in &material.source_lineage {
-            let record: bm_core::memory::TranscriptTurnRecord = decode_value(
-                json.get(&subject_soul_source_address(source)?)
-                    .ok_or_else(|| closure_error("retained revision source is missing"))?,
-            )?;
-            if !source.matches_transcript(&record) {
+            let value = json
+                .get(&subject_soul_source_address(source)?)
+                .ok_or_else(|| closure_error("retained revision source is missing"))?;
+            let exact = match source {
+                bm_core::memory::SubjectSoulSourceRefV1::Transcript(_) => {
+                    let record: bm_core::memory::TranscriptTurnRecord = decode_value(value)?;
+                    source.matches_transcript(&record)
+                }
+                bm_core::memory::SubjectSoulSourceRefV1::Perception(expected) => {
+                    let episode: crate::store_internal::perception::PerceptionEpisodeEvidenceV1 =
+                        decode_value(value)?;
+                    episode.source_ref()? == *expected
+                }
+            };
+            if !exact {
                 return Err(closure_error(
                     "retained Soul revision has an unrecorded source withdrawal",
                 ));
@@ -4871,6 +4971,15 @@ pub(crate) fn validate_subject_soul_source_transition(
 
 /// Compose source erasure with Transcript/page/job changes while the caller
 /// holds the existing Store transaction lock. This function does not commit.
+pub(crate) struct SubjectSoulWithdrawalContext<'a> {
+    pub(crate) additional_mutations: &'a [StoreMutation],
+    pub(crate) additional_preconditions: &'a [StoreJsonPrecondition],
+    pub(crate) additional_blob_preconditions: &'a [StoreBlobPrecondition],
+    pub(crate) withdrawn_perception_sources: &'a [bm_core::memory::PerceptionEpisodeSourceRef],
+    pub(crate) transaction_id: Option<&'a str>,
+    pub(crate) runtime_budget: &'a RuntimeBudgetReport,
+}
+
 pub(crate) fn plan_transcript_subject_soul_withdrawal(
     platform: &StorePlatform,
     scope: &super::StoreEventScope,
@@ -4879,10 +4988,16 @@ pub(crate) fn plan_transcript_subject_soul_withdrawal(
         bm_core::memory::TranscriptTurnRecord,
     )],
     request: &bm_core::memory::TranscriptLifecycleRequest,
-    additional_mutations: &[StoreMutation],
-    additional_preconditions: &[StoreJsonPrecondition],
-    runtime_budget: &RuntimeBudgetReport,
+    context: SubjectSoulWithdrawalContext<'_>,
 ) -> Result<Option<SubjectSoulStoreMutationPlan>> {
+    let SubjectSoulWithdrawalContext {
+        additional_mutations,
+        additional_preconditions,
+        additional_blob_preconditions,
+        withdrawn_perception_sources,
+        transaction_id,
+        runtime_budget,
+    } = context;
     use super::{MemoryStoreEvent, MemoryStoreEventKind};
     use bm_core::memory::{
         plan_subject_soul_source_withdrawal_v1, MemoryMutationEffect,
@@ -4891,6 +5006,10 @@ pub(crate) fn plan_transcript_subject_soul_withdrawal(
         SubjectSoulSourceWithdrawalIntentV1,
     };
     let mut owners = BTreeMap::<(String, String, String, u64), Vec<SubjectSoulSourceRefV1>>::new();
+    let withdrawn_perception_sources = withdrawn_perception_sources
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
     for (before, after) in records {
         if !before.permits_post_turn_learning() {
             continue;
@@ -4917,7 +5036,7 @@ pub(crate) fn plan_transcript_subject_soul_withdrawal(
                 "Transcript withdrawal differs from its admitted Soul owner",
             ));
         }
-        owners
+        let owner_sources = owners
             .entry((
                 owner.memory_space_id.clone(),
                 owner.subject_id.clone(),
@@ -4926,8 +5045,13 @@ pub(crate) fn plan_transcript_subject_soul_withdrawal(
                     .generation()
                     .map_err(|error| closure_error(error.to_string()))?,
             ))
-            .or_default()
-            .push(source);
+            .or_default();
+        owner_sources.push(source);
+        for use_ref in &before.perception_source_uses {
+            if withdrawn_perception_sources.contains(&use_ref.source) {
+                owner_sources.push(SubjectSoulSourceRefV1::Perception(use_ref.source.clone()));
+            }
+        }
     }
     let mut result = None;
     for ((space, subject, soul_id, generation), sources) in owners {
@@ -5071,7 +5195,7 @@ pub(crate) fn plan_transcript_subject_soul_withdrawal(
             &intent_digest,
             additional_mutations,
             additional_preconditions,
-            &[],
+            additional_blob_preconditions,
         )?;
         let identity = MemoryMutationOperationIdentity::new(
             &operation_id,
@@ -5089,7 +5213,10 @@ pub(crate) fn plan_transcript_subject_soul_withdrawal(
             request.requested_at,
         )?;
         mutations.extend_from_slice(additional_mutations);
-        preconditions.extend_from_slice(additional_preconditions);
+        crate::store_internal::merge_json_preconditions(
+            &mut preconditions,
+            additional_preconditions.iter().cloned(),
+        )?;
         mutations.push(StoreMutation::AppendEvent {
             event: Box::new(
                 MemoryStoreEvent::new(
@@ -5111,7 +5238,7 @@ pub(crate) fn plan_transcript_subject_soul_withdrawal(
             scope: scope.clone(),
             mutations,
         };
-        let plan = SubjectSoulStoreMutationPlan::new(
+        let mut plan = SubjectSoulStoreMutationPlan::new(
             &intent_digest,
             &full_digest,
             expected_state,
@@ -5129,8 +5256,20 @@ pub(crate) fn plan_transcript_subject_soul_withdrawal(
             operation,
         )
         .map_err(SubjectSoulStoreFailure::into_store_error)?
-        .bind_additional_owner_plan(additional_mutations, additional_preconditions, &[])
+        .bind_additional_owner_plan(
+            additional_mutations,
+            additional_preconditions,
+            additional_blob_preconditions,
+        )
         .map_err(SubjectSoulStoreFailure::into_store_error)?;
+        if let Some(transaction_id) = transaction_id {
+            let mut batch = plan.batch.clone();
+            batch.transaction_id = transaction_id.to_string();
+            plan = plan
+                .clone()
+                .bind_governance_completion(batch, plan.preconditions.clone())
+                .map_err(SubjectSoulStoreFailure::into_store_error)?;
+        }
         result = Some(plan);
     }
     Ok(result)
@@ -5178,16 +5317,18 @@ mod source_lineage_owner_tests {
                 subject_id: head.subject_id.clone(),
                 soul_id: head.soul_id.clone(),
             };
-            let source = bm_core::memory::SubjectSoulSourceRefV1 {
-                memory_space_id: owner.memory_space_id.clone(),
-                subject_id: owner.subject_id.clone(),
-                channel_id: "sdk".into(),
-                conversation_id: "conversation".into(),
-                turn_id: "withdrawn".into(),
-                sequence: 1,
-                canonical_turn_digest: format!("sha256:{}", "1".repeat(64)),
-                transcript_content_digest: format!("sha256:{}", "2".repeat(64)),
-            };
+            let source = bm_core::memory::SubjectSoulSourceRefV1::Transcript(
+                bm_core::memory::SubjectSoulTranscriptSourceRefV1 {
+                    memory_space_id: owner.memory_space_id.clone(),
+                    subject_id: owner.subject_id.clone(),
+                    channel_id: "sdk".into(),
+                    conversation_id: "conversation".into(),
+                    turn_id: "withdrawn".into(),
+                    sequence: 1,
+                    canonical_turn_digest: format!("sha256:{}", "1".repeat(64)),
+                    transcript_content_digest: format!("sha256:{}", "2".repeat(64)),
+                },
+            );
             manifest
                 .entries
                 .push(bm_core::memory::SubjectSoulScopeManifestEntryV1 {
@@ -5401,19 +5542,21 @@ mod source_lineage_owner_tests {
     #[test]
     fn primitive_source_withdrawal_cannot_leave_an_orphan_manifest_dependency() {
         let mut image = state(false);
-        let source = bm_core::memory::SubjectSoulSourceRefV1 {
+        let source = bm_core::memory::SubjectSoulSourceRefV1::Transcript(
+            bm_core::memory::SubjectSoulTranscriptSourceRefV1 {
+                memory_space_id: "space:lineage".into(),
+                subject_id: "agent:lineage".into(),
+                channel_id: "chat".into(),
+                conversation_id: "conversation:a".into(),
+                turn_id: "turn:a".into(),
+                sequence: 1,
+                canonical_turn_digest: format!("sha256:{}", "a".repeat(64)),
+                transcript_content_digest: format!("sha256:{}", "b".repeat(64)),
+            },
+        );
+        let owner = SubjectSoulOwnerV1 {
             memory_space_id: "space:lineage".into(),
             subject_id: "agent:lineage".into(),
-            channel_id: "chat".into(),
-            conversation_id: "conversation:a".into(),
-            turn_id: "turn:a".into(),
-            sequence: 1,
-            canonical_turn_digest: format!("sha256:{}", "a".repeat(64)),
-            transcript_content_digest: format!("sha256:{}", "b".repeat(64)),
-        };
-        let owner = SubjectSoulOwnerV1 {
-            memory_space_id: source.memory_space_id.clone(),
-            subject_id: source.subject_id.clone(),
             soul_id: "soul:lineage".into(),
         };
         let document = SubjectSoulOwnedDocumentV1::new(

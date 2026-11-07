@@ -17,6 +17,7 @@ pub enum SharedMemoryWriteSource {
     ManualTool,
     Extraction,
     TaskLearning,
+    VisualObservation,
     SnapshotImport,
     HygieneReconcile,
 }
@@ -27,6 +28,7 @@ impl SharedMemoryWriteSource {
             Self::ManualTool => "manual_tool",
             Self::Extraction => "extraction",
             Self::TaskLearning => "task_learning",
+            Self::VisualObservation => "visual_observation",
             Self::SnapshotImport => "snapshot_import",
             Self::HygieneReconcile => "hygiene_reconcile",
         }
@@ -564,6 +566,7 @@ mod tests {
         let store = MemoryStoreStub {
             entries: Mutex::new(vec![LongTermMemoryEntry {
                 transcript_sources: Vec::new(),
+                perception_sources: Vec::new(),
                 control_barrier_scope_revision: None,
 
                 id: draft("Owner timezone is Asia/Shanghai.")
@@ -661,6 +664,7 @@ mod tests {
         let store = MemoryStoreStub {
             entries: Mutex::new(vec![LongTermMemoryEntry {
                 transcript_sources: Vec::new(),
+                perception_sources: Vec::new(),
                 control_barrier_scope_revision: None,
 
                 id: draft("Owner timezone is private.").stable_id().unwrap(),
@@ -822,6 +826,7 @@ mod tests {
         let existing_store = MemoryStoreStub {
             entries: Mutex::new(vec![LongTermMemoryEntry {
                 transcript_sources: Vec::new(),
+                perception_sources: Vec::new(),
                 control_barrier_scope_revision: None,
 
                 id: draft("Owner timezone is Asia/Shanghai.")

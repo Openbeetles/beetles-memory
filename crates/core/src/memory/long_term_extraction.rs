@@ -2129,6 +2129,7 @@ mod tests {
     ) -> LongTermMemoryEntry {
         crate::memory::canonicalize_long_term_memory_entry(LongTermMemoryEntry {
             transcript_sources: Vec::new(),
+            perception_sources: Vec::new(),
             control_barrier_scope_revision: None,
 
             id: id.to_string(),

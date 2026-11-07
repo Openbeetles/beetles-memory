@@ -1,6 +1,6 @@
 # 快速开始
 
-Rust 宿主通过 SDK 内嵌 0.13.0 源码版本时，从本文开始。其 Store v17 和有序 `assistant_messages` 合同见[发布说明](release-notes-0.13.0.md)。协议部署场景先读本文，再读 [Adapter 合同](adapters.md)。
+Rust 宿主接入 0.14.0 macOS SDK 源码合同时，从本文开始。[0.14.0 源码说明](release-notes-0.14.0.md)记录感知与 Store v18；0.13.0 的第一人称主体投影仍是基础。`v0.14.0` Git tag 须完成验证后才能视为已发布。协议部署场景先读本文，再读 [Adapter 合同](adapters.md)。
 
 ## 依赖
 
@@ -11,16 +11,16 @@ Rust 宿主通过 SDK 内嵌 0.13.0 源码版本时，从本文开始。其 Stor
 bm-sdk = { path = "crates/sdk", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
-`v0.13.0` tag 完成发布与回读后，外部仓库可使用该源码 tag，无需等待 crates.io 发布：
+只有 `v0.14.0` tag 完成发布与回读后，外部仓库才可使用该源码 tag；crates.io 发布另算：
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.13.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.13.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.14.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.14.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 宿主必须按操作系统只选择一个 desktop embedded feature：`profile-desktop-macos-embedded-sdk`、`profile-desktop-windows-embedded-sdk` 或 `profile-desktop-linux-embedded-sdk`。Linux 桌面宿主禁止借用 server 或 dev-full profile。
 
-已发布的 v0.11.2 tag 仍对应 Store v16。Store v17 不读取 v16；在数据 owner 决定旧数据处理方式前，该版本应使用新 Store。
+Store v18 不读取 v17，也不自动迁移。旧 Store 的处理方式由数据 owner 决定；此前应使用新 Store，archive import 不是 schema migration。
 
 ## 构建 Runtime
 
@@ -87,6 +87,12 @@ assert!(projection.provider_payload().system_memory_block().len() <= 4096);
 宿主提交 typed long-term candidate 或 canonical turn。Runtime Skill 与 Agent Tool
 经验只能由 Beetle Memory 的受治理 post-turn learning worker 生成；公共 API 不再提供
 手工 procedural write 旁路。
+
+## macOS 可选视觉接入
+
+宿主负责采集、相机权限和界面、发送前筛查、媒体转换、接收方同意及最终 Provider 请求。先登记 `PerceptionHostHandle` 与 `VisualToolRegistrySnapshot`，授权来源，再提交 `PerceptionInputEnvelope<VisualInput>`。本轮用 `project_for_perception_host` 得到主体能力及初始 `provider_payload().visual_delivery()`；中途新画面用 `append_visual_delivery`。用 `attest_visual_delivery` 回传实际请求，有 Provider 响应时可再调用 `record_visual_provider_response`。精确顺序见[集成文档](integration.md#macos-sdk-视觉感知)与[API 合同](api.md#0140-macos-sdk-视觉感知)。
+
+Beetle 通过获授权的视觉推理桥 `infer_visual_for_memory` 自主决定记忆候选。视觉包本身不是记忆事实；若视觉回复要进入持久学习，宿主还须提交完整的 `TranscriptExternalContentManifestV1`。本文不配置真实相机或视觉 Provider。
 
 ## 运行示例
 

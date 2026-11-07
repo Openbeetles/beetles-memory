@@ -9,7 +9,7 @@ fn owner() -> SubjectSoulOwnerV1 {
 }
 
 fn source(index: usize) -> SubjectSoulSourceRefV1 {
-    SubjectSoulSourceRefV1 {
+    SubjectSoulSourceRefV1::Transcript(SubjectSoulTranscriptSourceRefV1 {
         memory_space_id: "space:a".into(),
         subject_id: "agent:a".into(),
         channel_id: "chat".into(),
@@ -18,7 +18,47 @@ fn source(index: usize) -> SubjectSoulSourceRefV1 {
         sequence: index as u64 + 1,
         canonical_turn_digest: format!("sha256:{}", "1".repeat(64)),
         transcript_content_digest: format!("sha256:{}", "2".repeat(64)),
-    }
+    })
+}
+
+fn perception_source(index: usize) -> SubjectSoulSourceRefV1 {
+    SubjectSoulSourceRefV1::from_perception(crate::memory::PerceptionEpisodeSourceRef {
+        memory_space_id: "space:a".into(),
+        subject_id: "agent:a".into(),
+        relationship_id: Some("relationship:a".into()),
+        source: crate::memory::PerceptionSourceKey {
+            host_id: "host:a".into(),
+            device_id: Some("camera:a".into()),
+            source_id: "visual:a".into(),
+            source_generation: 1,
+        },
+        revoke_epoch: 0,
+        episode_id: format!("episode:{index}"),
+        content_digest: format!("sha256:{}", "3".repeat(64)),
+    })
+    .unwrap()
+}
+
+#[test]
+fn perception_lineage_is_typed_owner_scoped_and_withdrawable() {
+    let visual = perception_source(0);
+    assert!(visual.perception().is_some());
+    assert!(visual.transcript().is_none());
+    assert!(visual.validate_for_owner(&owner()).is_ok());
+    let mut foreign = visual.clone();
+    let SubjectSoulSourceRefV1::Perception(foreign_perception) = &mut foreign else {
+        unreachable!("test source is perception");
+    };
+    foreign_perception.subject_id = "agent:b".into();
+    assert!(foreign.validate_for_owner(&owner()).is_err());
+    let encoded = serde_json::to_value(&visual).unwrap();
+    assert_eq!(encoded["kind"], "perception");
+    assert_eq!(
+        merge_subject_soul_source_lineage_v1(&owner(), [&[visual.clone(), source(0)][..]])
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 #[test]
@@ -41,7 +81,10 @@ fn lineage_union_is_exact_bounded_and_subject_scoped() {
         SubjectSoulLifecycleErrorKey::CapacityExceeded
     );
     let mut foreign = source(2);
-    foreign.subject_id = "agent:b".into();
+    let SubjectSoulSourceRefV1::Transcript(transcript) = &mut foreign else {
+        unreachable!("test source is a Transcript");
+    };
+    transcript.subject_id = "agent:b".into();
     assert!(merge_subject_soul_source_lineage_v1(&owner(), [&[foreign][..]]).is_err());
 }
 
@@ -632,6 +675,30 @@ fn transcript_source_identity_survives_archive_but_not_erasure_or_body_correctio
         withdrawn.apply_lifecycle_transition(transition, 5);
         assert!(!source.matches_transcript(&withdrawn));
     }
+    let visual = perception_source(0);
+    let sourced = record
+        .clone()
+        .with_perception_source_uses(vec![crate::memory::TranscriptPerceptionSourceUseV1 {
+            source: visual.perception().unwrap().clone(),
+            first_affected_assistant_sequence: record.assistant_messages[0].message.sequence,
+            delivery: crate::memory::PerceptionReplyEvidenceV1::HostAttested {
+                receipt_digest: format!("sha256:{}", "4".repeat(64)),
+            },
+        }])
+        .unwrap();
+    let closure = SubjectSoulSourceRefV1::closure_from_transcript(&sourced).unwrap();
+    assert_eq!(closure.len(), 2);
+    assert!(closure.contains(&visual));
+    assert!(closure.iter().any(|item| item.matches_transcript(&sourced)));
+    let mut forged = sourced.clone();
+    forged.perception_source_uses[0].source.subject_id = "agent:other".into();
+    assert!(forged.validate_canonical_intake().is_err());
+    let mut unproved = sourced;
+    unproved.perception_source_uses[0].delivery =
+        crate::memory::PerceptionReplyEvidenceV1::HostAttested {
+            receipt_digest: "not-a-digest".into(),
+        };
+    assert!(unproved.validate_canonical_intake().is_err());
 }
 
 fn held_revision() -> (

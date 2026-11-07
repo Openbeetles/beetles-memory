@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 
 use super::{
     canonical_evidence_ref_from_source, canonical_recall_evidence_group,
-    CanonicalRecallEvidenceFamilyGroup, LongTermMemoryEntry,
+    CanonicalRecallEvidenceFamilyGroup, LongTermMemoryEntry, PerceptionEpisodeSourceRef,
 };
 
 const GOVERNED_MEMORY_RECALL_CANDIDATE_DOMAIN: &str = "governed_memory_recall_candidate_id_v1";
@@ -164,6 +164,17 @@ pub fn governed_long_term_owner_evidence_bindings(
             ),
         );
     }
+    // Perception provenance is an exact typed owner reference, not a caller
+    // supplied citation string. The SDK must resolve every source against its
+    // live episode and tombstone before admitting this owner for recall.
+    for source in &entry.perception_sources {
+        let safe_ref = perception_episode_safe_evidence_ref(source)?;
+        let canonical_group = canonical_recall_evidence_group(&safe_ref);
+        bindings_by_safe_ref.insert(
+            safe_ref.clone(),
+            GovernedEvidenceBinding::new(safe_ref, canonical_group, None),
+        );
+    }
     for evidence in entry
         .canonical_entities
         .iter()
@@ -221,6 +232,19 @@ pub fn governed_long_term_owner_evidence_bindings(
         }
     }
     Ok(bindings_by_safe_ref.into_values().collect())
+}
+
+/// Opaque, stable binding for one exact perception episode source. A digest
+/// does not by itself prove that the episode exists or remains authorized.
+pub fn perception_episode_safe_evidence_ref(source: &PerceptionEpisodeSourceRef) -> Result<String> {
+    source.validate_contract()?;
+    let encoded = serde_json::to_vec(source)
+        .map_err(|error| Error::config("perception_evidence_binding", error.to_string()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"beetle-perception-episode-evidence-v1\0");
+    hasher.update((encoded.len() as u64).to_be_bytes());
+    hasher.update(encoded);
+    Ok(format!("perception_episode:sha256:{:x}", hasher.finalize()))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

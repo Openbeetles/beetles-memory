@@ -148,20 +148,41 @@ mod governed_report;
 mod learning;
 mod local_time;
 pub use bm_core::memory::{
-    AdmittedMethodLearningInputV1, MethodAdoptionEvidenceV1, MethodAdoptionStatusV1,
+    derive_contextual_user_attribution, AdmittedMethodLearningInputV1, ExternalContentCategoryV1,
+    ExternalContentCompletenessV1, MethodAdoptionEvidenceV1, MethodAdoptionStatusV1,
     MethodContentRefV1, MethodLearningInputV1, MethodLearningMaterialDispositionV1,
     MethodLearningMaterialPurposeV1, MethodLearningMaterialRejectionV1,
     MethodLearningMaterialSourceV1, MethodLearningMaterialV1, MethodTaskEvaluationV1,
-    MethodTaskEvaluatorV1, MethodTaskOutcomeV1, UserLocalTimeContext,
+    MethodTaskEvaluatorV1, MethodTaskOutcomeV1, PerceptionCapabilitySnapshot,
+    PerceptionCapabilityState, PerceptionEpisodeSourceRef, PerceptionInputEnvelope,
+    PerceptionModality, PerceptionRetentionCeiling, PerceptionScope, PerceptionSource,
+    PerceptionSourceKey, PerceptionSourceKind, PerceptionSourceRef, PerceptionTime,
+    PerceptionUnavailableReason, TranscriptExternalContentManifestV1,
+    TranscriptExternalContentUseV1, UserLocalTimeContext, VisualAttributionDecision,
+    VisualAttributionInput, VisualCaptureContext, VisualCaptureForm, VisualDeviceUse, VisualFrame,
+    VisualFrameStream, VisualImage, VisualInput, VisualMediaUnit, VisualObservation,
+    VisualSceneAttributionEvidence, VisualVideo, VisualView,
 };
 pub use local_time::{
     SystemUserLocalTimeProvider, UnavailableUserLocalTimeProvider, UserLocalTimeProvider,
 };
 mod mutation_capability;
+mod perception;
+pub use perception::{
+    HostSentVisualPart, HostVisualDeliveryReceipt, PerceptionHostHandle,
+    ProviderVisualDeliveryPacket, ProviderVisualPart, ProviderVisualWireRole,
+    UserVisualAttachmentBinding, VisualDeliveryProof, VisualDeliveryProofLevel,
+    VisualInferenceAuthorization, VisualSourceAuthorization, VisualSourceRevocation,
+    VisualSubmissionReport, VisualToolRegistrySnapshot, VisualTurnPosition,
+};
 mod ops;
 #[cfg(feature = "nonproduction-replay-harness")]
 mod p8_semantic_off_run;
 mod runtime;
+pub use runtime::perception_memory::{
+    BeetleVisualInferenceClient, BeetleVisualInferenceRequest, BeetleVisualInferenceResponse,
+    VisualMemoryDeleteReport, VisualMemoryEntry, VisualMemoryObservationDecision,
+};
 mod store;
 mod store_internal;
 
@@ -427,7 +448,7 @@ pub use learning::{
 #[cfg(feature = "nonproduction-replay-harness")]
 pub use ops::GovernedRuntimeSkillWriteInput;
 pub use ops::{
-    GovernedScopeArchiveEntry, GovernedScopeArchiveRootV1, MemoryArchiveScope, MemoryCloseReport,
+    GovernedScopeArchiveEntry, GovernedScopeArchiveRootV2, MemoryArchiveScope, MemoryCloseReport,
     MemoryCloseRequest, MemoryConsolidationReport, MemoryConsolidationState,
     MemoryConversationListReport, MemoryConversationListRequest, MemoryEvalEvidenceApplicability,
     MemoryEvalQuestionEvaluation, MemoryEvalRecallAblationReport, MemoryEvalRecallAblationSlice,
@@ -541,6 +562,17 @@ pub mod nonproduction_replay_harness {
         crate::export_memory_space_from_platform_with_budget(handle.platform(), request, None)
     }
 
+    pub fn export_memory_space_with_visual_media(
+        handle: &crate::MemoryStoreHandle,
+        request: crate::MemorySpaceExportRequest,
+    ) -> crate::Result<crate::MemorySpaceExportReport> {
+        crate::export_memory_space_with_visual_media_from_platform_with_budget(
+            handle.platform(),
+            request,
+            None,
+        )
+    }
+
     pub fn import_memory_space(
         handle: &crate::MemoryStoreHandle,
         request: crate::MemorySpaceImportRequest,
@@ -593,6 +625,31 @@ pub(crate) fn export_memory_space_from_platform_with_budget(
     request: MemorySpaceExportRequest,
     runtime_budget: Option<&RuntimeBudgetReport>,
 ) -> Result<MemorySpaceExportReport> {
+    export_memory_space_from_platform_impl(platform, request, runtime_budget, false)
+}
+
+pub(crate) fn export_memory_space_with_visual_media_from_platform_with_budget(
+    platform: &StorePlatform,
+    request: MemorySpaceExportRequest,
+    runtime_budget: Option<&RuntimeBudgetReport>,
+) -> Result<MemorySpaceExportReport> {
+    if request.private_material_policy != MemorySpacePrivateMaterialPolicy::IncludePrivate
+        || !matches!(request.scope, MemoryArchiveScope::Subject { .. })
+    {
+        return Err(Error::config(
+            "memory_space_export",
+            "explicit visual media export requires a private subject scope",
+        ));
+    }
+    export_memory_space_from_platform_impl(platform, request, runtime_budget, true)
+}
+
+fn export_memory_space_from_platform_impl(
+    platform: &StorePlatform,
+    request: MemorySpaceExportRequest,
+    runtime_budget: Option<&RuntimeBudgetReport>,
+    include_visual_media: bool,
+) -> Result<MemorySpaceExportReport> {
     request.scope.validate()?;
     let scope = request.scope;
     let private_material_policy = request.private_material_policy;
@@ -607,13 +664,18 @@ pub(crate) fn export_memory_space_from_platform_with_budget(
         }),
         MemoryArchiveScope::SharedProgram { .. } => None,
     };
-    let (mut snapshot, projection_report) =
-        platform.export_memory_space_projection_with_report(&store_scope, runtime_budget)?;
+    let (mut snapshot, projection_report) = if include_visual_media {
+        platform
+            .export_memory_space_projection_with_visual_media_report(&store_scope, runtime_budget)?
+    } else {
+        platform.export_memory_space_projection_with_report(&store_scope, runtime_budget)?
+    };
     let mut privacy_redactions = if let Some(subject_scope) = &subject_scope {
         project_memory_space_snapshot(
             &mut snapshot,
             subject_scope,
             private_material_policy.includes_private(),
+            include_visual_media,
             projection_report.operation_capacity,
             projection_report.max_retained_long_term_revisions_per_owner,
         )?
@@ -740,11 +802,19 @@ fn governed_scope_archive_root_from_snapshot(
     snapshot: &StoreSnapshot,
     scope: MemoryArchiveScope,
     private_material_policy: MemorySpacePrivateMaterialPolicy,
-) -> Result<GovernedScopeArchiveRootV1> {
-    if !snapshot.blobs.is_empty() {
+) -> Result<GovernedScopeArchiveRootV2> {
+    if !snapshot.blobs.is_empty() && !private_material_policy.includes_private() {
         return Err(Error::config(
             "governed_scope_archive_root",
-            "typed scope archive cannot bind blobs without a typed owning root",
+            "visual media requires an explicit private archive",
+        ));
+    }
+    let scoped = store_scoped_projection_scope(&scope)?;
+    let media_owners = store_internal::scoped_visual_media_owners(&scoped, &snapshot.json_docs)?;
+    if media_owners.len() != snapshot.blobs.len() {
+        return Err(Error::config(
+            "governed_scope_archive_root",
+            "visual media archive omits or adds an owned blob",
         ));
     }
     let mut entries = Vec::with_capacity(
@@ -768,13 +838,39 @@ fn governed_scope_archive_root_from_snapshot(
                 .map_err(|error| Error::config("governed_scope_archive_root", error.to_string()))?,
         )?);
     }
-    GovernedScopeArchiveRootV1::build(scope, private_material_policy, entries)
+    for blob in &snapshot.blobs {
+        let owner = media_owners.get(&blob.key).ok_or_else(|| {
+            Error::config(
+                "governed_scope_archive_root",
+                "blob has no typed visual owner",
+            )
+        })?;
+        if blob.namespace != store_internal::perception::PERCEPTION_MEDIA_NAMESPACE
+            || blob.value.len() != owner.byte_len
+            || format!(
+                "sha256:{:x}",
+                <sha2::Sha256 as sha2::Digest>::digest(&blob.value)
+            ) != owner.sha256
+        {
+            return Err(Error::config(
+                "governed_scope_archive_root",
+                "visual media bytes differ from their typed owner",
+            ));
+        }
+        entries.push(GovernedScopeArchiveEntry::blob(
+            &blob.namespace,
+            &blob.key,
+            &blob.value,
+        )?);
+    }
+    GovernedScopeArchiveRootV2::build(scope, private_material_policy, entries)
 }
 
 fn project_memory_space_snapshot(
     snapshot: &mut StoreSnapshot,
     scope: &MemorySpaceScope,
     include_private: bool,
+    include_visual_media: bool,
     capacity: StoreCapacityBudget,
     max_retained_long_term_revisions_per_owner: usize,
 ) -> Result<usize> {
@@ -792,9 +888,11 @@ fn project_memory_space_snapshot(
             && event.scope.subject_id == scope.mounted_subject_id
     });
 
-    // Blob namespaces currently have no typed memory-space owner. Omitting them is the only
-    // fail-closed projection until their persisted schema carries an explicit scope owner.
-    snapshot.blobs.clear();
+    // Ordinary archives retain the governed semantic episode only. The explicit
+    // media path carries typed visual blobs under the same scoped read fence.
+    if !include_visual_media {
+        snapshot.blobs.clear();
+    }
 
     if !include_private {
         redact_private_snapshot_entries(
@@ -804,6 +902,12 @@ fn project_memory_space_snapshot(
             max_retained_long_term_revisions_per_owner,
         )?;
     }
+    // Historical episode authorization travels with an archive. A live source
+    // grant belongs to the destination Store and must never travel with it.
+    snapshot.json_docs.retain(|document| {
+        document.namespace != store_internal::perception::PERCEPTION_SOURCE_AUTHORIZATION_NAMESPACE
+    });
+    store_internal::perception::rebuild_perception_archive_roots(snapshot)?;
     validate_projected_evidence_source_claim_closure(
         snapshot,
         &scope.memory_space_id,
@@ -1197,7 +1301,10 @@ fn rebuild_projected_long_term_private_closure(
         .collect::<Result<Vec<_>>>()?;
     let mut excluded_owners = materials
         .iter()
-        .filter(|material| !material.privacy_class.projection_content_allowed())
+        .filter(|material| {
+            !material.privacy_class.projection_content_allowed()
+                || !material.governed_content.perception_sources.is_empty()
+        })
         .map(|material| material.owner_ref.clone())
         .collect::<BTreeSet<_>>();
     if excluded_owners.is_empty() {
@@ -2562,6 +2669,7 @@ mod p7_6_memory_space_projection_tests {
                 &mut snapshot,
                 &source_scope,
                 false,
+                false,
                 projection_capacity(),
                 8,
             )
@@ -2573,6 +2681,7 @@ mod p7_6_memory_space_projection_tests {
         let redactions = project_memory_space_snapshot(
             &mut snapshot,
             &source_scope,
+            false,
             false,
             projection_capacity(),
             8,
@@ -2604,6 +2713,7 @@ mod p7_6_memory_space_projection_tests {
         project_memory_space_snapshot(
             &mut projection,
             &source_scope,
+            false,
             false,
             projection_capacity(),
             8,
@@ -2639,6 +2749,7 @@ mod p7_6_memory_space_projection_tests {
         project_memory_space_snapshot(
             &mut projection,
             &source_scope,
+            false,
             false,
             projection_capacity(),
             8,

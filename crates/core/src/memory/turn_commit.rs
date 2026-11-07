@@ -37,7 +37,7 @@ pub enum MemoryTurnProtocol {
     Native,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryEvidenceAuthority {
     UserAsserted,
@@ -285,6 +285,48 @@ pub struct CanonicalTurnDelta {
     pub candidate_ids: Vec<String>,
 }
 
+impl CanonicalTurnDelta {
+    /// Returns the exact Session message ID planned for one original user
+    /// input. This uses the same filtering and ordering as turn commit, so a
+    /// user-shared attachment can bind its real message before visual intake.
+    pub fn planned_input_message_id(
+        &self,
+        key: &ConversationKey,
+        input_index: usize,
+    ) -> Result<String> {
+        if ConversationKey::from_delta(&key.memory_space_id, self)? != *key {
+            return Err(crate::error::Error::config(
+                "canonical_turn_message_id",
+                "conversation key differs from canonical turn",
+            ));
+        }
+        let input = self.input_messages.get(input_index).ok_or_else(|| {
+            crate::error::Error::config(
+                "canonical_turn_message_id",
+                "input message index is outside the canonical turn",
+            )
+        })?;
+        if !input.is_role("user") || input.content.trim().is_empty() {
+            return Err(crate::error::Error::config(
+                "canonical_turn_message_id",
+                "input is not a committed user message",
+            ));
+        }
+        let prepared = prepare_canonical_turn_delta(0, self);
+        if prepared.messages.is_empty() {
+            return Err(crate::error::Error::config(
+                "canonical_turn_message_id",
+                "canonical turn does not commit this input",
+            ));
+        }
+        let prepared_index = self.input_messages[..input_index]
+            .iter()
+            .filter(|message| message.is_role("user") && !message.content.trim().is_empty())
+            .count();
+        Ok(canonical_turn_message_id(key, self, prepared_index))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PreparedCanonicalTurnCommit {
     before_count: usize,
@@ -321,6 +363,10 @@ pub struct CanonicalTurnTranscriptCommitOptions {
     pub host_refs: Vec<HostOpaqueRef>,
     pub learning_evidence: Option<PostTurnLearningEvidenceV3>,
     pub conversation_alias: Option<TranscriptConversationAlias>,
+    pub perception_retention: Option<super::PerceptionRetentionCeiling>,
+    pub perception_source_uses: Vec<super::TranscriptPerceptionSourceUseV1>,
+    pub external_content_manifest: Option<super::TranscriptExternalContentManifestV1>,
+    pub mounted_relationship_id: Option<String>,
     pub now_secs: u64,
 }
 
@@ -468,8 +514,18 @@ pub fn plan_canonical_turn_delta_with_transcript(
         host_refs,
         learning_evidence,
         conversation_alias,
+        perception_retention,
+        perception_source_uses,
+        external_content_manifest,
+        mounted_relationship_id,
         now_secs,
     } = options;
+    if perception_retention.is_none() && !perception_source_uses.is_empty() {
+        return Err(crate::error::Error::config(
+            "turn_transcript_commit",
+            "perception source uses require an explicit retention ceiling",
+        ));
+    }
     let key = ConversationKey::from_delta(memory_space_id, delta)?;
     if let Some(evidence) = learning_evidence.as_ref() {
         let conversation_id = delta
@@ -511,6 +567,9 @@ pub fn plan_canonical_turn_delta_with_transcript(
         if existing.canonical_turn_digest != canonical_turn_learning_digest(delta)?
             || existing.host_refs != host_refs
             || existing.learning_evidence != learning_evidence
+            || existing.perception_source_uses != perception_source_uses
+            || existing.external_content_manifest != external_content_manifest
+            || perception_retention.is_some_and(|ceiling| !ceiling.permits_durable_semantic())
         {
             return Err(crate::error::Error::conflict(
                 "canonical_turn_intake_conflict",
@@ -545,6 +604,32 @@ pub fn plan_canonical_turn_delta_with_transcript(
             },
         });
     }
+    if perception_retention.is_some_and(|ceiling| !ceiling.permits_durable_semantic()) {
+        return Ok(CanonicalTurnTranscriptCommitPlan {
+            append: None,
+            report: CanonicalTurnTranscriptCommitReport {
+                session_commit: SessionTurnCommitReport {
+                    attempted: true,
+                    committed: false,
+                    chat_id: delta.conversation.chat_id.clone(),
+                    before_count,
+                    after_count: before_count,
+                    committed_messages: Vec::new(),
+                    skipped_reason: Some("perception_retention_is_ephemeral".to_string()),
+                },
+                transcript_commit: None,
+            },
+        });
+    }
+    if perception_retention.is_some()
+        && !delta.assistant_messages.is_empty()
+        && perception_source_uses.is_empty()
+    {
+        return Err(crate::error::Error::config(
+            "turn_transcript_commit",
+            "durable visual reply requires a governed perception source use",
+        ));
+    }
     let prepared = prepare_canonical_turn_delta(before_count, delta);
     let committed_inputs = prepared.messages.clone();
     let (session_append, session_commit) =
@@ -575,7 +660,10 @@ pub fn plan_canonical_turn_delta_with_transcript(
             learning_evidence,
         },
         now_secs,
-    )?;
+    )?
+    .with_mounted_relationship_id(mounted_relationship_id)?
+    .with_perception_source_uses(perception_source_uses)?
+    .with_external_content_manifest(external_content_manifest)?;
     let intent = TranscriptAppendIntent {
         record,
         conversation_alias,
@@ -670,20 +758,7 @@ fn plan_prepared_session_messages(
         .enumerate()
         .map(|(index, message)| {
             let authority = message.authority;
-            let mut hasher = Sha256::new();
-            for field in [
-                "bm.canonical-turn.message.v1",
-                key.memory_space_id.as_str(),
-                key.channel_id.as_str(),
-                key.conversation_id.as_str(),
-                delta.subject.as_str(),
-                delta.turn_id.as_str(),
-            ] {
-                hasher.update((field.len() as u64).to_be_bytes());
-                hasher.update(field.as_bytes());
-            }
-            hasher.update((index as u64).to_be_bytes());
-            let message_id = format!("msg_{:x}", hasher.finalize());
+            let message_id = canonical_turn_message_id(key, delta, index);
             let session_message = message.into_session_message(message_id, now, now);
             (session_message, authority)
         })
@@ -722,6 +797,27 @@ fn plan_prepared_session_messages(
             skipped_reason: None,
         },
     )
+}
+
+fn canonical_turn_message_id(
+    key: &ConversationKey,
+    delta: &CanonicalTurnDelta,
+    index: usize,
+) -> String {
+    let mut hasher = Sha256::new();
+    for field in [
+        "bm.canonical-turn.message.v1",
+        key.memory_space_id.as_str(),
+        key.channel_id.as_str(),
+        key.conversation_id.as_str(),
+        delta.subject.as_str(),
+        delta.turn_id.as_str(),
+    ] {
+        hasher.update((field.len() as u64).to_be_bytes());
+        hasher.update(field.as_bytes());
+    }
+    hasher.update((index as u64).to_be_bytes());
+    format!("msg_{:x}", hasher.finalize())
 }
 
 /// Resolve the unanswered user-message group of a protocol history window.

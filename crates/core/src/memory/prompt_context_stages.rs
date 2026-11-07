@@ -16,16 +16,17 @@ use super::{
     compile_subject_soul_relationship_runtime_view_v1, decide_prompt_recall_route,
     inspect_continuity_capsule_recall, load_world_snapshot_reminders, load_world_snapshot_tasks,
     memory_capability_profile, memory_policy, parse_explicit_long_term_slot_query,
-    recall_long_term_memory_block, relationship_scope_id, render_autonomy_strategy_block,
-    render_exact_long_term_memory_block, render_inner_life_block,
-    render_mental_privacy_boundary_block, render_outer_voice_block,
+    recall_long_term_memory_block_with_lineage, relationship_scope_id,
+    render_autonomy_strategy_block, render_exact_long_term_memory_block_with_lineage,
+    render_inner_life_block, render_mental_privacy_boundary_block, render_outer_voice_block,
     render_persistent_self_authored_core_block, render_private_doc_workspace_block,
     render_private_garden_block, render_relationship_portfolio_block, render_self_continuity_block,
     render_self_model_block, render_self_state_block, ContinuityCapsule,
     ContinuityCapsuleRecallInspectionInput, ContinuityCapsuleScopeKind, ExecutionState,
-    ExecutionStatus, MemoryProfile, PromptMemoryContextParams, PromptRecallRouterDecision,
-    RecallPlane, RecallQuery, RecallSelectionReport, SessionMessage, WorkContinuityRecord,
-    WorldSnapshotContext, MAX_WORK_CONTINUITY_BLOCK_LEN,
+    ExecutionStatus, LongTermVisualReplayLineage, MemoryProfile, PromptMemoryContextParams,
+    PromptRecallRouterDecision, RecallPlane, RecallQuery, RecallSelectionReport, SessionMessage,
+    SessionMessageReplayLineage, WorkContinuityRecord, WorldSnapshotContext,
+    MAX_WORK_CONTINUITY_BLOCK_LEN,
 };
 
 pub(crate) struct PromptContextSeed {
@@ -39,6 +40,7 @@ pub(crate) struct PromptContextSeed {
 
 pub(crate) struct PromptSessionStage {
     pub recent_messages: Vec<SessionMessage>,
+    pub recent_message_lineage: Vec<SessionMessageReplayLineage>,
     pub summary_text: Option<String>,
     pub active_work: Option<Box<ActiveWorkRecord>>,
     pub work_continuity_text: Option<String>,
@@ -92,6 +94,7 @@ pub(crate) struct PromptGovernedMemoryScratch {
 
 pub(crate) struct PromptGovernedMemoryStage {
     pub long_term_memory_text: Option<String>,
+    pub long_term_visual_lineage: Vec<LongTermVisualReplayLineage>,
     pub continuity_capsule_text: Option<String>,
     pub archive_evidence_text: Option<String>,
     pub runtime_skill_text: Option<String>,
@@ -276,16 +279,19 @@ pub(crate) fn load_session_stage(
         } else {
             0
         });
-    let recent_messages = if !params.participation_plan.load_l1_session || recent_message_limit == 0
-    {
+    let recent = if !params.participation_plan.load_l1_session || recent_message_limit == 0 {
         Vec::new()
     } else {
         load_vec_with_health(health, "session_recent_messages", || {
             params
                 .session_store
-                .load_recent(params.chat_id, recent_message_limit)
+                .load_recent_records(params.chat_id, recent_message_limit)?
+                .into_iter()
+                .map(|record| Ok((record.as_message(), record.replay_lineage()?)))
+                .collect()
         })
     };
+    let (recent_messages, recent_message_lineage): (Vec<_>, Vec<_>) = recent.into_iter().unzip();
     let summary_text = params
         .participation_plan
         .load_l1_session
@@ -360,6 +366,7 @@ pub(crate) fn load_session_stage(
 
     Box::new(PromptSessionStage {
         recent_messages,
+        recent_message_lineage,
         summary_text,
         active_work,
         work_continuity_text,
@@ -614,6 +621,7 @@ pub(crate) fn load_private_projection_stage(
                 now_secs: params.now_secs,
                 user_local_time: params.user_local_time,
                 self_continuity: constitutional.self_continuity.as_deref(),
+                perceptions: &[],
                 remind_store: params.remind_store,
                 task_store: params.task_store,
             };
@@ -789,7 +797,7 @@ pub(crate) fn load_governed_memory_stage(
     session: &PromptSessionStage,
 ) -> Box<PromptGovernedMemoryStage> {
     let recall_policy = memory_policy(seed.profile).long_term_recall;
-    let long_term_memory_text = if !seed.governed_memory_enabled {
+    let long_term_memory_block = if !seed.governed_memory_enabled {
         None
     } else {
         let grounding_start = session
@@ -800,14 +808,14 @@ pub(crate) fn load_governed_memory_stage(
         if capability.prompt_exact_lookup_enabled {
             parse_explicit_long_term_slot_query(params.user_query)
                 .and_then(|slot| {
-                    render_exact_long_term_memory_block(
+                    render_exact_long_term_memory_block_with_lineage(
                         params.long_term_memory_store,
                         &slot,
                         params.system_max_len,
                     )
                 })
                 .or_else(|| {
-                    recall_long_term_memory_block(
+                    recall_long_term_memory_block_with_lineage(
                         params.long_term_memory_store,
                         params.chat_id,
                         params.user_query,
@@ -818,7 +826,7 @@ pub(crate) fn load_governed_memory_stage(
                     )
                 })
         } else {
-            recall_long_term_memory_block(
+            recall_long_term_memory_block_with_lineage(
                 params.long_term_memory_store,
                 params.chat_id,
                 params.user_query,
@@ -1000,8 +1008,12 @@ pub(crate) fn load_governed_memory_stage(
         task_recall_report: task_recall_report.as_ref(),
     });
 
+    let (long_term_memory_text, long_term_visual_lineage) = long_term_memory_block
+        .map(|block| (Some(block.text), block.visual_lineage))
+        .unwrap_or_default();
     Box::new(PromptGovernedMemoryStage {
         long_term_memory_text,
+        long_term_visual_lineage,
         continuity_capsule_text,
         archive_evidence_text,
         runtime_skill_text,

@@ -252,6 +252,7 @@ pub(super) fn load_self_runtime_state(
         now_secs: payload.now_secs,
         user_local_time: payload.user_local_time.as_ref(),
         self_continuity: self_continuity.as_ref(),
+        perceptions: ctx.perceptions,
         remind_store: ctx.remind_store,
         task_store: ctx.task_store,
     };

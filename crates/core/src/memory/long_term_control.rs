@@ -4452,6 +4452,7 @@ mod digest_tests {
     fn owner_fixture() -> LongTermMemoryEntry {
         LongTermMemoryEntry {
             transcript_sources: Vec::new(),
+            perception_sources: Vec::new(),
             control_barrier_scope_revision: None,
 
             id: "ltm-owner".to_string(),

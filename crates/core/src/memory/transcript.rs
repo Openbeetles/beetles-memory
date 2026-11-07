@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -704,9 +704,21 @@ pub struct TranscriptTurnRecord {
     pub delivery_status: MemoryTurnDeliveryStatus,
     pub source: MemoryTurnSource,
     pub subject: SubjectId,
+    /// The mounted relationship at this turn's intake. Store uses this exact
+    /// scope to prevent visual evidence from crossing relationship boundaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mounted_relationship_id: Option<String>,
     pub actor: ActorAttribution,
     pub input_messages: Vec<TranscriptMessageRecord>,
     pub assistant_messages: Vec<TranscriptAssistantMessageRecord>,
+    /// A source remains attached to every assistant message from this sequence
+    /// onward. The whole suffix is marked when exact text spans are unknown.
+    pub perception_source_uses: Vec<TranscriptPerceptionSourceUseV1>,
+    /// Host-attested inventory of every external item in the model requests
+    /// for this turn. Beetle verifies known sources, but cannot independently
+    /// inspect unknown host-added request content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_content_manifest: Option<TranscriptExternalContentManifestV1>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_observations: Vec<ToolObservationDigest>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -727,6 +739,227 @@ pub struct TranscriptAssistantMessageRecord {
     pub settlement: AssistantMessageSettlement,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PerceptionReplyEvidenceV1 {
+    HostAttested { receipt_digest: String },
+    BeetleObservation { observation_digest: String },
+    ReplayedOwner { owner: PerceptionReplayOwnerV1 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PerceptionReplayOwnerV1 {
+    TranscriptMessage {
+        reference: TranscriptEvidenceRef,
+    },
+    LongTermMemory {
+        owner_id: String,
+        owner_revision: u64,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptPerceptionSourceUseV1 {
+    pub source: super::PerceptionEpisodeSourceRef,
+    pub first_affected_assistant_sequence: u64,
+    pub delivery: PerceptionReplyEvidenceV1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalContentCompletenessV1 {
+    HostAttestedComplete,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalContentCategoryV1 {
+    ToolObservation,
+    RetrievedContent,
+    UserAttachment,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TranscriptExternalContentUseV1 {
+    Visual {
+        source: super::PerceptionEpisodeSourceRef,
+        input_id: String,
+        packet_id: String,
+        request_sha256: String,
+        receipt_digest: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_observation_id: Option<String>,
+    },
+    ReplayedVisual {
+        source: super::PerceptionEpisodeSourceRef,
+        owner: PerceptionReplayOwnerV1,
+        request_sha256: String,
+    },
+    Other {
+        category: ExternalContentCategoryV1,
+        content_digest: String,
+        request_sha256: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_observation_id: Option<String>,
+    },
+}
+
+/// `HostAttestedComplete` records the host's claim about the full ordered
+/// requests. It does not upgrade that claim to SDK-verified completeness.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptExternalContentManifestV1 {
+    pub completeness: ExternalContentCompletenessV1,
+    pub request_sha256: Vec<String>,
+    pub uses: Vec<TranscriptExternalContentUseV1>,
+}
+
+impl TranscriptExternalContentManifestV1 {
+    pub fn validate_against(&self, turn: &TranscriptTurnRecord) -> Result<()> {
+        let valid_id = |value: &str| {
+            !value.is_empty()
+                && value.len() <= 256
+                && value.trim() == value
+                && !value.chars().any(char::is_control)
+        };
+        if self.request_sha256.is_empty()
+            || self.request_sha256.len() > 64
+            || self.uses.len() > 128
+            || self
+                .request_sha256
+                .iter()
+                .any(|digest| !canonical_sha256_digest(digest))
+            || self
+                .request_sha256
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            || self.uses.windows(2).any(|pair| pair[0] >= pair[1])
+            || (turn.external_content_used == self.uses.is_empty())
+        {
+            return Err(Error::config(
+                "transcript_external_content",
+                "host inventory is not canonical or complete",
+            ));
+        }
+        let requests = self.request_sha256.iter().collect::<BTreeSet<_>>();
+        let mut covered_tool_observations = BTreeSet::new();
+        for usage in &self.uses {
+            let (request_sha256, tool_observation_id) = match usage {
+                TranscriptExternalContentUseV1::Visual {
+                    source,
+                    input_id,
+                    packet_id,
+                    request_sha256,
+                    receipt_digest,
+                    tool_observation_id,
+                } => {
+                    source.validate_contract()?;
+                    if source.memory_space_id != turn.key.memory_space_id
+                        || source.subject_id != turn.subject
+                        || !valid_id(input_id)
+                        || !valid_id(packet_id)
+                        || !canonical_sha256_digest(receipt_digest)
+                        || !turn.perception_source_uses.iter().any(|source_use| {
+                            source_use.source == *source
+                                && matches!(
+                                    &source_use.delivery,
+                                    PerceptionReplyEvidenceV1::HostAttested { receipt_digest: proof }
+                                        if proof == receipt_digest
+                                )
+                        })
+                    {
+                        return Err(Error::config("transcript_external_content", "visual inventory lacks its exact admitted source and receipt"));
+                    }
+                    (request_sha256, tool_observation_id.as_deref())
+                }
+                TranscriptExternalContentUseV1::ReplayedVisual {
+                    source,
+                    owner,
+                    request_sha256,
+                } => {
+                    source.validate_contract()?;
+                    if source.memory_space_id != turn.key.memory_space_id
+                        || source.subject_id != turn.subject
+                        || !turn.perception_source_uses.iter().any(|source_use| {
+                            source_use.source == *source
+                                && matches!(
+                                    &source_use.delivery,
+                                    PerceptionReplyEvidenceV1::ReplayedOwner { owner: proof }
+                                        if proof == owner
+                                )
+                        })
+                    {
+                        return Err(Error::config(
+                            "transcript_external_content",
+                            "replayed visual inventory lacks its exact admitted owner",
+                        ));
+                    }
+                    (request_sha256, None)
+                }
+                TranscriptExternalContentUseV1::Other {
+                    content_digest,
+                    request_sha256,
+                    tool_observation_id,
+                    ..
+                } => {
+                    if !canonical_sha256_digest(content_digest) {
+                        return Err(Error::config(
+                            "transcript_external_content",
+                            "other external content digest is invalid",
+                        ));
+                    }
+                    (request_sha256, tool_observation_id.as_deref())
+                }
+            };
+            if !requests.contains(request_sha256)
+                || tool_observation_id.is_some_and(|id| !valid_id(id))
+            {
+                return Err(Error::config(
+                    "transcript_external_content",
+                    "external item is outside the attested request set",
+                ));
+            }
+            if let Some(id) = tool_observation_id {
+                if !covered_tool_observations.insert(id) {
+                    return Err(Error::config(
+                        "transcript_external_content",
+                        "tool observation is counted more than once",
+                    ));
+                }
+            }
+        }
+        let actual_tools = turn
+            .tool_observations
+            .iter()
+            .map(|observation| observation.observation_id.as_str())
+            .collect::<BTreeSet<_>>();
+        if covered_tool_observations != actual_tools {
+            return Err(Error::config(
+                "transcript_external_content",
+                "tool observations are not exactly covered by the external inventory",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn visual_only_for(&self, turn: &TranscriptTurnRecord) -> bool {
+        self.validate_against(turn).is_ok()
+            && !self.uses.is_empty()
+            && self.uses.iter().all(|usage| {
+                matches!(
+                    usage,
+                    TranscriptExternalContentUseV1::Visual { .. }
+                        | TranscriptExternalContentUseV1::ReplayedVisual { .. }
+                )
+            })
+            && turn.perception_source_uses.len() == self.uses.len()
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct TranscriptTurnRecordAttachments {
     pub host_refs: Vec<HostOpaqueRef>,
@@ -734,6 +967,101 @@ pub(super) struct TranscriptTurnRecordAttachments {
 }
 
 impl TranscriptTurnRecord {
+    pub fn with_external_content_manifest(
+        mut self,
+        manifest: Option<TranscriptExternalContentManifestV1>,
+    ) -> Result<Self> {
+        self.external_content_manifest = manifest;
+        if let Some(manifest) = &self.external_content_manifest {
+            manifest.validate_against(&self)?;
+        }
+        Ok(self)
+    }
+
+    pub fn with_perception_source_uses(
+        mut self,
+        uses: Vec<TranscriptPerceptionSourceUseV1>,
+    ) -> Result<Self> {
+        self.perception_source_uses = uses;
+        self.validate_perception_source_uses()?;
+        Ok(self)
+    }
+
+    pub fn with_mounted_relationship_id(mut self, relationship_id: Option<String>) -> Result<Self> {
+        if relationship_id
+            .as_ref()
+            .is_some_and(|id| id.trim().is_empty())
+        {
+            return Err(Error::config(
+                "transcript_relationship_scope",
+                "mounted relationship id cannot be empty",
+            ));
+        }
+        self.mounted_relationship_id = relationship_id;
+        Ok(self)
+    }
+
+    fn validate_perception_source_uses(&self) -> Result<()> {
+        let first_assistant = self
+            .assistant_messages
+            .first()
+            .map(|item| item.message.sequence);
+        let last_assistant = self
+            .assistant_messages
+            .last()
+            .map(|item| item.message.sequence);
+        let mut seen = BTreeSet::new();
+        let mut previous = None;
+        for usage in &self.perception_source_uses {
+            usage.source.validate_contract().map_err(|error| {
+                Error::config("transcript_perception_source", error.to_string())
+            })?;
+            let valid_delivery = match &usage.delivery {
+                PerceptionReplyEvidenceV1::HostAttested { receipt_digest } => {
+                    canonical_sha256_digest(receipt_digest)
+                }
+                PerceptionReplyEvidenceV1::BeetleObservation { observation_digest } => {
+                    canonical_sha256_digest(observation_digest)
+                }
+                PerceptionReplyEvidenceV1::ReplayedOwner { owner } => match owner {
+                    PerceptionReplayOwnerV1::TranscriptMessage { reference } => {
+                        reference.memory_space_id == usage.source.memory_space_id
+                            && reference.subject_id.as_deref()
+                                == Some(usage.source.subject_id.as_str())
+                            && reference
+                                .message_id
+                                .as_ref()
+                                .is_some_and(|id| !id.is_empty())
+                            && reference.authority.is_some()
+                            && !reference.channel_id.is_empty()
+                            && !reference.conversation_id.is_empty()
+                            && !reference.turn_id.is_empty()
+                    }
+                    PerceptionReplayOwnerV1::LongTermMemory {
+                        owner_id,
+                        owner_revision,
+                    } => !owner_id.is_empty() && *owner_revision > 0,
+                },
+            };
+            if usage.source.memory_space_id != self.key.memory_space_id
+                || usage.source.subject_id != self.subject
+                || !valid_delivery
+                || first_assistant
+                    .is_none_or(|first| usage.first_affected_assistant_sequence < first)
+                || last_assistant.is_none_or(|last| usage.first_affected_assistant_sequence > last)
+                || !seen.insert(&usage.source)
+                || previous.is_some_and(|prior| prior >= usage)
+            {
+                return Err(Error::config(
+                    "transcript_perception_source",
+                    "source, delivery proof or affected assistant suffix is invalid",
+                ));
+            }
+            previous = Some(usage);
+        }
+        Ok(())
+    }
+
     pub fn from_delta(
         key: &ConversationKey,
         sequence: u64,
@@ -807,9 +1135,12 @@ impl TranscriptTurnRecord {
             delivery_status: delta.delivery_status,
             source: delta.source.clone(),
             subject: delta.subject.clone(),
+            mounted_relationship_id: None,
             actor,
             input_messages,
             assistant_messages,
+            perception_source_uses: Vec::new(),
+            external_content_manifest: None,
             tool_observations: delta.tool_observations.clone(),
             host_refs,
             learning_evidence,
@@ -902,9 +1233,12 @@ impl TranscriptTurnRecord {
             delivery_status: delta.delivery_status,
             source: delta.source.clone(),
             subject: delta.subject.clone(),
+            mounted_relationship_id: None,
             actor,
             input_messages,
             assistant_messages,
+            perception_source_uses: Vec::new(),
+            external_content_manifest: None,
             tool_observations: delta.tool_observations.clone(),
             host_refs: attachments.host_refs,
             learning_evidence: attachments.learning_evidence,
@@ -918,6 +1252,20 @@ impl TranscriptTurnRecord {
     }
 
     pub fn validate_canonical_intake(&self) -> Result<()> {
+        if self
+            .mounted_relationship_id
+            .as_ref()
+            .is_some_and(|id| id.trim().is_empty())
+        {
+            return Err(Error::config(
+                "transcript_relationship_scope",
+                "mounted relationship id cannot be empty",
+            ));
+        }
+        self.validate_perception_source_uses()?;
+        if let Some(manifest) = &self.external_content_manifest {
+            manifest.validate_against(self)?;
+        }
         super::validate_tool_observation_identities(&self.tool_observations)?;
         require_canonical_transcript_query_component(&self.session_chat_id, "session_chat_id")?;
         let lifecycle_valid = matches!(
@@ -939,6 +1287,8 @@ impl TranscriptTurnRecord {
         if !lifecycle_valid
             || (self.lifecycle_state == TranscriptLifecycleState::RawDeleted
                 && (!self.tool_observations.is_empty()
+                    || !self.perception_source_uses.is_empty()
+                    || self.external_content_manifest.is_some()
                     || self.learning_evidence.is_some()
                     || self
                         .host_refs
@@ -1045,6 +1395,8 @@ impl TranscriptTurnRecord {
                 self.lifecycle_state = TranscriptLifecycleState::RawDeleted;
                 self.redaction_state = TranscriptRedactionState::RawDeleted;
                 self.learning_evidence = None;
+                self.perception_source_uses.clear();
+                self.external_content_manifest = None;
                 self.tool_observations.clear();
                 for message in &mut self.input_messages {
                     message.redact_raw();
@@ -1111,7 +1463,7 @@ pub struct TranscriptLifecycleRequest {
     pub requested_at: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TranscriptEvidenceRef {
     pub memory_space_id: String,
     pub channel_id: String,
@@ -1290,6 +1642,8 @@ pub struct RedactedTranscriptMessage {
     pub actor: ActorAttribution,
     pub observed_at: u64,
     pub redacted: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub perception_sources: Vec<super::PerceptionEpisodeSourceRef>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2835,15 +3189,24 @@ impl RedactedTranscriptSlice {
                             view,
                             &mut redactions,
                         );
+                        let mut visible = redact_message_for_view(
+                            record,
+                            message,
+                            view,
+                            attrs_for_message,
+                            &mut redacted_messages,
+                            &mut redactions,
+                        );
+                        if visible.content.is_some()
+                            && record.redaction_state == TranscriptRedactionState::RawAvailable
+                        {
+                            visible.perception_sources = perception_sources_for_assistant_sequence(
+                                &record.perception_source_uses,
+                                message.sequence,
+                            );
+                        }
                         RedactedTranscriptAssistantMessage {
-                            message: redact_message_for_view(
-                                record,
-                                message,
-                                view,
-                                attrs_for_message,
-                                &mut redacted_messages,
-                                &mut redactions,
-                            ),
+                            message: visible,
                             settlement: item.settlement,
                         }
                     })
@@ -2885,6 +3248,20 @@ impl RedactedTranscriptSlice {
             redactions,
         }
     }
+}
+
+fn perception_sources_for_assistant_sequence(
+    uses: &[TranscriptPerceptionSourceUseV1],
+    sequence: u64,
+) -> Vec<super::PerceptionEpisodeSourceRef> {
+    let mut sources = uses
+        .iter()
+        .filter(|usage| sequence >= usage.first_affected_assistant_sequence)
+        .map(|usage| usage.source.clone())
+        .collect::<Vec<_>>();
+    sources.sort();
+    sources.dedup();
+    sources
 }
 
 pub trait ConversationTranscriptStore: Send + Sync {
@@ -3396,6 +3773,7 @@ fn redact_message_for_view(
         actor: message.actor.clone(),
         observed_at: message.observed_at,
         redacted: redaction_reason.is_some(),
+        perception_sources: Vec::new(),
     }
 }
 
@@ -3781,4 +4159,39 @@ fn encode_key_component(raw: &str) -> String {
 fn encode_labeled_key_component(label: &str, raw: &str) -> String {
     let encoded = encode_key_component(raw);
     format!("{label}{}:{encoded}", encoded.len())
+}
+
+#[cfg(test)]
+mod perception_replay_tests {
+    use super::*;
+
+    #[test]
+    fn assistant_suffix_carries_only_sources_which_already_affected_it() {
+        let source = super::super::PerceptionEpisodeSourceRef {
+            memory_space_id: "space".into(),
+            subject_id: "soul".into(),
+            relationship_id: None,
+            source: super::super::PerceptionSourceKey {
+                host_id: "host".into(),
+                device_id: Some("device".into()),
+                source_id: "eye".into(),
+                source_generation: 1,
+            },
+            revoke_epoch: 0,
+            episode_id: "episode".into(),
+            content_digest: format!("sha256:{}", "a".repeat(64)),
+        };
+        let uses = vec![TranscriptPerceptionSourceUseV1 {
+            source: source.clone(),
+            first_affected_assistant_sequence: 3,
+            delivery: PerceptionReplyEvidenceV1::HostAttested {
+                receipt_digest: format!("sha256:{}", "b".repeat(64)),
+            },
+        }];
+        assert!(perception_sources_for_assistant_sequence(&uses, 2).is_empty());
+        assert_eq!(
+            perception_sources_for_assistant_sequence(&uses, 3),
+            vec![source]
+        );
+    }
 }

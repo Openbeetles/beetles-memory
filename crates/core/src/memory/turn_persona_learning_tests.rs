@@ -86,8 +86,214 @@ fn fixture_for(
             quote: "admitted uncertainty instead of guessing".into(),
         }],
         counter_observations: vec![],
+        supporting_visual_sources: vec![],
+        counter_visual_sources: vec![],
     };
     (admission, identity, transcript, interpretation)
+}
+
+fn visual_persona_observation(
+    episode_id: &str,
+    input_id: &str,
+    originating_turn_id: &str,
+) -> VisualPersonaObservationV1 {
+    let source = PerceptionEpisodeSourceRef {
+        memory_space_id: "space".into(),
+        subject_id: "agent-a".into(),
+        relationship_id: Some("relation".into()),
+        source: crate::memory::PerceptionSourceKey {
+            host_id: "host".into(),
+            device_id: Some("device".into()),
+            source_id: "eye".into(),
+            source_generation: 1,
+        },
+        revoke_epoch: 0,
+        episode_id: episode_id.into(),
+        content_digest: format!("sha256:{}", "a".repeat(64)),
+    };
+    VisualPersonaObservationV1 {
+        episode_source: source.clone(),
+        observation: VisualObservation {
+            input_id: input_id.into(),
+            source_key: source.source,
+            scope: crate::memory::PerceptionScope {
+                memory_space_id: source.memory_space_id,
+                subject_id: source.subject_id,
+                relationship_id: source.relationship_id,
+                session_id: "session".into(),
+                turn_id: Some(originating_turn_id.into()),
+                step_id: None,
+            },
+            revoke_epoch: 0,
+            observed_at_unix_ms: Some(1_800_000_000_000),
+            text: "我看到当前用户在画面里微笑".into(),
+            search_terms: vec!["微笑".into()],
+            uncertainty: VisualObservationUncertainty::Low,
+            classification: crate::memory::VisualClassification {
+                subject_attribution: SubjectAttribution::ContextualCurrentUser,
+                attribution_confidence: AttributionConfidence::High,
+                visible_person_count: Some(1),
+                third_party_present: false,
+                sensitivity: VisualSensitivity::Ordinary,
+                minor_present: false,
+                sensitive_document_present: false,
+                attribution_evidence_refs: vec!["context".into()],
+                conflicting_evidence: false,
+            },
+            evidence_origin: VisualEvidenceOrigin::BeetleInference {
+                provider_id: "vision".into(),
+                request_receipt_digest: format!("sha256:{}", "b".repeat(64)),
+                inference_digest: format!("sha256:{}", "c".repeat(64)),
+            },
+        },
+    }
+}
+
+#[test]
+fn visual_persona_growth_requires_two_source_bound_independent_turns() {
+    let (admission, identity, mut transcript, _) = fixture();
+    let first = visual_persona_observation("episode-a", "input-a", "prior-turn-a");
+    let second = visual_persona_observation("episode-b", "input-b", "prior-turn-b");
+    transcript.external_content_used = true;
+    let request_sha256 = format!("sha256:{}", "d".repeat(64));
+    let replayed = [first.episode_source.clone(), second.episode_source.clone()]
+        .into_iter()
+        .enumerate()
+        .map(|(index, source)| {
+            let owner = crate::memory::PerceptionReplayOwnerV1::LongTermMemory {
+                owner_id: format!("fact-{index}"),
+                owner_revision: 1,
+            };
+            (
+                crate::memory::TranscriptPerceptionSourceUseV1 {
+                    source: source.clone(),
+                    first_affected_assistant_sequence: 2,
+                    delivery: crate::memory::PerceptionReplyEvidenceV1::ReplayedOwner {
+                        owner: owner.clone(),
+                    },
+                },
+                crate::memory::TranscriptExternalContentUseV1::ReplayedVisual {
+                    source,
+                    owner,
+                    request_sha256: request_sha256.clone(),
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut source_uses = replayed
+        .iter()
+        .map(|(source, _)| source.clone())
+        .collect::<Vec<_>>();
+    source_uses.sort();
+    let mut external_uses = replayed
+        .into_iter()
+        .map(|(_, usage)| usage)
+        .collect::<Vec<_>>();
+    external_uses.sort();
+    transcript = transcript
+        .with_perception_source_uses(source_uses)
+        .unwrap()
+        .with_external_content_manifest(Some(crate::memory::TranscriptExternalContentManifestV1 {
+            completeness: crate::memory::ExternalContentCompletenessV1::HostAttestedComplete,
+            request_sha256: vec![request_sha256],
+            uses: external_uses,
+        }))
+        .unwrap();
+    let interpretation = TurnPersonaInterpretationV1::Growth {
+        scope: TurnPersonaInterpretationScopeV1::ActiveRelationship,
+        priority_order: vec![],
+        value_orientation: String::new(),
+        relationship_posture: "remembering repeated shared presence".into(),
+        supporting_observations: vec![],
+        counter_observations: vec![],
+        supporting_visual_sources: vec![
+            first.episode_source.clone(),
+            second.episode_source.clone(),
+        ],
+        counter_visual_sources: vec![],
+    };
+    let evidence = GovernedTurnPersonaEvidenceV1::bind_with_visual(
+        &admission,
+        identity,
+        &transcript,
+        Some("relation".into()),
+        interpretation.clone(),
+        vec![first.clone(), second.clone()],
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(evidence.visual_observations.len(), 2);
+    evidence.validate_source(&admission, &transcript).unwrap();
+
+    let no_manifest = transcript
+        .clone()
+        .with_external_content_manifest(None)
+        .unwrap();
+    assert!(interpretation
+        .validate_against_with_visual(
+            &no_manifest,
+            Some("relation"),
+            &[first.clone(), second.clone()]
+        )
+        .is_err());
+    let mut with_other = transcript.clone();
+    let manifest = with_other.external_content_manifest.as_mut().unwrap();
+    manifest
+        .uses
+        .push(crate::memory::TranscriptExternalContentUseV1::Other {
+            category: crate::memory::ExternalContentCategoryV1::RetrievedContent,
+            content_digest: format!("sha256:{}", "e".repeat(64)),
+            request_sha256: manifest.request_sha256[0].clone(),
+            tool_observation_id: None,
+        });
+    manifest.uses.sort();
+    assert!(interpretation
+        .validate_against_with_visual(
+            &with_other,
+            Some("relation"),
+            &[first.clone(), second.clone()]
+        )
+        .is_err());
+    let mut uncovered_tool = transcript.clone();
+    uncovered_tool
+        .tool_observations
+        .push(crate::memory::ToolObservationDigest {
+            observation_id: "other-tool-output".into(),
+            call_id: "other-tool-call".into(),
+            tool_name: "search".into(),
+            summary: "external result".into(),
+            external_content: true,
+        });
+    assert!(uncovered_tool
+        .external_content_manifest
+        .as_ref()
+        .unwrap()
+        .validate_against(&uncovered_tool)
+        .is_err());
+
+    let mut only_one = interpretation.clone();
+    if let TurnPersonaInterpretationV1::Growth {
+        supporting_visual_sources,
+        ..
+    } = &mut only_one
+    {
+        supporting_visual_sources.pop();
+    }
+    assert!(only_one
+        .validate_against_with_visual(&transcript, Some("relation"), &[first.clone()])
+        .is_err());
+
+    let mut same_turn = second.clone();
+    same_turn.observation.scope.turn_id = first.observation.scope.turn_id.clone();
+    assert!(interpretation
+        .validate_against_with_visual(&transcript, Some("relation"), &[first.clone(), same_turn])
+        .is_err());
+
+    let mut private = second;
+    private.observation.classification.sensitivity = VisualSensitivity::Private;
+    assert!(interpretation
+        .validate_against_with_visual(&transcript, Some("relation"), &[first, private])
+        .is_err());
 }
 
 #[test]

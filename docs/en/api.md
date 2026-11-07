@@ -2,6 +2,24 @@
 
 The SDK API is the primary entry point. Host projects should enter through `bm-sdk` or through `bm-entry` plus a protocol adapter. They should not implement their own memory schema, store envelope, replay format, or adapter dispatch rules.
 
+## 0.14.0 Visual Perception macOS SDK
+
+This section describes the macOS `bm-sdk` source contract; `v0.14.0` is a release identity only after tag publication and remote verification. Store v18 does not read or migrate v17. See [integration](integration.md#visual-perception-on-the-macos-sdk) and the [0.14.0 source notes](release-notes-0.14.0.md).
+
+| Stage | Public SDK surface | Contract |
+| --- | --- | --- |
+| Capability and source | `register_perception_host`, `register_visual_tool_snapshot`, `authorize_visual_source`; `PerceptionCapabilitySnapshot`, `VisualToolRegistrySnapshot`, `VisualSourceAuthorization` | Host/device/source generations and the three capability states are explicit. The host owns capture, permission, tool registration, and consent. |
+| Input | `submit_visual_input`; `PerceptionInputEnvelope<VisualInput>`, `VisualInput::{Image, FrameStream, Video}`, `VisualTurnPosition`, `VisualCaptureContext` | Camera media is a host observation; `HumanUserSharedMedia` binds to the actual user message and attachment through `UserVisualAttachmentBinding`. `CanonicalTurnDelta::planned_input_message_id` gives the canonical ID before commit. |
+| Turn delivery | `project_for_perception_host`, `provider_payload().visual_delivery()`, `append_visual_delivery`, `attest_visual_delivery`, `record_visual_provider_response` | Initial and same-turn appended packets retain source and ordering. The host attests actual final request bytes, media, wire positions, and transforms; SDK preparation alone is not a sent receipt. |
+| Learning provenance | `prepare_turn_visual_external_uses`, `submit_turn_external_content_manifest`; `TranscriptExternalContentManifestV1`, `TranscriptExternalContentUseV1` | The host supplies a complete typed inventory of visual replay, other external content, and tool results. Beetle checks known receipts and owners. Host attestation cannot independently prove the absence of unlisted content. |
+| Memory decision | `authorize_visual_inference`, `infer_visual_for_memory`; `BeetleVisualInferenceClient`, `VisualInferenceAuthorization`, `PerceptionRetentionCeiling` | Separate recipient authorization precedes governed inference. Beetle chooses whether an observation is worth semantic memory; retention ceiling bounds it. A host cannot supply a final fact or classification. |
+| Revocation and management | `revoke_visual_source`, `revoke_all_current_visual_sources`, `clear_perception_session`, `list_visual_memory`, `read_visual_memory_media`, `forget_visual_memory`, `forbid_visual_source_memory` | Revocation invalidates current vision and replay. The host authenticates the user for memory management and stops replaying withdrawn material in its Provider context. |
+| Archive | `export_memory_space`, `export_memory_space_with_visual_media`, `import_memory_space` | Default export carries governed visual semantics without media bytes. Explicit private media export requires its own authorization; import atomically checks exact scope, provenance roots, tombstones, revocation, bans, and current retention. |
+
+The host owns camera acquisition, pre-send sensitive-media screening, metadata removal, compression, silent video preparation, final Provider assembly, and consent for each media recipient. The repository has no configured real camera, Provider adapter, or downstream UI integration. `HumanUserSharedMedia` remains a user message; a host camera observation is never silently recast as one.
+
+Subject-wide Soul growth requires unscoped visual sources from two original turns plus an independent canonical user or runtime text observation in the current turn. Relationship-scoped vision can contribute only to that relationship. A single image or the vision model's description alone is insufficient.
+
 ## 0.13.0: inhabited subject delivery
 
 `bm-sdk` 0.13.0 source release.
@@ -187,7 +205,7 @@ CTQ1 query surfaces use the Store-owned `TranscriptQueryCursor`. Treat it as opa
 
 `HostUi` is only the host-presentable redacted disclosure view. It is not a chat-window API, pagination direction, product name, transcript index owner, or authorization token. Catalog, timeline, search, and activity return only candidates that remain visible after Runtime hydration and redaction for the requested view. Search hits contain a governed Unicode-safe excerpt and durable `TranscriptAnchor`; pass that anchor to `TranscriptTimelineAnchor::Around` instead of asking the host UI to scan or re-match transcript text.
 
-The published v0.11.2 accepts Store v16 only; `bm-sdk` 0.12.0 accepts Store v17 only and does not read v16. 0.9.0 uses Store v14 and 0.7.0 uses Store v13. There is no public Store migration API, compatibility reader, dual write, or automatic migration. Older, partial, and foreign schema payloads fail closed. Development data from an older generation must be explicitly discarded and recreated by its owner; archive export/import is not schema migration.
+The prepared macOS SDK 0.14.0 uses Store v18 only and does not read v17. The published v0.11.2 accepts Store v16 only; `bm-sdk` 0.12.0 accepts Store v17 only and does not read v16. 0.9.0 uses Store v14 and 0.7.0 uses Store v13. There is no public Store migration API, compatibility reader, dual write, or automatic migration. Older, partial, and foreign schema payloads fail closed. Development data from an older generation must be explicitly discarded and recreated by its owner; archive export/import is not schema migration.
 
 Timeline supports latest, before, after, around-anchor, around-sequence, around-time, and first-visible-in-range queries. Page turns stay in sequence order and reports may carry opaque older/newer cursors. Calendar conversion stays with the host: resolve the user's IANA time zone and local date into a canonical UTC `[start_inclusive, end_exclusive)` range before calling Memory. Do not assume every local day is 86,400 seconds; DST days can be 23 or 25 hours. Transcript queries consume explicit UTC ranges and do not persist calendar time zones; the model-context local-time provider is a separate presentation input.
 

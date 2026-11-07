@@ -1,4 +1,8 @@
 use super::*;
+use crate::store_internal::perception::{
+    perception_episode_storage_key, PerceptionEpisodeEvidenceV1, PERCEPTION_EPISODE_NAMESPACE,
+    PERCEPTION_EPISODE_TOMBSTONE_NAMESPACE,
+};
 
 pub(crate) fn plan_governed_owner_facet_index_changes(
     store_platform: &dyn RuntimeKnownJsonRead,
@@ -442,16 +446,54 @@ pub(crate) fn project_long_term_evidence(
             available.insert(source.display_citation());
         }
     }
-    Ok(entry.project_transcript_evidence(|source| available.contains(&source.display_citation())))
+    let projected =
+        entry.project_transcript_evidence(|source| available.contains(&source.display_citation()));
+    if projected.content.is_empty() {
+        return Ok(projected);
+    }
+    for source in &entry.perception_sources {
+        let key = perception_episode_storage_key(
+            &source.memory_space_id,
+            &source.subject_id,
+            &source.source,
+            &source.episode_id,
+        )?;
+        if !reader
+            .read_known_json_docs(
+                PERCEPTION_EPISODE_TOMBSTONE_NAMESPACE,
+                std::slice::from_ref(&key),
+            )?
+            .is_empty()
+        {
+            return Ok(projected.redact_perception_derived());
+        }
+        let episode = reader
+            .read_known_json_docs(PERCEPTION_EPISODE_NAMESPACE, std::slice::from_ref(&key))?
+            .into_iter()
+            .next()
+            .map(|document| serde_json::from_value::<PerceptionEpisodeEvidenceV1>(document.value))
+            .transpose()
+            .map_err(|error| Error::config("long_term_perception_source", error.to_string()))?;
+        if episode
+            .as_ref()
+            .and_then(|episode| episode.source_ref().ok())
+            .as_ref()
+            != Some(source)
+        {
+            return Ok(projected.redact_perception_derived());
+        }
+    }
+    Ok(projected)
 }
 
 /// Composes factual evidence indexes into the existing Transcript lifecycle transaction.
 /// The accepted factual material is deliberately not rewritten.
-pub(crate) fn plan_transcript_factual_source_withdrawal(
+pub(crate) fn plan_transcript_factual_source_withdrawal_excluding(
     store: &StorePlatform,
     space: &str,
     changed: &[(TranscriptTurnRecord, TranscriptTurnRecord)],
     budget: &RuntimeBudgetReport,
+    purged_owner_ids: &BTreeSet<String>,
 ) -> Result<MemoryStoreMutationPlan> {
     let withdrawn = changed
         .iter()
@@ -474,6 +516,9 @@ pub(crate) fn plan_transcript_factual_source_withdrawal(
     let mut changes = BTreeMap::new();
     let mut rejected_by_owner = BTreeMap::new();
     for entry in entries {
+        if purged_owner_ids.contains(&entry.id) {
+            continue;
+        }
         let affected = entry.transcript_sources.iter().any(|source| {
             withdrawn.iter().any(|(_, after)| {
                 source.memory_space_id == after.key.memory_space_id
@@ -497,16 +542,24 @@ pub(crate) fn plan_transcript_factual_source_withdrawal(
             GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, entry.id.clone()),
             rejected,
         );
-        let facet = build_long_term_memory_facet_index_doc(
-            &projected,
-            space.to_string(),
-            vec![space.to_string()],
-            1,
-        )
-        .map_err(|error| Error::config("transcript_factual_source_facet", error.to_string()))?;
+        let facet = if projected.content.is_empty() {
+            None
+        } else {
+            Some(
+                build_long_term_memory_facet_index_doc(
+                    &projected,
+                    space.to_string(),
+                    vec![space.to_string()],
+                    1,
+                )
+                .map_err(|error| {
+                    Error::config("transcript_factual_source_facet", error.to_string())
+                })?,
+            )
+        };
         changes.insert(
             GovernedMemoryOwnerRef::new(GovernedMemoryOwnerPlane::LongTerm, entry.id),
-            Some(facet),
+            facet,
         );
     }
     let mut plan = plan_governed_owner_facet_index_changes(store, space, changes, space)?;

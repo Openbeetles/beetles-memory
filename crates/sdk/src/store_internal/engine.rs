@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 
 use bm_core::memory::{
@@ -7,14 +8,14 @@ use bm_core::memory::{
 use bm_core::{Error, Result};
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
+use crate::store_internal::snapshot::StoreSnapshotBlob;
 use crate::store_internal::transaction::{
     ConditionalDeleteEventTemplate, StoreAdmissionAuthority, StoreBoundedKnownKeyReadResult,
     StoreImmutableReadSession, StoreTransactionAdmission,
 };
 use crate::StorePhysicalOwningScope;
-#[cfg(feature = "nonproduction-replay-harness")]
-use crate::StoreSnapshotBlob;
 use crate::{MemoryStoreEvent, StoreEventLog, StoreSnapshotJsonDoc};
 use crate::{
     StoreCapacityBudget, StoreEngineMutation, StoreTransactionReport, StoreTransactionRequest,
@@ -108,6 +109,261 @@ pub struct StoreScopedProjection {
     pub json_docs: Vec<StoreSnapshotJsonDoc>,
     pub events: Vec<MemoryStoreEvent>,
     pub receipt: crate::StoreReadReceipt,
+}
+
+/// Visual media is returned with the exact scoped JSON projection under one
+/// backend read fence. A separate blob read would permit a mixed owner image.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoreScopedVisualMediaProjection {
+    pub projection: StoreScopedProjection,
+    pub blobs: Vec<StoreSnapshotBlob>,
+}
+
+/// Each selected media blob must have one typed episode and one exact root
+/// edge. The helper does not treat an arbitrary Store blob as exportable.
+pub(crate) fn scoped_visual_media_owners(
+    scope: &StoreScopedProjectionScope,
+    docs: &[StoreSnapshotJsonDoc],
+) -> Result<BTreeMap<String, super::perception::PerceptionMediaOwnerRefV1>> {
+    use super::perception::{
+        PerceptionEpisodeEvidenceV1, PERCEPTION_EPISODE_NAMESPACE,
+        PERCEPTION_SOURCE_DEPENDENTS_NAMESPACE,
+    };
+    use bm_core::memory::{PerceptionSourceDependentKindV1, PerceptionSourceDependentsRootV1};
+    let roots = docs
+        .iter()
+        .filter(|doc| doc.namespace == PERCEPTION_SOURCE_DEPENDENTS_NAMESPACE)
+        .map(|doc| (doc.key.as_str(), &doc.value))
+        .collect::<BTreeMap<_, _>>();
+    if roots.len()
+        != docs
+            .iter()
+            .filter(|doc| doc.namespace == PERCEPTION_SOURCE_DEPENDENTS_NAMESPACE)
+            .count()
+    {
+        return Err(Error::config(
+            "store_scoped_visual_media",
+            "duplicate source root in selected projection",
+        ));
+    }
+    let mut owners = BTreeMap::new();
+    let mut episode_keys = BTreeSet::new();
+    for doc in docs
+        .iter()
+        .filter(|doc| doc.namespace == PERCEPTION_EPISODE_NAMESPACE)
+    {
+        let episode: PerceptionEpisodeEvidenceV1 = serde_json::from_value(doc.value.clone())
+            .map_err(|error| Error::config("store_scoped_visual_media", error.to_string()))?;
+        episode.validate_contract()?;
+        if episode.key()? != doc.key
+            || episode.memory_space_id != scope.memory_space_id
+            || scope.mounted_subject_id() != Some(episode.subject_id.as_str())
+        {
+            return Err(Error::config(
+                "store_scoped_visual_media",
+                "visual episode escapes the selected subject scope",
+            ));
+        }
+        if !episode_keys.insert(doc.key.as_str()) {
+            return Err(Error::config(
+                "store_scoped_visual_media",
+                "duplicate visual episode in selected projection",
+            ));
+        }
+        let root_value = roots.get(doc.key.as_str()).ok_or_else(|| {
+            Error::config(
+                "store_scoped_visual_media",
+                "visual episode lacks its dependents root",
+            )
+        })?;
+        let root: PerceptionSourceDependentsRootV1 = serde_json::from_value((**root_value).clone())
+            .map_err(|error| Error::config("store_scoped_visual_media", error.to_string()))?;
+        root.validate_contract()?;
+        let media_edges = root
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == PerceptionSourceDependentKindV1::MediaEvidence)
+            .collect::<Vec<_>>();
+        if root.source != episode.source_ref()?
+            || media_edges.len() != usize::from(episode.media.is_some())
+            || episode.media.as_ref().is_some_and(|media| {
+                !media_edges.iter().any(|edge| {
+                    edge.owner_key == media.key
+                        && edge.content_digest == media.sha256
+                        && edge.owner_revision.is_none()
+                })
+            })
+        {
+            return Err(Error::config(
+                "store_scoped_visual_media",
+                "media owner differs from its exact source root",
+            ));
+        }
+        if let Some(media) = episode.media {
+            if owners.insert(media.key.clone(), media).is_some() {
+                return Err(Error::config(
+                    "store_scoped_visual_media",
+                    "duplicate media owner key in selected projection",
+                ));
+            }
+        }
+    }
+    if roots.keys().any(|key| !episode_keys.contains(key)) {
+        return Err(Error::config(
+            "store_scoped_visual_media",
+            "source root has no selected visual episode",
+        ));
+    }
+    Ok(owners)
+}
+
+pub(crate) fn validate_scoped_visual_media_blobs(
+    owners: &BTreeMap<String, super::perception::PerceptionMediaOwnerRefV1>,
+    blobs: &[StoreSnapshotBlob],
+    capacity: StoreCapacityBudget,
+) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    let mut total_bytes = 0usize;
+    for blob in blobs {
+        if blob.namespace != super::perception::PERCEPTION_MEDIA_NAMESPACE
+            || !seen.insert(blob.key.as_str())
+        {
+            return Err(Error::config(
+                "store_scoped_visual_media",
+                "media blob namespace or key is invalid or duplicated",
+            ));
+        }
+        let owner = owners.get(&blob.key).ok_or_else(|| {
+            Error::config(
+                "store_scoped_visual_media",
+                "media blob has no selected episode owner",
+            )
+        })?;
+        if blob.value.len() != owner.byte_len
+            || format!("sha256:{:x}", Sha256::digest(&blob.value)) != owner.sha256
+        {
+            return Err(Error::config(
+                "store_scoped_visual_media",
+                "media bytes differ from typed owner digest",
+            ));
+        }
+        total_bytes = total_bytes.checked_add(blob.value.len()).ok_or_else(|| {
+            Error::config("store_scoped_visual_media", "media byte count overflow")
+        })?;
+    }
+    if seen.len() != owners.len()
+        || total_bytes > capacity.blob_max_bytes
+        || seen.len() > capacity.kv_max_entries
+    {
+        return Err(Error::config(
+            "store_scoped_visual_media",
+            "selected media closure exceeds budget or omits an owner",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn collect_scoped_visual_media_under_fence(
+    projection: StoreScopedProjection,
+    capacity: StoreCapacityBudget,
+    mut read_blob: impl FnMut(&str, usize) -> Result<Option<Vec<u8>>>,
+) -> Result<StoreScopedVisualMediaProjection> {
+    let owners = scoped_visual_media_owners(&projection.scope, &projection.json_docs)?;
+    let mut blobs = Vec::with_capacity(owners.len());
+    let mut remaining = capacity.blob_max_bytes;
+    for (key, owner) in &owners {
+        if owner.byte_len > remaining {
+            return Err(Error::config(
+                "store_scoped_visual_media",
+                "selected media bytes exceed pinned read budget",
+            ));
+        }
+        let value = read_blob(key, remaining)?.ok_or_else(|| {
+            Error::config("store_scoped_visual_media", "typed media owner has no blob")
+        })?;
+        remaining = remaining.saturating_sub(value.len());
+        blobs.push(StoreSnapshotBlob {
+            namespace: super::perception::PERCEPTION_MEDIA_NAMESPACE.into(),
+            key: key.clone(),
+            value,
+        });
+    }
+    validate_scoped_visual_media_blobs(&owners, &blobs, capacity)?;
+    Ok(StoreScopedVisualMediaProjection { projection, blobs })
+}
+
+pub(crate) fn reject_visual_episode_in_plain_scoped_replace(
+    request: &StoreScopedProjectionReplaceRequest,
+) -> Result<()> {
+    if request.json_namespaces.iter().any(|namespace| {
+        namespace == super::perception::PERCEPTION_EPISODE_NAMESPACE
+            || namespace == super::perception::PERCEPTION_SOURCE_DEPENDENTS_NAMESPACE
+    }) || request.json_docs.iter().any(|doc| {
+        doc.namespace == super::perception::PERCEPTION_EPISODE_NAMESPACE
+            || doc.namespace == super::perception::PERCEPTION_SOURCE_DEPENDENTS_NAMESPACE
+    }) {
+        return Err(Error::config(
+            "store_scoped_visual_media",
+            "visual episodes require the atomic visual-media scoped replace",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) struct ScopedVisualMediaReplacePlan {
+    pub deleted_keys: BTreeSet<String>,
+}
+
+pub(crate) fn plan_scoped_visual_media_replace(
+    request: &StoreScopedProjectionReplaceRequest,
+    before_docs: &[StoreSnapshotJsonDoc],
+    media_blobs: &[StoreSnapshotBlob],
+    capacity: StoreCapacityBudget,
+) -> Result<ScopedVisualMediaReplacePlan> {
+    if !request
+        .json_namespaces
+        .iter()
+        .any(|value| value == super::perception::PERCEPTION_EPISODE_NAMESPACE)
+        || !request
+            .json_namespaces
+            .iter()
+            .any(|value| value == super::perception::PERCEPTION_SOURCE_DEPENDENTS_NAMESPACE)
+    {
+        return Err(Error::config(
+            "store_scoped_visual_media",
+            "atomic visual replace requires episode and dependents namespaces",
+        ));
+    }
+    let protected_visual_namespace = |namespace: &str| {
+        namespace == super::perception::PERCEPTION_EPISODE_NAMESPACE
+            || namespace == super::perception::PERCEPTION_SOURCE_DEPENDENTS_NAMESPACE
+    };
+    let incoming_visual_docs = request
+        .json_docs
+        .iter()
+        .filter(|doc| protected_visual_namespace(&doc.namespace))
+        .map(|doc| ((doc.namespace.as_str(), doc.key.as_str()), &doc.value))
+        .collect::<BTreeMap<_, _>>();
+    for prior in before_docs
+        .iter()
+        .filter(|doc| protected_visual_namespace(&doc.namespace))
+    {
+        if incoming_visual_docs
+            .get(&(prior.namespace.as_str(), prior.key.as_str()))
+            .is_none_or(|value| *value != &prior.value)
+        {
+            return Err(Error::config(
+                "store_scoped_visual_media",
+                "archive cannot delete or rewrite a live visual episode or source root; use governed source control",
+            ));
+        }
+    }
+    let before = scoped_visual_media_owners(&request.scope, before_docs)?;
+    let after = scoped_visual_media_owners(&request.scope, &request.json_docs)?;
+    validate_scoped_visual_media_blobs(&after, media_blobs, capacity)?;
+    Ok(ScopedVisualMediaReplacePlan {
+        deleted_keys: before.into_keys().collect(),
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -207,6 +463,11 @@ pub(crate) fn json_document_is_preserved_by_scoped_projection(
     value: &Value,
     request: &StoreScopedProjectionReplaceRequest,
 ) -> Result<bool> {
+    // A local turn's visual taint is durable replay authority. Replacing a
+    // memory projection may add imported taint, but cannot erase local taint.
+    if namespace == super::perception::PERCEPTION_TURN_TAINT_NAMESPACE {
+        return Ok(true);
+    }
     // A public-only subject archive carries no transcript query replacement.
     // Its omission must not delete the MemorySpace-wide cursor authority used
     // by retained conversations in other subjects. Full transcript restores
@@ -347,9 +608,20 @@ pub trait StoreEngine: StoreEventLog {
         request: &StoreScopedProjectionRequest,
         capacity: StoreCapacityBudget,
     ) -> Result<StoreScopedProjection>;
+    fn read_scoped_projection_with_visual_media(
+        &self,
+        request: &StoreScopedProjectionRequest,
+        capacity: StoreCapacityBudget,
+    ) -> Result<StoreScopedVisualMediaProjection>;
     fn replace_scoped_projection(
         &self,
         request: &StoreScopedProjectionReplaceRequest,
+        admission: &StoreTransactionAdmission,
+    ) -> Result<StoreScopedProjectionReplaceReport>;
+    fn replace_scoped_projection_with_visual_media(
+        &self,
+        request: &StoreScopedProjectionReplaceRequest,
+        media_blobs: &[StoreSnapshotBlob],
         admission: &StoreTransactionAdmission,
     ) -> Result<StoreScopedProjectionReplaceReport>;
     #[cfg(feature = "nonproduction-replay-harness")]
@@ -530,5 +802,49 @@ mod tests {
         let error = materialize_metric_event_source(&[event], below_capacity)
             .expect_err("N+1 bytes must fail before the event vector is cloned");
         assert_eq!(error.stage(), "runtime_metrics_event_bytes");
+    }
+
+    #[test]
+    fn scoped_import_cannot_omit_episode_or_rewrite_its_source_root() {
+        let episode_namespace = super::super::perception::PERCEPTION_EPISODE_NAMESPACE;
+        let root_namespace = super::super::perception::PERCEPTION_SOURCE_DEPENDENTS_NAMESPACE;
+        let scope = StoreScopedProjectionScope::subject("space", "subject").unwrap();
+        let episode = StoreSnapshotJsonDoc {
+            namespace: episode_namespace.into(),
+            key: "episode-a".into(),
+            value: serde_json::json!({"existing": true}),
+        };
+        let root = StoreSnapshotJsonDoc {
+            namespace: root_namespace.into(),
+            key: "episode-a".into(),
+            value: serde_json::json!({"edges": ["soul-revision"]}),
+        };
+        let request = |json_docs| StoreScopedProjectionReplaceRequest {
+            scope: scope.clone(),
+            json_namespaces: vec![episode_namespace.into(), root_namespace.into()],
+            json_docs,
+            events: Vec::new(),
+            preserve_protected_owner_state: true,
+            source_closure: None,
+        };
+        let before = vec![episode.clone(), root.clone()];
+        assert!(plan_scoped_visual_media_replace(
+            &request(vec![root.clone()]),
+            &before,
+            &[],
+            StoreCapacityBudget::full(),
+        )
+        .is_err());
+        let rewritten_root = StoreSnapshotJsonDoc {
+            value: serde_json::json!({"edges": []}),
+            ..root
+        };
+        assert!(plan_scoped_visual_media_replace(
+            &request(vec![episode, rewritten_root]),
+            &before,
+            &[],
+            StoreCapacityBudget::full(),
+        )
+        .is_err());
     }
 }

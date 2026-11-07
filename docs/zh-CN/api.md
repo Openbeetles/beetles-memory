@@ -2,6 +2,24 @@
 
 SDK API 是主要入口。宿主项目应通过 `bm-sdk` 进入，或通过 `bm-entry` 加协议 adapter 进入；不应自行实现记忆 schema、store envelope、replay 格式或 adapter dispatch 规则。
 
+## 0.14.0 macOS SDK 视觉感知
+
+本节描述 macOS `bm-sdk` 源码合同；`v0.14.0` 须在 tag 发布并完成远端回读后才能作为发布身份。Store v18 不读取或迁移 v17。接线见[集成文档](integration.md#macos-sdk-视觉感知)及[0.14.0 源码说明](release-notes-0.14.0.md)。
+
+| 阶段 | 公开 SDK 接口 | 合同 |
+| --- | --- | --- |
+| 能力与来源 | `register_perception_host`、`register_visual_tool_snapshot`、`authorize_visual_source`；`PerceptionCapabilitySnapshot`、`VisualToolRegistrySnapshot`、`VisualSourceAuthorization` | 宿主／设备／来源代次和三态能力明确区分；采集、权限、工具注册与同意归宿主。 |
+| 输入 | `submit_visual_input`；`PerceptionInputEnvelope<VisualInput>`、`VisualInput::{Image, FrameStream, Video}`、`VisualTurnPosition`、`VisualCaptureContext` | 相机画面是宿主观察；`HumanUserSharedMedia` 通过 `UserVisualAttachmentBinding` 绑定真实用户消息及附件。提交前用 `CanonicalTurnDelta::planned_input_message_id` 获取规范消息 ID。 |
+| 本轮交付 | `project_for_perception_host`、`provider_payload().visual_delivery()`、`append_visual_delivery`、`attest_visual_delivery`、`record_visual_provider_response` | 首次与同轮追加包保留来源和顺序。宿主为最终请求字节、媒体、线协议位置与转换作证；SDK 准备交付包本身不等于已发送。 |
+| 学习来源 | `prepare_turn_visual_external_uses`、`submit_turn_external_content_manifest`；`TranscriptExternalContentManifestV1`、`TranscriptExternalContentUseV1` | 宿主提交视觉回放、其他外部内容及工具结果的完整类型化清单；Beetle 核对已知回执与 owner。宿主作证不能独立证明不存在未列出的内容。 |
+| 记忆决定 | `authorize_visual_inference`、`infer_visual_for_memory`；`BeetleVisualInferenceClient`、`VisualInferenceAuthorization`、`PerceptionRetentionCeiling` | 受治理视觉推理须单独授权接收方；Beetle 判断观察是否值得形成语义记忆，保存上限约束结果。宿主不能提交最终事实或分类。 |
+| 撤权与管理 | `revoke_visual_source`、`revoke_all_current_visual_sources`、`clear_perception_session`、`list_visual_memory`、`read_visual_memory_media`、`forget_visual_memory`、`forbid_visual_source_memory` | 撤权使当前视觉与回放失效；宿主验证记忆管理用户身份，并停止在自己的 Provider 上下文重放已撤内容。 |
+| 归档 | `export_memory_space`、`export_memory_space_with_visual_media`、`import_memory_space` | 默认导出受治理视觉语义，不带媒体字节。显式私有媒体导出须另行授权；导入原子核对精确空间、来源 root、墓碑、撤权、禁记及当前保存上限。 |
+
+相机采集、发送前敏感画面筛查、去元数据、压缩、无音轨视频准备、最终 Provider 请求组装及各媒体接收方同意归宿主。本仓未配置真实摄像头、Provider adapter 或下游界面。`HumanUserSharedMedia` 保持用户消息身份；宿主相机观察不能暗中改记为用户消息。
+
+Soul 的主体范围成长需要两个不同原始回合的无关系视觉来源，并在本轮有独立的规范用户或运行时文字观察。关系范围视觉只参与该关系的成长；单次画面或视觉模型自己的描述不能单独改变 Soul。
+
 ## 0.13.0：主体投影交付
 
 `bm-sdk` 0.13.0 源码版本。
@@ -186,7 +204,7 @@ CTQ1 query surface 统一使用 Store-owned `TranscriptQueryCursor`。调用方�
 
 `HostUi` 只是 **host-presentable redacted disclosure view**。它不是聊天窗口 API、分页方向、宿主产品名、transcript index owner 或 authorization token。Catalog、timeline、search、activity 只返回 Runtime hydration 后仍能通过请求 view 脱敏规则的结果。Search hit 携带受治理的 Unicode-safe excerpt 和 durable `TranscriptAnchor`；宿主应把 anchor 交给 `TranscriptTimelineAnchor::Around`，不得在 UI 内扫描或二次匹配 transcript 正文。
 
-已发布的 v0.11.2 只接受 Store v16；`bm-sdk` 0.12.0 只接受 Store v17，不读取 v16。0.9.0 使用 Store v14，0.7.0 使用 Store v13。不提供 public Store migration API、compatibility reader、双写或 automatic migration。旧代、partial 与 foreign schema payload 都会 fail closed。旧代开发数据只能由其 owner 明确删除并重建；archive export/import 不是 schema migration。
+0.14.0 macOS SDK 只使用 Store v18，不读取 v17。已发布的 v0.11.2 只接受 Store v16；`bm-sdk` 0.12.0 只接受 Store v17，不读取 v16。0.9.0 使用 Store v14，0.7.0 使用 Store v13。不提供 public Store migration API、compatibility reader、双写或 automatic migration。旧代、partial 与 foreign schema payload 都会 fail closed。旧代开发数据只能由其 owner 明确删除并重建；archive export/import 不是 schema migration。
 
 Timeline 支持 latest、before、after、around-anchor、around-sequence、around-time 与 first-visible-in-range；页内 turn 始终按 sequence 正序，report 可返回 opaque older/newer cursor。日历换算归宿主：按用户 IANA timezone 把本地日期转换为 canonical UTC `[start_inclusive, end_exclusive)` 后再调用 Memory。不得假设每天都是 86400 秒，DST 当天可以是 23 或 25 小时；Transcript 查询消费显式 UTC 区间，不持久保存日历时区；模型上下文的本地时间 provider 是独立展示输入。
 

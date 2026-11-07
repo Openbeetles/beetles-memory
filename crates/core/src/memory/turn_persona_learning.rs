@@ -6,10 +6,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{
-    AssistantMessageSettlement, MemoryEvidenceAuthority, MemoryTurnDeliveryStatus,
-    PostTurnGovernanceIdentityV2, SubjectSoulExpectedStateV1, SubjectSoulLifecycleStateV1,
+    AssistantMessageSettlement, AttributionConfidence, MemoryEvidenceAuthority,
+    MemoryTurnDeliveryStatus, PerceptionEpisodeSourceRef, PostTurnGovernanceIdentityV2,
+    SubjectAttribution, SubjectSoulExpectedStateV1, SubjectSoulLifecycleStateV1,
     SubjectSoulOwnerV1, TranscriptTurnRecord, TurnContinuityEvidence, TurnLedgerStatus,
-    TurnPersonaLedger, TurnPersonaPriorityLedger,
+    TurnPersonaLedger, TurnPersonaPriorityLedger, VisualEvidenceOrigin, VisualObservation,
+    VisualObservationUncertainty, VisualSensitivity,
 };
 use crate::{Error, Result};
 
@@ -96,6 +98,63 @@ pub struct PersonaObservationRefV1 {
     pub quote: String,
 }
 
+/// A governed, source-bound visual observation. The SDK must read the exact
+/// episode owner; a host description or assistant reply cannot construct it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VisualPersonaObservationV1 {
+    pub episode_source: PerceptionEpisodeSourceRef,
+    pub observation: VisualObservation,
+}
+
+impl VisualPersonaObservationV1 {
+    pub fn validate_contract(&self) -> Result<()> {
+        self.episode_source.validate_contract()?;
+        self.observation.validate_contract()?;
+        let class = &self.observation.classification;
+        if self.observation.source_key != self.episode_source.source
+            || self.observation.scope.memory_space_id != self.episode_source.memory_space_id
+            || self.observation.scope.subject_id != self.episode_source.subject_id
+            || self.observation.scope.relationship_id != self.episode_source.relationship_id
+            || self.observation.revoke_epoch != self.episode_source.revoke_epoch
+            || self.observation.scope.turn_id.is_none()
+            || !matches!(
+                &self.observation.evidence_origin,
+                VisualEvidenceOrigin::BeetleInference { .. }
+            )
+            || self.observation.uncertainty != VisualObservationUncertainty::Low
+            || class.sensitivity != VisualSensitivity::Ordinary
+            || class.visible_person_count != Some(1)
+            || class.third_party_present
+            || class.minor_present
+            || class.sensitive_document_present
+            || class.conflicting_evidence
+            || !matches!(
+                class.subject_attribution,
+                SubjectAttribution::VerifiedCurrentUser | SubjectAttribution::ContextualCurrentUser
+            )
+            || class.attribution_confidence != AttributionConfidence::High
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+
+    pub fn validate_against(&self, transcript: &TranscriptTurnRecord) -> Result<()> {
+        self.validate_contract()?;
+        if self.episode_source.memory_space_id != transcript.key.memory_space_id
+            || self.episode_source.subject_id != transcript.subject
+            || !transcript
+                .perception_source_uses
+                .iter()
+                .any(|usage| usage.source == self.episode_source)
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TurnPersonaInterpretationV1 {
@@ -109,6 +168,10 @@ pub enum TurnPersonaInterpretationV1 {
         relationship_posture: String,
         supporting_observations: Vec<PersonaObservationRefV1>,
         counter_observations: Vec<PersonaObservationRefV1>,
+        #[serde(default)]
+        supporting_visual_sources: Vec<PerceptionEpisodeSourceRef>,
+        #[serde(default)]
+        counter_visual_sources: Vec<PerceptionEpisodeSourceRef>,
     },
 }
 
@@ -126,6 +189,15 @@ impl TurnPersonaInterpretationV1 {
         transcript: &TranscriptTurnRecord,
         relationship: Option<&str>,
     ) -> Result<()> {
+        self.validate_against_with_visual(transcript, relationship, &[])
+    }
+
+    pub fn validate_against_with_visual(
+        &self,
+        transcript: &TranscriptTurnRecord,
+        relationship: Option<&str>,
+        visual_observations: &[VisualPersonaObservationV1],
+    ) -> Result<()> {
         let Self::Growth {
             scope,
             priority_order,
@@ -133,13 +205,20 @@ impl TurnPersonaInterpretationV1 {
             relationship_posture,
             supporting_observations,
             counter_observations,
+            supporting_visual_sources,
+            counter_visual_sources,
         } = self
         else {
             return Ok(());
         };
         if !transcript.permits_post_turn_learning()
             || transcript.delivery_status != MemoryTurnDeliveryStatus::Delivered
-            || transcript.external_content_used
+            || (transcript.external_content_used && visual_observations.is_empty())
+            || (!visual_observations.is_empty()
+                && !transcript
+                    .external_content_manifest
+                    .as_ref()
+                    .is_some_and(|manifest| manifest.visual_only_for(transcript)))
             || transcript.assistant_messages.is_empty()
             || transcript.assistant_messages.iter().any(|entry| {
                 entry.settlement != AssistantMessageSettlement::Complete
@@ -166,10 +245,12 @@ impl TurnPersonaInterpretationV1 {
                 && !relationship_posture.is_empty())
             || (*scope == TurnPersonaInterpretationScopeV1::ActiveRelationship
                 && relationship.is_none_or(|id| !identifier(id)))
-            || supporting_observations.is_empty()
+            || (supporting_observations.is_empty() && supporting_visual_sources.is_empty())
             || supporting_observations
                 .len()
                 .saturating_add(counter_observations.len())
+                .saturating_add(supporting_visual_sources.len())
+                .saturating_add(counter_visual_sources.len())
                 > MAX_PERSONA_OBSERVATION_REFS
         {
             return Err(invalid());
@@ -192,6 +273,61 @@ impl TurnPersonaInterpretationV1 {
                 return Err(invalid());
             }
         }
+        let mut visual_sources = std::collections::BTreeSet::new();
+        let mut original_turns = std::collections::BTreeSet::new();
+        for visual in visual_observations {
+            visual.validate_against(transcript)?;
+            if !visual_sources.insert(&visual.episode_source)
+                || match scope {
+                    TurnPersonaInterpretationScopeV1::Subject => {
+                        visual.episode_source.relationship_id.is_some()
+                    }
+                    TurnPersonaInterpretationScopeV1::ActiveRelationship => {
+                        visual.episode_source.relationship_id.as_deref() != relationship
+                    }
+                }
+            {
+                return Err(invalid());
+            }
+        }
+        for source in supporting_visual_sources
+            .iter()
+            .chain(counter_visual_sources)
+        {
+            if !visual_sources.contains(source) {
+                return Err(invalid());
+            }
+        }
+        if !supporting_visual_sources.is_empty() {
+            for source in supporting_visual_sources {
+                let visual = visual_observations
+                    .iter()
+                    .find(|visual| &visual.episode_source == source)
+                    .ok_or_else(invalid)?;
+                original_turns.insert(
+                    visual
+                        .observation
+                        .scope
+                        .turn_id
+                        .as_deref()
+                        .ok_or_else(invalid)?,
+                );
+            }
+            if supporting_visual_sources.len() < 2
+                || original_turns.len() < 2
+                || (*scope == TurnPersonaInterpretationScopeV1::Subject
+                    && supporting_observations.is_empty())
+            {
+                return Err(invalid());
+            }
+        }
+        if visual_sources.len()
+            != supporting_visual_sources
+                .len()
+                .saturating_add(counter_visual_sources.len())
+        {
+            return Err(invalid());
+        }
         Ok(())
     }
 }
@@ -212,6 +348,7 @@ pub struct GovernedTurnPersonaEvidenceV1 {
     pub canonical_turn_digest: String,
     pub relationship_id: Option<String>,
     pub interpretation: TurnPersonaInterpretationV1,
+    pub visual_observations: Vec<VisualPersonaObservationV1>,
     pub observed_at: u64,
     pub content_digest: String,
 }
@@ -248,14 +385,18 @@ impl GovernedTurnPersonaEvidenceV1 {
             relationship_posture,
             supporting_observations,
             counter_observations,
+            supporting_visual_sources,
+            counter_visual_sources,
         } = &self.interpretation
         else {
             return Err(invalid());
         };
-        if supporting_observations.is_empty()
+        if (supporting_observations.is_empty() && supporting_visual_sources.is_empty())
             || supporting_observations
                 .len()
                 .saturating_add(counter_observations.len())
+                .saturating_add(supporting_visual_sources.len())
+                .saturating_add(counter_visual_sources.len())
                 > MAX_PERSONA_OBSERVATION_REFS
             || priority_order.len() > 8
             || priority_order.iter().any(|value| {
@@ -293,6 +434,49 @@ impl GovernedTurnPersonaEvidenceV1 {
         {
             return Err(invalid());
         }
+        let mut visual_sources = std::collections::BTreeSet::new();
+        let mut supporting_turns = std::collections::BTreeSet::new();
+        for visual in &self.visual_observations {
+            visual.validate_contract()?;
+            if visual.episode_source.memory_space_id != self.owner.memory_space_id
+                || visual.episode_source.subject_id != self.owner.subject_id
+                || !visual_sources.insert(&visual.episode_source)
+            {
+                return Err(invalid());
+            }
+        }
+        for source in supporting_visual_sources
+            .iter()
+            .chain(counter_visual_sources)
+        {
+            if !visual_sources.contains(source) {
+                return Err(invalid());
+            }
+        }
+        for source in supporting_visual_sources {
+            let visual = self
+                .visual_observations
+                .iter()
+                .find(|visual| &visual.episode_source == source)
+                .ok_or_else(invalid)?;
+            supporting_turns.insert(
+                visual
+                    .observation
+                    .scope
+                    .turn_id
+                    .as_deref()
+                    .ok_or_else(invalid)?,
+            );
+        }
+        if visual_sources.len()
+            != supporting_visual_sources
+                .len()
+                .saturating_add(counter_visual_sources.len())
+            || (!supporting_visual_sources.is_empty()
+                && (supporting_visual_sources.len() < 2 || supporting_turns.len() < 2))
+        {
+            return Err(invalid());
+        }
         Ok(())
     }
 
@@ -302,6 +486,24 @@ impl GovernedTurnPersonaEvidenceV1 {
         transcript: &TranscriptTurnRecord,
         relationship: Option<String>,
         interpretation: TurnPersonaInterpretationV1,
+    ) -> Result<Option<Self>> {
+        Self::bind_with_visual(
+            admission,
+            source,
+            transcript,
+            relationship,
+            interpretation,
+            Vec::new(),
+        )
+    }
+
+    pub fn bind_with_visual(
+        admission: &SoulTurnSourceAdmissionV1,
+        source: PostTurnGovernanceIdentityV2,
+        transcript: &TranscriptTurnRecord,
+        relationship: Option<String>,
+        interpretation: TurnPersonaInterpretationV1,
+        visual_observations: Vec<VisualPersonaObservationV1>,
     ) -> Result<Option<Self>> {
         let generation = admission.generation()?;
         source.validate()?;
@@ -318,7 +520,11 @@ impl GovernedTurnPersonaEvidenceV1 {
         {
             return Err(invalid());
         }
-        interpretation.validate_against(transcript, relationship.as_deref())?;
+        interpretation.validate_against_with_visual(
+            transcript,
+            relationship.as_deref(),
+            &visual_observations,
+        )?;
         if !matches!(interpretation, TurnPersonaInterpretationV1::Growth { .. }) {
             return Ok(None);
         }
@@ -339,10 +545,14 @@ impl GovernedTurnPersonaEvidenceV1 {
             source_sequence: transcript.sequence,
             source_transcript_digest: super::SubjectSoulSourceRefV1::from_transcript(transcript)
                 .map_err(|_| invalid())?
-                .transcript_content_digest,
+                .transcript()
+                .ok_or_else(invalid)?
+                .transcript_content_digest
+                .clone(),
             canonical_turn_digest: transcript.canonical_turn_digest.clone(),
             relationship_id,
             interpretation,
+            visual_observations,
             observed_at: transcript.created_at,
             content_digest: String::new(),
         };
@@ -372,12 +582,13 @@ impl GovernedTurnPersonaEvidenceV1 {
         admission: &SoulTurnSourceAdmissionV1,
         transcript: &TranscriptTurnRecord,
     ) -> Result<()> {
-        let rebound = Self::bind(
+        let rebound = Self::bind_with_visual(
             admission,
             self.source.clone(),
             transcript,
             self.relationship_id.clone(),
             self.interpretation.clone(),
+            self.visual_observations.clone(),
         )?
         .ok_or_else(invalid)?;
         if self != &rebound {

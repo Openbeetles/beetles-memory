@@ -3,8 +3,9 @@ use bm_core::memory::{
     build_long_term_memory_facet_index_doc as try_build_long_term_memory_facet_index_doc,
     canonical_recall_evidence_group, governed_evidence_document_content_digest,
     governed_long_term_owner_evidence_bindings, governed_memory_recall_candidate_id,
-    memory_facet_manifest_key, memory_facet_posting_key, scoped_memory_facet_owner_storage_key,
-    score_recall_delivery_texts, validate_memory_facet_manifest, validate_memory_facet_posting,
+    memory_facet_manifest_key, memory_facet_posting_key, perception_episode_safe_evidence_ref,
+    scoped_memory_facet_owner_storage_key, score_recall_delivery_texts,
+    validate_memory_facet_manifest, validate_memory_facet_posting,
     validate_memory_facet_read_chain, CanonicalEntityKey, CanonicalEntityKind, CanonicalEntityRef,
     CanonicalEvidenceRef, CanonicalRecallEvidenceFamilyGroup, FacetReportAudience,
     GovernedEvidenceBinding, GovernedEvidenceDocument, GovernedEvidenceDocumentChunk,
@@ -51,6 +52,19 @@ fn delivery_bindings(sources: &[&str], family: Option<&str>) -> Vec<GovernedEvid
             .expect("canonical owner evidence binding")
         })
         .collect()
+}
+
+#[test]
+fn unsegmented_chinese_query_exposes_bounded_exact_visual_keyword_anchor() {
+    let parsed =
+        QueryFacetParser::parse(QueryFacetInput::FreeText("你还记得那条红裙子吗？".into()));
+    assert!(parsed.accepted);
+    assert!(parsed.facets.len() <= 64);
+    assert!(parsed.facets.iter().take(8).any(|facet| {
+        facet.namespace() == MemoryFacetNamespace::Keyword && facet.canonical_value() == "红裙子"
+    }));
+    assert!(!QueryFacetParser::parse(QueryFacetInput::FreeText("猫".into())).accepted);
+    assert!(!QueryFacetParser::parse(QueryFacetInput::FreeText("你".repeat(129))).accepted);
 }
 
 #[test]
@@ -117,6 +131,7 @@ fn governed_recall_candidate_id_never_collides_across_planes() {
 fn fixture_long_term_entry() -> LongTermMemoryEntry {
     LongTermMemoryEntry {
         transcript_sources: Vec::new(),
+        perception_sources: Vec::new(),
         control_barrier_scope_revision: None,
 
         id: "ltm:project:agent-memory-w4".to_string(),
@@ -153,6 +168,48 @@ fn fixture_long_term_entry() -> LongTermMemoryEntry {
         owner_revision: 5,
         last_used_at: 0,
     }
+}
+
+#[test]
+fn visual_long_term_owner_derives_evidence_binding_from_exact_episode_source() {
+    let source = bm_core::memory::PerceptionEpisodeSourceRef {
+        memory_space_id: "space:main".into(),
+        subject_id: "subject:user".into(),
+        relationship_id: None,
+        source: bm_core::memory::PerceptionSourceKey {
+            host_id: "host".into(),
+            device_id: Some("camera".into()),
+            source_id: "eye".into(),
+            source_generation: 1,
+        },
+        revoke_epoch: 0,
+        episode_id: "visual-episode".into(),
+        content_digest: format!("sha256:{}", "a".repeat(64)),
+    };
+    let mut entry = fixture_long_term_entry();
+    entry.supporting_citations.clear();
+    entry.perception_sources = vec![source.clone()];
+    let expected = perception_episode_safe_evidence_ref(&source).unwrap();
+    let bindings = governed_long_term_owner_evidence_bindings(&entry).unwrap();
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].safe_evidence_ref(), expected);
+    assert_eq!(
+        bindings[0].canonical_evidence_group(),
+        canonical_recall_evidence_group(&expected)
+    );
+    let facet = build_long_term_memory_facet_index_doc(
+        &entry,
+        "space:main",
+        vec!["subject:user".into()],
+        1,
+    );
+    assert_eq!(facet.canonical_evidence_refs[0].source_ref, expected);
+    let mut changed = source;
+    changed.content_digest = format!("sha256:{}", "b".repeat(64));
+    assert_ne!(
+        perception_episode_safe_evidence_ref(&changed).unwrap(),
+        expected
+    );
 }
 
 fn fixture_evidence_document() -> GovernedEvidenceDocument {

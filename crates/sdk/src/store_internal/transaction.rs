@@ -1199,6 +1199,11 @@ pub(crate) fn expand_owner_transaction_dependencies(
         for address in super::platform::long_term_source_dependency_addresses(namespace, value)? {
             emit(address)?;
         }
+        for address in
+            super::perception::perception_transaction_dependency_addresses(namespace, value)?
+        {
+            emit(address)?;
+        }
         super::subject_soul::subject_soul_transaction_dependencies(namespace, value, &mut emit)?;
         let node = super::procedural_feedback::procedural_dependency_node(namespace, value, false)?;
         for address in node.addresses {
@@ -2256,6 +2261,64 @@ pub(crate) fn json_document_matches_scoped_projection(
     };
     let long_term_owner_id = scope.memory_space_id.as_str();
     match namespace {
+        super::perception::PERCEPTION_EPISODE_NAMESPACE => {
+            serde_json::from_value::<super::perception::PerceptionEpisodeEvidenceV1>(value.clone())
+                .is_ok_and(|episode| {
+                    episode.memory_space_id == scope.memory_space_id
+                        && episode.subject_id == mounted_subject_id
+                        && episode.key().is_ok_and(|expected| expected == key)
+                })
+        }
+        super::perception::PERCEPTION_SOURCE_DEPENDENTS_NAMESPACE => serde_json::from_value::<
+            bm_core::memory::PerceptionSourceDependentsRootV1,
+        >(value.clone())
+        .is_ok_and(|root| {
+            root.source.memory_space_id == scope.memory_space_id
+                && root.source.subject_id == mounted_subject_id
+                && super::perception::perception_episode_storage_key(
+                    &root.source.memory_space_id,
+                    &root.source.subject_id,
+                    &root.source.source,
+                    &root.source.episode_id,
+                )
+                .is_ok_and(|expected| expected == key)
+                && root.validate_contract().is_ok()
+        }),
+        super::perception::PERCEPTION_SOURCE_AUTHORIZATION_NAMESPACE => serde_json::from_value::<
+            super::perception::PerceptionSourceAuthorizationV1,
+        >(value.clone())
+        .is_ok_and(|authorization| {
+            authorization.memory_space_id == scope.memory_space_id
+                && authorization.subject_id == mounted_subject_id
+                && authorization.key().is_ok_and(|expected| expected == key)
+        }),
+        super::perception::PERCEPTION_HISTORICAL_AUTHORIZATION_NAMESPACE => {
+            serde_json::from_value::<super::perception::PerceptionHistoricalAuthorizationV1>(
+                value.clone(),
+            )
+            .is_ok_and(|historical| {
+                historical.source.memory_space_id == scope.memory_space_id
+                    && historical.source.subject_id == mounted_subject_id
+                    && historical.key().is_ok_and(|expected| expected == key)
+                    && historical.validate_contract().is_ok()
+            })
+        }
+        super::perception::PERCEPTION_SOURCE_EPISODE_COUNT_NAMESPACE => serde_json::from_value::<
+            super::perception::PerceptionSourceEpisodeCountV1,
+        >(value.clone())
+        .is_ok_and(|count| {
+            count.memory_space_id == scope.memory_space_id
+                && count.subject_id == mounted_subject_id
+                && count.key().is_ok_and(|expected| expected == key)
+        }),
+        super::perception::PERCEPTION_TURN_TAINT_NAMESPACE => {
+            serde_json::from_value::<super::perception::PerceptionTurnTaintV1>(value.clone())
+                .is_ok_and(|taint| {
+                    taint.memory_space_id == scope.memory_space_id
+                        && taint.subject_id == mounted_subject_id
+                        && taint.key().is_ok_and(|expected| expected == key)
+                })
+        }
         AGENT_TOOL_EXPERIENCE_MATERIAL_NAMESPACE => {
             serde_json::from_value::<AgentToolExperienceRevisionMaterialV4>(value.clone())
                 .is_ok_and(|material| {
@@ -2572,6 +2635,110 @@ pub(crate) fn json_document_matches_scoped_projection(
         }
         _ => false,
     }
+}
+
+/// A scoped archive may restore historical evidence, never overwrite a local
+/// deletion, source ban, or stricter current authorization. Backends call this
+/// under their own replace fence immediately before constructing the post-image.
+pub(crate) fn validate_visual_archive_import_against_live(
+    request: &crate::StoreScopedProjectionReplaceRequest,
+    mut read_json: impl FnMut(&str, &str) -> Result<Option<Value>>,
+) -> Result<()> {
+    use super::perception::{
+        perception_source_fence_key, PerceptionEpisodeEvidenceV1,
+        PerceptionHistoricalAuthorizationV1, PerceptionSourceAuthorizationV1,
+        PerceptionSourceFenceV1, PerceptionSourceRetentionBanV1, PERCEPTION_EPISODE_NAMESPACE,
+        PERCEPTION_EPISODE_TOMBSTONE_NAMESPACE, PERCEPTION_HISTORICAL_AUTHORIZATION_NAMESPACE,
+        PERCEPTION_SOURCE_AUTHORIZATION_NAMESPACE, PERCEPTION_SOURCE_FENCE_NAMESPACE,
+        PERCEPTION_SOURCE_RETENTION_BAN_NAMESPACE,
+    };
+    for document in &request.json_docs {
+        if document.namespace != PERCEPTION_EPISODE_NAMESPACE {
+            continue;
+        }
+        let episode: PerceptionEpisodeEvidenceV1 =
+            serde_json::from_value(document.value.clone())
+                .map_err(|error| Error::config("visual_archive_import", error.to_string()))?;
+        episode.validate_contract()?;
+        if episode.key()? != document.key
+            || episode.memory_space_id != request.scope.memory_space_id
+            || request.scope.mounted_subject_id() != Some(episode.subject_id.as_str())
+        {
+            return Err(Error::config(
+                "visual_archive_import",
+                "episode differs from exact archive subject scope",
+            ));
+        }
+        let historical_doc = request
+            .json_docs
+            .iter()
+            .find(|candidate| {
+                candidate.namespace == PERCEPTION_HISTORICAL_AUTHORIZATION_NAMESPACE
+                    && candidate.key == document.key
+            })
+            .ok_or_else(|| {
+                Error::config(
+                    "visual_archive_import",
+                    "episode lacks historical-only source authorization",
+                )
+            })?;
+        let historical: PerceptionHistoricalAuthorizationV1 =
+            serde_json::from_value(historical_doc.value.clone())
+                .map_err(|error| Error::config("visual_archive_import", error.to_string()))?;
+        historical.validate_episode(&episode)?;
+        if read_json(PERCEPTION_EPISODE_TOMBSTONE_NAMESPACE, &document.key)?.is_some() {
+            return Err(Error::config(
+                "visual_archive_import",
+                "local deletion tombstone forbids restoring a visual episode",
+            ));
+        }
+        let identity_key = perception_source_fence_key(
+            &episode.memory_space_id,
+            &episode.subject_id,
+            episode.relationship_id.as_deref(),
+            &episode.source,
+        )?;
+        if let Some(value) = read_json(PERCEPTION_SOURCE_FENCE_NAMESPACE, &identity_key)? {
+            let fence: PerceptionSourceFenceV1 = serde_json::from_value(value)
+                .map_err(|error| Error::config("visual_archive_import", error.to_string()))?;
+            fence.validate_contract()?;
+            if fence.key()? != identity_key {
+                return Err(Error::config(
+                    "visual_archive_import",
+                    "local source fence differs from archive identity",
+                ));
+            }
+        }
+        if let Some(value) = read_json(PERCEPTION_SOURCE_RETENTION_BAN_NAMESPACE, &identity_key)? {
+            let ban: PerceptionSourceRetentionBanV1 = serde_json::from_value(value)
+                .map_err(|error| Error::config("visual_archive_import", error.to_string()))?;
+            ban.validate_contract()?;
+            if ban.key()? != identity_key {
+                return Err(Error::config(
+                    "visual_archive_import",
+                    "local source ban differs from archive identity",
+                ));
+            }
+            return Err(Error::config(
+                "visual_archive_import",
+                "local source ban forbids restoring a visual episode",
+            ));
+        }
+        if let Some(value) = read_json(PERCEPTION_SOURCE_AUTHORIZATION_NAMESPACE, &identity_key)? {
+            let authorization: PerceptionSourceAuthorizationV1 = serde_json::from_value(value)
+                .map_err(|error| Error::config("visual_archive_import", error.to_string()))?;
+            authorization.validate_contract()?;
+            if authorization.key()? != identity_key
+                || episode.retention_ceiling > authorization.retention_ceiling
+            {
+                return Err(Error::config(
+                    "visual_archive_import",
+                    "current source authorization is stricter than archive episode",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn event_matches_scoped_projection(

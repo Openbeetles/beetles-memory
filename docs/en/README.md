@@ -1,6 +1,6 @@
 # Beetle Memory Developer Documentation
 
-Beetle Memory is integrated through `bm-sdk` or deployed through `bm-entry` plus protocol adapters. The [0.13.0 source release notes](release-notes-0.13.0.md), [Integration Guide](integration.md), [API Surface](api.md), and [Getting Started](getting-started.md) describe the current inhabited-subject delivery contract. The [0.12.0 release notes](release-notes-0.12.0.md) describe the prior source tag and its original model-delivery text.
+Beetle Memory is integrated through `bm-sdk` or deployed through `bm-entry` plus protocol adapters. The [0.14.0 macOS SDK source notes](release-notes-0.14.0.md) describe visual perception, governed memory, and Store v18. The [0.13.0 source notes](release-notes-0.13.0.md) document first-person inhabited-subject delivery. See the [Integration Guide](integration.md), [API Surface](api.md), and [Getting Started](getting-started.md) for the broader SDK contract. A version is published only when its Git tag has been verified.
 
 - [Architecture](architecture.md)
 - [Integration Guide](integration.md)
@@ -15,6 +15,7 @@ Beetle Memory is integrated through `bm-sdk` or deployed through `bm-entry` plus
 - [Replay and Archive](replay-and-archive.md)
 - [Operator Guide](operator-guide.md)
 - [Release Checklist](release-checklist.md)
+- [0.14.0 macOS SDK Source Release Notes](release-notes-0.14.0.md)
 - [0.13.0 Source Release Notes](release-notes-0.13.0.md)
 - [0.12.0 Source Release Notes](release-notes-0.12.0.md)
 - [0.11.2 Source Release Notes](release-notes-0.11.2.md)

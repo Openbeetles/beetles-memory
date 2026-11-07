@@ -5,8 +5,15 @@ use super::*;
 pub const SUBJECT_SOUL_MAX_SOURCE_LINEAGE: usize = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "source", rename_all = "snake_case")]
+pub enum SubjectSoulSourceRefV1 {
+    Transcript(SubjectSoulTranscriptSourceRefV1),
+    Perception(crate::memory::PerceptionEpisodeSourceRef),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SubjectSoulSourceRefV1 {
+pub struct SubjectSoulTranscriptSourceRefV1 {
     pub memory_space_id: String,
     pub subject_id: String,
     pub channel_id: String,
@@ -26,7 +33,7 @@ impl SubjectSoulSourceRefV1 {
                 "withdrawn Transcript cannot grant Soul source authority",
             ));
         }
-        let value = Self {
+        let value = Self::Transcript(SubjectSoulTranscriptSourceRefV1 {
             memory_space_id: record.key.memory_space_id.clone(),
             subject_id: record.subject.clone(),
             channel_id: record.key.channel_id.clone(),
@@ -35,10 +42,111 @@ impl SubjectSoulSourceRefV1 {
             sequence: record.sequence,
             canonical_turn_digest: record.canonical_turn_digest.clone(),
             transcript_content_digest: transcript_content_digest(record)?,
-        };
+        });
         value.validate()?;
         Ok(value)
     }
+
+    pub fn from_perception(
+        source: crate::memory::PerceptionEpisodeSourceRef,
+    ) -> SubjectSoulContractResult<Self> {
+        let value = Self::Perception(source);
+        value.validate()?;
+        Ok(value)
+    }
+
+    /// The Transcript turn and every perception episode that influenced its
+    /// assistant suffix form one causal closure for Soul learning.
+    pub fn closure_from_transcript(
+        record: &crate::memory::TranscriptTurnRecord,
+    ) -> SubjectSoulContractResult<Vec<Self>> {
+        record.validate_canonical_intake().map_err(|error| {
+            SubjectSoulContractError::repair(format!(
+                "Transcript perception source closure is invalid: {error}"
+            ))
+        })?;
+        let mut sources = BTreeSet::new();
+        sources.insert(Self::from_transcript(record)?);
+        for usage in &record.perception_source_uses {
+            sources.insert(Self::from_perception(usage.source.clone())?);
+            if sources.len() > SUBJECT_SOUL_MAX_SOURCE_LINEAGE {
+                return Err(SubjectSoulContractError {
+                    key: SubjectSoulLifecycleErrorKey::CapacityExceeded,
+                    reason: "Soul source lineage capacity exhausted; no lineage may be discarded"
+                        .into(),
+                });
+            }
+        }
+        Ok(sources.into_iter().collect())
+    }
+
+    pub fn memory_space_id(&self) -> &str {
+        match self {
+            Self::Transcript(source) => &source.memory_space_id,
+            Self::Perception(source) => &source.memory_space_id,
+        }
+    }
+
+    pub fn subject_id(&self) -> &str {
+        match self {
+            Self::Transcript(source) => &source.subject_id,
+            Self::Perception(source) => &source.subject_id,
+        }
+    }
+
+    pub fn transcript(&self) -> Option<&SubjectSoulTranscriptSourceRefV1> {
+        match self {
+            Self::Transcript(source) => Some(source),
+            Self::Perception(_) => None,
+        }
+    }
+
+    pub fn perception(&self) -> Option<&crate::memory::PerceptionEpisodeSourceRef> {
+        match self {
+            Self::Transcript(_) => None,
+            Self::Perception(source) => Some(source),
+        }
+    }
+
+    pub fn validate(&self) -> SubjectSoulContractResult<()> {
+        match self {
+            Self::Transcript(source) => source.validate(),
+            Self::Perception(source) => source.validate_contract().map_err(|error| {
+                SubjectSoulContractError::repair(format!("invalid perception source: {error}"))
+            }),
+        }
+    }
+
+    pub fn validate_for_owner(&self, owner: &SubjectSoulOwnerV1) -> SubjectSoulContractResult<()> {
+        for value in [self.memory_space_id(), self.subject_id()] {
+            validate_component(value, "source_identity")?;
+        }
+        self.validate()?;
+        if self.memory_space_id() != owner.memory_space_id || self.subject_id() != owner.subject_id
+        {
+            return Err(SubjectSoulContractError::repair(
+                "source lineage differs from exact Soul owner",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn matches_transcript(&self, record: &crate::memory::TranscriptTurnRecord) -> bool {
+        Self::from_transcript(record).is_ok_and(|current| current == *self)
+    }
+    pub fn names_transcript(&self, record: &crate::memory::TranscriptTurnRecord) -> bool {
+        let Self::Transcript(source) = self else {
+            return false;
+        };
+        source.memory_space_id == record.key.memory_space_id
+            && source.subject_id == record.subject
+            && source.channel_id == record.key.channel_id
+            && source.conversation_id == record.key.conversation_id
+            && source.turn_id == record.turn_id
+    }
+}
+
+impl SubjectSoulTranscriptSourceRefV1 {
     pub fn validate(&self) -> SubjectSoulContractResult<()> {
         for value in [
             &self.memory_space_id,
@@ -70,25 +178,6 @@ impl SubjectSoulSourceRefV1 {
                 })?,
             "transcript_content_digest",
         )
-    }
-    pub fn validate_for_owner(&self, owner: &SubjectSoulOwnerV1) -> SubjectSoulContractResult<()> {
-        self.validate()?;
-        if self.memory_space_id != owner.memory_space_id || self.subject_id != owner.subject_id {
-            return Err(SubjectSoulContractError::repair(
-                "source lineage differs from exact Soul owner",
-            ));
-        }
-        Ok(())
-    }
-    pub fn matches_transcript(&self, record: &crate::memory::TranscriptTurnRecord) -> bool {
-        Self::from_transcript(record).is_ok_and(|current| current == *self)
-    }
-    pub fn names_transcript(&self, record: &crate::memory::TranscriptTurnRecord) -> bool {
-        self.memory_space_id == record.key.memory_space_id
-            && self.subject_id == record.subject
-            && self.channel_id == record.key.channel_id
-            && self.conversation_id == record.key.conversation_id
-            && self.turn_id == record.turn_id
     }
 }
 

@@ -1984,94 +1984,16 @@ impl StoreEngine for SqliteStoreEngine {
         request: &crate::StoreScopedProjectionRequest,
         capacity: StoreCapacityBudget,
     ) -> Result<crate::StoreScopedProjection> {
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Deferred)
-            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
-        let scoped_json = read_scoped_json_exact(&tx, request, capacity)?;
-        let events = if request.include_events {
-            let (count, bytes): (usize, usize) = tx
-                .query_row(
-                    r#"SELECT COUNT(*), COALESCE(SUM(length(event_json)), 0)
-                       FROM bm_event_log
-                       WHERE json_extract(event_json, '$.scope.memory_space_id') = ?1
-                         AND json_extract(event_json, '$.scope.physical_owning_scope.kind') = ?2
-                         AND (
-                           ?2 = 'shared_program'
-                           OR (
-                             json_extract(event_json, '$.scope.physical_owning_scope.mounted_subject_id') = ?3
-                             AND json_extract(event_json, '$.scope.subject_id') = ?3
-                           )
-                         )"#,
-                    params![
-                        &request.scope.memory_space_id,
-                        match &request.scope.physical_owning_scope {
-                            crate::StorePhysicalOwningScope::Subject { .. } => "subject",
-                            crate::StorePhysicalOwningScope::SharedProgram => "shared_program",
-                        },
-                        request.scope.mounted_subject_id(),
-                    ],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
-            if count > capacity.event_log_max_items
-                || scoped_json.logical_bytes.saturating_add(bytes) > capacity.snapshot_max_bytes
-            {
-                return Err(Error::config(
-                    "store_scoped_projection_budget_exceeded",
-                    "scoped projection events exceed the pinned operation budget",
-                ));
-            }
-            let mut statement = tx
-                .prepare(
-                    r#"SELECT event_json FROM bm_event_log
-                       WHERE json_extract(event_json, '$.scope.memory_space_id') = ?1
-                         AND json_extract(event_json, '$.scope.physical_owning_scope.kind') = ?2
-                         AND (
-                           ?2 = 'shared_program'
-                           OR (
-                             json_extract(event_json, '$.scope.physical_owning_scope.mounted_subject_id') = ?3
-                             AND json_extract(event_json, '$.scope.subject_id') = ?3
-                           )
-                         )
-                       ORDER BY sequence"#,
-                )
-                .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
-            let rows = statement
-                .query_map(
-                    params![
-                        &request.scope.memory_space_id,
-                        match &request.scope.physical_owning_scope {
-                            crate::StorePhysicalOwningScope::Subject { .. } => "subject",
-                            crate::StorePhysicalOwningScope::SharedProgram => "shared_program",
-                        },
-                        request.scope.mounted_subject_id(),
-                    ],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
-            let mut events = Vec::with_capacity(count);
-            for row in rows {
-                let raw =
-                    row.map_err(|error| map_transaction_error("store_scoped_projection", error))?;
-                events.push(decode_current_event(&raw, "store_scoped_projection")?);
-            }
-            events
-        } else {
-            Vec::new()
-        };
-        let projection = crate::store_internal::transaction::read_scoped_projection_from_parts(
-            request,
-            capacity,
-            &scoped_json.documents,
-            &events,
-        )?;
-        tx.commit()
-            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
-        Ok(projection)
+        self.read_scoped_projection_internal(request, capacity, false)
+            .map(|result| result.projection)
+    }
+
+    fn read_scoped_projection_with_visual_media(
+        &self,
+        request: &crate::StoreScopedProjectionRequest,
+        capacity: StoreCapacityBudget,
+    ) -> Result<super::engine::StoreScopedVisualMediaProjection> {
+        self.read_scoped_projection_internal(request, capacity, true)
     }
 
     fn replace_scoped_projection(
@@ -2079,226 +2001,16 @@ impl StoreEngine for SqliteStoreEngine {
         request: &crate::StoreScopedProjectionReplaceRequest,
         admission: &StoreTransactionAdmission,
     ) -> Result<crate::StoreScopedProjectionReplaceReport> {
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
-        admission.validate_inside_engine_fence(self.capacity, &self.admission_authority)?;
-        let projection_request = crate::StoreScopedProjectionRequest {
-            scope: request.scope.clone(),
-            json_namespaces: request.json_namespaces.clone(),
-            include_events: false,
-        };
-        let scoped_json =
-            read_scoped_json_exact(&tx, &projection_request, admission.operation_capacity())?;
-        let mut deleted_addresses = scoped_json
-            .documents
-            .keys()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        for (address, value) in &scoped_json.documents {
-            if crate::store_internal::engine::json_document_is_preserved_by_scoped_projection(
-                &address.0, value, request,
-            )? {
-                deleted_addresses.remove(address);
-            }
-        }
-        for doc in &request.json_docs {
-            let address = (doc.namespace.clone(), doc.key.clone());
-            if deleted_addresses.contains(&address) {
-                continue;
-            }
-            let existing = tx
-                .query_row(
-                    "SELECT value_json FROM bm_kv WHERE namespace = ?1 AND key = ?2",
-                    params![&doc.namespace, &doc.key],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
-            let Some(existing) = existing else { continue };
-            let existing: Value = serde_json::from_str(&existing)
-                .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?;
-            let same_search_owner =
-                crate::store_internal::transaction::existing_scoped_search_owner_is_replaceable(
-                    &doc.namespace,
-                    &doc.key,
-                    &existing,
-                    &request.scope,
-                    |namespace, key| {
-                        tx.query_row(
-                            "SELECT value_json FROM bm_kv WHERE namespace = ?1 AND key = ?2",
-                            params![namespace, key],
-                            |row| row.get::<_, String>(0),
-                        )
-                        .optional()
-                        .map_err(|error| map_transaction_error("store_scoped_projection", error))?
-                        .map(|raw| {
-                            serde_json::from_str(&raw).map_err(|error| {
-                                Error::config("store_scoped_projection", error.to_string())
-                            })
-                        })
-                        .transpose()
-                    },
-                )?;
-            if !same_search_owner {
-                return Err(Error::config(
-                    "store_scoped_projection",
-                    format!(
-                        "replacement address {}/{} is owned by another projection scope",
-                        doc.namespace, doc.key
-                    ),
-                ));
-            }
-            deleted_addresses.insert(address);
-        }
-        let scoped_events = {
-            let mut statement = tx
-                .prepare(
-                    r#"SELECT event_id, event_json FROM bm_event_log
-                       WHERE json_extract(event_json, '$.scope.memory_space_id') = ?1
-                         AND json_extract(event_json, '$.scope.physical_owning_scope.kind') = ?2
-                         AND (
-                           ?2 = 'shared_program'
-                           OR (
-                             json_extract(event_json, '$.scope.physical_owning_scope.mounted_subject_id') = ?3
-                             AND json_extract(event_json, '$.scope.subject_id') = ?3
-                           )
-                         )"#,
-                )
-                .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
-            let rows = statement
-                .query_map(
-                    params![
-                        &request.scope.memory_space_id,
-                        match &request.scope.physical_owning_scope {
-                            crate::StorePhysicalOwningScope::Subject { .. } => "subject",
-                            crate::StorePhysicalOwningScope::SharedProgram => "shared_program",
-                        },
-                        request.scope.mounted_subject_id(),
-                    ],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-                )
-                .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
-            rows.collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|error| map_transaction_error("store_scoped_projection", error))?
-        };
-        let scoped_events = scoped_events
-            .into_iter()
-            .map(|(event_id, raw)| {
-                let event = serde_json::from_str::<MemoryStoreEvent>(&raw)
-                    .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?;
-                Ok((event_id, event))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let events = scoped_events
-            .iter()
-            .map(|(_, event)| event.clone())
-            .collect::<Vec<_>>();
-        let actual = super::platform::scoped_projection_source::actual_projection(
-            request,
-            admission.operation_capacity(),
-            &scoped_json.documents,
-            &events,
-        )?;
-        let source_closure = super::platform::scoped_projection_source::prepare(
-            request,
-            &actual,
-            admission.operation_capacity(),
-            |namespace, key| {
-                tx.query_row(
-                    "SELECT value_json FROM bm_kv WHERE namespace = ?1 AND key = ?2",
-                    params![namespace, key],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(|error| map_transaction_error("store_scoped_projection", error))?
-                .map(|raw| {
-                    serde_json::from_str(&raw).map_err(|error| {
-                        Error::config("store_scoped_projection", error.to_string())
-                    })
-                })
-                .transpose()
-            },
-        )?;
-        for (namespace, key) in &deleted_addresses {
-            tx.execute(
-                "DELETE FROM bm_kv WHERE namespace = ?1 AND key = ?2",
-                params![namespace, key],
-            )
-            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
-        }
-        let deleted_json = deleted_addresses.len();
-        for doc in &request.json_docs {
-            let raw = serde_json::to_string(&doc.value)
-                .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?;
-            tx.execute(
-                "INSERT INTO bm_kv(namespace, key, value_json) VALUES (?1, ?2, ?3)",
-                params![&doc.namespace, &doc.key, raw],
-            )
-            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
-        }
-        for doc in &source_closure.documents {
-            let raw = serde_json::to_string(&doc.value)
-                .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?;
-            tx.execute(
-                "INSERT INTO bm_kv(namespace, key, value_json) VALUES (?1, ?2, ?3) ON CONFLICT(namespace, key) DO UPDATE SET value_json = excluded.value_json",
-                params![&doc.namespace, &doc.key, raw],
-            )
-            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
-        }
-        let deleted_event_ids = scoped_events
-            .into_iter()
-            .filter(|(_, event)| {
-                crate::store_internal::engine::event_is_replaced_by_scoped_projection(
-                    event, request,
-                )
-            })
-            .map(|(event_id, _)| event_id)
-            .collect::<Vec<_>>();
-        for event_id in &deleted_event_ids {
-            tx.execute(
-                "DELETE FROM bm_event_log WHERE event_id = ?1",
-                params![event_id],
-            )
-            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
-        }
-        let deleted_events = deleted_event_ids.len();
-        for event in request.events.iter().chain(&source_closure.events) {
-            let raw = serialize_event(event)?;
-            tx.execute(
-                "INSERT INTO bm_event_log(event_id, event_json) VALUES (?1, ?2)",
-                params![&event.event_id, raw],
-            )
-            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
-        }
-        let (entries, blob_bytes, event_count): (usize, usize, usize) = tx
-            .query_row(
-                "SELECT (SELECT COUNT(*) FROM bm_kv) + (SELECT COUNT(*) FROM bm_blob), COALESCE((SELECT SUM(length(value_blob)) FROM bm_blob), 0), (SELECT COUNT(*) FROM bm_event_log)",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
-        validate_scoped_projection_post_image(
-            admission,
-            request,
-            entries,
-            std::iter::once(blob_bytes),
-            std::iter::empty(),
-            event_count,
-        )?;
-        tx.commit()
-            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
-        Ok(crate::StoreScopedProjectionReplaceReport {
-            admission_report_id: admission.report_id().to_string(),
-            deleted_json,
-            inserted_json: request.json_docs.len(),
-            deleted_events,
-            inserted_events: request.events.len(),
-        })
+        self.replace_scoped_projection_internal(request, None, admission)
+    }
+
+    fn replace_scoped_projection_with_visual_media(
+        &self,
+        request: &crate::StoreScopedProjectionReplaceRequest,
+        media_blobs: &[StoreSnapshotBlob],
+        admission: &StoreTransactionAdmission,
+    ) -> Result<crate::StoreScopedProjectionReplaceReport> {
+        self.replace_scoped_projection_internal(request, Some(media_blobs), admission)
     }
 
     fn get_json_value(&self, namespace: &str, key: &str) -> Result<Option<Value>> {
@@ -2800,5 +2512,497 @@ mod tests {
         assert_eq!(std::fs::read(&path).expect("read sqlite after"), before);
 
         std::fs::remove_file(path).expect("remove sqlite fixture");
+    }
+}
+
+impl SqliteStoreEngine {
+    fn replace_scoped_projection_internal(
+        &self,
+        request: &crate::StoreScopedProjectionReplaceRequest,
+        media_blobs: Option<&[StoreSnapshotBlob]>,
+        admission: &StoreTransactionAdmission,
+    ) -> Result<crate::StoreScopedProjectionReplaceReport> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+        admission.validate_inside_engine_fence(self.capacity, &self.admission_authority)?;
+        if media_blobs.is_none() {
+            super::engine::reject_visual_episode_in_plain_scoped_replace(request)?;
+        }
+        crate::store_internal::transaction::validate_visual_archive_import_against_live(
+            request,
+            |namespace, key| {
+                tx.query_row(
+                    "SELECT value_json FROM bm_kv WHERE namespace = ?1 AND key = ?2",
+                    params![namespace, key],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|error| map_transaction_error("store_scoped_visual_media", error))?
+                .map(|raw| {
+                    serde_json::from_str(&raw).map_err(|error| {
+                        Error::config("store_scoped_visual_media", error.to_string())
+                    })
+                })
+                .transpose()
+            },
+        )?;
+        let projection_request = crate::StoreScopedProjectionRequest {
+            scope: request.scope.clone(),
+            json_namespaces: request.json_namespaces.clone(),
+            include_events: false,
+        };
+        let scoped_json =
+            read_scoped_json_exact(&tx, &projection_request, admission.operation_capacity())?;
+        let mut deleted_addresses = scoped_json
+            .documents
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for (address, value) in &scoped_json.documents {
+            if crate::store_internal::engine::json_document_is_preserved_by_scoped_projection(
+                &address.0, value, request,
+            )? {
+                deleted_addresses.remove(address);
+            }
+        }
+        let visual_plan = if let Some(blobs) = media_blobs {
+            let before_docs = deleted_addresses
+                .iter()
+                .filter_map(|address| {
+                    scoped_json
+                        .documents
+                        .get(address)
+                        .map(|value| StoreSnapshotJsonDoc {
+                            namespace: address.0.clone(),
+                            key: address.1.clone(),
+                            value: value.clone(),
+                        })
+                })
+                .collect::<Vec<_>>();
+            let plan = super::engine::plan_scoped_visual_media_replace(
+                request,
+                &before_docs,
+                blobs,
+                admission.operation_capacity(),
+            )?;
+            let owners = super::engine::scoped_visual_media_owners(&request.scope, &before_docs)?;
+            let mut old_blobs = Vec::with_capacity(owners.len());
+            let mut remaining = admission.operation_capacity().blob_max_bytes;
+            for (key, owner) in &owners {
+                let length: Option<usize> = tx
+                    .query_row(
+                        "SELECT length(value_blob) FROM bm_blob WHERE namespace = ?1 AND key = ?2",
+                        params![super::perception::PERCEPTION_MEDIA_NAMESPACE, key],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(|error| map_transaction_error("store_scoped_visual_media", error))?;
+                if length.is_none_or(|length| length > remaining || length != owner.byte_len) {
+                    return Err(Error::config(
+                        "store_scoped_visual_media",
+                        "old media is absent or exceeds pinned import budget",
+                    ));
+                }
+                let value: Vec<u8> = tx
+                    .query_row(
+                        "SELECT value_blob FROM bm_blob WHERE namespace = ?1 AND key = ?2",
+                        params![super::perception::PERCEPTION_MEDIA_NAMESPACE, key],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(|error| map_transaction_error("store_scoped_visual_media", error))?
+                    .ok_or_else(|| {
+                        Error::config("store_scoped_visual_media", "old media owner has no blob")
+                    })?;
+                remaining = remaining.saturating_sub(value.len());
+                old_blobs.push(StoreSnapshotBlob {
+                    namespace: super::perception::PERCEPTION_MEDIA_NAMESPACE.into(),
+                    key: key.clone(),
+                    value,
+                });
+            }
+            super::engine::validate_scoped_visual_media_blobs(
+                &owners,
+                &old_blobs,
+                admission.operation_capacity(),
+            )?;
+            for blob in blobs {
+                if !plan.deleted_keys.contains(&blob.key)
+                    && tx
+                        .query_row(
+                            "SELECT 1 FROM bm_blob WHERE namespace = ?1 AND key = ?2",
+                            params![super::perception::PERCEPTION_MEDIA_NAMESPACE, &blob.key],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .optional()
+                        .map_err(|error| map_transaction_error("store_scoped_visual_media", error))?
+                        .is_some()
+                {
+                    return Err(Error::config(
+                        "store_scoped_visual_media",
+                        "new media key is owned outside the replaced projection",
+                    ));
+                }
+            }
+            Some(plan)
+        } else {
+            None
+        };
+        for doc in &request.json_docs {
+            let address = (doc.namespace.clone(), doc.key.clone());
+            if deleted_addresses.contains(&address) {
+                continue;
+            }
+            let existing = tx
+                .query_row(
+                    "SELECT value_json FROM bm_kv WHERE namespace = ?1 AND key = ?2",
+                    params![&doc.namespace, &doc.key],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+            let Some(existing) = existing else { continue };
+            let existing: Value = serde_json::from_str(&existing)
+                .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?;
+            let same_search_owner =
+                crate::store_internal::transaction::existing_scoped_search_owner_is_replaceable(
+                    &doc.namespace,
+                    &doc.key,
+                    &existing,
+                    &request.scope,
+                    |namespace, key| {
+                        tx.query_row(
+                            "SELECT value_json FROM bm_kv WHERE namespace = ?1 AND key = ?2",
+                            params![namespace, key],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .optional()
+                        .map_err(|error| map_transaction_error("store_scoped_projection", error))?
+                        .map(|raw| {
+                            serde_json::from_str(&raw).map_err(|error| {
+                                Error::config("store_scoped_projection", error.to_string())
+                            })
+                        })
+                        .transpose()
+                    },
+                )?;
+            if !same_search_owner {
+                return Err(Error::config(
+                    "store_scoped_projection",
+                    format!(
+                        "replacement address {}/{} is owned by another projection scope",
+                        doc.namespace, doc.key
+                    ),
+                ));
+            }
+            deleted_addresses.insert(address);
+        }
+        let scoped_events = {
+            let mut statement = tx
+                .prepare(
+                    r#"SELECT event_id, event_json FROM bm_event_log
+                       WHERE json_extract(event_json, '$.scope.memory_space_id') = ?1
+                         AND json_extract(event_json, '$.scope.physical_owning_scope.kind') = ?2
+                         AND (
+                           ?2 = 'shared_program'
+                           OR (
+                             json_extract(event_json, '$.scope.physical_owning_scope.mounted_subject_id') = ?3
+                             AND json_extract(event_json, '$.scope.subject_id') = ?3
+                           )
+                         )"#,
+                )
+                .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+            let rows = statement
+                .query_map(
+                    params![
+                        &request.scope.memory_space_id,
+                        match &request.scope.physical_owning_scope {
+                            crate::StorePhysicalOwningScope::Subject { .. } => "subject",
+                            crate::StorePhysicalOwningScope::SharedProgram => "shared_program",
+                        },
+                        request.scope.mounted_subject_id(),
+                    ],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|error| map_transaction_error("store_scoped_projection", error))?
+        };
+        let scoped_events = scoped_events
+            .into_iter()
+            .map(|(event_id, raw)| {
+                let event = serde_json::from_str::<MemoryStoreEvent>(&raw)
+                    .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?;
+                Ok((event_id, event))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let events = scoped_events
+            .iter()
+            .map(|(_, event)| event.clone())
+            .collect::<Vec<_>>();
+        let actual = super::platform::scoped_projection_source::actual_projection(
+            request,
+            admission.operation_capacity(),
+            &scoped_json.documents,
+            &events,
+        )?;
+        let source_closure = super::platform::scoped_projection_source::prepare(
+            request,
+            &actual,
+            admission.operation_capacity(),
+            |namespace, key| {
+                tx.query_row(
+                    "SELECT value_json FROM bm_kv WHERE namespace = ?1 AND key = ?2",
+                    params![namespace, key],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|error| map_transaction_error("store_scoped_projection", error))?
+                .map(|raw| {
+                    serde_json::from_str(&raw).map_err(|error| {
+                        Error::config("store_scoped_projection", error.to_string())
+                    })
+                })
+                .transpose()
+            },
+        )?;
+        for (namespace, key) in &deleted_addresses {
+            tx.execute(
+                "DELETE FROM bm_kv WHERE namespace = ?1 AND key = ?2",
+                params![namespace, key],
+            )
+            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+        }
+        let deleted_json = deleted_addresses.len();
+        for doc in &request.json_docs {
+            let raw = serde_json::to_string(&doc.value)
+                .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?;
+            tx.execute(
+                "INSERT INTO bm_kv(namespace, key, value_json) VALUES (?1, ?2, ?3)",
+                params![&doc.namespace, &doc.key, raw],
+            )
+            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+        }
+        for doc in &source_closure.documents {
+            let raw = serde_json::to_string(&doc.value)
+                .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?;
+            tx.execute(
+                "INSERT INTO bm_kv(namespace, key, value_json) VALUES (?1, ?2, ?3) ON CONFLICT(namespace, key) DO UPDATE SET value_json = excluded.value_json",
+                params![&doc.namespace, &doc.key, raw],
+            )
+            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+        }
+        let deleted_event_ids = scoped_events
+            .into_iter()
+            .filter(|(_, event)| {
+                crate::store_internal::engine::event_is_replaced_by_scoped_projection(
+                    event, request,
+                )
+            })
+            .map(|(event_id, _)| event_id)
+            .collect::<Vec<_>>();
+        for event_id in &deleted_event_ids {
+            tx.execute(
+                "DELETE FROM bm_event_log WHERE event_id = ?1",
+                params![event_id],
+            )
+            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+        }
+        let deleted_events = deleted_event_ids.len();
+        for event in request.events.iter().chain(&source_closure.events) {
+            let raw = serialize_event(event)?;
+            tx.execute(
+                "INSERT INTO bm_event_log(event_id, event_json) VALUES (?1, ?2)",
+                params![&event.event_id, raw],
+            )
+            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+        }
+        if let Some(plan) = &visual_plan {
+            for key in &plan.deleted_keys {
+                tx.execute(
+                    "DELETE FROM bm_blob WHERE namespace = ?1 AND key = ?2",
+                    params![super::perception::PERCEPTION_MEDIA_NAMESPACE, key],
+                )
+                .map_err(|error| map_transaction_error("store_scoped_visual_media", error))?;
+            }
+            for blob in media_blobs.into_iter().flatten() {
+                tx.execute(
+                    "INSERT INTO bm_blob(namespace, key, value_blob) VALUES (?1, ?2, ?3)",
+                    params![&blob.namespace, &blob.key, &blob.value],
+                )
+                .map_err(|error| map_transaction_error("store_scoped_visual_media", error))?;
+            }
+        }
+        let (entries, blob_bytes, event_count): (usize, usize, usize) = tx
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM bm_kv) + (SELECT COUNT(*) FROM bm_blob), COALESCE((SELECT SUM(length(value_blob)) FROM bm_blob), 0), (SELECT COUNT(*) FROM bm_event_log)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+        validate_scoped_projection_post_image(
+            admission,
+            request,
+            entries,
+            std::iter::once(blob_bytes),
+            std::iter::empty(),
+            event_count,
+        )?;
+        tx.commit()
+            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+        Ok(crate::StoreScopedProjectionReplaceReport {
+            admission_report_id: admission.report_id().to_string(),
+            deleted_json,
+            inserted_json: request.json_docs.len(),
+            deleted_events,
+            inserted_events: request.events.len(),
+        })
+    }
+}
+
+impl SqliteStoreEngine {
+    fn read_scoped_projection_internal(
+        &self,
+        request: &crate::StoreScopedProjectionRequest,
+        capacity: StoreCapacityBudget,
+        include_visual_media: bool,
+    ) -> Result<super::engine::StoreScopedVisualMediaProjection> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|error| Error::config("store_scoped_projection", error.to_string()))?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+        let scoped_json = read_scoped_json_exact(&tx, request, capacity)?;
+        let events = if request.include_events {
+            let (count, bytes): (usize, usize) = tx
+                .query_row(
+                    r#"SELECT COUNT(*), COALESCE(SUM(length(event_json)), 0)
+                       FROM bm_event_log
+                       WHERE json_extract(event_json, '$.scope.memory_space_id') = ?1
+                         AND json_extract(event_json, '$.scope.physical_owning_scope.kind') = ?2
+                         AND (
+                           ?2 = 'shared_program'
+                           OR (
+                             json_extract(event_json, '$.scope.physical_owning_scope.mounted_subject_id') = ?3
+                             AND json_extract(event_json, '$.scope.subject_id') = ?3
+                           )
+                         )"#,
+                    params![
+                        &request.scope.memory_space_id,
+                        match &request.scope.physical_owning_scope {
+                            crate::StorePhysicalOwningScope::Subject { .. } => "subject",
+                            crate::StorePhysicalOwningScope::SharedProgram => "shared_program",
+                        },
+                        request.scope.mounted_subject_id(),
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+            if count > capacity.event_log_max_items
+                || scoped_json.logical_bytes.saturating_add(bytes) > capacity.snapshot_max_bytes
+            {
+                return Err(Error::config(
+                    "store_scoped_projection_budget_exceeded",
+                    "scoped projection events exceed the pinned operation budget",
+                ));
+            }
+            let mut statement = tx
+                .prepare(
+                    r#"SELECT event_json FROM bm_event_log
+                       WHERE json_extract(event_json, '$.scope.memory_space_id') = ?1
+                         AND json_extract(event_json, '$.scope.physical_owning_scope.kind') = ?2
+                         AND (
+                           ?2 = 'shared_program'
+                           OR (
+                             json_extract(event_json, '$.scope.physical_owning_scope.mounted_subject_id') = ?3
+                             AND json_extract(event_json, '$.scope.subject_id') = ?3
+                           )
+                         )
+                       ORDER BY sequence"#,
+                )
+                .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+            let rows = statement
+                .query_map(
+                    params![
+                        &request.scope.memory_space_id,
+                        match &request.scope.physical_owning_scope {
+                            crate::StorePhysicalOwningScope::Subject { .. } => "subject",
+                            crate::StorePhysicalOwningScope::SharedProgram => "shared_program",
+                        },
+                        request.scope.mounted_subject_id(),
+                    ],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+            let mut events = Vec::with_capacity(count);
+            for row in rows {
+                let raw =
+                    row.map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+                events.push(decode_current_event(&raw, "store_scoped_projection")?);
+            }
+            events
+        } else {
+            Vec::new()
+        };
+        let projection = crate::store_internal::transaction::read_scoped_projection_from_parts(
+            request,
+            capacity,
+            &scoped_json.documents,
+            &events,
+        )?;
+        let result = if include_visual_media {
+            super::engine::collect_scoped_visual_media_under_fence(
+                projection,
+                capacity,
+                |key, remaining| {
+                    let length: Option<usize> = tx
+                        .query_row(
+                            "SELECT length(value_blob) FROM bm_blob WHERE namespace = ?1 AND key = ?2",
+                            params![super::perception::PERCEPTION_MEDIA_NAMESPACE, key],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(|error| map_transaction_error("store_scoped_visual_media", error))?;
+                    if length.is_some_and(|length| length > remaining) {
+                        return Err(Error::config(
+                            "store_scoped_visual_media",
+                            "selected media bytes exceed pinned read budget",
+                        ));
+                    }
+                    let value: Option<Vec<u8>> = tx
+                        .query_row(
+                            "SELECT value_blob FROM bm_blob WHERE namespace = ?1 AND key = ?2",
+                            params![super::perception::PERCEPTION_MEDIA_NAMESPACE, key],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(|error| {
+                            map_transaction_error("store_scoped_visual_media", error)
+                        })?;
+                    if value.as_ref().is_some_and(|bytes| bytes.len() > remaining) {
+                        return Err(Error::config(
+                            "store_scoped_visual_media",
+                            "selected media bytes exceed pinned read budget",
+                        ));
+                    }
+                    Ok(value)
+                },
+            )?
+        } else {
+            super::engine::StoreScopedVisualMediaProjection {
+                projection,
+                blobs: Vec::new(),
+            }
+        };
+        tx.commit()
+            .map_err(|error| map_transaction_error("store_scoped_projection", error))?;
+        Ok(result)
     }
 }

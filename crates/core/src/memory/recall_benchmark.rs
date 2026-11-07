@@ -573,6 +573,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
             .push(LongTermMemoryEntry {
                 transcript_sources: Vec::new(),
+                perception_sources: Vec::new(),
                 control_barrier_scope_revision: None,
 
                 id: "fact:network_setup".to_string(),

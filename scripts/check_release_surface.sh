@@ -53,6 +53,7 @@ required_docs=(
   "docs/en/adapters.md"
   "docs/en/operator-guide.md"
   "docs/en/release-checklist.md"
+  "docs/en/release-notes-0.14.0.md"
   "docs/en/release-notes-0.13.0.md"
   "docs/en/release-notes-0.12.0.md"
   "docs/en/release-notes-0.11.2.md"
@@ -77,6 +78,7 @@ required_docs=(
   "docs/zh-CN/adapters.md"
   "docs/zh-CN/operator-guide.md"
   "docs/zh-CN/release-checklist.md"
+  "docs/zh-CN/release-notes-0.14.0.md"
   "docs/zh-CN/release-notes-0.13.0.md"
   "docs/zh-CN/release-notes-0.12.0.md"
   "docs/zh-CN/release-notes-0.11.2.md"
@@ -106,7 +108,7 @@ for doc in "${required_docs[@]}"; do
   fi
 done
 
-release_version="0.13.0"
+release_version="0.14.0"
 version_manifests=(
   "crates/core/Cargo.toml"
   "crates/store-contract-tests/Cargo.toml"
@@ -191,6 +193,15 @@ for desktop_identity in apps/desktop/package.json apps/desktop/package-lock.json
     echo "desktop identity is not on the release version: $desktop_identity" >&2
     exit 1
   }
+done
+
+for doc in docs/en/release-notes-0.14.0.md docs/zh-CN/release-notes-0.14.0.md; do
+  for marker in 'Store v18' 'macOS SDK' 'VisualInput'; do
+    rg -F -qi "$marker" "$doc" || {
+      echo "0.14.0 source notes omit required visual SDK marker: doc=$doc marker=$marker" >&2
+      exit 1
+    }
+  done
 done
 
 for doc in docs/en/release-notes-0.13.0.md docs/zh-CN/release-notes-0.13.0.md; do

@@ -9,12 +9,15 @@ pub(crate) mod agent_tool_experience;
 mod config;
 mod embedded;
 mod engine;
-pub(crate) use engine::json_document_is_protected_owner;
+#[cfg(all(test, feature = "nonproduction-replay-harness"))]
+pub(crate) use engine::StoreScopedVisualMediaProjection;
+pub(crate) use engine::{json_document_is_protected_owner, scoped_visual_media_owners};
 mod error;
 mod event;
 mod file;
 mod in_memory;
 mod mutation;
+pub(crate) mod perception;
 mod platform;
 pub(crate) mod post_turn_governance;
 pub(crate) mod procedural_feedback;
@@ -63,6 +66,7 @@ pub use mutation::{
 pub use platform::StorePlatform;
 #[cfg(feature = "nonproduction-replay-harness")]
 pub(crate) use platform::StorePlatformPreparation;
+pub(crate) use platform::TranscriptLifecyclePlanOptions;
 pub(crate) use platform::{
     canonical_subject_soul_full_intent_digest, materialize_runtime_lifecycle_store_event,
     snapshot_json_requires_private_export, snapshot_key_requires_private_export,

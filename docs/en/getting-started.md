@@ -1,6 +1,6 @@
 # Getting Started
 
-Use this guide when embedding the 0.13.0 source version into a Rust host through the SDK. Its Store v17 and ordered `assistant_messages` contract is described in the [release notes](release-notes-0.13.0.md). For protocol deployment, start here and then read [Adapters](adapters.md).
+Use this guide when embedding the 0.14.0 macOS SDK source contract into a Rust host. [0.14.0 source notes](release-notes-0.14.0.md) cover perception and Store v18; the 0.13.0 first-person projection remains the baseline. The `v0.14.0` Git tag must be verified before treating it as published. For protocol deployment, start here and then read [Adapters](adapters.md).
 
 ## Dependency
 
@@ -11,16 +11,16 @@ From this repository:
 bm-sdk = { path = "crates/sdk", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
-After `v0.13.0` has been published and verified, an external repository can use the source tag (this does not require a crates.io publication):
+Only after `v0.14.0` has been published and verified can an external repository use the source tag (a crates.io publication is separate):
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.13.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.13.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.14.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.14.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 Select exactly one desktop embedded feature for the host OS: `profile-desktop-macos-embedded-sdk`, `profile-desktop-windows-embedded-sdk`, or `profile-desktop-linux-embedded-sdk`. Linux desktop hosts must not use a server or dev-full profile.
 
-The published v0.11.2 tag remains a Store v16 release. Store v17 does not read v16; use a new Store for this version until the data owner has decided how to handle existing data.
+Store v18 does not read v17 and provides no automatic migration. Use a new Store until the data owner has decided how to handle an older one; archive import is not a schema migration path.
 
 ## Build A Runtime
 
@@ -87,6 +87,12 @@ assert!(projection.provider_payload().system_memory_block().len() <= 4096);
 Hosts submit typed long-term candidates or canonical turns. Runtime Skill and
 Agent Tool experience are created only by Beetle Memory's governed post-turn
 learning worker; there is no public manual procedural-write shortcut.
+
+## Optional Vision On macOS
+
+The host owns capture, camera permission and UI, pre-send screening, media conversion, recipient consent, and final Provider requests. Register one `PerceptionHostHandle` and its `VisualToolRegistrySnapshot`, authorize the source, then submit a `PerceptionInputEnvelope<VisualInput>`. Use `project_for_perception_host` for the turn's subject-aware capability and initial `provider_payload().visual_delivery()`; use `append_visual_delivery` for a later image in the same turn. Return the actual request through `attest_visual_delivery` and, when available, `record_visual_provider_response`. See the exact [integration order](integration.md#visual-perception-on-the-macos-sdk) and [API contract](api.md#0140-visual-perception-macos-sdk).
+
+Beetle decides what becomes memory through `infer_visual_for_memory` and its authorized visual inference bridge. A host that wants durable learning from a visual reply must also submit a complete, host-attested `TranscriptExternalContentManifestV1`; a visual packet alone is not a memory fact. This guide does not configure a camera or a live visual Provider.
 
 ## Run Examples
 

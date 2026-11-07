@@ -36,8 +36,8 @@ use bm_core::memory::{
     SubjectSoulRevisionOriginV1, SubjectSoulRevisionProvenanceV1,
     SubjectSoulSelfAuthoredCommitPlanV1, SubjectSoulSelfAuthoredPostImageAddressesV1,
     SubjectSoulSelfAuthoredRevisionBasisV1, SubjectSoulSourceAuthorityV1, SubjectSoulSourceRefV1,
-    SubjectSoulTerminalActionV1, SubjectSoulTerminatedGenerationV1, SubjectSoulVerifiedSnapshotV1,
-    SubjectVisibility,
+    SubjectSoulTerminalActionV1, SubjectSoulTerminatedGenerationV1,
+    SubjectSoulTranscriptSourceRefV1, SubjectSoulVerifiedSnapshotV1, SubjectVisibility,
 };
 
 #[test]
@@ -312,16 +312,18 @@ fn revision_evidence() -> SubjectSoulRevisionEvidenceV1 {
     SubjectSoulRevisionEvidenceV1 {
         lawful_founding: None,
         source_review: None,
-        source_lineage: vec![SubjectSoulSourceRefV1 {
-            memory_space_id: "space:1".into(),
-            subject_id: "agent:a".into(),
-            channel_id: "sdk.direct".into(),
-            conversation_id: "conversation:a".into(),
-            turn_id: "observed-persona:a".into(),
-            sequence: 1,
-            canonical_turn_digest: format!("sha256:{}", "1".repeat(64)),
-            transcript_content_digest: format!("sha256:{}", "2".repeat(64)),
-        }],
+        source_lineage: vec![SubjectSoulSourceRefV1::Transcript(
+            SubjectSoulTranscriptSourceRefV1 {
+                memory_space_id: "space:1".into(),
+                subject_id: "agent:a".into(),
+                channel_id: "sdk.direct".into(),
+                conversation_id: "conversation:a".into(),
+                turn_id: "observed-persona:a".into(),
+                sequence: 1,
+                canonical_turn_digest: format!("sha256:{}", "1".repeat(64)),
+                transcript_content_digest: format!("sha256:{}", "2".repeat(64)),
+            },
+        )],
     }
 }
 

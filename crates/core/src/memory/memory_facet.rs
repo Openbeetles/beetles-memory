@@ -145,6 +145,9 @@ pub enum QueryFacetInput {
     TopicFull(String),
     TopicSegments(Vec<String>),
     Keyword(String),
+    /// Bounded CJK lexical anchors for unsegmented natural-language queries.
+    /// These are exact keyword postings, not an identity or semantic claim.
+    FreeText(String),
     SourceScope(LongTermMemorySourceScope),
     SourceType(LongTermMemorySourceType),
     Freshness(LongTermMemoryFreshness),
@@ -183,6 +186,12 @@ impl QueryFacetParser {
             }
             QueryFacetInput::Keyword(keyword) => {
                 one_query_facet(MemoryFacetNamespace::Keyword, &keyword)
+            }
+            QueryFacetInput::FreeText(query) => {
+                if query.chars().count() > 128 {
+                    return rejected_query_facets("free_text_query_exceeds_bound");
+                }
+                cjk_free_text_keyword_facets(&query)
             }
             QueryFacetInput::SourceScope(scope) => {
                 one_query_facet(MemoryFacetNamespace::SourceScope, source_scope_value(scope))
@@ -230,6 +239,41 @@ impl QueryFacetParser {
             facets,
         }
     }
+}
+
+fn cjk_free_text_keyword_facets(query: &str) -> Vec<QueryFacet> {
+    const MAX_FACETS: usize = 64;
+    let mut runs = Vec::<Vec<char>>::new();
+    for ch in query.chars() {
+        if crate::util::is_cjk(ch) {
+            if runs.last().is_none_or(|run| run.is_empty()) {
+                runs.push(Vec::new());
+            }
+            runs.last_mut().expect("CJK run exists").push(ch);
+        } else if runs.last().is_some_and(|run| !run.is_empty()) {
+            runs.push(Vec::new());
+        }
+    }
+    let mut facets = Vec::new();
+    for run in runs.iter().filter(|run| run.len() >= 2) {
+        for distance in 0..run.len() {
+            for width in [3usize, 2, 4] {
+                if run.len() < width || distance > run.len() - width {
+                    continue;
+                }
+                for start in [run.len() - width - distance, distance] {
+                    let value = run[start..start + width].iter().collect::<String>();
+                    if let Some(facet) = QueryFacet::exact(MemoryFacetNamespace::Keyword, &value) {
+                        push_unique_query_facet(&mut facets, facet);
+                    }
+                    if facets.len() >= MAX_FACETS {
+                        return facets;
+                    }
+                }
+            }
+        }
+    }
+    facets
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -1250,6 +1294,11 @@ pub fn build_long_term_memory_facet_index_doc(
     subject_ids: Vec<String>,
     facet_index_revision: u64,
 ) -> Result<MemoryFacetIndexDoc, MemoryFacetValidationError> {
+    // Withheld perception leaves no independently attributable synthetic owner
+    // evidence. A caller must remove this owner's facet document instead.
+    if !entry.perception_sources.is_empty() && entry.content.is_empty() {
+        return Err(MemoryFacetValidationError::OwnerDocumentInvalid);
+    }
     let canonical_evidence_refs = canonicalize_evidence_refs(entry)?;
     let canonical_evidence_by_safe_ref = canonical_evidence_refs
         .iter()

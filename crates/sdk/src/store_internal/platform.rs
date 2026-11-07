@@ -115,6 +115,10 @@ type RecallIndexMutationPlan = (
     serde_json::Value,
     Option<serde_json::Value>,
 );
+struct RecallIntakePreconditions {
+    json: Vec<StoreJsonPrecondition>,
+    blobs: Vec<StoreBlobPrecondition>,
+}
 type TranscriptCatalogPageSnapshot = (String, TranscriptCatalogPageV1, serde_json::Value);
 type TranscriptCatalogLoad = (
     String,
@@ -1493,6 +1497,11 @@ impl StorePlatform {
         )?;
         self.append_recall_owner_scope_binding_closure(&mut batch, &mut preconditions)?;
         self.append_control_plane_scope_manifest_closure(&mut batch, &mut preconditions)?;
+        crate::store_internal::perception::append_perception_soul_source_closure(
+            self,
+            &mut batch.mutations,
+            &mut preconditions,
+        )?;
         if batch.transaction_id.trim().is_empty() {
             return Err(Error::config(
                 "memory_write_transaction_preflight_failed",
@@ -2206,7 +2215,7 @@ impl StorePlatform {
                 _ => unreachable!("filtered control-plane JSON mutation"),
             }
         }
-        preconditions.push(match previous_value {
+        let manifest_precondition = match previous_value {
             Some(value) => StoreJsonPrecondition::Exact {
                 namespace: CONTROL_PLANE_SCOPE_MANIFEST_NAMESPACE.to_string(),
                 key: manifest_key.clone(),
@@ -2216,7 +2225,8 @@ impl StorePlatform {
                 namespace: CONTROL_PLANE_SCOPE_MANIFEST_NAMESPACE.to_string(),
                 key: manifest_key.clone(),
             },
-        });
+        };
+        super::merge_json_preconditions(preconditions, [manifest_precondition])?;
         let next = ControlPlaneScopeManifest::build(
             previous
                 .as_ref()
@@ -2495,6 +2505,13 @@ impl StorePlatform {
         Ok(docs)
     }
 
+    pub(crate) fn read_owned_perception_media_blob(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.engine.get_blob(
+            crate::store_internal::perception::PERCEPTION_MEDIA_NAMESPACE,
+            key,
+        )
+    }
+
     pub(crate) fn read_procedural_application_ledgers_with_runtime_budget(
         &self,
         runtime_budget: &RuntimeBudgetReport,
@@ -2722,6 +2739,23 @@ impl StorePlatform {
         scope: &StoreScopedProjectionScope,
         pinned_runtime_budget: Option<&RuntimeBudgetReport>,
     ) -> Result<(StoreSnapshot, StoreMemorySpaceProjectionReport)> {
+        self.export_memory_space_projection_impl(scope, pinned_runtime_budget, false)
+    }
+
+    pub(crate) fn export_memory_space_projection_with_visual_media_report(
+        &self,
+        scope: &StoreScopedProjectionScope,
+        pinned_runtime_budget: Option<&RuntimeBudgetReport>,
+    ) -> Result<(StoreSnapshot, StoreMemorySpaceProjectionReport)> {
+        self.export_memory_space_projection_impl(scope, pinned_runtime_budget, true)
+    }
+
+    fn export_memory_space_projection_impl(
+        &self,
+        scope: &StoreScopedProjectionScope,
+        pinned_runtime_budget: Option<&RuntimeBudgetReport>,
+        include_visual_media: bool,
+    ) -> Result<(StoreSnapshot, StoreMemorySpaceProjectionReport)> {
         let owned_runtime_budget;
         let runtime_budget = if let Some(runtime_budget) = pinned_runtime_budget {
             runtime_budget
@@ -2731,40 +2765,77 @@ impl StorePlatform {
         };
         let operation_capacity =
             StoreCapacityBudget::from_runtime_budget(runtime_budget.store_budget);
-        let projection = self.engine.read_scoped_projection(
-            &StoreScopedProjectionRequest {
-                scope: scope.clone(),
-                json_namespaces: store_memory_space_archive_json_namespaces()
-                    .map(str::to_string)
-                    .collect(),
-                include_events: true,
-            },
-            operation_capacity,
-        )?;
+        let request = StoreScopedProjectionRequest {
+            scope: scope.clone(),
+            json_namespaces: store_memory_space_archive_json_namespaces()
+                .map(str::to_string)
+                .collect(),
+            include_events: true,
+        };
+        let (projection, media_blobs) = if include_visual_media {
+            let selected = self
+                .engine
+                .read_scoped_projection_with_visual_media(&request, operation_capacity)?;
+            (selected.projection, selected.blobs)
+        } else {
+            (
+                self.engine
+                    .read_scoped_projection(&request, operation_capacity)?,
+                Vec::new(),
+            )
+        };
         let mut omitted_private_entries = 0usize;
-        let json_docs = projection
-            .json_docs
-            .into_iter()
-            .filter_map(|document| {
-                if document.namespace == TRANSCRIPT_QUERY_KEYRING_NAMESPACE {
-                    omitted_private_entries = omitted_private_entries.saturating_add(1);
-                    return None;
-                }
-                crate::store_internal::engine::json_document_is_protected_owner(
+        let mut json_docs = Vec::with_capacity(projection.json_docs.len());
+        for mut document in projection.json_docs {
+            if document.namespace == TRANSCRIPT_QUERY_KEYRING_NAMESPACE
+                || crate::store_internal::engine::json_document_is_protected_owner(
                     &document.namespace,
                     &document.value,
-                )
-                .map(|protected| (!protected).then_some(document))
-                .transpose()
-            })
-            .collect::<Result<Vec<_>>>()?;
+                )?
+            {
+                omitted_private_entries = omitted_private_entries.saturating_add(1);
+                continue;
+            }
+            if !include_visual_media {
+                if let Some(semantic) =
+                    crate::store_internal::perception::project_perception_semantic_archive_doc(
+                        &document.namespace,
+                        &document.key,
+                        &document.value,
+                    )?
+                {
+                    document.value = semantic;
+                }
+            }
+            json_docs.push(document);
+        }
         let events = projection
             .events
             .into_iter()
             .filter(|event| !crate::store_internal::engine::event_is_protected_owner(event))
             .collect();
         let snapshot =
-            StoreSnapshot::new(self.schema_manifest.clone(), json_docs, Vec::new(), events);
+            StoreSnapshot::new(self.schema_manifest.clone(), json_docs, media_blobs, events);
+        crate::store_internal::perception::validate_perception_store_image(
+            &BackendTransactionState {
+                json: snapshot
+                    .json_docs
+                    .iter()
+                    .map(|doc| ((doc.namespace.clone(), doc.key.clone()), doc.value.clone()))
+                    .collect(),
+                blobs: snapshot
+                    .blobs
+                    .iter()
+                    .map(|blob| {
+                        (
+                            (blob.namespace.clone(), blob.key.clone()),
+                            blob.value.clone(),
+                        )
+                    })
+                    .collect(),
+                events: Vec::new(),
+            },
+        )?;
         self.enforce_snapshot_budget(
             &snapshot,
             self.capacity.snapshot_max_bytes,
@@ -2807,12 +2878,6 @@ impl StorePlatform {
                 "typed memory-space archive must not carry transcript cursor authority",
             ));
         }
-        if !snapshot.blobs.is_empty() {
-            return Err(Error::config(
-                "memory_space_import",
-                "typed memory-space archive must not contain unowned blobs",
-            ));
-        }
         for document in &snapshot.json_docs {
             if crate::store_internal::engine::json_document_is_protected_owner(
                 &document.namespace,
@@ -2853,10 +2918,29 @@ impl StorePlatform {
             operation_capacity,
         )?;
         validate_scoped_projection_governed_closure(&admitted_snapshot, scope)?;
+        if admitted_snapshot.json_docs.iter().any(|document| {
+            document.namespace
+                == crate::store_internal::perception::PERCEPTION_SOURCE_AUTHORIZATION_NAMESPACE
+        }) {
+            return Err(Error::config(
+                "memory_space_import",
+                "a memory archive cannot install a live visual source authorization",
+            ));
+        }
         let admission = self.store_transaction_admission_for_report(runtime_budget)?;
         let mut request = StoreScopedProjectionReplaceRequest {
             scope: scope.clone(),
             json_namespaces: store_memory_space_archive_json_namespaces()
+                .filter(|namespace| {
+                    *namespace
+                        != crate::store_internal::perception::PERCEPTION_SOURCE_AUTHORIZATION_NAMESPACE
+                        && (scope.mounted_subject_id().is_some()
+                            || !matches!(
+                                *namespace,
+                                crate::store_internal::perception::PERCEPTION_EPISODE_NAMESPACE
+                                    | crate::store_internal::perception::PERCEPTION_SOURCE_DEPENDENTS_NAMESPACE
+                            ))
+                })
                 .map(str::to_string)
                 .collect(),
             json_docs: admitted_snapshot.json_docs,
@@ -2865,9 +2949,16 @@ impl StorePlatform {
             source_closure: None,
         };
         self.bind_scoped_source_closure(&mut request, operation_capacity, current_unix_secs())?;
-        let replace = self
-            .engine
-            .replace_scoped_projection(&request, &admission)?;
+        let replace = if scope.mounted_subject_id().is_some() {
+            self.engine.replace_scoped_projection_with_visual_media(
+                &request,
+                &snapshot.blobs,
+                &admission,
+            )?
+        } else {
+            self.engine
+                .replace_scoped_projection(&request, &admission)?
+        };
         Ok(replace)
     }
 
@@ -2973,7 +3064,10 @@ impl StorePlatform {
             scope,
             owner_mutations,
             indexes,
-            preconditions,
+            RecallIntakePreconditions {
+                json: preconditions,
+                blobs: Vec::new(),
+            },
             None,
         )
     }
@@ -2984,11 +3078,11 @@ impl StorePlatform {
         scope: StoreEventScope,
         mut owner_mutations: Vec<StoreMutation>,
         indexes: Vec<RecallIndexMutationPlan>,
-        mut preconditions: Vec<StoreJsonPrecondition>,
+        mut preconditions: RecallIntakePreconditions,
         intake_authority: Option<&crate::learning::ProceduralIntakeAuthorization>,
     ) -> Result<StoreMutationBatchReport> {
         for (namespace, key, value, before) in indexes {
-            preconditions.push(match before {
+            preconditions.json.push(match before {
                 Some(value) => StoreJsonPrecondition::Exact {
                     namespace: namespace.to_string(),
                     key: key.clone(),
@@ -3015,7 +3109,7 @@ impl StorePlatform {
                 scope,
                 mutations: owner_mutations,
             },
-            StoreCommitPreconditions::new(&preconditions, &[]),
+            StoreCommitPreconditions::new(&preconditions.json, &preconditions.blobs),
             None,
             None,
             None,
@@ -5112,6 +5206,45 @@ fn validate_recall_index_mutation_closure(
     read_before_json: impl Fn(&str, &str) -> Result<Option<serde_json::Value>>,
     read_before_blob: impl Fn(&str, &str) -> Result<Option<Vec<u8>>>,
 ) -> Result<()> {
+    let mut mutated_conversations = BTreeSet::new();
+    for mutation in &batch.mutations {
+        if let StoreMutation::PutJson {
+            namespace,
+            key,
+            value,
+            ..
+        } = mutation
+        {
+            if namespace == "conversation_transcript" {
+                let record: TranscriptTurnRecord =
+                    serde_json::from_value(value.clone()).map_err(|error| {
+                        Error::config("recall_index_mutation_closure", error.to_string())
+                    })?;
+                if record.key.memory_space_id != batch.scope.memory_space_id
+                    || record.subject != batch.scope.subject_id
+                    || crate::store_internal::transcript_turn_storage_key(
+                        &record.key,
+                        &record.subject,
+                        &record.turn_id,
+                    ) != *key
+                {
+                    return Err(Error::config(
+                        "recall_index_mutation_closure",
+                        "transcript owner differs from the transaction subject scope",
+                    ));
+                }
+                mutated_conversations.insert((
+                    record.key.channel_id.clone(),
+                    record.key.conversation_id.clone(),
+                ));
+            }
+        }
+    }
+    let conversation_is_covered = |channel: &str, conversation: &str| {
+        (batch.scope.channel == channel
+            && batch.scope.conversation_id.as_deref() == Some(conversation))
+            || mutated_conversations.contains(&(channel.to_string(), conversation.to_string()))
+    };
     let index_namespaces = [
         CONVERSATION_RECALL_MANIFEST_NAMESPACE,
         CONVERSATION_TRANSCRIPT_PAGE_NAMESPACE,
@@ -5144,9 +5277,7 @@ fn validate_recall_index_mutation_closure(
                         )?;
                         if index.memory_space_id != batch.scope.memory_space_id
                             || index.mounted_subject_id != batch.scope.subject_id
-                            || index.channel_id != batch.scope.channel
-                            || batch.scope.conversation_id.as_deref()
-                                != Some(index.conversation_id.as_str())
+                            || !conversation_is_covered(&index.channel_id, &index.conversation_id)
                         {
                             return Err(Error::config(
                                 "recall_index_mutation_closure",
@@ -5162,9 +5293,7 @@ fn validate_recall_index_mutation_closure(
                         )?;
                         if index.memory_space_id != batch.scope.memory_space_id
                             || index.mounted_subject_id != batch.scope.subject_id
-                            || index.channel_id != batch.scope.channel
-                            || batch.scope.conversation_id.as_deref()
-                                != Some(index.conversation_id.as_str())
+                            || !conversation_is_covered(&index.channel_id, &index.conversation_id)
                         {
                             return Err(Error::config(
                                 "recall_index_mutation_closure",
@@ -5180,9 +5309,7 @@ fn validate_recall_index_mutation_closure(
                         )?;
                         if index.memory_space_id != batch.scope.memory_space_id
                             || index.mounted_subject_id != batch.scope.subject_id
-                            || index.channel_id != batch.scope.channel
-                            || batch.scope.conversation_id.as_deref()
-                                != Some(index.conversation_id.as_str())
+                            || !conversation_is_covered(&index.channel_id, &index.conversation_id)
                         {
                             return Err(Error::config(
                                 "recall_index_mutation_closure",
@@ -6042,6 +6169,9 @@ pub(crate) fn validate_governed_transaction_post_image(
     )?;
     validate_long_term_version_root_post_image(batch, after, limits.long_term_retention)?;
     validate_runtime_skill_owner_post_image(batch, before, after, limits.runtime_skill_owners)?;
+    crate::store_internal::perception::validate_perception_transaction_post_image(
+        batch, before, after,
+    )?;
     crate::store_internal::agent_tool_experience::validate_agent_tool_experience_transaction_post_image(
         batch,
         before,
@@ -6353,7 +6483,37 @@ fn project_long_term_evidence_from_image(
     image: &BackendTransactionState,
     material: &LongTermMemoryVersionMaterial,
 ) -> Result<bm_core::memory::LongTermMemoryEntry> {
-    let entry = material.to_current_projection()?;
+    let mut entry = material.to_current_projection()?;
+    for source in entry.perception_sources.clone() {
+        let key = crate::store_internal::perception::perception_episode_storage_key(
+            &source.memory_space_id,
+            &source.subject_id,
+            &source.source,
+            &source.episode_id,
+        )?;
+        let address = (
+            crate::store_internal::perception::PERCEPTION_EPISODE_NAMESPACE.to_string(),
+            key.clone(),
+        );
+        let tombstone = (
+            crate::store_internal::perception::PERCEPTION_EPISODE_TOMBSTONE_NAMESPACE.to_string(),
+            key,
+        );
+        let valid = !image.json.contains_key(&tombstone)
+            && image.json.get(&address).is_some_and(|value| {
+                serde_json::from_value::<
+                    crate::store_internal::perception::PerceptionEpisodeEvidenceV1,
+                >(value.clone())
+                .ok()
+                .and_then(|episode| episode.source_ref().ok())
+                .as_ref()
+                    == Some(&source)
+            });
+        if !valid {
+            entry = entry.redact_perception_derived();
+            break;
+        }
+    }
     let mut available = BTreeSet::new();
     for source in &entry.transcript_sources {
         if source.is_available_in(&factual_source_from_image(image, source)?) {
@@ -9911,6 +10071,16 @@ pub(crate) fn snapshot_namespace_requires_private_export(namespace: &str) -> boo
             | GOVERNED_EVIDENCE_DOCUMENT_NAMESPACE
             | GOVERNED_EVIDENCE_SOURCE_REF_NAMESPACE
             | GOVERNED_EVIDENCE_SOURCE_CLAIM_MANIFEST_NAMESPACE
+            | crate::store_internal::perception::PERCEPTION_EPISODE_NAMESPACE
+            | crate::store_internal::perception::PERCEPTION_EPISODE_TOMBSTONE_NAMESPACE
+            | crate::store_internal::perception::PERCEPTION_MEDIA_NAMESPACE
+            | crate::store_internal::perception::PERCEPTION_SOURCE_DEPENDENTS_NAMESPACE
+            | crate::store_internal::perception::PERCEPTION_TURN_TAINT_NAMESPACE
+            | crate::store_internal::perception::PERCEPTION_SOURCE_FENCE_NAMESPACE
+            | crate::store_internal::perception::PERCEPTION_SOURCE_AUTHORIZATION_NAMESPACE
+            | crate::store_internal::perception::PERCEPTION_HISTORICAL_AUTHORIZATION_NAMESPACE
+            | crate::store_internal::perception::PERCEPTION_SOURCE_RETENTION_BAN_NAMESPACE
+            | crate::store_internal::perception::PERCEPTION_SOURCE_EPISODE_COUNT_NAMESPACE
             | "private_garden"
     )
 }
@@ -11202,6 +11372,30 @@ impl StorePlatform {
         head: &ConversationCatalogHead,
         channel_id: Option<&str>,
     ) -> Result<Vec<RecallIndexMutationPlan>> {
+        self.plan_catalog_page_upsert_many(std::slice::from_ref(head), channel_id)
+    }
+
+    fn plan_catalog_page_upsert_many(
+        &self,
+        new_heads: &[ConversationCatalogHead],
+        channel_id: Option<&str>,
+    ) -> Result<Vec<RecallIndexMutationPlan>> {
+        let head = new_heads.first().ok_or_else(|| {
+            Error::config(
+                "conversation_transcript_catalog_index",
+                "no heads to update",
+            )
+        })?;
+        if new_heads.iter().any(|item| {
+            item.key.memory_space_id != head.key.memory_space_id
+                || item.mounted_subject_id != head.mounted_subject_id
+                || channel_id.is_some_and(|channel| item.key.channel_id != channel)
+        }) {
+            return Err(Error::config(
+                "conversation_transcript_catalog_index",
+                "batched heads span different catalog scopes",
+            ));
+        }
         let (root_key, previous_root, root_before, previous_pages) = self.load_catalog_pages(
             &head.key.memory_space_id,
             &head.mounted_subject_id,
@@ -11211,8 +11405,8 @@ impl StorePlatform {
             .iter()
             .flat_map(|(_, page, _)| page.heads.clone())
             .collect::<Vec<_>>();
-        heads.retain(|candidate| candidate.key != head.key);
-        heads.push(head.clone());
+        heads.retain(|candidate| !new_heads.iter().any(|head| candidate.key == head.key));
+        heads.extend(new_heads.iter().cloned());
         heads.sort_by(|left, right| {
             (right.updated_at, &right.key.conversation_id)
                 .cmp(&(left.updated_at, &left.key.conversation_id))
@@ -11750,9 +11944,102 @@ impl StorePlatform {
         changed: &[(TranscriptTurnRecord, TranscriptTurnRecord)],
         head: &ConversationCatalogHead,
     ) -> Result<Vec<RecallIndexMutationPlan>> {
-        let mut plans = self.plan_catalog_page_upsert(head, None)?;
-        plans.extend(self.plan_catalog_page_upsert(head, Some(&head.key.channel_id))?);
-        let mut by_day = BTreeMap::<u64, Vec<TranscriptPostingLocatorV1>>::new();
+        self.plan_transcript_query_lifecycle_indexes_many(changed, std::slice::from_ref(head))
+    }
+
+    pub(crate) fn plan_multi_transcript_query_lifecycle_indexes(
+        &self,
+        changed: &[(TranscriptTurnRecord, TranscriptTurnRecord)],
+        heads: &[ConversationCatalogHead],
+    ) -> Result<crate::runtime::MemoryStoreMutationPlan> {
+        let indexes = self.plan_transcript_query_lifecycle_indexes_many(changed, heads)?;
+        let mut plan = crate::runtime::MemoryStoreMutationPlan::default();
+        for (namespace, key, value, before) in indexes {
+            plan.preconditions.push(match before {
+                Some(value) => StoreJsonPrecondition::Exact {
+                    namespace: namespace.to_string(),
+                    key: key.clone(),
+                    value,
+                },
+                None => StoreJsonPrecondition::Absent {
+                    namespace: namespace.to_string(),
+                    key: key.clone(),
+                },
+            });
+            plan.mutations.push(StoreMutation::PutJson {
+                namespace: namespace.to_string(),
+                key: key.clone(),
+                value,
+                event_kind: MemoryStoreEventKind::MemoryWrite,
+                plane: namespace.to_string(),
+                record_key: key,
+            });
+        }
+        Ok(plan)
+    }
+
+    fn plan_transcript_query_lifecycle_indexes_many(
+        &self,
+        changed: &[(TranscriptTurnRecord, TranscriptTurnRecord)],
+        heads: &[ConversationCatalogHead],
+    ) -> Result<Vec<RecallIndexMutationPlan>> {
+        let first = heads.first().ok_or_else(|| {
+            Error::config(
+                "conversation_transcript_catalog_index",
+                "no lifecycle heads",
+            )
+        })?;
+        if heads.iter().any(|head| {
+            head.key.memory_space_id != first.key.memory_space_id
+                || head.mounted_subject_id != first.mounted_subject_id
+        }) {
+            return Err(Error::config(
+                "conversation_transcript_catalog_index",
+                "lifecycle heads span different subject scopes",
+            ));
+        }
+        let head_keys = heads
+            .iter()
+            .map(|head| {
+                (
+                    head.key.memory_space_id.as_str(),
+                    head.key.channel_id.as_str(),
+                    head.key.conversation_id.as_str(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        if head_keys.len() != heads.len()
+            || changed.iter().any(|(before, after)| {
+                before.key != after.key
+                    || before.subject != after.subject
+                    || before.subject != first.mounted_subject_id
+                    || !head_keys.contains(&(
+                        before.key.memory_space_id.as_str(),
+                        before.key.channel_id.as_str(),
+                        before.key.conversation_id.as_str(),
+                    ))
+            })
+        {
+            return Err(Error::config(
+                "conversation_transcript_catalog_index",
+                "lifecycle turns do not match the batched heads",
+            ));
+        }
+        let mut plans = self.plan_catalog_page_upsert_many(heads, None)?;
+        let mut by_channel = BTreeMap::<String, Vec<ConversationCatalogHead>>::new();
+        for head in heads {
+            by_channel
+                .entry(head.key.channel_id.clone())
+                .or_default()
+                .push(head.clone());
+        }
+        for (channel, heads) in by_channel {
+            plans.extend(self.plan_catalog_page_upsert_many(&heads, Some(&channel))?);
+        }
+        let mut by_day = BTreeMap::<
+            (String, String, String, u64),
+            (TranscriptTurnRecord, Vec<TranscriptPostingLocatorV1>),
+        >::new();
         let mut by_term = BTreeMap::<String, Vec<TranscriptPostingLocatorV1>>::new();
         let mut owner = None::<TranscriptTurnRecord>;
         for (before_record, after_record) in changed {
@@ -11765,7 +12052,16 @@ impl StorePlatform {
                     redaction_state: after_record.redaction_state,
                 };
                 let utc_day = locator.observed_at / 86_400;
-                by_day.entry(utc_day).or_default().push(replacement.clone());
+                by_day
+                    .entry((
+                        before_record.key.memory_space_id.clone(),
+                        before_record.key.channel_id.clone(),
+                        before_record.key.conversation_id.clone(),
+                        utc_day,
+                    ))
+                    .or_insert_with(|| (before_record.clone(), Vec::new()))
+                    .1
+                    .push(replacement.clone());
 
                 let manifest_key = search_message_manifest_key(&locator);
                 let manifest_value = self
@@ -11807,10 +12103,10 @@ impl StorePlatform {
                 }
             }
         }
+        for ((_, _, _, utc_day), (record, additions)) in by_day {
+            plans.extend(self.plan_time_posting_upsert(&record, utc_day, additions)?);
+        }
         if let Some(owner) = owner.as_ref() {
-            for (utc_day, additions) in by_day {
-                plans.extend(self.plan_time_posting_upsert(owner, utc_day, additions)?);
-            }
             for (digest, additions) in by_term {
                 plans.extend(self.plan_search_posting_upsert(owner, &digest, additions)?);
             }
@@ -11996,12 +12292,19 @@ impl StorePlatform {
         intent: &TranscriptAppendIntent,
         canonical: Option<&CanonicalTurnAppendIntent>,
         intake_authority: Option<&crate::learning::ProceduralIntakeAuthorization>,
+        perception_episodes: &[crate::store_internal::perception::PerceptionTurnEpisodeIntakeV1],
     ) -> Result<TranscriptCommitReport> {
         intent.validate()?;
         if let Some(canonical) = canonical {
             canonical.validate()?;
         }
         let record = &intent.record;
+        if !perception_episodes.is_empty() && canonical.is_none() {
+            return Err(Error::invalid_input(
+                "perception_turn_intake",
+                "visual source intake requires the canonical turn transaction",
+            ));
+        }
         let _transaction_guard = self.lock_transaction("conversation_recall_manifest_append")?;
         let key = transcript_turn_storage_key(&record.key, &record.subject, &record.turn_id);
         let (_, head, head_before) =
@@ -12042,8 +12345,10 @@ impl StorePlatform {
             }
             existing.validate_canonical_intake()?;
             if record.canonical_turn_digest != existing.canonical_turn_digest
+                || record.mounted_relationship_id != existing.mounted_relationship_id
                 || record.host_refs != existing.host_refs
                 || record.learning_evidence != existing.learning_evidence
+                || record.perception_source_uses != existing.perception_source_uses
             {
                 return Err(Error::config(
                     "conversation_transcript_append",
@@ -12179,6 +12484,13 @@ impl StorePlatform {
             plane: "conversation_transcript".to_string(),
             record_key: key,
         }];
+        let (perception_mutations, perception_preconditions, perception_blob_preconditions) =
+            crate::store_internal::perception::plan_perception_episode_intake(
+                self,
+                &record,
+                perception_episodes,
+            )?;
+        owner_mutations.extend(perception_mutations);
         if let Some(alias) = intent.conversation_alias.as_ref() {
             let alias_key = alias.storage_key();
             let alias_value = serde_json::to_value(alias).map_err(|error| {
@@ -12226,6 +12538,7 @@ impl StorePlatform {
                 key: factual_root_key,
             },
         }];
+        owner_preconditions.extend(perception_preconditions);
         if let Some(canonical) = canonical {
             scope.chat_id.clone_from(&canonical.session_chat_id);
             let before = self
@@ -12425,7 +12738,10 @@ impl StorePlatform {
             scope,
             owner_mutations,
             index_plans,
-            owner_preconditions,
+            RecallIntakePreconditions {
+                json: owner_preconditions,
+                blobs: perception_blob_preconditions,
+            },
             intake_authority,
         )?;
         Ok(TranscriptCommitReport {
@@ -12439,12 +12755,26 @@ impl StorePlatform {
         })
     }
 
-    pub(crate) fn append_authorized_canonical_turn(
+    pub(crate) fn append_authorized_canonical_turn_with_perception(
         &self,
         intent: &CanonicalTurnAppendIntent,
         authority: &crate::learning::ProceduralIntakeAuthorization,
+        episodes: &[crate::store_internal::perception::PerceptionTurnEpisodeIntakeV1],
     ) -> Result<TranscriptCommitReport> {
-        self.append_transcript_intake_atomic(&intent.transcript, Some(intent), Some(authority))
+        self.append_transcript_intake_atomic(
+            &intent.transcript,
+            Some(intent),
+            Some(authority),
+            episodes,
+        )
+    }
+
+    pub(crate) fn append_canonical_turn_with_perception(
+        &self,
+        intent: &CanonicalTurnAppendIntent,
+        episodes: &[crate::store_internal::perception::PerceptionTurnEpisodeIntakeV1],
+    ) -> Result<TranscriptCommitReport> {
+        self.append_transcript_intake_atomic(&intent.transcript, Some(intent), None, episodes)
     }
 }
 
@@ -12453,14 +12783,14 @@ impl ConversationTranscriptStore for StorePlatform {
         &self,
         intent: &TranscriptAppendIntent,
     ) -> Result<TranscriptCommitReport> {
-        self.append_transcript_intake_atomic(intent, None, None)
+        self.append_transcript_intake_atomic(intent, None, None, &[])
     }
 
     fn append_canonical_turn_intent(
         &self,
         intent: &CanonicalTurnAppendIntent,
     ) -> Result<TranscriptCommitReport> {
-        self.append_transcript_intake_atomic(&intent.transcript, Some(intent), None)
+        self.append_transcript_intake_atomic(&intent.transcript, Some(intent), None, &[])
     }
 
     fn remember_conversation_alias(&self, alias: &TranscriptConversationAlias) -> Result<()> {
@@ -13996,6 +14326,135 @@ impl ConversationTranscriptStore for StorePlatform {
         request: &TranscriptLifecycleRequest,
     ) -> Result<TranscriptLifecycleReport> {
         let _transaction_guard = self.lock_transaction("conversation_recall_manifest_lifecycle")?;
+        let target_turn_ids = request
+            .turn_id
+            .as_ref()
+            .map(|turn_id| BTreeSet::from([turn_id.clone()]));
+        let planned = self.plan_transcript_lifecycle_request(
+            mounted_subject_id,
+            request,
+            TranscriptLifecyclePlanOptions {
+                target_turn_ids: target_turn_ids.as_ref(),
+                close_perception_roots: true,
+                purged_long_term_owner_ids: &BTreeSet::new(),
+                shared_changed_records: None,
+                include_shared: true,
+                include_query_indexes: true,
+            },
+        )?;
+        if let Some(owner_plan) = planned.owner_plan {
+            let TranscriptLifecycleOwnerPlan {
+                request,
+                scope,
+                changed_records,
+                catalog_head: _,
+                mutations,
+                preconditions,
+                runtime_budget,
+            } = owner_plan;
+            if let Some(soul_plan) = super::subject_soul::plan_transcript_subject_soul_withdrawal(
+                self,
+                &scope,
+                &changed_records,
+                &request,
+                super::subject_soul::SubjectSoulWithdrawalContext {
+                    additional_mutations: &mutations,
+                    additional_preconditions: &preconditions,
+                    additional_blob_preconditions: &[],
+                    withdrawn_perception_sources: &[],
+                    transaction_id: None,
+                    runtime_budget: &runtime_budget,
+                },
+            )? {
+                self.commit_subject_soul_mutation_with_runtime_budget(soul_plan, &runtime_budget)
+                    .map_err(super::subject_soul::SubjectSoulStoreFailure::into_store_error)?;
+            } else {
+                let intent_bytes = serde_json::to_vec(&(&request, &mutations, &preconditions))
+                    .map_err(|error| {
+                        Error::config("transcript_lifecycle_plan", error.to_string())
+                    })?;
+                let intent_digest = format!("sha256:{:x}", Sha256::digest(&intent_bytes));
+                let identity = MemoryMutationOperationIdentity::new(
+                    format!("transcript-lifecycle-{intent_digest}"),
+                    &scope.memory_space_id,
+                    &scope.subject_id,
+                    &request.requested_by,
+                    MemoryMutationOperationKind::ProceduralLifecycle,
+                )?;
+                let operation = StoreMutationOperationPlan::new(
+                    identity,
+                    intent_digest,
+                    MemoryMutationEffect::Changed,
+                    mutations.len(),
+                    &request.requested_by,
+                    request.requested_at,
+                )?;
+                self.commit_memory_mutation_operation_with_runtime_budget(
+                    StoreMutationBatch {
+                        transaction_id: operation.transaction_id().to_string(),
+                        operation: "conversation.transcript.lifecycle".to_string(),
+                        scope,
+                        mutations,
+                    },
+                    &preconditions,
+                    operation,
+                    &runtime_budget,
+                )?;
+            }
+        }
+        let mut report = planned.report;
+        for turn_id in &report.affected_turn_ids {
+            report
+                .derived_memory_refs
+                .extend(self.list_derived_memory_refs(
+                    &request.key,
+                    mounted_subject_id,
+                    Some(turn_id),
+                )?);
+        }
+        Ok(report)
+    }
+}
+
+pub(crate) struct TranscriptLifecycleOwnerPlan {
+    pub(crate) request: TranscriptLifecycleRequest,
+    pub(crate) scope: StoreEventScope,
+    pub(crate) changed_records: Vec<(TranscriptTurnRecord, TranscriptTurnRecord)>,
+    pub(crate) catalog_head: ConversationCatalogHead,
+    pub(crate) mutations: Vec<StoreMutation>,
+    pub(crate) preconditions: Vec<StoreJsonPrecondition>,
+    pub(crate) runtime_budget: RuntimeBudgetReport,
+}
+
+pub(crate) struct TranscriptLifecyclePlannedChange {
+    pub(crate) report: TranscriptLifecycleReport,
+    pub(crate) owner_plan: Option<TranscriptLifecycleOwnerPlan>,
+}
+
+pub(crate) struct TranscriptLifecyclePlanOptions<'a> {
+    pub(crate) target_turn_ids: Option<&'a BTreeSet<String>>,
+    pub(crate) close_perception_roots: bool,
+    pub(crate) purged_long_term_owner_ids: &'a BTreeSet<String>,
+    pub(crate) shared_changed_records: Option<&'a [(TranscriptTurnRecord, TranscriptTurnRecord)]>,
+    pub(crate) include_shared: bool,
+    pub(crate) include_query_indexes: bool,
+}
+
+impl StorePlatform {
+    pub(crate) fn plan_transcript_lifecycle_request(
+        &self,
+        mounted_subject_id: &str,
+        request: &TranscriptLifecycleRequest,
+        options: TranscriptLifecyclePlanOptions<'_>,
+    ) -> Result<TranscriptLifecyclePlannedChange> {
+        let TranscriptLifecyclePlanOptions {
+            target_turn_ids,
+            close_perception_roots,
+            purged_long_term_owner_ids,
+            shared_changed_records,
+            include_shared,
+            include_query_indexes,
+        } = options;
         let (_, head, _) =
             self.load_conversation_recall_manifest(&request.key, mounted_subject_id)?;
         let head = head.ok_or_else(|| {
@@ -14022,10 +14481,8 @@ impl ConversationTranscriptStore for StorePlatform {
         let mut changed_records = Vec::<(TranscriptTurnRecord, TranscriptTurnRecord)>::new();
         let mut owner_subject_id = None::<String>;
         for record in &mut records {
-            let matches_turn = request
-                .turn_id
-                .as_ref()
-                .map(|turn_id| turn_id == &record.turn_id)
+            let matches_turn = target_turn_ids
+                .map(|turn_ids| turn_ids.contains(&record.turn_id))
                 .unwrap_or(true);
             if matches_turn {
                 if owner_subject_id
@@ -14113,7 +14570,9 @@ impl ConversationTranscriptStore for StorePlatform {
                 affected_turns = affected_turns.saturating_add(1);
             }
         }
+        let mut owner_plan = None;
         if !mutations.is_empty() {
+            let shared_records = shared_changed_records.unwrap_or(&changed_records);
             let mut indexes = Vec::with_capacity(pages.len().saturating_add(8));
             let mut lifecycle_preconditions = Vec::new();
             for (page_id, (page, before, entries)) in pages {
@@ -14127,12 +14586,7 @@ impl ConversationTranscriptStore for StorePlatform {
                 )?);
             }
             if request.transition == TranscriptLifecycleTransition::DeleteRaw {
-                let mut session_targets = BTreeMap::<String, Vec<&TranscriptTurnRecord>>::new();
                 for (before, _) in &changed_records {
-                    session_targets
-                        .entry(before.session_chat_id.clone())
-                        .or_default()
-                        .push(before);
                     let (_, aux, aux_before) = self.load_conversation_transcript_aux(
                         &request.key,
                         mounted_subject_id,
@@ -14183,6 +14637,15 @@ impl ConversationTranscriptStore for StorePlatform {
                                 remaining,
                             )?);
                         }
+                    }
+                }
+                let mut session_targets = BTreeMap::<String, Vec<&TranscriptTurnRecord>>::new();
+                if include_shared {
+                    for (before, _) in shared_records {
+                        session_targets
+                            .entry(before.session_chat_id.clone())
+                            .or_default()
+                            .push(before);
                     }
                 }
                 let summary_chats = session_targets.keys().cloned().collect::<Vec<_>>();
@@ -14436,9 +14899,11 @@ impl ConversationTranscriptStore for StorePlatform {
             let catalog_head =
                 Self::transcript_catalog_head_from_records(&next_manifest, &records)?;
             indexes.push(head_plan);
-            indexes.extend(
-                self.plan_transcript_query_lifecycle_indexes(&changed_records, &catalog_head)?,
-            );
+            if include_query_indexes {
+                indexes.extend(
+                    self.plan_transcript_query_lifecycle_indexes(&changed_records, &catalog_head)?,
+                );
+            }
             let mut scope = self.recall_scope();
             scope
                 .memory_space_id
@@ -14449,13 +14914,17 @@ impl ConversationTranscriptStore for StorePlatform {
             };
             scope.channel.clone_from(&request.key.channel_id);
             scope.conversation_id = Some(request.key.conversation_id.clone());
-            let learning = super::procedural_feedback::plan_transcript_learning_lifecycle(
-                self,
-                &scope,
-                &changed_records,
-                request.transition,
-                request.requested_at,
-            )?;
+            let learning = if include_shared {
+                super::procedural_feedback::plan_transcript_learning_lifecycle(
+                    self,
+                    &scope,
+                    shared_records,
+                    request.transition,
+                    request.requested_at,
+                )?
+            } else {
+                StoreOwnerMutationPlan::default()
+            };
             let mut preconditions = learning.preconditions;
             preconditions.extend(lifecycle_preconditions);
             mutations.extend(learning.mutations);
@@ -14494,82 +14963,54 @@ impl ConversationTranscriptStore for StorePlatform {
                 });
             }
             let runtime_budget = self.current_runtime_budget(current_unix_secs());
-            let factual =
-                crate::runtime::governed_indexes::plan_transcript_factual_source_withdrawal(
+            let factual = if include_shared {
+                crate::runtime::governed_indexes::plan_transcript_factual_source_withdrawal_excluding(
                     self,
                     &scope.memory_space_id,
-                    &changed_records,
+                    shared_records,
                     &runtime_budget,
-                )?;
+                    purged_long_term_owner_ids,
+                )?
+            } else {
+                crate::runtime::MemoryStoreMutationPlan::default()
+            };
             mutations.extend(factual.mutations);
             super::merge_json_preconditions(&mut preconditions, factual.preconditions)?;
-            if let Some(soul_plan) = super::subject_soul::plan_transcript_subject_soul_withdrawal(
-                self,
-                &scope,
-                &changed_records,
-                request,
-                &mutations,
-                &preconditions,
-                &runtime_budget,
-            )? {
-                self.commit_subject_soul_mutation_with_runtime_budget(soul_plan, &runtime_budget)
-                    .map_err(super::subject_soul::SubjectSoulStoreFailure::into_store_error)?;
-            } else {
-                let intent_bytes = serde_json::to_vec(&(request, &mutations, &preconditions))
-                    .map_err(|error| {
-                        Error::config("transcript_lifecycle_plan", error.to_string())
-                    })?;
-                let intent_digest = format!("sha256:{:x}", Sha256::digest(&intent_bytes));
-                let identity = MemoryMutationOperationIdentity::new(
-                    format!("transcript-lifecycle-{intent_digest}"),
-                    &scope.memory_space_id,
-                    &scope.subject_id,
-                    &request.requested_by,
-                    MemoryMutationOperationKind::ProceduralLifecycle,
-                )?;
-                let operation = StoreMutationOperationPlan::new(
-                    identity,
-                    intent_digest,
-                    MemoryMutationEffect::Changed,
-                    mutations.len(),
-                    &request.requested_by,
-                    request.requested_at,
-                )?;
-                self.commit_memory_mutation_operation_with_runtime_budget(
-                    StoreMutationBatch {
-                        transaction_id: operation.transaction_id().to_string(),
-                        operation: "conversation.transcript.lifecycle".to_string(),
-                        scope,
-                        mutations,
-                    },
-                    &preconditions,
-                    operation,
-                    &runtime_budget,
-                )?;
+            if request.transition == TranscriptLifecycleTransition::DeleteRaw
+                && close_perception_roots
+            {
+                let (perception_mutations, perception_preconditions) =
+                    self.plan_perception_transcript_withdrawal(&changed_records, &mutations)?;
+                mutations.extend(perception_mutations);
+                super::merge_json_preconditions(&mut preconditions, perception_preconditions)?;
             }
+            owner_plan = Some(TranscriptLifecycleOwnerPlan {
+                request: request.clone(),
+                scope,
+                changed_records,
+                catalog_head,
+                mutations,
+                preconditions,
+                runtime_budget,
+            });
         }
-        let mut derived_memory_refs = Vec::new();
-        for turn_id in &affected_turn_ids {
-            derived_memory_refs.extend(self.list_derived_memory_refs(
-                &request.key,
-                mounted_subject_id,
-                Some(turn_id),
-            )?);
-        }
-        Ok(TranscriptLifecycleReport {
-            key: request.key.clone(),
-            transition: request.transition,
-            affected_turns,
-            affected_turn_ids,
-            affected_message_ids,
-            affected_host_refs,
-            redacted_host_refs: 0,
-            host_ref_redactions: Vec::new(),
-            derived_memory_refs,
-            profile_budget_applied: false,
-            reason: request.reason.clone(),
-            requested_by: request.requested_by.clone(),
-            requested_at: request.requested_at,
+        Ok(TranscriptLifecyclePlannedChange {
+            report: TranscriptLifecycleReport {
+                key: request.key.clone(),
+                transition: request.transition,
+                affected_turns,
+                affected_turn_ids,
+                affected_message_ids,
+                affected_host_refs,
+                redacted_host_refs: 0,
+                host_ref_redactions: Vec::new(),
+                derived_memory_refs: Vec::new(),
+                profile_budget_applied: false,
+                reason: request.reason.clone(),
+                requested_by: request.requested_by.clone(),
+                requested_at: request.requested_at,
+            },
+            owner_plan,
         })
     }
 }
@@ -17459,6 +17900,11 @@ fn validate_snapshot_import_contract(
             blob.value.clone(),
         );
     }
+    crate::store_internal::perception::validate_perception_store_image(&BackendTransactionState {
+        json: snapshot_json.clone(),
+        blobs: snapshot_blobs.clone(),
+        events: Vec::new(),
+    })?;
     crate::store_internal::transaction::validate_snapshot_recall_manifest_documents(
         &snapshot_json,
         &snapshot_blobs,
@@ -17750,9 +18196,19 @@ pub(crate) fn validate_scoped_projection_governed_closure(
             .iter()
             .map(|doc| ((doc.namespace.clone(), doc.key.clone()), doc.value.clone()))
             .collect(),
-        blobs: BTreeMap::new(),
+        blobs: snapshot
+            .blobs
+            .iter()
+            .map(|blob| {
+                (
+                    (blob.namespace.clone(), blob.key.clone()),
+                    blob.value.clone(),
+                )
+            })
+            .collect(),
         events: snapshot.events.clone(),
     };
+    crate::store_internal::perception::validate_perception_store_image(&after)?;
     crate::store_internal::transaction::validate_scoped_recall_manifest_documents(
         &after.json,
         &after.blobs,
@@ -19652,6 +20108,10 @@ mod transaction_error_contract_tests {
                 host_refs: Vec::new(),
                 learning_evidence: None,
                 conversation_alias: None,
+                perception_retention: None,
+                perception_source_uses: Vec::new(),
+                external_content_manifest: None,
+                mounted_relationship_id: None,
                 now_secs: 101,
             };
             let positive =
@@ -19789,6 +20249,10 @@ mod transaction_error_contract_tests {
                     host_refs: Vec::new(),
                     learning_evidence: Some(evidence),
                     conversation_alias: Some(alias.clone()),
+                    perception_retention: None,
+                    perception_source_uses: Vec::new(),
+                    external_content_manifest: None,
+                    mounted_relationship_id: None,
                     now_secs: 101,
                 },
             )
@@ -19821,6 +20285,10 @@ mod transaction_error_contract_tests {
                     host_refs: Vec::new(),
                     learning_evidence: None,
                     conversation_alias: Some(alias.clone()),
+                    perception_retention: None,
+                    perception_source_uses: Vec::new(),
+                    external_content_manifest: None,
+                    mounted_relationship_id: None,
                     now_secs: 101,
                 },
             )
@@ -19843,6 +20311,10 @@ mod transaction_error_contract_tests {
                     host_refs: Vec::new(),
                     learning_evidence: None,
                     conversation_alias: Some(alias),
+                    perception_retention: None,
+                    perception_source_uses: Vec::new(),
+                    external_content_manifest: None,
+                    mounted_relationship_id: None,
                     now_secs: 101,
                 },
             )

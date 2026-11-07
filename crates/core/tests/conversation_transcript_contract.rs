@@ -4,18 +4,19 @@ use bm_core::memory::{
     CanonicalTurnDelta, CanonicalTurnTranscriptCommitOptions, ConversationCatalogHead,
     ConversationKey, ConversationScope, ConversationTranscriptStore, DerivedMemoryPlane,
     DerivedMemoryRef, HostOpaqueRef, HostRefRelation, HostRefVisibility, MemoryEvidenceAuthority,
-    MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource, RedactedTranscriptSlice,
-    SessionMessage, SessionStore, ToolObservationDigest, TranscriptActivityBucket,
-    TranscriptAnchor, TranscriptAppendIntent, TranscriptAttrEnvelope, TranscriptAttrGovernance,
-    TranscriptAttrLink, TranscriptAttrRedactionPolicy, TranscriptAttrScope, TranscriptAttrSource,
-    TranscriptAttrSourceKind, TranscriptAttrTarget, TranscriptAttrValueKind,
-    TranscriptCommitReport, TranscriptConversationAlias, TranscriptCursorDisclosurePolicyV1,
-    TranscriptCursorOperationKind, TranscriptEvidenceRef, TranscriptInputMessage,
-    TranscriptLifecycleReport, TranscriptLifecycleRequest, TranscriptLifecycleState,
-    TranscriptQueryCursor, TranscriptRedactionReason, TranscriptRedactionState,
-    TranscriptRepairIssueKind, TranscriptReplayView, TranscriptSearchCandidate,
-    TranscriptSearchCandidatePage, TranscriptSearchNormalizerV1, TranscriptSearchQuery,
-    TranscriptSearchScope, TranscriptSearchSort, TranscriptTurnRecord, TranscriptUtcRange,
+    MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource, PerceptionRetentionCeiling,
+    RedactedTranscriptSlice, SessionMessage, SessionStore, ToolObservationDigest,
+    TranscriptActivityBucket, TranscriptAnchor, TranscriptAppendIntent, TranscriptAttrEnvelope,
+    TranscriptAttrGovernance, TranscriptAttrLink, TranscriptAttrRedactionPolicy,
+    TranscriptAttrScope, TranscriptAttrSource, TranscriptAttrSourceKind, TranscriptAttrTarget,
+    TranscriptAttrValueKind, TranscriptCommitReport, TranscriptConversationAlias,
+    TranscriptCursorDisclosurePolicyV1, TranscriptCursorOperationKind, TranscriptEvidenceRef,
+    TranscriptInputMessage, TranscriptLifecycleReport, TranscriptLifecycleRequest,
+    TranscriptLifecycleState, TranscriptQueryCursor, TranscriptRedactionReason,
+    TranscriptRedactionState, TranscriptRepairIssueKind, TranscriptReplayView,
+    TranscriptSearchCandidate, TranscriptSearchCandidatePage, TranscriptSearchNormalizerV1,
+    TranscriptSearchQuery, TranscriptSearchScope, TranscriptSearchSort, TranscriptTurnRecord,
+    TranscriptUtcRange,
 };
 use bm_core::Result;
 use serde_json::json;
@@ -1325,6 +1326,10 @@ fn canonical_turn_commit_passes_conversation_alias_in_same_append_intent() {
             host_refs: Vec::new(),
             learning_evidence: None,
             conversation_alias: Some(alias.clone()),
+            perception_retention: None,
+            perception_source_uses: Vec::new(),
+            external_content_manifest: None,
+            mounted_relationship_id: None,
             now_secs: 1_800_000_010,
         },
     )
@@ -1336,6 +1341,104 @@ fn canonical_turn_commit_passes_conversation_alias_in_same_append_intent() {
     let intents = transcript_store.appended_intents.lock().unwrap();
     assert_eq!(intents.len(), 1);
     assert_eq!(intents[0].conversation_alias.as_ref(), Some(&alias));
+}
+
+#[test]
+fn planned_user_input_id_matches_committed_message_after_filtering() {
+    let session_store = TranscriptSessionStore::default();
+    let transcript_store = RepairFixtureStore {
+        sessions: session_store.messages.clone(),
+        ..Default::default()
+    };
+    let mut delta = delivered_delta("turn-attachment-ids");
+    delta.input_messages = vec![
+        TranscriptInputMessage::user(" "),
+        TranscriptInputMessage::user("first photo"),
+        TranscriptInputMessage::user("second photo"),
+    ];
+    let key = ConversationKey::from_delta("space-a", &delta).unwrap();
+    let first = delta.planned_input_message_id(&key, 1).unwrap();
+    let second = delta.planned_input_message_id(&key, 2).unwrap();
+    assert_ne!(first, second);
+    assert!(delta.planned_input_message_id(&key, 0).is_err());
+    assert!(delta.planned_input_message_id(&key, 3).is_err());
+    let mut non_user = delta.clone();
+    non_user.input_messages[2] = TranscriptInputMessage::assistant("not a user input");
+    assert!(non_user.planned_input_message_id(&key, 2).is_err());
+    let wrong_key = ConversationKey::new("space-a", "other", "conversation-a").unwrap();
+    assert!(delta.planned_input_message_id(&wrong_key, 1).is_err());
+
+    let report = commit_canonical_turn_delta_with_transcript(
+        &session_store,
+        &transcript_store,
+        "space-a",
+        &delta,
+        CanonicalTurnTranscriptCommitOptions {
+            host_refs: Vec::new(),
+            learning_evidence: None,
+            conversation_alias: None,
+            perception_retention: None,
+            perception_source_uses: Vec::new(),
+            external_content_manifest: None,
+            mounted_relationship_id: None,
+            now_secs: 1_800_000_010,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        report.session_commit.committed_messages[0].message_id,
+        first
+    );
+    assert_eq!(
+        report.session_commit.committed_messages[1].message_id,
+        second
+    );
+
+    delta.delivery_status = MemoryTurnDeliveryStatus::RejectedByPolicy;
+    delta.assistant_messages.clear();
+    assert!(delta.planned_input_message_id(&key, 1).is_err());
+}
+
+#[test]
+fn ephemeral_perception_cannot_persist_session_or_transcript_reply() {
+    let session_store = TranscriptSessionStore::default();
+    let transcript_store = RepairFixtureStore {
+        sessions: session_store.messages.clone(),
+        ..Default::default()
+    };
+    let delta = delivered_delta("turn-visual-ephemeral");
+    let report = commit_canonical_turn_delta_with_transcript(
+        &session_store,
+        &transcript_store,
+        "space-a",
+        &delta,
+        CanonicalTurnTranscriptCommitOptions {
+            host_refs: Vec::new(),
+            learning_evidence: None,
+            conversation_alias: None,
+            perception_retention: Some(PerceptionRetentionCeiling::EphemeralSession),
+            perception_source_uses: Vec::new(),
+            external_content_manifest: None,
+            mounted_relationship_id: None,
+            now_secs: 1_800_000_010,
+        },
+    )
+    .unwrap();
+    assert!(!report.session_commit.committed);
+    assert_eq!(
+        report.session_commit.skipped_reason.as_deref(),
+        Some("perception_retention_is_ephemeral")
+    );
+    assert_eq!(session_store.message_count("legacy-chat-a").unwrap(), 0);
+    assert_eq!(
+        transcript_store
+            .turn_count(
+                &ConversationKey::from_delta("space-a", &delta).unwrap(),
+                &delta.subject
+            )
+            .unwrap(),
+        0
+    );
 }
 
 #[test]
@@ -1375,6 +1478,10 @@ fn canonical_turn_does_not_adopt_same_text_from_session_shadow() {
             host_refs: Vec::new(),
             learning_evidence: None,
             conversation_alias: Some(alias.clone()),
+            perception_retention: None,
+            perception_source_uses: Vec::new(),
+            external_content_manifest: None,
+            mounted_relationship_id: None,
             now_secs: 1_800_000_010,
         },
     )
@@ -1532,6 +1639,10 @@ fn distinct_turns_preserve_repeated_user_text_and_message_identity() {
                     host_refs: vec![],
                     learning_evidence: None,
                     conversation_alias: None,
+                    perception_retention: None,
+                    perception_source_uses: Vec::new(),
+                    external_content_manifest: None,
+                    mounted_relationship_id: None,
                     now_secs: 1_800_000_030,
                 },
             )
@@ -1684,6 +1795,10 @@ fn canonical_existing_turn_rejects_divergent_payload_without_mutation() {
         host_refs: vec![host_ref("original", HostRefVisibility::HostUi)],
         learning_evidence: None,
         conversation_alias: None,
+        perception_retention: None,
+        perception_source_uses: Vec::new(),
+        external_content_manifest: None,
+        mounted_relationship_id: None,
         now_secs: 1_800_000_010,
     };
     let first = commit_canonical_turn_delta_with_transcript(
@@ -1701,6 +1816,7 @@ fn canonical_existing_turn_rejects_divergent_payload_without_mutation() {
         "space-a",
         &original,
         CanonicalTurnTranscriptCommitOptions {
+            mounted_relationship_id: None,
             now_secs: options.now_secs + 1,
             ..options.clone()
         },
@@ -1769,6 +1885,10 @@ fn canonical_atomic_intent_preserves_session_admission_and_speaker_binding() {
             host_refs: Vec::new(),
             learning_evidence: None,
             conversation_alias: None,
+            perception_retention: None,
+            perception_source_uses: Vec::new(),
+            external_content_manifest: None,
+            mounted_relationship_id: None,
             now_secs: 1_800_000_010,
         },
     )
@@ -1828,6 +1948,10 @@ fn canonical_atomic_admission_rejection_leaves_session_and_transcript_unchanged(
             host_refs: Vec::new(),
             learning_evidence: None,
             conversation_alias: None,
+            perception_retention: None,
+            perception_source_uses: Vec::new(),
+            external_content_manifest: None,
+            mounted_relationship_id: None,
             now_secs: 1_800_000_010,
         },
     );
@@ -1865,6 +1989,10 @@ fn mismatched_alias_fails_before_session_or_transcript_mutation() {
             host_refs: Vec::new(),
             learning_evidence: None,
             conversation_alias: Some(alias),
+            perception_retention: None,
+            perception_source_uses: Vec::new(),
+            external_content_manifest: None,
+            mounted_relationship_id: None,
             now_secs: 1_800_000_010,
         },
     )
@@ -1970,6 +2098,10 @@ fn commit_canonical_turn_delta(
             host_refs: vec![],
             learning_evidence: None,
             conversation_alias: None,
+            perception_retention: None,
+            perception_source_uses: Vec::new(),
+            external_content_manifest: None,
+            mounted_relationship_id: None,
             now_secs: 1_800_000_100,
         },
     )?;

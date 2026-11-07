@@ -1439,6 +1439,7 @@ mod tests {
     fn key_memory_entry(id: &str, chat_id: &str) -> LongTermMemoryEntry {
         LongTermMemoryEntry {
             transcript_sources: Vec::new(),
+            perception_sources: Vec::new(),
             control_barrier_scope_revision: None,
 
             id: id.to_string(),
@@ -1896,6 +1897,7 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner())
             .push(LongTermMemoryEntry {
                 transcript_sources: Vec::new(),
+                perception_sources: Vec::new(),
                 control_barrier_scope_revision: None,
 
                 id: "pref-1".to_string(),

@@ -7,7 +7,7 @@ use bm_sdk::{
     SubjectSoulFoundingCharterSeedV1, SubjectSoulProvisionIntentV1, SubjectSoulReadSelectorV1,
 };
 use bm_sdk::{
-    GovernedScopeArchiveEntry, GovernedScopeArchiveRootV1, MemoryArchiveScope, MemorySpaceArchive,
+    GovernedScopeArchiveEntry, GovernedScopeArchiveRootV2, MemoryArchiveScope, MemorySpaceArchive,
     MemorySpaceExportRequest, MemorySpaceImportRequest, MemorySpacePrivateMaterialPolicy,
     ProfileId,
 };
@@ -52,7 +52,7 @@ fn production_archive_surface_is_typed_and_root_bound() {
     }
 
     fn assert_archive_root(archive: &MemorySpaceArchive) {
-        let root: &GovernedScopeArchiveRootV1 = archive.root();
+        let root: &GovernedScopeArchiveRootV2 = archive.root();
         assert_eq!(root.scope, subject_scope());
         assert_eq!(
             root.private_material_policy,
@@ -103,7 +103,7 @@ fn archive_scope_identity_is_exact_and_rejects_aliases() {
 #[test]
 fn archive_root_uses_canonical_order_independent_sha_and_exact_counts() {
     let entries = representative_entries();
-    let root = GovernedScopeArchiveRootV1::build(
+    let root = GovernedScopeArchiveRootV2::build(
         subject_scope(),
         MemorySpacePrivateMaterialPolicy::ExcludePrivate,
         entries.clone(),
@@ -120,7 +120,7 @@ fn archive_root_uses_canonical_order_independent_sha_and_exact_counts() {
         .bytes()
         .all(|byte: u8| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
 
-    let reversed = GovernedScopeArchiveRootV1::build(
+    let reversed = GovernedScopeArchiveRootV2::build(
         subject_scope(),
         MemorySpacePrivateMaterialPolicy::ExcludePrivate,
         entries.into_iter().rev().collect::<Vec<_>>(),
@@ -142,7 +142,7 @@ fn archive_root_uses_canonical_order_independent_sha_and_exact_counts() {
         )
         .expect("canonical event archive entry"),
     ];
-    let canonical_equivalent = GovernedScopeArchiveRootV1::build(
+    let canonical_equivalent = GovernedScopeArchiveRootV2::build(
         subject_scope(),
         MemorySpacePrivateMaterialPolicy::ExcludePrivate,
         differently_ordered_json,
@@ -155,7 +155,7 @@ fn archive_root_uses_canonical_order_independent_sha_and_exact_counts() {
         .as_object_mut()
         .expect("archive root JSON object")
         .insert("legacy_alias".into(), serde_json::Value::Bool(true));
-    assert!(serde_json::from_value::<GovernedScopeArchiveRootV1>(forged).is_err());
+    assert!(serde_json::from_value::<GovernedScopeArchiveRootV2>(forged).is_err());
 }
 
 #[test]
@@ -163,8 +163,8 @@ fn archive_root_identity_is_profile_independent_but_scope_and_policy_bound() {
     fn build_for_profile(
         _operation_profile: ProfileId,
         scope: MemoryArchiveScope,
-    ) -> GovernedScopeArchiveRootV1 {
-        GovernedScopeArchiveRootV1::build(
+    ) -> GovernedScopeArchiveRootV2 {
+        GovernedScopeArchiveRootV2::build(
             scope,
             MemorySpacePrivateMaterialPolicy::ExcludePrivate,
             representative_entries(),
@@ -179,13 +179,43 @@ fn archive_root_identity_is_profile_independent_but_scope_and_policy_bound() {
     let shared_program = build_for_profile(ProfileId::DesktopMacosDevFull, shared_program_scope());
     assert_ne!(desktop.closure_sha256, shared_program.closure_sha256);
 
-    let include_private = GovernedScopeArchiveRootV1::build(
+    let include_private = GovernedScopeArchiveRootV2::build(
         subject_scope(),
         MemorySpacePrivateMaterialPolicy::IncludePrivate,
         representative_entries(),
     )
     .expect("private archive root");
     assert_ne!(desktop.closure_sha256, include_private.closure_sha256);
+}
+
+#[test]
+fn visual_media_archive_root_binds_exact_bytes_and_rejects_duplicate_blob_address() {
+    let image = GovernedScopeArchiveEntry::blob("perception_media_evidence", "image:a", b"image-a")
+        .expect("visual blob entry");
+    let root = GovernedScopeArchiveRootV2::build(
+        subject_scope(),
+        MemorySpacePrivateMaterialPolicy::IncludePrivate,
+        vec![image.clone()],
+    )
+    .expect("media root");
+    assert_eq!(root.blob_count, 1);
+    assert_eq!(root.blob_bytes, 7);
+    let changed = GovernedScopeArchiveRootV2::build(
+        subject_scope(),
+        MemorySpacePrivateMaterialPolicy::IncludePrivate,
+        vec![
+            GovernedScopeArchiveEntry::blob("perception_media_evidence", "image:a", b"image-b")
+                .unwrap(),
+        ],
+    )
+    .unwrap();
+    assert_ne!(root.closure_sha256, changed.closure_sha256);
+    assert!(GovernedScopeArchiveRootV2::build(
+        subject_scope(),
+        MemorySpacePrivateMaterialPolicy::IncludePrivate,
+        vec![image.clone(), image],
+    )
+    .is_err());
 }
 
 #[cfg(feature = "nonproduction-replay-harness")]
@@ -210,7 +240,7 @@ fn production_subject_archive_binds_root_and_rejects_forgery_before_replace() {
         MemorySpacePrivateMaterialPolicy::IncludePrivate
     );
 
-    let forged_root = GovernedScopeArchiveRootV1::build(
+    let forged_root = GovernedScopeArchiveRootV2::build(
         scope.clone(),
         MemorySpacePrivateMaterialPolicy::IncludePrivate,
         representative_entries(),
