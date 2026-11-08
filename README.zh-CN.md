@@ -20,7 +20,7 @@ Beetle Memory 是面向 agent 系统的 Rust 记忆运行时。它提供 SDK-fir
 | 模型网关与透明本地模型控制 | `bm-llm-gateway`, `bm-ollama-transparent` |
 | Adapters | `bm-cli`, `bm-http`, `bm-wss`, `bm-mcp`, `bm-a2a` |
 
-[0.14.0 macOS SDK 源码说明](docs/zh-CN/release-notes-0.14.0.md)介绍视觉感知、受治理的视觉记忆与 Store v18。Store v18 不兼容读取 v17，也不自动迁移；旧 Store 打开时必须明确失败且不改动旧数据。[0.13.0 源码说明](docs/zh-CN/release-notes-0.13.0.md)记录此前的第一人称宿主体交付。发布身份以已验证的 Git tag 为准，不以工作树版本号代替；crates.io、二进制和部署分别需要独立发布证据。仓库包含 `examples/` 下的五个 smoke 示例，以及 `fixtures/platform/capabilities/` 下的 profile capability fixtures。
+[0.15.0 macOS SDK 源码说明](docs/zh-CN/release-notes-0.15.0.md)介绍后台治理任务的有界重试与安全诊断。[0.14.0 说明](docs/zh-CN/release-notes-0.14.0.md)记录视觉感知与受治理的视觉记忆。当前 Store 拒绝读取旧代格式且不改动旧数据；不提供自动迁移。发布身份以已验证的 Git tag 为准，不以工作树版本号代替；crates.io、二进制和部署分别需要独立发布证据。仓库包含 `examples/` 下的五个 smoke 示例，以及 `fixtures/platform/capabilities/` 下的 profile capability fixtures。
 
 ## 能力范围
 
@@ -122,6 +122,7 @@ fn smoke(runtime: &MemoryRuntime) -> bm_sdk::Result<()> {
 - [回放与归档](docs/zh-CN/replay-and-archive.md)
 - [运维与检查](docs/zh-CN/operator-guide.md)
 - [发布清单](docs/zh-CN/release-checklist.md)
+- [0.15.0 macOS SDK 源码发布说明](docs/zh-CN/release-notes-0.15.0.md)
 - [0.14.0 macOS SDK 源码发布说明](docs/zh-CN/release-notes-0.14.0.md)
 - [0.13.0 源码发布说明](docs/zh-CN/release-notes-0.13.0.md)
 - [0.12.0 源码发布说明](docs/zh-CN/release-notes-0.12.0.md)
@@ -151,6 +152,7 @@ English documentation:
 - [Replay and Archive](docs/en/replay-and-archive.md)
 - [Operator Guide](docs/en/operator-guide.md)
 - [Release Checklist](docs/en/release-checklist.md)
+- [0.15.0 macOS SDK Source Release Notes](docs/en/release-notes-0.15.0.md)
 - [0.14.0 macOS SDK Source Release Notes](docs/en/release-notes-0.14.0.md)
 - [0.13.0 Source Release Notes](docs/en/release-notes-0.13.0.md)
 - [0.12.0 Source Release Notes](docs/en/release-notes-0.12.0.md)

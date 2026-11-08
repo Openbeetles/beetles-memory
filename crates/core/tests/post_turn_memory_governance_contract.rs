@@ -1,7 +1,9 @@
 use bm_core::memory::{
-    GovernedWriteDecision, MemoryWriteAuthority, PostTurnGovernanceExecutionBindingV1,
-    PostTurnGovernanceExecutionBlockReasonV1, PostTurnGovernanceIdentityV2,
-    PostTurnGovernanceJobRefV2, PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV4,
+    DeferredGovernanceJobSummary, GovernedWriteDecision, MemoryWriteAuthority,
+    PostTurnGovernanceErrorClassV2, PostTurnGovernanceExecutionBindingV1,
+    PostTurnGovernanceExecutionBlockReasonV1, PostTurnGovernanceFailureCode,
+    PostTurnGovernanceFailureStage, PostTurnGovernanceIdentityV2, PostTurnGovernanceJob,
+    PostTurnGovernanceJobRefV2, PostTurnGovernanceJobStatusV2,
     PostTurnGovernancePrivacyAuthorityV1, PostTurnGovernanceReconciliationCursorV1,
     PostTurnGovernanceScopeIndexV4, PostTurnPrivateGardenReport, PrivateGardenAdmissionDecision,
     MAX_POST_TURN_GOVERNANCE_ACTIVE_JOBS,
@@ -32,8 +34,8 @@ fn private_garden_freeform_report_is_not_governed_write_decision() {
     );
 }
 
-fn governance_job(conversation_id: &str) -> PostTurnGovernanceJobV4 {
-    PostTurnGovernanceJobV4::pending(
+fn governance_job(conversation_id: &str) -> PostTurnGovernanceJob {
+    PostTurnGovernanceJob::pending(
         PostTurnGovernanceIdentityV2::new(
             "space:owner-default",
             "agent:governance",
@@ -59,6 +61,29 @@ fn governance_job(conversation_id: &str) -> PostTurnGovernanceJobV4 {
         1_800_000_000,
     )
     .expect("pending job")
+}
+
+#[test]
+fn governance_failure_diagnostic_is_bounded_typed_and_safe_for_summary() {
+    let mut job = governance_job("conversation-failure-diagnostic");
+    job.last_error_class = Some(PostTurnGovernanceErrorClassV2::ServiceUnavailable);
+    assert!(
+        job.validate().is_err(),
+        "class needs the exact safe diagnostic"
+    );
+    job.last_failure_stage = Some(PostTurnGovernanceFailureStage::ResponseBodyRead);
+    job.last_failure_code = Some(PostTurnGovernanceFailureCode::ResponseBodyReadFailed);
+    job.validate().expect("typed safe diagnostic is canonical");
+    let summary = DeferredGovernanceJobSummary::from_job(&job);
+    assert_eq!(summary.last_failure_stage, job.last_failure_stage);
+    assert_eq!(summary.last_failure_code, job.last_failure_code);
+
+    let mut json = serde_json::to_value(&job).expect("serialize safe job");
+    json["lastFailureCode"] = serde_json::json!("raw_private_response");
+    assert!(
+        serde_json::from_value::<PostTurnGovernanceJob>(json).is_err(),
+        "unknown string cannot become a durable failure code"
+    );
 }
 
 #[test]

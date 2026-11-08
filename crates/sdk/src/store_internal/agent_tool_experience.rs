@@ -794,7 +794,7 @@ pub(crate) fn validate_agent_tool_experience_store_image(
         if namespace != bm_core::memory::POST_TURN_GOVERNANCE_JOB_NAMESPACE {
             continue;
         }
-        let job: bm_core::memory::PostTurnGovernanceJobV4 = decode(value, stage)?;
+        let job: bm_core::memory::PostTurnGovernanceJob = decode(value, stage)?;
         if job.status == bm_core::memory::PostTurnGovernanceJobStatusV2::Succeeded
             && job.receipt.as_ref().is_some_and(|receipt| {
                 matches!(

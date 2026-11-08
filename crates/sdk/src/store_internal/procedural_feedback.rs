@@ -7,7 +7,7 @@ pub(crate) const EVENT_PLANE: &str = "procedural_feedback";
 use bm_core::memory::{
     GovernedMemoryOwnerPlane, MemoryMutationAuditRecord, MemoryMutationEffect,
     MemoryMutationOperationIdentity, MemoryMutationOperationKind, MemoryMutationReceipt,
-    PostTurnGovernanceJobRefV2, PostTurnGovernanceJobV4, PostTurnGovernanceScopeIndexV4,
+    PostTurnGovernanceJob, PostTurnGovernanceJobRefV2, PostTurnGovernanceScopeIndexV4,
     ProceduralAppliedOwnerBindingV1, ProceduralFeedbackApplicationLedgerV3,
     ProceduralFeedbackErrorClassV1, ProceduralFeedbackJobRefV2, ProceduralFeedbackJobStatusV1,
     ProceduralFeedbackJobV2, ProceduralFeedbackReceiptV2, ProceduralFeedbackReconciliationCursorV1,
@@ -1480,7 +1480,7 @@ struct TranscriptLearningSource<'a> {
 
 pub(crate) fn semantic_learning_transcript_precondition(
     platform: &StorePlatform,
-    job: &PostTurnGovernanceJobV4,
+    job: &PostTurnGovernanceJob,
 ) -> Result<StoreJsonPrecondition> {
     TranscriptLearningSource::semantic(job)?.read_precondition(platform)
 }
@@ -1501,7 +1501,7 @@ impl<'a> TranscriptLearningSource<'a> {
         })
     }
 
-    fn semantic(job: &'a PostTurnGovernanceJobV4) -> Result<Self> {
+    fn semantic(job: &'a PostTurnGovernanceJob) -> Result<Self> {
         Ok(Self {
             key: bm_core::memory::ConversationKey::new(
                 &job.identity.memory_space_id,
@@ -1836,7 +1836,7 @@ pub(crate) fn plan_transcript_learning_lifecycle(
             POST_TURN_GOVERNANCE_JOB_NAMESPACE,
             &semantic_identity.job_id(),
         )? {
-            let semantic: PostTurnGovernanceJobV4 = decode(value, stage)?;
+            let semantic: PostTurnGovernanceJob = decode(value, stage)?;
             semantic.validate()?;
             if semantic.identity != semantic_identity
                 || semantic.transcript_sequence != record.sequence
@@ -2091,7 +2091,7 @@ pub(crate) fn ensure_post_turn_learning_intents(
     platform: &StorePlatform,
     scope: StoreEventScope,
     runtime_budget: &RuntimeBudgetReport,
-    semantic_job: &PostTurnGovernanceJobV4,
+    semantic_job: &PostTurnGovernanceJob,
     procedural_job: Option<&ProceduralFeedbackJobV2>,
     now_secs: u64,
     additional_preconditions: &[StoreJsonPrecondition],
@@ -3275,7 +3275,7 @@ fn previously_erased_semantic_method(
         let value = reads
             .before(POST_TURN_GOVERNANCE_JOB_NAMESPACE, &reference.job_key)?
             .ok_or_else(|| Error::config(stage, "semantic erasure retained job is missing"))?;
-        let job: PostTurnGovernanceJobV4 = decode(value, stage)?;
+        let job: PostTurnGovernanceJob = decode(value, stage)?;
         job.validate()?;
         if PostTurnGovernanceJobRefV2::from_job(&job) != *reference
             || job.identity.scope_id() != index_key

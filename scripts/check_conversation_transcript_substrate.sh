@@ -95,7 +95,8 @@ require_fixed "beetle-memory.platform.capability.v5" crates/sdk/src/capability_s
 require_fixed "transcript_search" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md crates/sdk/src/capability.rs crates/sdk/src/capability_snapshot.rs
 require_fixed "transcript_activity" dev-docs/conversation-transcript-substrate-plan.md docs/en/api.md docs/zh-CN/api.md crates/sdk/src/capability.rs crates/sdk/src/capability_snapshot.rs
 require_fixed "beetle_memory_store_schema_v11" dev-docs/conversation-transcript-substrate-plan.md
-require_fixed "beetle_memory_store_schema_v15" crates/sdk/src/store_internal/schema.rs
+require_fixed 'pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema";' crates/sdk/src/store_internal/schema.rs
+require_fixed 'pub const STORE_SCHEMA_VERSION: u32 = 19;' crates/sdk/src/store_internal/schema.rs
 require_fixed "CanonicalTurnAppendIntent" crates/core/src/memory/transcript.rs
 require_fixed "append_canonical_turn_intent" crates/core/src/memory/turn_commit.rs
 require_fixed "append_canonical_turn_intent" crates/sdk/src/store_internal/platform.rs

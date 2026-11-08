@@ -3,8 +3,9 @@ use std::sync::Arc;
 
 use bm_core::llm::{LlmClient, LlmHttpClient};
 use bm_core::memory::{
-    PostTurnGovernanceErrorClassV2, PostTurnGovernanceJobStatusV2, ProceduralFeedbackErrorClassV1,
-    ProceduralFeedbackJobStatusV1, ProceduralFeedbackJobV2, ProceduralFeedbackReceiptV2,
+    PostTurnGovernanceErrorClassV2, PostTurnGovernanceFailureCode, PostTurnGovernanceFailureStage,
+    PostTurnGovernanceJobStatusV2, ProceduralFeedbackErrorClassV1, ProceduralFeedbackJobStatusV1,
+    ProceduralFeedbackJobV2, ProceduralFeedbackReceiptV2,
 };
 use bm_core::{Error, Result};
 
@@ -15,7 +16,7 @@ use crate::{
     MemoryGovernanceJobBlockRequest, MemoryGovernanceJobClaimRequest,
     MemoryGovernanceJobFailRequest, MemoryGovernanceJobResumeRequest,
     MemoryGovernanceJobRetryRequest, MemoryGovernanceJobRunReport, MemoryGovernanceJobRunRequest,
-    MemoryRuntime, PostTurnGovernanceJobV4,
+    MemoryRuntime, PostTurnGovernanceJob,
 };
 
 const MAX_LEARNING_CYCLE_JOBS: usize = 32;
@@ -380,7 +381,7 @@ pub struct AuthorizedGovernanceEnvelope {
 }
 
 impl AuthorizedGovernanceEnvelope {
-    fn from_claimed(job: &PostTurnGovernanceJobV4) -> Result<Self> {
+    fn from_claimed(job: &PostTurnGovernanceJob) -> Result<Self> {
         let authority = job.attempt_authority.as_ref().ok_or_else(|| {
             Error::config(
                 "memory_learning_envelope",
@@ -465,7 +466,7 @@ impl From<Error> for GovernanceExecutionPortFailure {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryLearningStateReport {
-    pub job: PostTurnGovernanceJobV4,
+    pub job: PostTurnGovernanceJob,
     pub reason: String,
 }
 
@@ -735,7 +736,11 @@ impl MemoryLearningEngine {
             Ok(()) => self.transition_classified_failure(
                 claimed,
                 &request,
-                PostTurnGovernanceErrorClassV2::SchemaViolation,
+                ClassifiedGovernanceFailure {
+                    class: PostTurnGovernanceErrorClassV2::SchemaViolation,
+                    stage: PostTurnGovernanceFailureStage::ExecutionContract,
+                    code: PostTurnGovernanceFailureCode::PortSkippedOperation,
+                },
             ),
             Err(failure) => self.transition_execution_failure(claimed, &request, &egress, failure),
         }
@@ -861,7 +866,7 @@ impl MemoryLearningEngine {
 
     fn transition_execution_failure(
         &self,
-        claimed: PostTurnGovernanceJobV4,
+        claimed: PostTurnGovernanceJob,
         request: &MemoryLearningCycleRequest,
         egress: &GovernanceEgressAuthority,
         failure: GovernanceExecutionPortFailure,
@@ -987,21 +992,13 @@ impl MemoryLearningEngine {
         {
             return Err(error);
         }
-        if let Error::Http { status_code, .. } = &error {
-            let status_code = *status_code;
-            return self.transition_classified_failure(
-                claimed,
-                request,
-                classify_http_status(status_code),
-            );
-        }
         self.transition_classified_failure(claimed, request, classify_execution_error(&error))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn block_claimed_execution(
         &self,
-        claimed: PostTurnGovernanceJobV4,
+        claimed: PostTurnGovernanceJob,
         request: &MemoryLearningCycleRequest,
         kind: MemoryGovernanceBlockKind,
         reason: crate::PostTurnGovernanceExecutionBlockReasonV1,
@@ -1039,10 +1036,11 @@ impl MemoryLearningEngine {
 
     fn transition_classified_failure(
         &self,
-        claimed: PostTurnGovernanceJobV4,
+        claimed: PostTurnGovernanceJob,
         request: &MemoryLearningCycleRequest,
-        error_class: PostTurnGovernanceErrorClassV2,
+        failure: ClassifiedGovernanceFailure,
     ) -> Result<MemoryLearningCycleOutcome> {
+        let error_class = failure.class;
         if error_class.is_retryable() {
             let job = self
                 .runtime
@@ -1051,6 +1049,8 @@ impl MemoryLearningEngine {
                     lease_owner: request.lease_owner.clone(),
                     lease_epoch: claimed.lease_epoch,
                     error_class,
+                    failure_stage: failure.stage,
+                    failure_code: failure.code,
                 })?
                 .job;
             if job.status == PostTurnGovernanceJobStatusV2::DeadLetter {
@@ -1075,6 +1075,8 @@ impl MemoryLearningEngine {
                 lease_owner: request.lease_owner.clone(),
                 lease_epoch: claimed.lease_epoch,
                 error_class,
+                failure_stage: failure.stage,
+                failure_code: failure.code,
                 reason: error_class.as_str().to_string(),
             })?
             .job;
@@ -1113,7 +1115,7 @@ impl GovernanceExecutionOperation for RuntimeGovernanceExecutionOperation {
     }
 }
 
-fn is_due(job: &PostTurnGovernanceJobV4, now_secs: u64) -> bool {
+fn is_due(job: &PostTurnGovernanceJob, now_secs: u64) -> bool {
     match job.status {
         PostTurnGovernanceJobStatusV2::Pending => job
             .next_attempt_at
@@ -1141,29 +1143,211 @@ fn classify_http_status(status_code: u16) -> PostTurnGovernanceErrorClassV2 {
     }
 }
 
-fn classify_execution_error(error: &Error) -> PostTurnGovernanceErrorClassV2 {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ClassifiedGovernanceFailure {
+    class: PostTurnGovernanceErrorClassV2,
+    stage: PostTurnGovernanceFailureStage,
+    code: PostTurnGovernanceFailureCode,
+}
+
+fn classify_execution_error(error: &Error) -> ClassifiedGovernanceFailure {
+    use PostTurnGovernanceErrorClassV2 as C;
+    use PostTurnGovernanceFailureCode as R;
+    use PostTurnGovernanceFailureStage as S;
     match error {
-        Error::Http { status_code, .. } => classify_http_status(*status_code),
-        Error::Io { .. }
-        | Error::Other { .. }
-        | Error::Nvs { .. }
-        | Error::Storage { .. }
-        | Error::Esp { .. } => PostTurnGovernanceErrorClassV2::ServiceUnavailable,
-        Error::Config { stage, .. }
-            if matches!(
-                *stage,
-                "governance_model_llm"
-                    | "private_garden_governance_output"
-                    | "long_term_memory_extraction_output"
-            ) =>
-        {
-            PostTurnGovernanceErrorClassV2::MalformedModelOutput
+        Error::Http { status_code, .. } => ClassifiedGovernanceFailure {
+            class: classify_http_status(*status_code),
+            stage: S::HttpStatus,
+            code: R::ProviderHttpStatus,
+        },
+        Error::Io {
+            stage: "governance_model_http_read",
+            ..
+        } => ClassifiedGovernanceFailure {
+            class: C::ServiceUnavailable,
+            stage: S::ResponseBodyRead,
+            code: R::ResponseBodyReadFailed,
+        },
+        Error::Io { .. } => ClassifiedGovernanceFailure {
+            class: C::ServiceUnavailable,
+            stage: S::Unknown,
+            code: R::IoFailure,
+        },
+        Error::Other {
+            stage: "governance_model_http",
+            ..
+        } => ClassifiedGovernanceFailure {
+            class: C::ServiceUnavailable,
+            stage: S::RequestSend,
+            code: R::RequestSendFailed,
+        },
+        Error::Other { .. } | Error::Nvs { .. } | Error::Storage { .. } | Error::Esp { .. } => {
+            ClassifiedGovernanceFailure {
+                class: C::ServiceUnavailable,
+                stage: S::Unknown,
+                code: R::ServiceFailure,
+            }
         }
-        Error::Conflict { .. } | Error::NotFound { .. } => {
-            PostTurnGovernanceErrorClassV2::IdentityMismatch
-        }
-        Error::InvalidInput { .. } | Error::Config { .. } => {
+        Error::MalformedModelOutput { stage, reason_code } => ClassifiedGovernanceFailure {
+            class: C::MalformedModelOutput,
+            stage: match *stage {
+                "governance_model_response" => S::ModelResponseDecode,
+                "turn_persona_interpretation_output" => S::PersonaInterpretation,
+                "private_garden_governance_output" => S::PrivateGardenOutput,
+                "long_term_memory_extraction_output" => S::LongTermExtractionOutput,
+                _ => S::Unknown,
+            },
+            code: classify_model_output_code(reason_code),
+        },
+        Error::Config {
+            stage: "governance_model_credential",
+            ..
+        } => ClassifiedGovernanceFailure {
+            class: C::SchemaViolation,
+            stage: S::CredentialBinding,
+            code: R::CredentialUnavailable,
+        },
+        Error::Config {
+            stage: "governance_model_request",
+            ..
+        } => ClassifiedGovernanceFailure {
+            class: C::SchemaViolation,
+            stage: S::RequestEncode,
+            code: R::RequestEncodingFailed,
+        },
+        Error::Config {
+            stage: "governance_model_http_budget",
+            ..
+        } => ClassifiedGovernanceFailure {
+            class: C::SchemaViolation,
+            stage: S::ResponseBodyRead,
+            code: R::ResponseBudgetExceeded,
+        },
+        Error::Config { .. } => ClassifiedGovernanceFailure {
+            class: C::SchemaViolation,
+            stage: S::ExecutionContract,
+            code: R::ConfigurationInvalid,
+        },
+        Error::InvalidInput { .. } => ClassifiedGovernanceFailure {
+            class: C::SchemaViolation,
+            stage: S::ExecutionContract,
+            code: R::InputContractRejected,
+        },
+        Error::Conflict { .. } | Error::NotFound { .. } => ClassifiedGovernanceFailure {
+            class: C::IdentityMismatch,
+            stage: S::ExecutionContract,
+            code: R::IdentityMismatch,
+        },
+    }
+}
+
+fn classify_model_output_code(reason_code: &str) -> PostTurnGovernanceFailureCode {
+    use PostTurnGovernanceFailureCode as R;
+    match reason_code {
+        "response_json_invalid" => R::ResponseJsonInvalid,
+        "openai_choices_missing" => R::OpenaiChoicesMissing,
+        "openai_content_missing" => R::OpenaiContentMissing,
+        "ollama_content_missing" => R::OllamaContentMissing,
+        "output_too_large" => R::OutputTooLarge,
+        "invalid_json_or_shape" => R::InvalidJsonOrShape,
+        "invalid_semantic_shape" => R::InvalidSemanticShape,
+        "invalid_observation_quote" => R::InvalidObservationQuote,
+        "unknown_visual_source" => R::UnknownVisualSource,
+        "insufficient_visual_support" => R::InsufficientVisualSupport,
+        "incomplete_visual_source_partition" => R::IncompleteVisualSourcePartition,
+        "invalid_json" => R::InvalidJson,
+        "invalid_governance_object" => R::InvalidGovernanceObject,
+        "invalid_governance_schema" => R::InvalidGovernanceSchema,
+        "actions_exceed_policy" => R::ActionsExceedPolicy,
+        "expected_json_array" => R::ExpectedJsonArray,
+        "batch_limit_exceeded" => R::BatchLimitExceeded,
+        "item_not_object" => R::ItemNotObject,
+        "unknown_field" => R::UnknownField,
+        "invalid_item_schema" => R::InvalidItemSchema,
+        "empty_topic" => R::EmptyTopic,
+        "incomplete_factual_item" => R::IncompleteFactualItem,
+        "unsupported_plane" => R::UnsupportedPlane,
+        "normalization_failed" => R::NormalizationFailed,
+        "incomplete_or_tool_call_response" => R::IncompleteOrToolCallResponse,
+        _ => R::UnknownModelOutputCode,
+    }
+}
+
+#[cfg(test)]
+mod governance_error_tests {
+    use super::*;
+
+    #[test]
+    fn response_body_io_retries_and_preserves_a_safe_phase() {
+        let error = Error::io(
+            "governance_model_http_read",
+            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "private response bytes"),
+        );
+        assert_eq!(
+            classify_execution_error(&error),
+            ClassifiedGovernanceFailure {
+                class: PostTurnGovernanceErrorClassV2::ServiceUnavailable,
+                stage: PostTurnGovernanceFailureStage::ResponseBodyRead,
+                code: PostTurnGovernanceFailureCode::ResponseBodyReadFailed,
+            }
+        );
+    }
+
+    #[test]
+    fn complete_malformed_model_output_retries_without_raw_text() {
+        let error = Error::malformed_model_output(
+            "turn_persona_interpretation_output",
+            "invalid_json_or_shape",
+        );
+        assert_eq!(
+            classify_execution_error(&error),
+            ClassifiedGovernanceFailure {
+                class: PostTurnGovernanceErrorClassV2::MalformedModelOutput,
+                stage: PostTurnGovernanceFailureStage::PersonaInterpretation,
+                code: PostTurnGovernanceFailureCode::InvalidJsonOrShape,
+            }
+        );
+        // A reused stage label alone cannot convert a configuration failure
+        // into retryable model output.
+        let config = Error::config("turn_persona_interpretation_output", "private config");
+        assert_eq!(
+            classify_execution_error(&config).class,
             PostTurnGovernanceErrorClassV2::SchemaViolation
+        );
+    }
+
+    #[test]
+    fn genuine_contract_and_credential_errors_remain_terminal() {
+        for (error, stage, code) in [
+            (
+                Error::invalid_input("turn_persona_learning", "private source"),
+                PostTurnGovernanceFailureStage::ExecutionContract,
+                PostTurnGovernanceFailureCode::InputContractRejected,
+            ),
+            (
+                Error::config("governance_model_credential", "private credential"),
+                PostTurnGovernanceFailureStage::CredentialBinding,
+                PostTurnGovernanceFailureCode::CredentialUnavailable,
+            ),
+            (
+                Error::config("governance_model_http_budget", "private body"),
+                PostTurnGovernanceFailureStage::ResponseBodyRead,
+                PostTurnGovernanceFailureCode::ResponseBudgetExceeded,
+            ),
+            (
+                Error::config("governance_model_http", "private client setup"),
+                PostTurnGovernanceFailureStage::ExecutionContract,
+                PostTurnGovernanceFailureCode::ConfigurationInvalid,
+            ),
+        ] {
+            assert_eq!(
+                classify_execution_error(&error),
+                ClassifiedGovernanceFailure {
+                    class: PostTurnGovernanceErrorClassV2::SchemaViolation,
+                    stage,
+                    code,
+                }
+            );
         }
     }
 }

@@ -131,7 +131,7 @@ impl MemoryRuntime {
     /// transport. A commit CAS alone cannot protect bytes already sent.
     pub(in crate::runtime) fn revalidate_method_extraction_egress(
         &self,
-        job: &PostTurnGovernanceJobV4,
+        job: &PostTurnGovernanceJob,
     ) -> Result<()> {
         let transcript = self.load_governance_transcript(job)?;
         self.current_method_extraction_inputs(job, &transcript)
@@ -140,7 +140,7 @@ impl MemoryRuntime {
 
     fn current_method_extraction_inputs(
         &self,
-        job: &PostTurnGovernanceJobV4,
+        job: &PostTurnGovernanceJob,
         transcript: &bm_core::memory::TranscriptTurnRecord,
     ) -> Result<MethodExtractionInputs> {
         let Some(evidence) = transcript.learning_evidence.as_ref() else {
@@ -230,7 +230,7 @@ impl MemoryRuntime {
 
     pub(in crate::runtime) fn plan_governance_method_extractions(
         &self,
-        job: &PostTurnGovernanceJobV4,
+        job: &PostTurnGovernanceJob,
         transcript: &bm_core::memory::TranscriptTurnRecord,
         http: &mut dyn LlmHttpClient,
         llm: &(dyn CoreLlmClient + Send + Sync),

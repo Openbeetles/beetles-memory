@@ -1,6 +1,6 @@
 # 快速开始
 
-Rust 宿主接入 0.14.0 macOS SDK 源码合同时，从本文开始。[0.14.0 源码说明](release-notes-0.14.0.md)记录感知与 Store v18；0.13.0 的第一人称主体投影仍是基础。`v0.14.0` Git tag 须完成验证后才能视为已发布。协议部署场景先读本文，再读 [Adapter 合同](adapters.md)。
+Rust 宿主接入 0.15.0 macOS SDK 源码合同时，从本文开始。[0.15.0 源码说明](release-notes-0.15.0.md)记录后台治理故障恢复；[0.14.0 说明](release-notes-0.14.0.md)记录感知合同。`v0.15.0` Git tag 须完成验证后才能视为已发布。协议部署场景先读本文，再读 [Adapter 合同](adapters.md)。
 
 ## 依赖
 
@@ -11,16 +11,16 @@ Rust 宿主接入 0.14.0 macOS SDK 源码合同时，从本文开始。[0.14.0 �
 bm-sdk = { path = "crates/sdk", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
-只有 `v0.14.0` tag 完成发布与回读后，外部仓库才可使用该源码 tag；crates.io 发布另算：
+只有 `v0.15.0` tag 完成发布与回读后，外部仓库才可使用该源码 tag；crates.io 发布另算：
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.14.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.14.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.15.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.15.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 宿主必须按操作系统只选择一个 desktop embedded feature：`profile-desktop-macos-embedded-sdk`、`profile-desktop-windows-embedded-sdk` 或 `profile-desktop-linux-embedded-sdk`。Linux 桌面宿主禁止借用 server 或 dev-full profile。
 
-Store v18 不读取 v17，也不自动迁移。旧 Store 的处理方式由数据 owner 决定；此前应使用新 Store，archive import 不是 schema migration。
+当前 Store 不读取 v0.14.0 写入的数据，也不自动迁移。旧 Store 的处理方式由数据 owner 决定；此前应使用新 Store，archive import 不是 schema migration。
 
 ## 构建 Runtime
 

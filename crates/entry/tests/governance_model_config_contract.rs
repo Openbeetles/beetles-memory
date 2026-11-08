@@ -5,8 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bm_entry::{
     ConfiguredGovernanceLlmClient, EntryAuthConfig, EntryGovernanceModelAuthMode,
-    EntryGovernanceModelConfigUpdate, EntryGovernanceModelProtocol, EntryIdempotencyConfig,
-    EntryIdentity, EntryRuntime, EntryRuntimeConfig, EntryScope, EntryTransportConfig,
+    EntryGovernanceModelConfigUpdate, EntryGovernanceModelExecutionBinding,
+    EntryGovernanceModelProtocol, EntryIdempotencyConfig, EntryIdentity, EntryRuntime,
+    EntryRuntimeConfig, EntryScope, EntryTransportConfig,
 };
 use bm_sdk::{
     Error, LlmClient, LlmHttpClient, MemoryCapabilityPolicy, MemoryPrivacyPolicy, Message,
@@ -449,6 +450,104 @@ struct RecordingGovernanceHttp {
     url: String,
     body: Vec<u8>,
     response: Vec<u8>,
+}
+
+fn test_execution_binding(
+    auth_mode: EntryGovernanceModelAuthMode,
+) -> EntryGovernanceModelExecutionBinding {
+    EntryGovernanceModelExecutionBinding {
+        binding_id: "synthetic-binding".into(),
+        protocol: EntryGovernanceModelProtocol::OpenAiCompatible,
+        endpoint: "http://127.0.0.1:11434/v1".into(),
+        model: "synthetic-model".into(),
+        auth_mode,
+        request_timeout_ms: 2_000,
+        max_input_tokens: 1_024,
+        max_output_tokens: 128,
+        config_revision: 1,
+    }
+}
+
+#[test]
+fn missing_credential_is_configuration_failure_before_network_egress() {
+    let variable = format!(
+        "BEETLE_MEMORY_TEST_MISSING_CREDENTIAL_{}",
+        std::process::id()
+    );
+    assert!(std::env::var(&variable).is_err());
+    let client = ConfiguredGovernanceLlmClient::new(test_execution_binding(
+        EntryGovernanceModelAuthMode::CredentialEnv {
+            credential_env: variable,
+        },
+    ));
+    let mut http = RecordingGovernanceHttp::default();
+    let error = client
+        .chat(
+            &mut http,
+            "system",
+            &[Message {
+                role: "user".into(),
+                content: "hello".into(),
+            }],
+            None,
+            ToolChoicePolicy::Auto,
+        )
+        .expect_err("missing credential must fail before request");
+    assert!(matches!(&error, Error::Config { .. }));
+    assert_eq!(error.stage(), "governance_model_credential");
+    assert!(http.url.is_empty());
+}
+
+#[test]
+fn malformed_provider_responses_have_typed_safe_failure_codes() {
+    for (protocol, response, expected_code) in [
+        (
+            EntryGovernanceModelProtocol::OpenAiCompatible,
+            b"{".as_slice(),
+            "response_json_invalid",
+        ),
+        (
+            EntryGovernanceModelProtocol::OpenAiCompatible,
+            br#"{}"#.as_slice(),
+            "openai_choices_missing",
+        ),
+        (
+            EntryGovernanceModelProtocol::OpenAiCompatible,
+            br#"{"choices":[{}]}"#.as_slice(),
+            "openai_content_missing",
+        ),
+        (
+            EntryGovernanceModelProtocol::OllamaNative,
+            br#"{}"#.as_slice(),
+            "ollama_content_missing",
+        ),
+    ] {
+        let mut binding =
+            test_execution_binding(EntryGovernanceModelAuthMode::LocalUnauthenticated);
+        binding.protocol = protocol;
+        let client = ConfiguredGovernanceLlmClient::new(binding);
+        let mut http = RecordingGovernanceHttp {
+            response: response.to_vec(),
+            ..RecordingGovernanceHttp::default()
+        };
+        let error = client
+            .chat(
+                &mut http,
+                "system",
+                &[Message {
+                    role: "user".into(),
+                    content: "hello".into(),
+                }],
+                None,
+                ToolChoicePolicy::Auto,
+            )
+            .expect_err("malformed response must be typed");
+        assert_eq!(error.stage(), "governance_model_response");
+        assert!(matches!(
+            error,
+            Error::MalformedModelOutput { reason_code, .. } if reason_code == expected_code
+        ));
+    }
 }
 
 impl LlmHttpClient for RecordingGovernanceHttp {

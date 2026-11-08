@@ -2,6 +2,10 @@
 
 The SDK API is the primary entry point. Host projects should enter through `bm-sdk` or through `bm-entry` plus a protocol adapter. They should not implement their own memory schema, store envelope, replay format, or adapter dispatch rules.
 
+## 0.15.0 macOS SDK governed learning
+
+`bm-sdk` 0.15.0 keeps the official bounded governance retry owner. A response body read failure or a complete but malformed model response enters retry; trusted input and configuration contract failures remain terminal. `PostTurnGovernanceJob` and `DeferredGovernanceJobSummary` expose fixed `PostTurnGovernanceFailureStage` and `PostTurnGovernanceFailureCode` diagnostics without raw response text. The current Store rejects data written by v0.14.0 and does not migrate it. See the [0.15.0 source notes](release-notes-0.15.0.md).
+
 ## 0.14.0 Visual Perception macOS SDK
 
 This section describes the macOS `bm-sdk` source contract; `v0.14.0` is a release identity only after tag publication and remote verification. Store v18 does not read or migrate v17. See [integration](integration.md#visual-perception-on-the-macos-sdk) and the [0.14.0 source notes](release-notes-0.14.0.md).
@@ -205,7 +209,7 @@ CTQ1 query surfaces use the Store-owned `TranscriptQueryCursor`. Treat it as opa
 
 `HostUi` is only the host-presentable redacted disclosure view. It is not a chat-window API, pagination direction, product name, transcript index owner, or authorization token. Catalog, timeline, search, and activity return only candidates that remain visible after Runtime hydration and redaction for the requested view. Search hits contain a governed Unicode-safe excerpt and durable `TranscriptAnchor`; pass that anchor to `TranscriptTimelineAnchor::Around` instead of asking the host UI to scan or re-match transcript text.
 
-The prepared macOS SDK 0.14.0 uses Store v18 only and does not read v17. The published v0.11.2 accepts Store v16 only; `bm-sdk` 0.12.0 accepts Store v17 only and does not read v16. 0.9.0 uses Store v14 and 0.7.0 uses Store v13. There is no public Store migration API, compatibility reader, dual write, or automatic migration. Older, partial, and foreign schema payloads fail closed. Development data from an older generation must be explicitly discarded and recreated by its owner; archive export/import is not schema migration.
+The current macOS SDK uses Store schema generation 19 and does not read generation 18 from v0.14.0. Earlier published tags have their own exact Store generations. There is no public Store migration API, compatibility reader, dual write, or automatic migration. Older, partial, and foreign schema payloads fail closed. Development data from an older generation must be handled by its owner; archive export/import is not schema migration.
 
 Timeline supports latest, before, after, around-anchor, around-sequence, around-time, and first-visible-in-range queries. Page turns stay in sequence order and reports may carry opaque older/newer cursors. Calendar conversion stays with the host: resolve the user's IANA time zone and local date into a canonical UTC `[start_inclusive, end_exclusive)` range before calling Memory. Do not assume every local day is 86,400 seconds; DST days can be 23 or 25 hours. Transcript queries consume explicit UTC ranges and do not persist calendar time zones; the model-context local-time provider is a separate presentation input.
 

@@ -1,6 +1,6 @@
 # 集成文档
 
-本文描述 0.14.0 macOS `bm-sdk` 源码合同：第一人称主体投影、视觉感知、受治理视觉记忆与 Store v18。0.13.0 的主体投影和有序回合合同仍是基础。`v0.14.0` 须在 Git tag 完成验证后才能作为发布身份；Store v18 不提供 v17 兼容读取或自动迁移。
+本文描述 0.15.0 macOS `bm-sdk` 源码合同：第一人称主体投影、视觉感知、受治理视觉记忆与后台治理故障恢复。`v0.15.0` 须在 Git tag 完成验证后才能作为发布身份。当前 Store 拒绝读取 v0.14.0 写入的数据，不提供自动迁移。
 
 [API 变更](api.md#runtime-操作)所述历史 0.11.2 长期记忆控制合同使用 material v6 / control revision v4；0.12.0 源码保留这些合同，同时改变 transcript 回合输入和 Store schema。历史 v0.10.0 tag 不变。
 
@@ -28,11 +28,11 @@
 bm-sdk = { path = "crates/sdk", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
-所有 Beetle crate 必须来自同一源码 tag。源码发布不代表 crates.io 上传；只有 `v0.14.0` 发布并完成远端回读后，外部 macOS SDK 消费者才可这样接入：
+所有 Beetle crate 必须来自同一源码 tag。源码发布不代表 crates.io 上传；只有 `v0.15.0` 发布并完成远端回读后，外部 macOS SDK 消费者才可这样接入：
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.14.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.14.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.15.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.15.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 每次构建只使用一个 profile feature。Linux desktop、Linux device 与 Linux server 是三个不同部署目标，禁止相互替代。
@@ -178,7 +178,7 @@ Linux/Windows 配置分别增加 `--no-default-features --features desktop-linux
 示例的 `expected_revision: None` 只用于本次新建的易失 Store。持久宿主应保存/查询既有 binding 引用并显式管理其 revision，
 不能在每次启动或每个回合自动重授权限。真实模型配置与凭证分别通过既有 `GovernanceBindingSource`、
 `GovernanceCredentialResolver` 接入产品的同一配置真源；本示例刻意不配置它们。
-感知与 Store v18 见 [0.14.0 macOS SDK 源码说明](release-notes-0.14.0.md)；第一人称交付见 [0.13.0 源码版本说明](release-notes-0.13.0.md)。
+后台治理故障恢复见 [0.15.0 macOS SDK 源码说明](release-notes-0.15.0.md)；感知合同见 [0.14.0 说明](release-notes-0.14.0.md)。
 
 system、developer、user、tool message 的最终排序仍归宿主 prompt assembly。
 
@@ -194,7 +194,7 @@ system、developer、user、tool message 的最终排序仍归宿主 prompt asse
 4. 在 Provider 边界用 `attest_visual_delivery` 回传最终请求正文、实际发送的有序媒体字节、线协议位置和声明的转换；有绑定的响应时调用 `record_visual_provider_response`。仅准备交付包不等于证明实际送达。要让视觉影响后的回复进入持久学习，先用 `prepare_turn_visual_external_uses` 取得 SDK 已知视觉来源，加上其他一切外部内容，提交排序后的 `TranscriptExternalContentManifestV1` 至 `submit_turn_external_content_manifest`。清单完整性由宿主作证；Beetle 核对已知回执、跨轮回放 owner 与工具观察。缺失或冲突时，视觉人格成长和无来源文本学习保持关闭。
 5. 若让 Beetle 自主判断什么值得记，先以 `authorize_visual_inference` 授权另一推理接收方，再以 `infer_visual_for_memory(input_id, client)` 调用 `BeetleVisualInferenceClient`。Beetle 生成推理提示并校验结果；宿主桥接层只把媒体发给获授权的接收方。`memory_worthy=false` 的普通瞬时画面不会直接晋升。宿主不能提交最终分类、事实或记忆决定。
 
-关闭相机或系统撤权时调用 `revoke_visual_source`（或 `revoke_all_current_visual_sources`），并停止在宿主 Provider 上下文重放旧画面及受其影响的回复。`clear_perception_session` 清除会话内媒体。面向用户的记忆管理使用 `list_visual_memory`、`read_visual_memory_media`、`forget_visual_memory` 和 `forbid_visual_source_memory`，宿主在展示或调用前验证用户身份。默认 `export_memory_space` 只带受治理视觉语义，不带图像字节；明确允许私有媒体导出时才用 `export_memory_space_with_visual_media`。`import_memory_space` 对精确空间、归档 root、墓碑、撤权、来源禁记和当前保存上限做校验，再原子替换。Store v18 不能导入或打开 v17 Store。
+关闭相机或系统撤权时调用 `revoke_visual_source`（或 `revoke_all_current_visual_sources`），并停止在宿主 Provider 上下文重放旧画面及受其影响的回复。`clear_perception_session` 清除会话内媒体。面向用户的记忆管理使用 `list_visual_memory`、`read_visual_memory_media`、`forget_visual_memory` 和 `forbid_visual_source_memory`，宿主在展示或调用前验证用户身份。默认 `export_memory_space` 只带受治理视觉语义，不带图像字节；明确允许私有媒体导出时才用 `export_memory_space_with_visual_media`。`import_memory_space` 对精确空间、归档 root、墓碑、撤权、来源禁记和当前保存上限做校验，再原子替换。当前 Store 不能导入或打开 v0.14.0 写入的 Store。
 
 以上是 SDK 接入合同。本仓没有替宿主配置真实摄像头、Provider 适配器或下游界面。
 
@@ -249,7 +249,7 @@ runtime.write(MemoryWriteRequest::Candidates {
 })?;
 ```
 
-如果 post-turn LLM 服务暂时不可用，`finalize_turn` 仍会先提交会话，并原子建立 exact Job V4
+如果 post-turn LLM 服务暂时不可用，`finalize_turn` 仍会先提交会话，并原子建立 exact `PostTurnGovernanceJob`
 governance intent。durable intent 是恢复真源，wake signal 只是一条可丢失提示。
 
 生产宿主使用官方网络模型执行器时，必须为 `bm-entry` 启用 `governance-model-client-std`，并与 `bm-sdk` 使用同一 profile。例如同仓桌面嵌入接入：

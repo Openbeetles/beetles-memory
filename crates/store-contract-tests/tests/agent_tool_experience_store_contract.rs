@@ -213,9 +213,9 @@ fn json_projection(platform: &StorePlatform) -> Vec<(String, String, serde_json:
 }
 
 #[test]
-fn store_schema_v17_is_the_only_current_schema() {
-    assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v17");
-    assert_eq!(STORE_SCHEMA_VERSION, 17);
+fn store_schema_identity_is_current() {
+    assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema");
+    assert_eq!(STORE_SCHEMA_VERSION, 19);
 }
 
 #[test]

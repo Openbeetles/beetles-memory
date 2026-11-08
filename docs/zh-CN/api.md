@@ -2,6 +2,10 @@
 
 SDK API 是主要入口。宿主项目应通过 `bm-sdk` 进入，或通过 `bm-entry` 加协议 adapter 进入；不应自行实现记忆 schema、store envelope、replay 格式或 adapter dispatch 规则。
 
+## 0.15.0 macOS SDK 后台治理
+
+`bm-sdk` 0.15.0 保持官方有界重试 owner：响应正文读取失败、完整模型响应格式错误进入重试；可信输入和配置合同错误仍立即终止。`PostTurnGovernanceJob` 与 `DeferredGovernanceJobSummary` 暴露固定的 `PostTurnGovernanceFailureStage`、`PostTurnGovernanceFailureCode`，不带原始响应。当前 Store 拒绝读取 v0.14.0 写入的数据，也不自动迁移。详见[0.15.0 源码说明](release-notes-0.15.0.md)。
+
 ## 0.14.0 macOS SDK 视觉感知
 
 本节描述 macOS `bm-sdk` 源码合同；`v0.14.0` 须在 tag 发布并完成远端回读后才能作为发布身份。Store v18 不读取或迁移 v17。接线见[集成文档](integration.md#macos-sdk-视觉感知)及[0.14.0 源码说明](release-notes-0.14.0.md)。
@@ -204,7 +208,7 @@ CTQ1 query surface 统一使用 Store-owned `TranscriptQueryCursor`。调用方�
 
 `HostUi` 只是 **host-presentable redacted disclosure view**。它不是聊天窗口 API、分页方向、宿主产品名、transcript index owner 或 authorization token。Catalog、timeline、search、activity 只返回 Runtime hydration 后仍能通过请求 view 脱敏规则的结果。Search hit 携带受治理的 Unicode-safe excerpt 和 durable `TranscriptAnchor`；宿主应把 anchor 交给 `TranscriptTimelineAnchor::Around`，不得在 UI 内扫描或二次匹配 transcript 正文。
 
-0.14.0 macOS SDK 只使用 Store v18，不读取 v17。已发布的 v0.11.2 只接受 Store v16；`bm-sdk` 0.12.0 只接受 Store v17，不读取 v16。0.9.0 使用 Store v14，0.7.0 使用 Store v13。不提供 public Store migration API、compatibility reader、双写或 automatic migration。旧代、partial 与 foreign schema payload 都会 fail closed。旧代开发数据只能由其 owner 明确删除并重建；archive export/import 不是 schema migration。
+当前 macOS SDK 使用 Store schema 代次 19，不读取 v0.14.0 的代次 18。此前发布的 tag 各有精确 Store 代次。不提供 public Store migration API、compatibility reader、双写或 automatic migration；旧代、partial 与 foreign schema payload 都会 fail closed。旧代数据由其 owner 决定处理方式；archive export/import 不是 schema migration。
 
 Timeline 支持 latest、before、after、around-anchor、around-sequence、around-time 与 first-visible-in-range；页内 turn 始终按 sequence 正序，report 可返回 opaque older/newer cursor。日历换算归宿主：按用户 IANA timezone 把本地日期转换为 canonical UTC `[start_inclusive, end_exclusive)` 后再调用 Memory。不得假设每天都是 86400 秒，DST 当天可以是 23 或 25 小时；Transcript 查询消费显式 UTC 区间，不持久保存日历时区；模型上下文的本地时间 provider 是独立展示输入。
 

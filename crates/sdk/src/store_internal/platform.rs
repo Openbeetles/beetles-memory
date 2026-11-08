@@ -16476,12 +16476,12 @@ fn validate_post_turn_governance_transaction_closure(
         if namespace == POST_TURN_GOVERNANCE_JOB_NAMESPACE {
             let before_job = before
                 .get(&(namespace.clone(), key.clone()))
-                .map(|value| serde_json::from_value::<PostTurnGovernanceJobV4>(value.clone()))
+                .map(|value| serde_json::from_value::<PostTurnGovernanceJob>(value.clone()))
                 .transpose()
                 .map_err(|error| Error::config(stage, error.to_string()))?;
             let after_job = after
                 .get(&(namespace.clone(), key.clone()))
-                .map(|value| serde_json::from_value::<PostTurnGovernanceJobV4>(value.clone()))
+                .map(|value| serde_json::from_value::<PostTurnGovernanceJob>(value.clone()))
                 .transpose()
                 .map_err(|error| Error::config(stage, error.to_string()))?;
             if let Some(job) = after_job.as_ref() {
@@ -16583,7 +16583,7 @@ fn validate_post_turn_governance_transaction_closure(
                                 "new or changed governance index ref points to a missing job",
                             )
                         })?;
-                    let job = serde_json::from_value::<PostTurnGovernanceJobV4>(value.clone())
+                    let job = serde_json::from_value::<PostTurnGovernanceJob>(value.clone())
                         .map_err(|error| Error::config(stage, error.to_string()))?;
                     if reference != &PostTurnGovernanceJobRefV2::from_job(&job) {
                         return Err(Error::config(
@@ -16637,7 +16637,7 @@ fn governance_index_refs(
 }
 
 fn validate_touched_bound_job_authority(
-    job: &PostTurnGovernanceJobV4,
+    job: &PostTurnGovernanceJob,
     after: &BTreeMap<(String, String), serde_json::Value>,
 ) -> Result<()> {
     let PostTurnGovernanceExecutionBindingV1::Bound {
@@ -16902,7 +16902,7 @@ fn validate_touched_binding_authority(
 fn validate_post_turn_governance_snapshot_closure(
     json: &BTreeMap<(String, String), serde_json::Value>,
 ) -> Result<()> {
-    let mut jobs = BTreeMap::<String, PostTurnGovernanceJobV4>::new();
+    let mut jobs = BTreeMap::<String, PostTurnGovernanceJob>::new();
     let mut indexes = BTreeMap::<String, PostTurnGovernanceScopeIndexV4>::new();
     let mut snapshots = BTreeMap::<(String, u64), PostTurnGovernanceBindingSnapshotV1>::new();
     let mut binding_indexes = BTreeMap::<String, PostTurnGovernanceBindingRevisionIndexV1>::new();
@@ -16946,10 +16946,9 @@ fn validate_post_turn_governance_snapshot_closure(
                 }
             }
             POST_TURN_GOVERNANCE_JOB_NAMESPACE => {
-                let job = serde_json::from_value::<PostTurnGovernanceJobV4>(value.clone())
-                    .map_err(|error| {
-                        Error::config("post_turn_governance_closure", error.to_string())
-                    })?;
+                let job = serde_json::from_value::<PostTurnGovernanceJob>(value.clone()).map_err(
+                    |error| Error::config("post_turn_governance_closure", error.to_string()),
+                )?;
                 job.validate()?;
                 if job.job_id != *key || jobs.insert(key.clone(), job).is_some() {
                     return Err(Error::config(
@@ -18821,7 +18820,7 @@ mod transaction_error_contract_tests {
 
     fn governance_job_and_index(
         now_secs: u64,
-    ) -> (PostTurnGovernanceJobV4, PostTurnGovernanceScopeIndexV4) {
+    ) -> (PostTurnGovernanceJob, PostTurnGovernanceScopeIndexV4) {
         let identity = PostTurnGovernanceIdentityV2::new(
             "space:closure",
             "subject:closure",
@@ -18831,7 +18830,7 @@ mod transaction_error_contract_tests {
             "turn",
         )
         .expect("governance identity");
-        let job = PostTurnGovernanceJobV4::pending(
+        let job = PostTurnGovernanceJob::pending(
             identity.clone(),
             1,
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

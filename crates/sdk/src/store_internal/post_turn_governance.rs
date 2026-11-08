@@ -14,8 +14,9 @@ use bm_core::memory::{
     PostTurnGovernanceBindingRevisionIndexV1, PostTurnGovernanceBindingRevisionRefV1,
     PostTurnGovernanceBindingSnapshotV1, PostTurnGovernanceDecisionSummaryV1,
     PostTurnGovernanceErrorClassV2, PostTurnGovernanceExecutionBindingV1,
-    PostTurnGovernanceExecutionBlockAuthorityV1, PostTurnGovernanceJobRefV2,
-    PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV4, PostTurnGovernanceReceiptV4,
+    PostTurnGovernanceExecutionBlockAuthorityV1, PostTurnGovernanceFailureCode,
+    PostTurnGovernanceFailureStage, PostTurnGovernanceJob, PostTurnGovernanceJobRefV2,
+    PostTurnGovernanceJobStatusV2, PostTurnGovernanceReceiptV4,
     PostTurnGovernanceReconciliationCursorV1, PostTurnGovernanceScopeIndexV4,
     MAX_POST_TURN_GOVERNANCE_ACTIVE_JOBS, MAX_POST_TURN_GOVERNANCE_BINDING_REVISIONS,
     MAX_POST_TURN_GOVERNANCE_RECENT_TERMINAL_JOBS, MEMORY_MUTATION_RECEIPT_NAMESPACE,
@@ -54,7 +55,7 @@ fn ensure_governance_intent(
     platform: &StorePlatform,
     scope: StoreEventScope,
     runtime_budget: &RuntimeBudgetReport,
-    job: &PostTurnGovernanceJobV4,
+    job: &PostTurnGovernanceJob,
     now_secs: u64,
 ) -> Result<GovernanceIntentEnsureOutcome> {
     let (outcome, _) = super::procedural_feedback::ensure_post_turn_learning_intents(
@@ -71,13 +72,13 @@ fn ensure_governance_intent(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GovernanceRecoveryOutcome {
-    pub(crate) job: PostTurnGovernanceJobV4,
+    pub(crate) job: PostTurnGovernanceJob,
     pub(crate) replayed: bool,
 }
 
 pub(crate) fn governance_recovery_operation_was_committed(
     platform: &StorePlatform,
-    job: &PostTurnGovernanceJobV4,
+    job: &PostTurnGovernanceJob,
     caller_operation_id: &str,
     actor_subject_id: &str,
     operation_kind: MemoryMutationOperationKind,
@@ -114,7 +115,7 @@ pub(crate) fn reconcile_governance_intents(
     platform: &StorePlatform,
     scope: StoreEventScope,
     runtime_budget: &RuntimeBudgetReport,
-    jobs: &[PostTurnGovernanceJobV4],
+    jobs: &[PostTurnGovernanceJob],
     cursor_source: &bm_core::memory::TranscriptTurnRecord,
     now_secs: u64,
 ) -> Result<usize> {
@@ -341,7 +342,7 @@ pub(crate) fn claim_governance_job(
     lease_until: u64,
     authority: PostTurnGovernanceAttemptAuthorityV3,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV4> {
+) -> Result<PostTurnGovernanceJob> {
     authority.validate()?;
     if lease_owner.trim().is_empty() || lease_until <= now_secs {
         return Err(Error::invalid_input(
@@ -499,7 +500,7 @@ pub(crate) fn renew_governance_job_lease(
     lease_epoch: u64,
     lease_until: u64,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV4> {
+) -> Result<PostTurnGovernanceJob> {
     let before_job = read_job(platform, job_id)?.ok_or_else(|| {
         Error::not_found("post_turn_governance_renew", "governance job not found")
     })?;
@@ -572,8 +573,10 @@ pub(crate) fn retry_governance_job(
     lease_owner: &str,
     lease_epoch: u64,
     error_class: PostTurnGovernanceErrorClassV2,
+    failure_stage: PostTurnGovernanceFailureStage,
+    failure_code: PostTurnGovernanceFailureCode,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV4> {
+) -> Result<PostTurnGovernanceJob> {
     if !error_class.is_retryable() {
         return Err(Error::invalid_input(
             "post_turn_governance_retry",
@@ -608,6 +611,8 @@ pub(crate) fn retry_governance_job(
     after_job.lease_until = None;
     after_job.execution_block_authority = None;
     after_job.last_error_class = Some(error_class);
+    after_job.last_failure_stage = Some(failure_stage);
+    after_job.last_failure_code = Some(failure_code);
     after_job.updated_at = now_secs;
     let exhausted = after_job.attempt_count >= after_job.max_attempts;
     if exhausted {
@@ -689,7 +694,7 @@ pub(crate) fn block_governance_job(
     reason: &str,
     execution_block_authority: Option<PostTurnGovernanceExecutionBlockAuthorityV1>,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV4> {
+) -> Result<PostTurnGovernanceJob> {
     if !matches!(
         status,
         PostTurnGovernanceJobStatusV2::BlockedConfiguration
@@ -733,6 +738,8 @@ pub(crate) fn block_governance_job(
     after_job.execution_block_authority = execution_block_authority;
     after_job.blocking_reason = Some(reason.to_string());
     after_job.last_error_class = None;
+    after_job.last_failure_stage = None;
+    after_job.last_failure_code = None;
     after_job.updated_at = now_secs;
     after_job.validate()?;
 
@@ -777,7 +784,7 @@ pub(crate) fn block_claimed_governance_job(
     reason: &str,
     execution_block_authority: Option<PostTurnGovernanceExecutionBlockAuthorityV1>,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV4> {
+) -> Result<PostTurnGovernanceJob> {
     if !matches!(
         status,
         PostTurnGovernanceJobStatusV2::BlockedConfiguration
@@ -827,6 +834,8 @@ pub(crate) fn block_claimed_governance_job(
     after_job.execution_block_authority = execution_block_authority;
     after_job.blocking_reason = Some(reason.to_string());
     after_job.last_error_class = None;
+    after_job.last_failure_stage = None;
+    after_job.last_failure_code = None;
     after_job.updated_at = now_secs;
     after_job.validate()?;
 
@@ -865,7 +874,7 @@ pub(crate) fn resume_governance_job(
     runtime_budget: &RuntimeBudgetReport,
     job_id: &str,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV4> {
+) -> Result<PostTurnGovernanceJob> {
     let before_job = read_job(platform, job_id)?.ok_or_else(|| {
         Error::not_found("post_turn_governance_resume", "governance job not found")
     })?;
@@ -896,6 +905,8 @@ pub(crate) fn resume_governance_job(
     after_job.execution_block_authority = None;
     after_job.blocking_reason = None;
     after_job.last_error_class = None;
+    after_job.last_failure_stage = None;
+    after_job.last_failure_code = None;
     after_job.updated_at = now_secs;
     after_job.validate()?;
 
@@ -996,6 +1007,8 @@ pub(crate) fn resume_governance_job_for_credential(
     after_job.execution_block_authority = None;
     after_job.blocking_reason = None;
     after_job.last_error_class = None;
+    after_job.last_failure_stage = None;
+    after_job.last_failure_code = None;
     after_job.updated_at = now_secs;
     after_job.validate()?;
 
@@ -1118,6 +1131,8 @@ pub(crate) fn resume_governance_job_for_provider_permission(
     after_job.last_provider_permission_recovery_generation = Some(new_generation);
     after_job.blocking_reason = None;
     after_job.last_error_class = None;
+    after_job.last_failure_stage = None;
+    after_job.last_failure_code = None;
     after_job.updated_at = now_secs;
     after_job.validate()?;
 
@@ -1172,9 +1187,11 @@ pub(crate) fn dead_letter_governance_job(
     lease_owner: &str,
     lease_epoch: u64,
     error_class: PostTurnGovernanceErrorClassV2,
+    failure_stage: PostTurnGovernanceFailureStage,
+    failure_code: PostTurnGovernanceFailureCode,
     reason: &str,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV4> {
+) -> Result<PostTurnGovernanceJob> {
     if error_class.is_retryable() || reason.trim().is_empty() {
         return Err(Error::invalid_input(
             "post_turn_governance_fail",
@@ -1211,6 +1228,8 @@ pub(crate) fn dead_letter_governance_job(
     after_job.lease_until = None;
     after_job.execution_block_authority = None;
     after_job.last_error_class = Some(error_class);
+    after_job.last_failure_stage = Some(failure_stage);
+    after_job.last_failure_code = Some(failure_code);
     after_job.blocking_reason = Some(reason.to_string());
     after_job.updated_at = now_secs;
     after_job.terminal_at = Some(now_secs);
@@ -1266,7 +1285,7 @@ pub(crate) fn cancel_governance_job(
     job_id: &str,
     reason: &str,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV4> {
+) -> Result<PostTurnGovernanceJob> {
     if reason.trim().is_empty() {
         return Err(Error::invalid_input(
             "post_turn_governance_cancel",
@@ -1297,6 +1316,8 @@ pub(crate) fn cancel_governance_job(
     after_job.execution_block_authority = None;
     after_job.blocking_reason = Some(reason.to_string());
     after_job.last_error_class = None;
+    after_job.last_failure_stage = None;
+    after_job.last_failure_code = None;
     after_job.terminal_at = Some(now_secs);
     after_job.updated_at = now_secs;
     after_job.validate()?;
@@ -1466,6 +1487,8 @@ fn plan_governance_job_completion(
     after_job.execution_block_authority = None;
     after_job.blocking_reason = None;
     after_job.last_error_class = None;
+    after_job.last_failure_stage = None;
+    after_job.last_failure_code = None;
     after_job.receipt = Some(expected_receipt.clone());
     after_job.updated_at = now_secs;
     after_job.terminal_at = Some(now_secs);
@@ -1538,7 +1561,7 @@ fn plan_governance_job_completion(
 
 enum GovernanceCompletionPlan {
     AlreadyCompleted {
-        job: Box<PostTurnGovernanceJobV4>,
+        job: Box<PostTurnGovernanceJob>,
         transaction_id: String,
     },
     Pending(Box<GovernanceCompletionPending>),
@@ -1546,7 +1569,7 @@ enum GovernanceCompletionPlan {
 
 fn derive_method_application(
     platform: &StorePlatform,
-    job: &PostTurnGovernanceJobV4,
+    job: &PostTurnGovernanceJob,
     mutations: &[StoreMutation],
     conditions: &mut Vec<StoreJsonPrecondition>,
 ) -> Result<bm_core::memory::PostTurnGovernanceMethodApplicationV1> {
@@ -1817,7 +1840,7 @@ pub(crate) fn validate_semantic_method_completion(
             _ => None,
         })
         .map(|value| {
-            let job: PostTurnGovernanceJobV4 =
+            let job: PostTurnGovernanceJob =
                 serde_json::from_value(value.clone()).map_err(|_| invalid())?;
             job.validate()?;
             Ok(job)
@@ -1843,7 +1866,7 @@ pub(crate) fn validate_semantic_method_completion(
         return Err(invalid());
     }
     let job = &jobs[0];
-    let previous: PostTurnGovernanceJobV4 = before
+    let previous: PostTurnGovernanceJob = before
         .json
         .get(&(
             POST_TURN_GOVERNANCE_JOB_NAMESPACE.into(),
@@ -2028,7 +2051,7 @@ pub(crate) fn validate_semantic_method_completion(
 
 struct GovernanceCompletionPending {
     expected_receipt: PostTurnGovernanceReceiptV4,
-    after_job: PostTurnGovernanceJobV4,
+    after_job: PostTurnGovernanceJob,
     batch: StoreMutationBatch,
     preconditions: Vec<StoreJsonPrecondition>,
 }
@@ -2046,7 +2069,7 @@ pub(crate) fn complete_governance_job_with_memory_plan(
     memory_preconditions: Vec<StoreJsonPrecondition>,
     memory_blob_preconditions: Vec<StoreBlobPrecondition>,
     now_secs: u64,
-) -> Result<PostTurnGovernanceJobV4> {
+) -> Result<PostTurnGovernanceJob> {
     let plan = plan_governance_job_completion(
         platform,
         scope,
@@ -2093,7 +2116,7 @@ pub(crate) fn complete_governance_job_with_memory_plan(
 
 #[derive(Debug)]
 pub(crate) struct SubjectSoulGovernanceCompletionOutcome {
-    pub(crate) job: PostTurnGovernanceJobV4,
+    pub(crate) job: PostTurnGovernanceJob,
     pub(crate) soul: SubjectSoulStoreMutationOutcome,
 }
 
@@ -2230,9 +2253,9 @@ pub(crate) fn complete_governance_job_with_subject_soul_plan(
 }
 
 fn completed_job_if_same_receipt(
-    job: PostTurnGovernanceJobV4,
+    job: PostTurnGovernanceJob,
     expected: &PostTurnGovernanceReceiptV4,
-) -> Result<PostTurnGovernanceJobV4> {
+) -> Result<PostTurnGovernanceJob> {
     let Some(actual) = job.receipt.as_ref() else {
         return Err(Error::config(
             "post_turn_governance_complete",
@@ -2561,7 +2584,7 @@ pub(crate) fn read_binding_snapshot(
 pub(crate) fn read_job(
     platform: &StorePlatform,
     job_id: &str,
-) -> Result<Option<PostTurnGovernanceJobV4>> {
+) -> Result<Option<PostTurnGovernanceJob>> {
     let mut docs = platform
         .read_json_docs_by_keys(POST_TURN_GOVERNANCE_JOB_NAMESPACE, &[job_id.to_string()])?;
     let Some(doc) = docs.pop() else {
@@ -2594,8 +2617,8 @@ fn commit_job_and_index(
     scope: StoreEventScope,
     runtime_budget: &RuntimeBudgetReport,
     operation: &str,
-    before_job: &PostTurnGovernanceJobV4,
-    after_job: &PostTurnGovernanceJobV4,
+    before_job: &PostTurnGovernanceJob,
+    after_job: &PostTurnGovernanceJob,
     before_index: &PostTurnGovernanceScopeIndexV4,
     after_index: &PostTurnGovernanceScopeIndexV4,
     now_secs: u64,
@@ -2621,8 +2644,8 @@ fn commit_job_and_index_with_extra(
     scope: StoreEventScope,
     runtime_budget: &RuntimeBudgetReport,
     operation: &str,
-    before_job: &PostTurnGovernanceJobV4,
-    after_job: &PostTurnGovernanceJobV4,
+    before_job: &PostTurnGovernanceJob,
+    after_job: &PostTurnGovernanceJob,
     before_index: &PostTurnGovernanceScopeIndexV4,
     after_index: &PostTurnGovernanceScopeIndexV4,
     mut extra_mutations: Vec<StoreMutation>,
@@ -2686,8 +2709,8 @@ fn commit_recovery_job_and_index(
     scope: StoreEventScope,
     runtime_budget: &RuntimeBudgetReport,
     operation: &str,
-    before_job: &PostTurnGovernanceJobV4,
-    after_job: &PostTurnGovernanceJobV4,
+    before_job: &PostTurnGovernanceJob,
+    after_job: &PostTurnGovernanceJob,
     before_index: &PostTurnGovernanceScopeIndexV4,
     after_index: &PostTurnGovernanceScopeIndexV4,
     caller_operation_id: &str,
@@ -2824,7 +2847,7 @@ fn governance_recovery_intent_digest(
 }
 
 fn governance_recovery_operation_identity(
-    job: &PostTurnGovernanceJobV4,
+    job: &PostTurnGovernanceJob,
     caller_operation_id: &str,
     actor_subject_id: &str,
     operation_kind: MemoryMutationOperationKind,
@@ -2928,8 +2951,8 @@ pub(crate) fn append_binding_reference_mutation(
 
 fn replace_scope_index_ref(
     index: &mut PostTurnGovernanceScopeIndexV4,
-    before_job: &PostTurnGovernanceJobV4,
-    after_job: &PostTurnGovernanceJobV4,
+    before_job: &PostTurnGovernanceJob,
+    after_job: &PostTurnGovernanceJob,
     stage: &'static str,
 ) -> Result<()> {
     let reference = index
@@ -2949,7 +2972,7 @@ fn replace_scope_index_ref(
 
 fn append_terminal_ref(
     index: &mut PostTurnGovernanceScopeIndexV4,
-    job: &PostTurnGovernanceJobV4,
+    job: &PostTurnGovernanceJob,
     stage: &'static str,
 ) -> Result<()> {
     if !job.status.is_terminal() {
@@ -3025,18 +3048,20 @@ mod tests {
     use crate::{MemoryStoreEventKind, ProfileId, StoreEventScope, StoreMutation};
     use bm_core::memory::{
         PostTurnGovernanceAttemptAuthorityV3, PostTurnGovernanceBindingSnapshotV1,
-        PostTurnGovernanceDecisionSummaryV1, PostTurnGovernanceExecutionBindingV1,
-        PostTurnGovernanceIdentityV2, PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV4,
-        PostTurnGovernancePrivacyAuthorityV1, PostTurnGovernanceProviderProtocolV1,
-        PostTurnSemanticGovernanceReport, SubjectSoulReadOutcomeV1, SubjectSoulReadRequestV1,
-        SubjectSoulReadSelectorV1, SubjectSoulReadViewV1,
-        POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
+        PostTurnGovernanceDecisionSummaryV1, PostTurnGovernanceErrorClassV2,
+        PostTurnGovernanceExecutionBindingV1, PostTurnGovernanceFailureCode,
+        PostTurnGovernanceFailureStage, PostTurnGovernanceIdentityV2, PostTurnGovernanceJob,
+        PostTurnGovernanceJobStatusV2, PostTurnGovernancePrivacyAuthorityV1,
+        PostTurnGovernanceProviderProtocolV1, PostTurnSemanticGovernanceReport,
+        SubjectSoulReadOutcomeV1, SubjectSoulReadRequestV1, SubjectSoulReadSelectorV1,
+        SubjectSoulReadViewV1, POST_TURN_GOVERNANCE_SCOPE_INDEX_NAMESPACE,
     };
 
     use super::{
         claim_governance_job, complete_governance_job_with_memory_plan,
-        complete_governance_job_with_subject_soul_plan, ensure_binding_snapshot,
-        ensure_governance_intent, read_job, read_scope_index,
+        complete_governance_job_with_subject_soul_plan, dead_letter_governance_job,
+        ensure_binding_snapshot, ensure_governance_intent, read_job, read_scope_index,
+        retry_governance_job,
     };
 
     fn now_secs() -> u64 {
@@ -3046,7 +3071,7 @@ mod tests {
             .as_secs()
     }
 
-    fn pending_job(platform: &StorePlatform, now_secs: u64) -> PostTurnGovernanceJobV4 {
+    fn pending_job(platform: &StorePlatform, now_secs: u64) -> PostTurnGovernanceJob {
         use bm_core::memory::{
             CanonicalTurnDelta, ConversationKey, ConversationScope, ConversationTranscriptStore,
             IngressKind, MemoryTurnDeliveryStatus, MemoryTurnProtocol, MemoryTurnSource,
@@ -3093,7 +3118,7 @@ mod tests {
         platform
             .append_turn(&record)
             .expect("commit real source transcript");
-        PostTurnGovernanceJobV4::pending(
+        PostTurnGovernanceJob::pending(
             PostTurnGovernanceIdentityV2::new(
                 "space:atomic",
                 "subject:atomic",
@@ -3267,6 +3292,92 @@ mod tests {
                 .expect("index doc")
                 .len()
                 == 1
+        );
+    }
+
+    #[test]
+    fn failure_diagnostic_survives_retry_and_dead_letter_without_raw_error() {
+        let platform = StorePlatform::open(
+            StoreBackendConfig::in_memory(ProfileId::DesktopMacosEmbeddedSdk)
+                .expect("store config"),
+        )
+        .expect("store");
+        let now_secs = now_secs();
+        let budget = platform.current_runtime_budget(now_secs);
+        let pending = pending_job(&platform, now_secs);
+        ensure_governance_intent(&platform, scope(), &budget, &pending, now_secs)
+            .expect("ensure intent");
+        let leased = claim_governance_job(
+            &platform,
+            scope(),
+            &budget,
+            &pending.job_id,
+            "worker:atomic",
+            now_secs + 60,
+            authority(&platform, &budget, now_secs),
+            now_secs,
+        )
+        .expect("claim");
+        let retry = retry_governance_job(
+            &platform,
+            scope(),
+            &budget,
+            &leased.job_id,
+            "worker:atomic",
+            leased.lease_epoch,
+            PostTurnGovernanceErrorClassV2::ServiceUnavailable,
+            PostTurnGovernanceFailureStage::ResponseBodyRead,
+            PostTurnGovernanceFailureCode::ResponseBodyReadFailed,
+            now_secs + 1,
+        )
+        .expect("retry with safe diagnostic");
+        assert_eq!(retry.status, PostTurnGovernanceJobStatusV2::RetryWaiting);
+        assert_eq!(
+            retry.last_failure_stage,
+            Some(PostTurnGovernanceFailureStage::ResponseBodyRead)
+        );
+        assert_eq!(
+            retry.last_failure_code,
+            Some(PostTurnGovernanceFailureCode::ResponseBodyReadFailed)
+        );
+        assert_eq!(
+            read_job(&platform, &retry.job_id).expect("read retry"),
+            Some(retry.clone())
+        );
+        let next_at = retry.next_attempt_at.expect("retry scheduled");
+        let leased_again = claim_governance_job(
+            &platform,
+            scope(),
+            &budget,
+            &retry.job_id,
+            "worker:atomic",
+            next_at + 60,
+            authority(&platform, &budget, now_secs),
+            next_at,
+        )
+        .expect("second claim");
+        let dead = dead_letter_governance_job(
+            &platform,
+            scope(),
+            &budget,
+            &leased_again.job_id,
+            "worker:atomic",
+            leased_again.lease_epoch,
+            PostTurnGovernanceErrorClassV2::SchemaViolation,
+            PostTurnGovernanceFailureStage::ExecutionContract,
+            PostTurnGovernanceFailureCode::InputContractRejected,
+            "schema_violation",
+            next_at + 1,
+        )
+        .expect("terminal safe diagnostic");
+        assert_eq!(dead.status, PostTurnGovernanceJobStatusV2::DeadLetter);
+        assert_eq!(
+            dead.last_failure_code,
+            Some(PostTurnGovernanceFailureCode::InputContractRejected)
+        );
+        assert_eq!(
+            read_job(&platform, &dead.job_id).expect("read dead letter"),
+            Some(dead)
         );
     }
 

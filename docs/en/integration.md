@@ -1,6 +1,6 @@
 # Integration Guide
 
-This guide describes the 0.14.0 macOS `bm-sdk` source contract: first-person subject projection, visual perception, governed visual memory, and Store v18. The 0.13.0 projection and ordered turn contracts remain the baseline. `v0.14.0` is a release identity only after its Git tag has been verified; Store v18 has no v17 compatibility reader or automatic migration.
+This guide describes the 0.15.0 macOS `bm-sdk` source contract: first-person subject projection, visual perception, governed visual memory, and governed learning recovery. `v0.15.0` is a release identity only after its Git tag has been verified. The current Store rejects data written by v0.14.0; there is no automatic migration.
 
 The historical 0.11.2 long-term control contract described in [API changes](api.md#runtime-operations) uses material v6 and control revision v4. The 0.12.0 source retains those contracts while changing transcript turn input and Store schema. The historical v0.10.0 tag remains unchanged.
 
@@ -28,11 +28,11 @@ From this repository:
 bm-sdk = { path = "crates/sdk", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
-Use the same source tag for every Beetle crate. Source release does not mean crates.io publication. Only after `v0.14.0` is published and verified by remote readback can an external macOS SDK consumer use:
+Use the same source tag for every Beetle crate. Source release does not mean crates.io publication. Only after `v0.15.0` is published and verified by remote readback can an external macOS SDK consumer use:
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.14.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.14.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.15.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.15.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 Use exactly one profile feature for a build. Linux desktop, Linux device, and Linux server are distinct deployment targets; do not substitute one for another.
@@ -188,7 +188,7 @@ Its `expected_revision: None` is only for this fresh ephemeral Store. Persistent
 existing binding references and manage revisions explicitly, never automatically regrant on each
 startup or turn. Adapt `GovernanceBindingSource` and `GovernanceCredentialResolver` to the product's
 one configuration owner for real model execution; they are deliberately unconfigured here.
-See the [0.14.0 macOS SDK source notes](release-notes-0.14.0.md) for perception and Store v18, and the [0.13.0 source notes](release-notes-0.13.0.md) for first-person model delivery.
+See the [0.15.0 macOS SDK source notes](release-notes-0.15.0.md) for governed learning recovery and the [0.14.0 notes](release-notes-0.14.0.md) for perception.
 
 The host remains responsible for final ordering of system, developer, user, and
 tool messages.
@@ -205,7 +205,7 @@ The minimum host sequence is:
 4. At the Provider boundary, call `attest_visual_delivery` with the actual final request body, ordered sent media bytes, wire positions, and declared transforms. Call `record_visual_provider_response` when a bound response is available. A prepared packet by itself is not proven delivery. Before durable learning from the reply, use `prepare_turn_visual_external_uses` for SDK-known visual sources, add every other external item, and submit a sorted `TranscriptExternalContentManifestV1` through `submit_turn_external_content_manifest`. Completeness is host-attested; Beetle checks the known receipts, replay owners, and tool observations. A missing or conflicting manifest fails closed for visual persona growth and source-free text learning.
 5. To let Beetle decide what is worth remembering, authorize the separate inference recipient with `authorize_visual_inference`, then call `infer_visual_for_memory(input_id, client)` with a `BeetleVisualInferenceClient`. Beetle supplies the inference prompt and validates its response; the host bridge sends media only to that authorized recipient. `memory_worthy=false` leaves an ordinary passing view unpromoted. The host cannot submit a final classification, fact, or memory decision.
 
-On camera disable or permission withdrawal, call `revoke_visual_source` (or `revoke_all_current_visual_sources`) and stop replaying old media and derived replies in the host's Provider context. `clear_perception_session` clears session-local media. User-facing memory controls are `list_visual_memory`, `read_visual_memory_media`, `forget_visual_memory`, and `forbid_visual_source_memory`; the host authenticates the human before exposing those calls. Default `export_memory_space` carries governed visual semantics without image bytes. Use `export_memory_space_with_visual_media` only for an explicitly permitted private-media export; `import_memory_space` checks the exact scope, archive root, tombstones, revocation, source bans, and current retention before an atomic replace. Store v18 cannot import or open a v17 Store.
+On camera disable or permission withdrawal, call `revoke_visual_source` (or `revoke_all_current_visual_sources`) and stop replaying old media and derived replies in the host's Provider context. `clear_perception_session` clears session-local media. User-facing memory controls are `list_visual_memory`, `read_visual_memory_media`, `forget_visual_memory`, and `forbid_visual_source_memory`; the host authenticates the human before exposing those calls. Default `export_memory_space` carries governed visual semantics without image bytes. Use `export_memory_space_with_visual_media` only for an explicitly permitted private-media export; `import_memory_space` checks the exact scope, archive root, tombstones, revocation, source bans, and current retention before an atomic replace. The current Store cannot import or open a Store written by v0.14.0.
 
 These calls define the SDK integration contract. This repository does not configure a real camera, Provider adapter, or downstream UI for a host application.
 
@@ -262,7 +262,7 @@ runtime.write(MemoryWriteRequest::Candidates {
 ```
 
 If post-turn LLM services are unavailable, `finalize_turn` still commits the
-transcript and atomically creates an exact Job V4 governance intent. The durable
+transcript and atomically creates an exact `PostTurnGovernanceJob` intent. The durable
 intent is the recovery truth; a wake signal is only a hint.
 
 To use the official network model executor, enable `governance-model-client-std` on `bm-entry` and use the same profile as `bm-sdk`. For an embedded desktop consumer in this checkout:

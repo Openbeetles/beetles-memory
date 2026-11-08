@@ -501,16 +501,16 @@ pub fn parse_long_term_memory_extraction_response_strict(
     let values = match parse_strict_llm_json_payload(raw) {
         LlmJsonPayload::Value(serde_json::Value::Array(values)) => values,
         LlmJsonPayload::Absent | LlmJsonPayload::Null | LlmJsonPayload::Value(_) => {
-            return Err(Error::config(
+            return Err(Error::malformed_model_output(
                 "long_term_memory_extraction_output",
-                "model output must be one JSON array",
+                "expected_json_array",
             ));
         }
     };
     if values.len() > LONG_TERM_MEMORY_EXTRACTION_BATCH {
-        return Err(Error::config(
+        return Err(Error::malformed_model_output(
             "long_term_memory_extraction_output",
-            "model output exceeds the extraction batch limit",
+            "batch_limit_exceeded",
         ));
     }
     const ALLOWED_KEYS: &[&str] = &[
@@ -531,32 +531,29 @@ pub fn parse_long_term_memory_extraction_response_strict(
     ];
     for value in &values {
         let object = value.as_object().ok_or_else(|| {
-            Error::config(
-                "long_term_memory_extraction_output",
-                "every extraction item must be an object",
-            )
+            Error::malformed_model_output("long_term_memory_extraction_output", "item_not_object")
         })?;
         if object
             .keys()
             .any(|key| !ALLOWED_KEYS.contains(&key.as_str()))
         {
-            return Err(Error::config(
+            return Err(Error::malformed_model_output(
                 "long_term_memory_extraction_output",
-                "extraction item contains an unknown field",
+                "unknown_field",
             ));
         }
         let item = serde_json::from_value::<LongTermMemoryExtractionItem>(value.clone()).map_err(
             |_| {
-                Error::config(
+                Error::malformed_model_output(
                     "long_term_memory_extraction_output",
-                    "extraction item differs from the governed schema",
+                    "invalid_item_schema",
                 )
             },
         )?;
         if item.topic.trim().is_empty() {
-            return Err(Error::config(
+            return Err(Error::malformed_model_output(
                 "long_term_memory_extraction_output",
-                "extraction topic must not be empty",
+                "empty_topic",
             ));
         }
         match item.plane.as_deref().map(str::trim) {
@@ -569,27 +566,24 @@ pub fn parse_long_term_memory_extraction_response_strict(
                     || (item.op.trim() == "upsert"
                         && !factual_source_authority_allows_upsert(item.source_authority))
                 {
-                    return Err(Error::config(
+                    return Err(Error::malformed_model_output(
                         "long_term_memory_extraction_output",
-                        "factual extraction item is incomplete",
+                        "incomplete_factual_item",
                     ));
                 }
             }
             Some("skill") if !item.content.trim().is_empty() => {}
             Some("ignore") => {}
             _ => {
-                return Err(Error::config(
+                return Err(Error::malformed_model_output(
                     "long_term_memory_extraction_output",
-                    "extraction plane is missing or unsupported",
+                    "unsupported_plane",
                 ));
             }
         }
     }
     let normalized = serde_json::to_string(&values).map_err(|_| {
-        Error::config(
-            "long_term_memory_extraction_output",
-            "model output could not be normalized",
-        )
+        Error::malformed_model_output("long_term_memory_extraction_output", "normalization_failed")
     })?;
     Ok(parse_long_term_memory_extraction_response(
         &normalized,

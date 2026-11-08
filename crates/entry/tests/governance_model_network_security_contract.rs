@@ -112,6 +112,22 @@ fn response_byte_budget_fails_closed_before_body_is_accepted() {
     let error = client
         .do_post(&format!("{endpoint}/chat"), &[], b"{}")
         .expect_err("oversized response must fail closed");
-    assert_eq!(error.stage(), "governance_model_http");
+    assert_eq!(error.stage(), "governance_model_http_budget");
+    assert!(matches!(error, bm_sdk::Error::Config { .. }));
     server.join().expect("budget server");
+}
+
+#[test]
+fn incomplete_response_body_is_a_transport_error_not_a_schema_violation() {
+    let response =
+        "HTTP/1.1 200 OK\r\ncontent-length: 64\r\nconnection: close\r\n\r\n{\"partial\":true}";
+    let (endpoint, server) = one_shot_server(response.to_string());
+    let mut client =
+        ReqwestGovernanceLlmHttpClient::for_endpoint(&endpoint, 2_000, 1024).expect("client");
+    let error = client
+        .do_post(&format!("{endpoint}/chat"), &[], b"{}")
+        .expect_err("truncated response must fail as transport");
+    assert_eq!(error.stage(), "governance_model_http_read");
+    assert!(matches!(error, bm_sdk::Error::Io { .. }));
+    server.join().expect("truncated response server");
 }

@@ -1016,7 +1016,7 @@ pub struct ProceduralReadAuthorityV1<'a> {
     root: &'a ProceduralSubjectValidityRootV1,
     completion: Option<&'a super::ProceduralFeedbackJobV2>,
     applications: &'a [super::ProceduralFeedbackApplicationLedgerV3],
-    semantic_applications: &'a [crate::memory::PostTurnGovernanceJobV4],
+    semantic_applications: &'a [crate::memory::PostTurnGovernanceJob],
 }
 
 impl<'a> ProceduralReadAuthorityV1<'a> {
@@ -1024,7 +1024,7 @@ impl<'a> ProceduralReadAuthorityV1<'a> {
         root: &'a ProceduralSubjectValidityRootV1,
         completion: Option<&'a super::ProceduralFeedbackJobV2>,
         applications: &'a [super::ProceduralFeedbackApplicationLedgerV3],
-        semantic_applications: &'a [crate::memory::PostTurnGovernanceJobV4],
+        semantic_applications: &'a [crate::memory::PostTurnGovernanceJob],
     ) -> Result<Self> {
         root.validate(MAX_PROCEDURAL_SUBJECT_SCOPES)?;
         match (&root.state, completion) {

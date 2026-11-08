@@ -14,16 +14,16 @@ use bm_core::memory::{
     MemoryLongTermTargetResolutionReport, MemoryLongTermTombstoneRef, MemoryMutationReceipt,
     MemoryPrivacyClass, MemoryProjectionImpactReport, PostTurnGovernanceAttemptAuthorityV3,
     PostTurnGovernanceErrorClassV2, PostTurnGovernanceExecutionBlockAuthorityV1,
-    PostTurnGovernanceJobV4, PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport,
-    QueryFacetInput, RedactedTranscriptSlice, RelationshipDisclosureCeilingV1,
-    RelationshipSourceControlErrorKeyV1, RelationshipSourceStateV1, SessionMessage,
-    SessionTurnCommitReport, SubjectScopedRuntime, SubjectSoulLifecycleErrorKey,
-    SubjectSoulReadSelectorV1, TranscriptActivityReport, TranscriptAttrEnvelope,
-    TranscriptAttrWriteRejection, TranscriptCatalogLifecycle, TranscriptCommitReport,
-    TranscriptEvidenceRef, TranscriptLifecycleReport, TranscriptLifecycleTransition,
-    TranscriptQueryCursor, TranscriptRedactionReportItem, TranscriptRepairReport,
-    TranscriptReplayView, TranscriptSearchLifecycle, TranscriptSearchPage, TranscriptSearchSort,
-    TranscriptTimelineAnchor, TranscriptTimelinePage, TranscriptUtcRange,
+    PostTurnGovernanceFailureCode, PostTurnGovernanceFailureStage, PostTurnGovernanceJob,
+    PostTurnPrivateGardenReport, PostTurnSemanticGovernanceReport, QueryFacetInput,
+    RedactedTranscriptSlice, RelationshipDisclosureCeilingV1, RelationshipSourceControlErrorKeyV1,
+    RelationshipSourceStateV1, SessionMessage, SessionTurnCommitReport, SubjectScopedRuntime,
+    SubjectSoulLifecycleErrorKey, SubjectSoulReadSelectorV1, TranscriptActivityReport,
+    TranscriptAttrEnvelope, TranscriptAttrWriteRejection, TranscriptCatalogLifecycle,
+    TranscriptCommitReport, TranscriptEvidenceRef, TranscriptLifecycleReport,
+    TranscriptLifecycleTransition, TranscriptQueryCursor, TranscriptRedactionReportItem,
+    TranscriptRepairReport, TranscriptReplayView, TranscriptSearchLifecycle, TranscriptSearchPage,
+    TranscriptSearchSort, TranscriptTimelineAnchor, TranscriptTimelinePage, TranscriptUtcRange,
 };
 use bm_core::memory::{
     CompactMemoryGraph, EvidenceBacklink, FacetCoverageSelectionReport, FacetRankFusionReport,
@@ -476,9 +476,10 @@ impl ProceduralLearningSdkError {
             {
                 (Key::BudgetExceeded, Disposition::CapacityRejected)
             }
-            Error::Config { .. } | Error::InvalidInput { .. } | Error::NotFound { .. } => {
-                (Key::RepairRequired, Disposition::RepairRequired)
-            }
+            Error::Config { .. }
+            | Error::MalformedModelOutput { .. }
+            | Error::InvalidInput { .. }
+            | Error::NotFound { .. } => (Key::RepairRequired, Disposition::RepairRequired),
         };
         Self {
             operation,
@@ -1739,7 +1740,7 @@ pub struct MemoryGovernanceJobStatusRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryGovernanceJobStatusReport {
-    pub job: PostTurnGovernanceJobV4,
+    pub job: PostTurnGovernanceJob,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1749,7 +1750,7 @@ pub struct MemoryGovernanceActiveJobsRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryGovernanceActiveJobsReport {
-    pub jobs: Vec<PostTurnGovernanceJobV4>,
+    pub jobs: Vec<PostTurnGovernanceJob>,
     pub has_more: bool,
 }
 
@@ -1803,7 +1804,7 @@ pub struct MemoryGovernanceJobBlockRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryGovernanceJobBlockReport {
-    pub job: PostTurnGovernanceJobV4,
+    pub job: PostTurnGovernanceJob,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1818,7 +1819,7 @@ pub struct MemoryGovernanceClaimedJobBlockRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryGovernanceClaimedJobBlockReport {
-    pub job: PostTurnGovernanceJobV4,
+    pub job: PostTurnGovernanceJob,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1828,7 +1829,7 @@ pub struct MemoryGovernanceJobResumeRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryGovernanceJobResumeReport {
-    pub job: PostTurnGovernanceJobV4,
+    pub job: PostTurnGovernanceJob,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1866,12 +1867,14 @@ pub struct MemoryGovernanceJobFailRequest {
     pub lease_owner: String,
     pub lease_epoch: u64,
     pub error_class: PostTurnGovernanceErrorClassV2,
+    pub failure_stage: PostTurnGovernanceFailureStage,
+    pub failure_code: PostTurnGovernanceFailureCode,
     pub reason: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryGovernanceJobFailReport {
-    pub job: PostTurnGovernanceJobV4,
+    pub job: PostTurnGovernanceJob,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1900,7 +1903,7 @@ pub struct MemoryGovernanceJobClaimRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryGovernanceJobClaimReport {
-    pub job: PostTurnGovernanceJobV4,
+    pub job: PostTurnGovernanceJob,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1913,7 +1916,7 @@ pub struct MemoryGovernanceJobRenewRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryGovernanceJobRenewReport {
-    pub job: PostTurnGovernanceJobV4,
+    pub job: PostTurnGovernanceJob,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1922,11 +1925,13 @@ pub struct MemoryGovernanceJobRetryRequest {
     pub lease_owner: String,
     pub lease_epoch: u64,
     pub error_class: PostTurnGovernanceErrorClassV2,
+    pub failure_stage: PostTurnGovernanceFailureStage,
+    pub failure_code: PostTurnGovernanceFailureCode,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryGovernanceJobRetryReport {
-    pub job: PostTurnGovernanceJobV4,
+    pub job: PostTurnGovernanceJob,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1938,7 +1943,7 @@ pub struct MemoryGovernanceJobRunRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryGovernanceJobRunReport {
-    pub job: PostTurnGovernanceJobV4,
+    pub job: PostTurnGovernanceJob,
     pub private_garden_self_work: PostTurnPrivateGardenReport,
     pub semantic_governance: PostTurnSemanticGovernanceReport,
 }

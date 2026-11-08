@@ -34,6 +34,14 @@ pub enum Error {
         stage: &'static str,
     },
 
+    /// A complete model response failed a bounded output contract. The code
+    /// identifies the failure without retaining model text or private input.
+    #[error("malformed model output: {reason_code} (stage: {stage})")]
+    MalformedModelOutput {
+        stage: &'static str,
+        reason_code: &'static str,
+    },
+
     #[error("invalid input: {message} (stage: {stage})")]
     InvalidInput {
         message: String,
@@ -133,6 +141,10 @@ impl Error {
         }
     }
 
+    pub const fn malformed_model_output(stage: &'static str, reason_code: &'static str) -> Self {
+        Error::MalformedModelOutput { stage, reason_code }
+    }
+
     pub fn invalid_input(stage: &'static str, message: impl Into<String>) -> Self {
         Error::InvalidInput {
             message: message.into(),
@@ -172,6 +184,7 @@ impl Error {
             Error::Nvs { stage, .. } => stage,
             Error::Storage { stage, .. } => stage,
             Error::Config { stage, .. } => stage,
+            Error::MalformedModelOutput { stage, .. } => stage,
             Error::InvalidInput { stage, .. } => stage,
             Error::NotFound { stage, .. } => stage,
             Error::Conflict { stage, .. } => stage,
@@ -252,6 +265,9 @@ impl Error {
             Error::Nvs { source, .. } => Error::Nvs { source, stage },
             Error::Storage { source, .. } => Error::Storage { source, stage },
             Error::Config { message, .. } => Error::Config { message, stage },
+            Error::MalformedModelOutput { reason_code, .. } => {
+                Error::MalformedModelOutput { stage, reason_code }
+            }
             Error::InvalidInput { message, .. } => Error::InvalidInput { message, stage },
             Error::NotFound { message, .. } => Error::NotFound { message, stage },
             Error::Conflict { message, .. } => Error::Conflict { message, stage },

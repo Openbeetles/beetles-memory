@@ -160,7 +160,7 @@ fn completed_semantic_jobs(mutations: &[StoreMutation]) -> Result<BTreeSet<Strin
         } = mutation
         {
             if namespace == bm_core::memory::POST_TURN_GOVERNANCE_JOB_NAMESPACE {
-                let job: PostTurnGovernanceJobV4 = parse(value.clone())?;
+                let job: PostTurnGovernanceJob = parse(value.clone())?;
                 job.validate()?;
                 if job.status == bm_core::memory::PostTurnGovernanceJobStatusV2::Succeeded {
                     jobs.insert(job.job_id);
@@ -1358,7 +1358,7 @@ pub(crate) fn validate_transition(
                 AgentToolExperienceRevisionMaterialV4,
             >(value.clone())?)?);
         } else if namespace == bm_core::memory::POST_TURN_GOVERNANCE_JOB_NAMESPACE {
-            let job: PostTurnGovernanceJobV4 = parse(value.clone())?;
+            let job: PostTurnGovernanceJob = parse(value.clone())?;
             job.validate()?;
             if job.status == bm_core::memory::PostTurnGovernanceJobStatusV2::Succeeded {
                 completed.insert(job.job_id);

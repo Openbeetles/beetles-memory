@@ -777,11 +777,11 @@ fn prepare_real_semantic_commit(
         combine_agent_tool_experience_plans, AgentToolExperienceStoreMutationPlanV1,
     };
     use bm_core::skills::*;
-    let job: PostTurnGovernanceJobV4 = platform
+    let job: PostTurnGovernanceJob = platform
         .read_json_namespace(POST_TURN_GOVERNANCE_JOB_NAMESPACE)
         .unwrap()
         .into_iter()
-        .map(|doc| serde_json::from_value::<PostTurnGovernanceJobV4>(doc.value).unwrap())
+        .map(|doc| serde_json::from_value::<PostTurnGovernanceJob>(doc.value).unwrap())
         .find(|job| job.status == PostTurnGovernanceJobStatusV2::Leased)
         .expect("real leased job");
     let PostTurnGovernanceExecutionBindingV1::Bound {

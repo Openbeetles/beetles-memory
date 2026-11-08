@@ -86,7 +86,7 @@ struct MaterializedProceduralReadAuthority {
     root: ProceduralSubjectValidityRootV1,
     completion: Option<ProceduralFeedbackJobV2>,
     applications: Vec<ProceduralFeedbackApplicationLedgerV3>,
-    semantic_applications: Vec<bm_core::memory::PostTurnGovernanceJobV4>,
+    semantic_applications: Vec<bm_core::memory::PostTurnGovernanceJob>,
 }
 
 impl MaterializedProceduralReadAuthority {
@@ -1424,7 +1424,7 @@ impl<'a> RecallImmutableReadContext<'a> {
         }
         let mut semantic_applications = Vec::new();
         for id in semantic_jobs {
-            let job: bm_core::memory::PostTurnGovernanceJobV4 = self
+            let job: bm_core::memory::PostTurnGovernanceJob = self
                 .read_json(bm_core::memory::POST_TURN_GOVERNANCE_JOB_NAMESPACE, id)?
                 .ok_or_else(invalid)?;
             job.validate()?;

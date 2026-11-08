@@ -24,7 +24,7 @@ use bm_sdk::{
     MemoryTranscriptCommitRequest, MemoryTranscriptLifecycleRequest, MemoryTurnDeliveryStatus,
     MemoryTurnFinalizeRequest, MemoryTurnProtocol, MemoryTurnSource, Message,
     PostTurnGovernanceAttemptAuthorityV3, PostTurnGovernanceErrorClassV2,
-    PostTurnGovernanceExecutionBindingV1, PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV4,
+    PostTurnGovernanceExecutionBindingV1, PostTurnGovernanceJob, PostTurnGovernanceJobStatusV2,
     PostTurnGovernancePrivacyAuthorityV1, PostTurnGovernanceProviderProtocolV1, PressureLevel,
     RelationshipAccessConstraintV1, RelationshipDisclosureCeilingV1, RelationshipSourceClausesV1,
     RelationshipSourceControlAuthorityV1, RelationshipSourceControlIntentActionV1,
@@ -212,9 +212,7 @@ fn attempt_authority() -> PostTurnGovernanceAttemptAuthorityV3 {
     }
 }
 
-fn attempt_authority_for_job(
-    job: &PostTurnGovernanceJobV4,
-) -> PostTurnGovernanceAttemptAuthorityV3 {
+fn attempt_authority_for_job(job: &PostTurnGovernanceJob) -> PostTurnGovernanceAttemptAuthorityV3 {
     let PostTurnGovernanceExecutionBindingV1::Bound {
         binding_id,
         binding_revision,
@@ -1806,6 +1804,27 @@ struct HttpFailureLearningPort {
     status_code: u16,
 }
 
+struct SyntheticFailureLearningPort {
+    error: Option<bm_sdk::Error>,
+}
+
+impl GovernanceExecutionPort for SyntheticFailureLearningPort {
+    fn execute(
+        &mut self,
+        _envelope: &AuthorizedGovernanceEnvelope,
+        _binding: &ImmutableGovernanceExecutionBinding,
+        egress: &GovernanceEgressAuthority,
+        _operation: &mut dyn GovernanceExecutionOperation,
+    ) -> std::result::Result<(), GovernanceExecutionPortFailure> {
+        egress
+            .revalidate_before_egress()
+            .map_err(GovernanceExecutionPortFailure::Other)?;
+        Err(GovernanceExecutionPortFailure::Other(
+            self.error.take().expect("one synthetic failure per cycle"),
+        ))
+    }
+}
+
 impl GovernanceExecutionPort for HttpFailureLearningPort {
     fn execute(
         &mut self,
@@ -1972,6 +1991,14 @@ fn learning_engine_dead_letters_port_that_skips_governed_operation() {
         report.job.last_error_class,
         Some(PostTurnGovernanceErrorClassV2::SchemaViolation)
     );
+    assert_eq!(
+        report.job.last_failure_stage,
+        Some(bm_sdk::PostTurnGovernanceFailureStage::ExecutionContract)
+    );
+    assert_eq!(
+        report.job.last_failure_code,
+        Some(bm_sdk::PostTurnGovernanceFailureCode::PortSkippedOperation)
+    );
     assert!(report.job.receipt.is_none());
 }
 
@@ -2023,7 +2050,77 @@ fn learning_engine_owns_retry_and_provider_authority_transitions() {
         };
         assert_eq!(job.status, expected_status);
         assert_eq!(job.last_error_class, expected_error);
+        if status_code == 429 {
+            assert_eq!(
+                job.last_failure_stage,
+                Some(bm_sdk::PostTurnGovernanceFailureStage::HttpStatus)
+            );
+            assert_eq!(
+                job.last_failure_code,
+                Some(bm_sdk::PostTurnGovernanceFailureCode::ProviderHttpStatus)
+            );
+        }
         assert!(job.receipt.is_none());
+    }
+}
+
+#[test]
+fn learning_engine_retries_transport_and_model_output_failures_with_typed_diagnostics() {
+    for (name, error, expected_class, expected_stage, expected_code) in [
+        (
+            "response-body-io",
+            bm_sdk::Error::io(
+                "governance_model_http_read",
+                std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "private response"),
+            ),
+            PostTurnGovernanceErrorClassV2::ServiceUnavailable,
+            bm_sdk::PostTurnGovernanceFailureStage::ResponseBodyRead,
+            bm_sdk::PostTurnGovernanceFailureCode::ResponseBodyReadFailed,
+        ),
+        (
+            "persona-model-shape",
+            bm_sdk::Error::malformed_model_output(
+                "turn_persona_interpretation_output",
+                "invalid_json_or_shape",
+            ),
+            PostTurnGovernanceErrorClassV2::MalformedModelOutput,
+            bm_sdk::PostTurnGovernanceFailureStage::PersonaInterpretation,
+            bm_sdk::PostTurnGovernanceFailureCode::InvalidJsonOrShape,
+        ),
+    ] {
+        let profile = support::host_test_profile();
+        let runtime = Arc::new(test_runtime_with_scope_and_subject(
+            empty_store_platform(profile),
+            profile,
+            "llm.gateway",
+            "chat-a",
+            "subject-default",
+        ));
+        install_learning_binding(&runtime, 1);
+        runtime
+            .finalize_turn_with_inline_governance(
+                None,
+                None,
+                finalize_request("subject-default", name, name, "合成故障分类"),
+            )
+            .expect("finalize");
+        let engine = MemoryLearningEngine::attach(Arc::clone(&runtime)).expect("attach engine");
+        let mut port = SyntheticFailureLearningPort { error: Some(error) };
+        let outcome = engine
+            .run_due_cycle(learning_cycle_request(1), &mut port)
+            .expect("classified cycle");
+        let MemoryLearningCycleOutcome::Retrying(report) = outcome else {
+            panic!("temporary transport and model output failures must retry: {name}")
+        };
+        assert_eq!(
+            report.job.status,
+            PostTurnGovernanceJobStatusV2::RetryWaiting
+        );
+        assert_eq!(report.job.attempt_count, 1);
+        assert_eq!(report.job.last_error_class, Some(expected_class));
+        assert_eq!(report.job.last_failure_stage, Some(expected_stage));
+        assert_eq!(report.job.last_failure_code, Some(expected_code));
+        assert!(report.job.receipt.is_none());
     }
 }
 
@@ -4687,6 +4784,8 @@ fn retry_requires_current_lease_and_enforces_runtime_backoff() {
             lease_owner: "stale-worker".to_string(),
             lease_epoch: leased.lease_epoch,
             error_class: PostTurnGovernanceErrorClassV2::ServiceUnavailable,
+            failure_stage: bm_sdk::PostTurnGovernanceFailureStage::RequestSend,
+            failure_code: bm_sdk::PostTurnGovernanceFailureCode::RequestSendFailed,
         })
         .is_err());
     let retry = runtime
@@ -4695,6 +4794,8 @@ fn retry_requires_current_lease_and_enforces_runtime_backoff() {
             lease_owner: "worker-a".to_string(),
             lease_epoch: leased.lease_epoch,
             error_class: PostTurnGovernanceErrorClassV2::ServiceUnavailable,
+            failure_stage: bm_sdk::PostTurnGovernanceFailureStage::RequestSend,
+            failure_code: bm_sdk::PostTurnGovernanceFailureCode::RequestSendFailed,
         })
         .expect("schedule retry")
         .job;
@@ -4798,6 +4899,8 @@ fn due_query_does_not_starve_pending_work_behind_future_retries() {
                 lease_owner: format!("worker:future-{index}"),
                 lease_epoch: leased.lease_epoch,
                 error_class: PostTurnGovernanceErrorClassV2::ServiceUnavailable,
+                failure_stage: bm_sdk::PostTurnGovernanceFailureStage::RequestSend,
+                failure_code: bm_sdk::PostTurnGovernanceFailureCode::RequestSendFailed,
             })
             .expect("schedule future retry");
     }

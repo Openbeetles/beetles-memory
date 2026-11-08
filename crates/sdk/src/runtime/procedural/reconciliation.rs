@@ -1102,11 +1102,11 @@ impl MemoryRuntime {
     ) -> Result<bool> {
         use bm_core::memory::{
             PostTurnGovernanceBindingSnapshotV1, PostTurnGovernanceExecutionBindingV1,
-            PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV4,
+            PostTurnGovernanceJob, PostTurnGovernanceJobStatusV2,
             POST_TURN_GOVERNANCE_BINDING_SNAPSHOT_NAMESPACE, POST_TURN_GOVERNANCE_JOB_NAMESPACE,
         };
         let store = self.config.store_platform.as_ref().ok_or_else(repair)?;
-        let job: PostTurnGovernanceJobV4 = read(
+        let job: PostTurnGovernanceJob = read(
             store,
             POST_TURN_GOVERNANCE_JOB_NAMESPACE,
             &source.source_job_id,

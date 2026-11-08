@@ -8,7 +8,7 @@ use bm_core::memory::{
 use bm_core::skills::{agent_tool_experience_material_key, AgentToolExperienceRevisionMaterialV4};
 
 fn application_binding(
-    job: &PostTurnGovernanceJobV4,
+    job: &PostTurnGovernanceJob,
     read: &mut impl FnMut(&str, &str) -> Result<serde_json::Value>,
 ) -> Result<PostTurnGovernanceBindingSnapshotV1> {
     let invalid = || {
@@ -40,7 +40,7 @@ fn application_binding(
 /// The exact immutable receipt must resolve every producing revision, or its
 /// exact retained deletion tombstone. This never grants model access to raw.
 pub(crate) fn verify_semantic_method_application(
-    job: &PostTurnGovernanceJobV4,
+    job: &PostTurnGovernanceJob,
     mut read: impl FnMut(&str, &str) -> Result<serde_json::Value>,
 ) -> Result<Vec<ProceduralAppliedOwnerBindingV1>> {
     let invalid = || {
@@ -185,7 +185,7 @@ pub(crate) fn verify_semantic_method_source(
     {
         return Err(invalid());
     }
-    let job: PostTurnGovernanceJobV4 = serde_json::from_value(read(
+    let job: PostTurnGovernanceJob = serde_json::from_value(read(
         POST_TURN_GOVERNANCE_JOB_NAMESPACE,
         &source.source_job_id,
     )?)
@@ -351,7 +351,7 @@ pub(crate) fn dependencies(
             }
         }
         POST_TURN_GOVERNANCE_JOB_NAMESPACE => {
-            let job: PostTurnGovernanceJobV4 =
+            let job: PostTurnGovernanceJob =
                 serde_json::from_value(value.clone()).map_err(|_| invalid())?;
             job.validate()?;
             let key = bm_core::memory::ConversationKey::new(

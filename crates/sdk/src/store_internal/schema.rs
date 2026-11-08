@@ -16,7 +16,7 @@ use bm_core::memory::{
     MemoryGraphRecallIndexDoc, MemoryGraphRevisionDoc, MemoryGraphScopeManifest,
     MemoryLongTermGovernancePolicy, MemoryMutationAuditRecord, MemoryMutationOperationIdentity,
     MemoryMutationReceipt, PostTurnGovernanceBindingRevisionIndexV1,
-    PostTurnGovernanceBindingSnapshotV1, PostTurnGovernanceJobV4, PostTurnGovernanceScopeIndexV4,
+    PostTurnGovernanceBindingSnapshotV1, PostTurnGovernanceJob, PostTurnGovernanceScopeIndexV4,
     ProceduralFeedbackApplicationLedgerV3, ProceduralFeedbackJobV2, ProceduralFeedbackScopeIndexV2,
     RelationshipSourceConstitutionV1, RelationshipSourceControlOutcomeV1,
     RelationshipSourceControlReportV1, RelationshipSourceScopeManifestV1,
@@ -71,8 +71,8 @@ use crate::store_internal::recall_index::{
     TASK_LEARNING_BY_CHAT_INDEX_NAMESPACE,
 };
 
-pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema_v18";
-pub const STORE_SCHEMA_VERSION: u32 = 18;
+pub const STORE_SCHEMA_ID: &str = "beetle_memory_store_schema";
+pub const STORE_SCHEMA_VERSION: u32 = 19;
 pub(crate) const LONG_TERM_VERSION_MATERIAL_NAMESPACE: &str = "long_term_version_materials";
 pub(crate) const LONG_TERM_HEAD_MANIFEST_NAMESPACE: &str = "long_term_head_manifests";
 pub(crate) const LONG_TERM_VERSION_SCOPE_MANIFEST_NAMESPACE: &str =
@@ -1813,7 +1813,7 @@ fn validate_store_json_value(
             Ok(())
         }
         StoreJsonDecoderKind::PostTurnGovernanceJob => {
-            let job = decode_json::<PostTurnGovernanceJobV4>(value, invalid)?;
+            let job = decode_json::<PostTurnGovernanceJob>(value, invalid)?;
             if job.job_id != key || job.identity.job_key() != key || job.validate().is_err() {
                 return Err(invalid(
                     "post-turn governance job contract or physical key mismatch".to_string(),
@@ -3538,14 +3538,15 @@ mod tests {
     }
 
     #[test]
-    fn store_schema_identity_is_exactly_v18_and_rejects_v17() {
-        assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema_v18");
-        assert_eq!(STORE_SCHEMA_VERSION, 18);
+    fn store_schema_identity_keeps_a_stable_name_and_rejects_old_generations() {
+        assert_eq!(STORE_SCHEMA_ID, "beetle_memory_store_schema");
+        assert_eq!(STORE_SCHEMA_VERSION, 19);
         assert!(
             validate_store_schema_identity(STORE_SCHEMA_ID, STORE_SCHEMA_VERSION, "test").is_ok()
         );
+        assert!(validate_store_schema_identity(STORE_SCHEMA_ID, 18, "test").is_err());
         assert!(
-            validate_store_schema_identity("beetle_memory_store_schema_v17", 17, "test").is_err()
+            validate_store_schema_identity("beetle_memory_store_schema_v18", 18, "test").is_err()
         );
         assert!(
             validate_store_schema_identity("beetle_memory_store_schema_v14", 14, "test").is_err()
@@ -3557,7 +3558,7 @@ mod tests {
     }
 
     #[test]
-    fn store_v17_rejects_v2_governance_job_and_scope_payloads() {
+    fn store_rejects_obsolete_governance_job_and_scope_payloads() {
         let identity = PostTurnGovernanceIdentityV2::new(
             "space:v2-reject",
             "subject:v2-reject",
@@ -3567,7 +3568,7 @@ mod tests {
             "turn:v2-reject",
         )
         .unwrap();
-        let job = PostTurnGovernanceJobV4::pending(
+        let job = PostTurnGovernanceJob::pending(
             identity.clone(),
             1,
             "sha256:1111111111111111111111111111111111111111111111111111111111111111",

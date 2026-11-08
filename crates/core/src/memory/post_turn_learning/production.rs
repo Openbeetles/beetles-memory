@@ -106,7 +106,7 @@ impl GovernanceMethodExtractionSourceV1 {
     }
 
     pub fn build(
-        job: &crate::memory::PostTurnGovernanceJobV4,
+        job: &crate::memory::PostTurnGovernanceJob,
         binding: &crate::memory::PostTurnGovernanceBindingSnapshotV1,
         transcript: &crate::memory::TranscriptTurnRecord,
         input_group_ordinal: u32,
@@ -161,7 +161,7 @@ impl GovernanceMethodExtractionSourceV1 {
 
     pub fn validate_against(
         &self,
-        job: &crate::memory::PostTurnGovernanceJobV4,
+        job: &crate::memory::PostTurnGovernanceJob,
         binding: &crate::memory::PostTurnGovernanceBindingSnapshotV1,
         transcript: &crate::memory::TranscriptTurnRecord,
     ) -> Result<()> {

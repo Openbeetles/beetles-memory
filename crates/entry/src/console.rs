@@ -10,7 +10,7 @@ use bm_adapter::{AdapterOperation, AdapterResponse, AdapterSdkReport};
 #[cfg(feature = "nonproduction-replay-harness")]
 use bm_replay::{MemoryBenchmarkMode, MemoryBenchmarkReport};
 use bm_sdk::{
-    DeferredGovernanceQueueReport, GovernedScopeArchiveRootV1, MemoryArchiveScope,
+    DeferredGovernanceQueueReport, GovernedScopeArchiveRootV2, MemoryArchiveScope,
     MemorySpacePrivateMaterialPolicy, RuntimeBudgetReport, RuntimeMetricsReport,
     RuntimeSkillDetailReport, RuntimeSkillListReport, RuntimeSkillMutationReport,
     RuntimeSkillOwnerLocator, RuntimeSkillSummary, StoreBackendKind, WorkbenchApiMap,
@@ -422,7 +422,7 @@ pub struct EntryConsoleWorkbenchArchiveRestore {
     pub status: EntryConsoleWorkbenchStatus,
     pub scope: MemoryArchiveScope,
     pub private_material_policy: MemorySpacePrivateMaterialPolicy,
-    pub archive_root: Option<GovernedScopeArchiveRootV1>,
+    pub archive_root: Option<GovernedScopeArchiveRootV2>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

@@ -178,10 +178,18 @@ pub enum TurnPersonaInterpretationV1 {
 impl TurnPersonaInterpretationV1 {
     pub fn parse(raw: &str) -> Result<Self> {
         if raw.len() > MAX_PERSONA_INTERPRETATION_BYTES {
-            return Err(invalid());
+            return Err(Error::malformed_model_output(
+                "turn_persona_interpretation_output",
+                "output_too_large",
+            ));
         }
         // No salvage of prose, partial JSON, defaults or authority fields.
-        serde_json::from_str(raw).map_err(|_| invalid())
+        serde_json::from_str(raw).map_err(|_| {
+            Error::malformed_model_output(
+                "turn_persona_interpretation_output",
+                "invalid_json_or_shape",
+            )
+        })
     }
 
     pub fn validate_against(
@@ -224,7 +232,11 @@ impl TurnPersonaInterpretationV1 {
                 entry.settlement != AssistantMessageSettlement::Complete
                     || entry.message.content.trim().is_empty()
             })
-            || priority_order.len() > 8
+            || relationship.is_some_and(|id| !identifier(id))
+        {
+            return Err(invalid());
+        }
+        if priority_order.len() > 8
             || priority_order.iter().any(|value| {
                 super::persona_priority::canonical_priority_token(value).as_deref()
                     != Some(value.as_str())
@@ -244,7 +256,8 @@ impl TurnPersonaInterpretationV1 {
             || (*scope == TurnPersonaInterpretationScopeV1::Subject
                 && !relationship_posture.is_empty())
             || (*scope == TurnPersonaInterpretationScopeV1::ActiveRelationship
-                && relationship.is_none_or(|id| !identifier(id)))
+                && relationship.is_none())
+            || (*scope == TurnPersonaInterpretationScopeV1::Subject && relationship.is_some())
             || (supporting_observations.is_empty() && supporting_visual_sources.is_empty())
             || supporting_observations
                 .len()
@@ -253,7 +266,7 @@ impl TurnPersonaInterpretationV1 {
                 .saturating_add(counter_visual_sources.len())
                 > MAX_PERSONA_OBSERVATION_REFS
         {
-            return Err(invalid());
+            return Err(invalid_model_output("invalid_semantic_shape"));
         }
         let mut observed = std::collections::BTreeSet::new();
         for observation in supporting_observations.iter().chain(counter_observations) {
@@ -270,7 +283,7 @@ impl TurnPersonaInterpretationV1 {
                         && message.content.contains(&observation.quote)
                 })
             {
-                return Err(invalid());
+                return Err(invalid_model_output("invalid_observation_quote"));
             }
         }
         let mut visual_sources = std::collections::BTreeSet::new();
@@ -278,24 +291,18 @@ impl TurnPersonaInterpretationV1 {
         for visual in visual_observations {
             visual.validate_against(transcript)?;
             if !visual_sources.insert(&visual.episode_source)
-                || match scope {
-                    TurnPersonaInterpretationScopeV1::Subject => {
-                        visual.episode_source.relationship_id.is_some()
-                    }
-                    TurnPersonaInterpretationScopeV1::ActiveRelationship => {
-                        visual.episode_source.relationship_id.as_deref() != relationship
-                    }
-                }
+                || visual.episode_source.relationship_id.as_deref() != relationship
             {
                 return Err(invalid());
             }
         }
+        let mut selected_visual_sources = std::collections::BTreeSet::new();
         for source in supporting_visual_sources
             .iter()
             .chain(counter_visual_sources)
         {
-            if !visual_sources.contains(source) {
-                return Err(invalid());
+            if !visual_sources.contains(source) || !selected_visual_sources.insert(source) {
+                return Err(invalid_model_output("unknown_visual_source"));
             }
         }
         if !supporting_visual_sources.is_empty() {
@@ -303,7 +310,7 @@ impl TurnPersonaInterpretationV1 {
                 let visual = visual_observations
                     .iter()
                     .find(|visual| &visual.episode_source == source)
-                    .ok_or_else(invalid)?;
+                    .ok_or_else(|| invalid_model_output("unknown_visual_source"))?;
                 original_turns.insert(
                     visual
                         .observation
@@ -318,15 +325,11 @@ impl TurnPersonaInterpretationV1 {
                 || (*scope == TurnPersonaInterpretationScopeV1::Subject
                     && supporting_observations.is_empty())
             {
-                return Err(invalid());
+                return Err(invalid_model_output("insufficient_visual_support"));
             }
         }
-        if visual_sources.len()
-            != supporting_visual_sources
-                .len()
-                .saturating_add(counter_visual_sources.len())
-        {
-            return Err(invalid());
+        if visual_sources.len() != selected_visual_sources.len() {
+            return Err(invalid_model_output("incomplete_visual_source_partition"));
         }
         Ok(())
     }
@@ -589,7 +592,8 @@ impl GovernedTurnPersonaEvidenceV1 {
             self.relationship_id.clone(),
             self.interpretation.clone(),
             self.visual_observations.clone(),
-        )?
+        )
+        .map_err(|_| invalid())?
         .ok_or_else(invalid)?;
         if self != &rebound {
             return Err(invalid());
@@ -675,6 +679,10 @@ fn invalid() -> Error {
         "turn_persona_learning",
         "persona source, interpretation or generation admission is invalid",
     )
+}
+
+fn invalid_model_output(reason_code: &'static str) -> Error {
+    Error::malformed_model_output("turn_persona_interpretation_output", reason_code)
 }
 
 #[cfg(test)]

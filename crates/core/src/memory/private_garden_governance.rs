@@ -458,16 +458,16 @@ fn parse_private_garden_governance_response_strict(
         LlmJsonPayload::Null => return Ok(None),
         LlmJsonPayload::Value(value) => value,
         LlmJsonPayload::Absent => {
-            return Err(Error::config(
+            return Err(Error::malformed_model_output(
                 "private_garden_governance_output",
-                "model output is not valid JSON",
+                "invalid_json",
             ));
         }
     };
     let object = value.as_object().ok_or_else(|| {
-        Error::config(
+        Error::malformed_model_output(
             "private_garden_governance_output",
-            "model output must be null or one governance object",
+            "invalid_governance_object",
         )
     })?;
     if object
@@ -513,9 +513,9 @@ fn parse_private_garden_governance_response_strict(
                 .is_none_or(|items| items.iter().any(|item| !item.is_string()))
         })
     {
-        return Err(Error::config(
+        return Err(Error::malformed_model_output(
             "private_garden_governance_output",
-            "model output differs from the private-garden schema",
+            "invalid_governance_schema",
         ));
     }
     Ok(parse_private_garden_governance_response(raw))
@@ -543,9 +543,9 @@ fn validate_private_garden_governance_actions_strict(
             .iter()
             .any(|path| normalize_private_garden_doc_path(path).is_err())
     {
-        return Err(Error::config(
+        return Err(Error::malformed_model_output(
             "private_garden_governance_output",
-            "model actions exceed the governed private-garden contract",
+            "actions_exceed_policy",
         ));
     }
     Ok(())

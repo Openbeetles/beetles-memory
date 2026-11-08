@@ -223,10 +223,12 @@ pub struct DeferredGovernanceJobSummary {
     pub created_at: u64,
     pub attempts: u32,
     pub last_error: Option<String>,
+    pub last_failure_stage: Option<PostTurnGovernanceFailureStage>,
+    pub last_failure_code: Option<PostTurnGovernanceFailureCode>,
 }
 
 impl DeferredGovernanceJobSummary {
-    pub fn from_job(job: &PostTurnGovernanceJobV4) -> Self {
+    pub fn from_job(job: &PostTurnGovernanceJob) -> Self {
         let status = match job.status {
             PostTurnGovernanceJobStatusV2::Pending
             | PostTurnGovernanceJobStatusV2::BlockedConfiguration
@@ -259,6 +261,8 @@ impl DeferredGovernanceJobSummary {
             created_at: job.created_at,
             attempts: job.attempt_count,
             last_error: job.last_error_class.map(|error| error.as_str().to_string()),
+            last_failure_stage: job.last_failure_stage,
+            last_failure_code: job.last_failure_code,
         }
     }
 }
@@ -277,7 +281,7 @@ pub struct DeferredGovernanceQueueReport {
 }
 
 pub fn build_deferred_governance_queue_report(
-    jobs: &[PostTurnGovernanceJobV4],
+    jobs: &[PostTurnGovernanceJob],
     recent_limit: usize,
 ) -> DeferredGovernanceQueueReport {
     let mut report = DeferredGovernanceQueueReport {
@@ -328,7 +332,7 @@ pub fn build_deferred_governance_queue_report(
     report
 }
 
-pub const POST_TURN_GOVERNANCE_JOB_SCHEMA_VERSION: u32 = 4;
+pub const POST_TURN_GOVERNANCE_JOB_SCHEMA_VERSION: u32 = 5;
 pub const POST_TURN_GOVERNANCE_SCOPE_INDEX_SCHEMA_VERSION: u32 = 4;
 pub const POST_TURN_GOVERNANCE_PRIVACY_AUTHORITY_SCHEMA_VERSION: u32 = 1;
 pub const POST_TURN_GOVERNANCE_JOB_NAMESPACE: &str = "post_turn_governance_jobs";
@@ -446,6 +450,87 @@ pub enum PostTurnGovernanceErrorClassV2 {
     IdentityMismatch,
     TranscriptDigestMismatch,
     SchemaViolation,
+}
+
+/// Safe, durable location of the last failed governance attempt. This is a
+/// fixed code, never a Provider response, credential, transcript, or raw error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PostTurnGovernanceFailureStage {
+    RequestSend,
+    HttpStatus,
+    ResponseBodyRead,
+    ModelResponseDecode,
+    PersonaInterpretation,
+    PrivateGardenOutput,
+    LongTermExtractionOutput,
+    CredentialBinding,
+    RequestEncode,
+    ExecutionContract,
+    Unknown,
+}
+
+impl PostTurnGovernanceFailureStage {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RequestSend => "request_send",
+            Self::HttpStatus => "http_status",
+            Self::ResponseBodyRead => "response_body_read",
+            Self::ModelResponseDecode => "model_response_decode",
+            Self::PersonaInterpretation => "persona_interpretation",
+            Self::PrivateGardenOutput => "private_garden_output",
+            Self::LongTermExtractionOutput => "long_term_extraction_output",
+            Self::CredentialBinding => "credential_binding",
+            Self::RequestEncode => "request_encode",
+            Self::ExecutionContract => "execution_contract",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Fixed, privacy-safe failure code. Raw `Error` detail and model output must
+/// never be copied into a durable governance job or operator report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PostTurnGovernanceFailureCode {
+    ResponseBodyReadFailed,
+    RequestSendFailed,
+    ProviderHttpStatus,
+    CredentialUnavailable,
+    RequestEncodingFailed,
+    ResponseBudgetExceeded,
+    ConfigurationInvalid,
+    InputContractRejected,
+    IdentityMismatch,
+    PortSkippedOperation,
+    IoFailure,
+    ServiceFailure,
+    ResponseJsonInvalid,
+    OpenaiChoicesMissing,
+    OpenaiContentMissing,
+    OllamaContentMissing,
+    OutputTooLarge,
+    InvalidJsonOrShape,
+    InvalidSemanticShape,
+    InvalidObservationQuote,
+    UnknownVisualSource,
+    InsufficientVisualSupport,
+    IncompleteVisualSourcePartition,
+    InvalidJson,
+    InvalidGovernanceObject,
+    InvalidGovernanceSchema,
+    ActionsExceedPolicy,
+    ExpectedJsonArray,
+    BatchLimitExceeded,
+    ItemNotObject,
+    UnknownField,
+    InvalidItemSchema,
+    EmptyTopic,
+    IncompleteFactualItem,
+    UnsupportedPlane,
+    NormalizationFailed,
+    IncompleteOrToolCallResponse,
+    UnknownModelOutputCode,
 }
 
 impl PostTurnGovernanceErrorClassV2 {
@@ -1225,7 +1310,7 @@ impl PostTurnGovernanceReceiptV4 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PostTurnGovernanceJobV4 {
+pub struct PostTurnGovernanceJob {
     pub schema_version: u32,
     pub job_id: String,
     pub idempotency_key: String,
@@ -1252,13 +1337,15 @@ pub struct PostTurnGovernanceJobV4 {
     pub last_provider_permission_recovery_generation: Option<u64>,
     pub blocking_reason: Option<String>,
     pub last_error_class: Option<PostTurnGovernanceErrorClassV2>,
+    pub last_failure_stage: Option<PostTurnGovernanceFailureStage>,
+    pub last_failure_code: Option<PostTurnGovernanceFailureCode>,
     pub receipt: Option<PostTurnGovernanceReceiptV4>,
     pub created_at: u64,
     pub updated_at: u64,
     pub terminal_at: Option<u64>,
 }
 
-impl PostTurnGovernanceJobV4 {
+impl PostTurnGovernanceJob {
     /// Body-free producing input commitment retained by the semantic receipt.
     /// Mutable lease/attempt/status/receipt fields are deliberately excluded.
     pub fn method_source_commitment_digest(
@@ -1354,6 +1441,8 @@ impl PostTurnGovernanceJobV4 {
                     .to_string()
             }),
             last_error_class: None,
+            last_failure_stage: None,
+            last_failure_code: None,
             receipt: None,
             created_at: now_secs,
             updated_at: now_secs,
@@ -1418,6 +1507,8 @@ impl PostTurnGovernanceJobV4 {
             || self
                 .last_provider_permission_recovery_generation
                 .is_some_and(|generation| generation == 0)
+            || self.last_error_class.is_some() != self.last_failure_stage.is_some()
+            || self.last_error_class.is_some() != self.last_failure_code.is_some()
         {
             return Err(Error::invalid_input(
                 "post_turn_governance_job",
@@ -1523,7 +1614,7 @@ pub struct PostTurnGovernanceJobRefV2 {
 }
 
 impl PostTurnGovernanceJobRefV2 {
-    pub fn from_job(job: &PostTurnGovernanceJobV4) -> Self {
+    pub fn from_job(job: &PostTurnGovernanceJob) -> Self {
         Self {
             job_schema_version: POST_TURN_GOVERNANCE_JOB_SCHEMA_VERSION,
             job_id: job.job_id.clone(),

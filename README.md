@@ -20,7 +20,7 @@ The project is not a vector database, a generic RAG framework, a chat-history du
 | Model gateway and transparent local-model control | `bm-llm-gateway`, `bm-ollama-transparent` |
 | Adapters | `bm-cli`, `bm-http`, `bm-wss`, `bm-mcp`, `bm-a2a` |
 
-The [0.14.0 macOS SDK source notes](docs/en/release-notes-0.14.0.md) cover visual perception, governed visual memory, and Store v18. Store v18 has no v17 compatibility reader or automatic migration; an older Store must fail to open without changing its data. The [0.13.0 source notes](docs/en/release-notes-0.13.0.md) describe the preceding first-person inhabited-subject delivery. Release identity is determined by a verified Git tag, not a working-tree version number; crates.io packages, binaries, and deployment each require separate release evidence. The repository includes smoke-test examples under `examples/` and platform capability fixtures under `fixtures/platform/capabilities/`.
+The [0.15.0 macOS SDK source notes](docs/en/release-notes-0.15.0.md) cover governed learning retries and safe failure diagnostics. The [0.14.0 notes](docs/en/release-notes-0.14.0.md) cover visual perception and governed visual memory. The current Store rejects older schema generations without changing their data; no automatic migration is provided. Release identity is determined by a verified Git tag, not a working-tree version number; crates.io packages, binaries, and deployment each require separate release evidence. The repository includes smoke-test examples under `examples/` and platform capability fixtures under `fixtures/platform/capabilities/`.
 
 ## Capabilities
 
@@ -127,6 +127,7 @@ English documentation:
 - [Replay and Archive](docs/en/replay-and-archive.md)
 - [Operator Guide](docs/en/operator-guide.md)
 - [Release Checklist](docs/en/release-checklist.md)
+- [0.15.0 macOS SDK Source Release Notes](docs/en/release-notes-0.15.0.md)
 - [0.14.0 macOS SDK Source Release Notes](docs/en/release-notes-0.14.0.md)
 - [0.13.0 Source Release Notes](docs/en/release-notes-0.13.0.md)
 - [0.12.0 Source Release Notes](docs/en/release-notes-0.12.0.md)
@@ -157,6 +158,7 @@ English documentation:
 - [回放与归档](docs/zh-CN/replay-and-archive.md)
 - [运维与检查](docs/zh-CN/operator-guide.md)
 - [发布清单](docs/zh-CN/release-checklist.md)
+- [0.15.0 macOS SDK 源码发布说明](docs/zh-CN/release-notes-0.15.0.md)
 - [0.14.0 macOS SDK 源码发布说明](docs/zh-CN/release-notes-0.14.0.md)
 - [0.13.0 源码发布说明](docs/zh-CN/release-notes-0.13.0.md)
 - [0.12.0 源码发布说明](docs/zh-CN/release-notes-0.12.0.md)

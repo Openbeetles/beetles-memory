@@ -345,6 +345,44 @@ fn persona_interpreter_has_no_authority_or_identity_fields() {
 }
 
 #[test]
+fn malformed_persona_response_is_distinct_from_source_contract_failure() {
+    for raw in [
+        "Analysis: {\"decision\":\"no_change\"}".to_string(),
+        "x".repeat(MAX_PERSONA_INTERPRETATION_BYTES + 1),
+    ] {
+        assert!(matches!(
+            TurnPersonaInterpretationV1::parse(&raw),
+            Err(Error::MalformedModelOutput {
+                stage: "turn_persona_interpretation_output",
+                ..
+            })
+        ));
+    }
+    let (_, _, transcript, mut proposal) = fixture();
+    let TurnPersonaInterpretationV1::Growth {
+        supporting_observations,
+        ..
+    } = &mut proposal
+    else {
+        panic!("growth fixture");
+    };
+    supporting_observations[0].quote = "not in canonical source".into();
+    assert!(matches!(
+        proposal.validate_against(&transcript, None),
+        Err(Error::MalformedModelOutput {
+            reason_code: "invalid_observation_quote",
+            ..
+        })
+    ));
+    let mut unavailable = transcript;
+    unavailable.external_content_used = true;
+    assert!(matches!(
+        proposal.validate_against(&unavailable, None),
+        Err(Error::InvalidInput { .. })
+    ));
+}
+
+#[test]
 fn persona_growth_cannot_confuse_values_or_aliases_with_governance_priority_domains() {
     let (_, _, transcript, mut proposal) = fixture();
     let TurnPersonaInterpretationV1::Growth { priority_order, .. } = &mut proposal else {

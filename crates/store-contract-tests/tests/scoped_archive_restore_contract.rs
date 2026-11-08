@@ -14,7 +14,7 @@ use bm_sdk::nonproduction_replay_harness::{
     export_memory_space, import_memory_space, StorePhysicalOwningScope, StoreSnapshot,
 };
 use bm_sdk::{
-    primary_human_subject_id, GovernedRuntimeSkillWriteInput, GovernedScopeArchiveRootV1,
+    primary_human_subject_id, GovernedRuntimeSkillWriteInput, GovernedScopeArchiveRootV2,
     MemoryArchiveScope, MemoryCapabilityPolicy, MemoryClock, MemoryIdentity, MemoryPrivacyClass,
     MemoryPrivacyPolicy, MemoryRuntime, MemoryScope, MemorySpaceExportRequest,
     MemorySpaceImportRequest, MemorySpacePrivateMaterialPolicy, MemoryStoreHandle,
@@ -766,7 +766,7 @@ fn assert_backend_scoped_archive_restore(backend: &str, root: &Path, scenario: A
     );
 
     let before_forged = full_snapshot(&target);
-    let forged_root = GovernedScopeArchiveRootV1::build(
+    let forged_root = GovernedScopeArchiveRootV2::build(
         archive_scope_subject(SUBJECT_A),
         MemorySpacePrivateMaterialPolicy::ExcludePrivate,
         [],

@@ -222,7 +222,7 @@ impl bm_sdk::LlmHttpClient for ReqwestGovernanceLlmHttpClient {
             .is_some_and(|length| length > self.response_max_bytes as u64)
         {
             return Err(bm_sdk::Error::config(
-                "governance_model_http",
+                "governance_model_http_budget",
                 "model response exceeds the configured byte budget",
             ));
         }
@@ -230,10 +230,10 @@ impl bm_sdk::LlmHttpClient for ReqwestGovernanceLlmHttpClient {
         response
             .take((self.response_max_bytes as u64).saturating_add(1))
             .read_to_end(&mut bytes)
-            .map_err(|error| bm_sdk::Error::config("governance_model_http", error.to_string()))?;
+            .map_err(|error| bm_sdk::Error::io("governance_model_http_read", error))?;
         if bytes.len() > self.response_max_bytes {
             return Err(bm_sdk::Error::config(
-                "governance_model_http",
+                "governance_model_http_budget",
                 "model response exceeds the configured byte budget",
             ));
         }
@@ -318,21 +318,26 @@ impl bm_sdk::LlmClient for ConfiguredGovernanceLlmClient {
         {
             let token = std::env::var(credential_env).map_err(|_| {
                 bm_sdk::Error::config(
-                    "governance_model_llm",
+                    "governance_model_credential",
                     "credential environment variable is unset",
                 )
             })?;
             bearer = format!("Bearer {token}");
             headers.push(("authorization", bearer.as_str()));
         }
-        let body = serde_json::to_vec(&body)
-            .map_err(|error| bm_sdk::Error::config("governance_model_llm", error.to_string()))?;
+        let body = serde_json::to_vec(&body).map_err(|error| {
+            bm_sdk::Error::config("governance_model_request", error.to_string())
+        })?;
         let (status, response) = http.do_post(&url, &headers, &body)?;
         if !(200..300).contains(&status) {
             return Err(bm_sdk::Error::http("governance_model_llm", status));
         }
-        let value: serde_json::Value = serde_json::from_slice(response.as_ref())
-            .map_err(|error| bm_sdk::Error::config("governance_model_llm", error.to_string()))?;
+        let value: serde_json::Value = serde_json::from_slice(response.as_ref()).map_err(|_| {
+            bm_sdk::Error::malformed_model_output(
+                "governance_model_response",
+                "response_json_invalid",
+            )
+        })?;
         let (content, stop_reason) = match self.binding.protocol {
             EntryGovernanceModelProtocol::OpenAiCompatible => {
                 let choice = value
@@ -340,9 +345,9 @@ impl bm_sdk::LlmClient for ConfiguredGovernanceLlmClient {
                     .and_then(serde_json::Value::as_array)
                     .and_then(|choices| choices.first())
                     .ok_or_else(|| {
-                        bm_sdk::Error::config(
-                            "governance_model_llm",
-                            "OpenAI-compatible response is missing choices",
+                        bm_sdk::Error::malformed_model_output(
+                            "governance_model_response",
+                            "openai_choices_missing",
                         )
                     })?;
                 let content = choice
@@ -350,9 +355,9 @@ impl bm_sdk::LlmClient for ConfiguredGovernanceLlmClient {
                     .and_then(|message| message.get("content"))
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| {
-                        bm_sdk::Error::config(
-                            "governance_model_llm",
-                            "OpenAI-compatible response is missing message content",
+                        bm_sdk::Error::malformed_model_output(
+                            "governance_model_response",
+                            "openai_content_missing",
                         )
                     })?;
                 let stop_reason = match choice
@@ -372,9 +377,9 @@ impl bm_sdk::LlmClient for ConfiguredGovernanceLlmClient {
                     .and_then(|message| message.get("content"))
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| {
-                        bm_sdk::Error::config(
-                            "governance_model_llm",
-                            "Ollama response is missing message content",
+                        bm_sdk::Error::malformed_model_output(
+                            "governance_model_response",
+                            "ollama_content_missing",
                         )
                     })?;
                 let stop_reason = match value.get("done_reason").and_then(serde_json::Value::as_str)

@@ -53,6 +53,7 @@ required_docs=(
   "docs/en/adapters.md"
   "docs/en/operator-guide.md"
   "docs/en/release-checklist.md"
+  "docs/en/release-notes-0.15.0.md"
   "docs/en/release-notes-0.14.0.md"
   "docs/en/release-notes-0.13.0.md"
   "docs/en/release-notes-0.12.0.md"
@@ -78,6 +79,7 @@ required_docs=(
   "docs/zh-CN/adapters.md"
   "docs/zh-CN/operator-guide.md"
   "docs/zh-CN/release-checklist.md"
+  "docs/zh-CN/release-notes-0.15.0.md"
   "docs/zh-CN/release-notes-0.14.0.md"
   "docs/zh-CN/release-notes-0.13.0.md"
   "docs/zh-CN/release-notes-0.12.0.md"
@@ -108,7 +110,7 @@ for doc in "${required_docs[@]}"; do
   fi
 done
 
-release_version="0.14.0"
+release_version="0.15.0"
 version_manifests=(
   "crates/core/Cargo.toml"
   "crates/store-contract-tests/Cargo.toml"
@@ -195,6 +197,15 @@ for desktop_identity in apps/desktop/package.json apps/desktop/package-lock.json
   }
 done
 
+for doc in docs/en/release-notes-0.15.0.md docs/zh-CN/release-notes-0.15.0.md; do
+  for marker in 'PostTurnGovernanceJob' 'PostTurnGovernanceFailureStage' 'PostTurnGovernanceFailureCode' 'macOS SDK'; do
+    rg -F -qi "$marker" "$doc" || {
+      echo "0.15.0 source notes omit required governance SDK marker: doc=$doc marker=$marker" >&2
+      exit 1
+    }
+  done
+done
+
 for doc in docs/en/release-notes-0.14.0.md docs/zh-CN/release-notes-0.14.0.md; do
   for marker in 'Store v18' 'macOS SDK' 'VisualInput'; do
     rg -F -qi "$marker" "$doc" || {
@@ -274,7 +285,7 @@ for doc in docs/en/api.md docs/zh-CN/api.md; do
 done
 
 for doc in docs/en/integration.md docs/zh-CN/integration.md; do
-  for marker in 'Job V4' 'MemoryLearningService' 'MemoryLearningEngine' 'typed inspection authority'; do
+  for marker in 'PostTurnGovernanceJob' 'MemoryLearningService' 'MemoryLearningEngine' 'typed inspection authority'; do
     rg -F -q "$marker" "$doc" || {
       echo "current integration document omits the production learning owner: doc=$doc marker=$marker" >&2
       exit 1

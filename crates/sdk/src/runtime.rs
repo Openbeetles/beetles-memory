@@ -145,7 +145,7 @@ use bm_core::memory::{
     PostReplyMemoryMaintenanceContext, PostReplyMemoryMaintenanceInput,
     PostTurnGovernanceAttemptAuthorityV3, PostTurnGovernanceBindingSnapshotV1,
     PostTurnGovernanceDecisionSummaryV1, PostTurnGovernanceExecutionBindingV1,
-    PostTurnGovernanceIdentityV2, PostTurnGovernanceJobStatusV2, PostTurnGovernanceJobV4,
+    PostTurnGovernanceIdentityV2, PostTurnGovernanceJob, PostTurnGovernanceJobStatusV2,
     PostTurnGovernancePrivacyAuthorityV1, PostTurnLearningEvidenceV3, PostTurnPrivateGardenReport,
     PostTurnSemanticGovernanceReport, PremiseTypedSource, PrivateDocStore, PrivateDocWorkspace,
     PrivateGardenDoc, PrivateGardenDocRecord, PrivateGardenGovernanceContext,
@@ -19433,7 +19433,7 @@ impl MemoryRuntime {
         tool_calls: u32,
         blocking_reason: &str,
         now_secs: u64,
-    ) -> Result<PostTurnGovernanceJobV4> {
+    ) -> Result<PostTurnGovernanceJob> {
         if record.key.memory_space_id != self.config.memory_space_id
             || record.key.channel_id != self.config.scope.channel
             || record.subject != self.config.subject_id
@@ -19459,7 +19459,7 @@ impl MemoryRuntime {
             .expect("governance current binding lock")
             .clone()
             .unwrap_or(PostTurnGovernanceExecutionBindingV1::Unbound);
-        let job = PostTurnGovernanceJobV4::pending(
+        let job = PostTurnGovernanceJob::pending(
             identity,
             record.sequence,
             post_turn_governance_transcript_digest(record)?,
@@ -19550,7 +19550,7 @@ impl MemoryRuntime {
 
     pub(crate) fn governance_binding_snapshot_for_job(
         &self,
-        job: &PostTurnGovernanceJobV4,
+        job: &PostTurnGovernanceJob,
     ) -> Result<PostTurnGovernanceBindingSnapshotV1> {
         let binding = match &job.execution_binding {
             PostTurnGovernanceExecutionBindingV1::Bound {
@@ -20230,6 +20230,8 @@ impl MemoryRuntime {
             &request.lease_owner,
             request.lease_epoch,
             request.error_class,
+            request.failure_stage,
+            request.failure_code,
             &request.reason,
             self.config.clock.now_secs(),
         )?;
@@ -20533,6 +20535,8 @@ impl MemoryRuntime {
             &request.lease_owner,
             request.lease_epoch,
             request.error_class,
+            request.failure_stage,
+            request.failure_code,
             self.config.clock.now_secs(),
         )?;
         Ok(MemoryGovernanceJobRetryReport { job })
@@ -20949,7 +20953,7 @@ impl MemoryRuntime {
         })
     }
 
-    fn validate_governance_job_runtime_scope(&self, job: &PostTurnGovernanceJobV4) -> Result<()> {
+    fn validate_governance_job_runtime_scope(&self, job: &PostTurnGovernanceJob) -> Result<()> {
         if job.identity.memory_space_id != self.config.memory_space_id
             || job.identity.mounted_subject_id != self.config.subject_id
             || job.identity.channel_id != self.config.scope.channel
@@ -21117,7 +21121,7 @@ impl MemoryRuntime {
 
     fn load_governance_transcript(
         &self,
-        job: &PostTurnGovernanceJobV4,
+        job: &PostTurnGovernanceJob,
     ) -> Result<TranscriptTurnRecord> {
         let key = ConversationKey::new(
             &job.identity.memory_space_id,
@@ -21143,7 +21147,7 @@ impl MemoryRuntime {
     fn ensure_governance_disclosure_authority(
         &self,
         store_platform: &StorePlatform,
-        leased: &PostTurnGovernanceJobV4,
+        leased: &PostTurnGovernanceJob,
     ) -> Result<()> {
         let current = read_governance_job(store_platform, &leased.job_id)?.ok_or_else(|| {
             Error::not_found(
@@ -21188,7 +21192,7 @@ impl MemoryRuntime {
     fn ensure_governance_transcript_claimable(
         &self,
         store_platform: &StorePlatform,
-        job: &PostTurnGovernanceJobV4,
+        job: &PostTurnGovernanceJob,
     ) -> Result<()> {
         let key = ConversationKey::new(
             &job.identity.memory_space_id,
@@ -23270,7 +23274,7 @@ impl LlmHttpClient for GovernanceDisclosureHttpClient<'_> {
 }
 
 fn canonical_turn_delta_from_transcript(
-    job: &PostTurnGovernanceJobV4,
+    job: &PostTurnGovernanceJob,
     record: &TranscriptTurnRecord,
 ) -> Result<CanonicalTurnDelta> {
     if !record.permits_post_turn_learning()

@@ -1,6 +1,6 @@
 # Getting Started
 
-Use this guide when embedding the 0.14.0 macOS SDK source contract into a Rust host. [0.14.0 source notes](release-notes-0.14.0.md) cover perception and Store v18; the 0.13.0 first-person projection remains the baseline. The `v0.14.0` Git tag must be verified before treating it as published. For protocol deployment, start here and then read [Adapters](adapters.md).
+Use this guide when embedding the 0.15.0 macOS SDK source contract into a Rust host. [0.15.0 source notes](release-notes-0.15.0.md) cover governed learning recovery; the [0.14.0 notes](release-notes-0.14.0.md) cover perception. The `v0.15.0` Git tag must be verified before treating it as published. For protocol deployment, start here and then read [Adapters](adapters.md).
 
 ## Dependency
 
@@ -11,16 +11,16 @@ From this repository:
 bm-sdk = { path = "crates/sdk", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
-Only after `v0.14.0` has been published and verified can an external repository use the source tag (a crates.io publication is separate):
+Only after `v0.15.0` has been published and verified can an external repository use the source tag (a crates.io publication is separate):
 
 ```toml
 [dependencies]
-bm-sdk = { version = "0.14.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.14.0", features = ["profile-desktop-macos-embedded-sdk"] }
+bm-sdk = { version = "0.15.0", git = "https://github.com/Openbeetles/beetles-memory", tag = "v0.15.0", features = ["profile-desktop-macos-embedded-sdk"] }
 ```
 
 Select exactly one desktop embedded feature for the host OS: `profile-desktop-macos-embedded-sdk`, `profile-desktop-windows-embedded-sdk`, or `profile-desktop-linux-embedded-sdk`. Linux desktop hosts must not use a server or dev-full profile.
 
-Store v18 does not read v17 and provides no automatic migration. Use a new Store until the data owner has decided how to handle an older one; archive import is not a schema migration path.
+The current Store does not read data written by v0.14.0 and provides no automatic migration. Use a new Store until the data owner has decided how to handle an older one; archive import is not a schema migration path.
 
 ## Build A Runtime
 

@@ -512,8 +512,9 @@ impl MemoryRuntime {
                 .as_ref()
                 .is_some_and(|calls| !calls.is_empty())
         {
-            return Err(invalid(
-                "persona interpretation must finish without tool execution",
+            return Err(Error::malformed_model_output(
+                "turn_persona_interpretation_output",
+                "incomplete_or_tool_call_response",
             ));
         }
         let interpretation = TurnPersonaInterpretationV1::parse(&response.content)?;
